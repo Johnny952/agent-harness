@@ -105,13 +105,11 @@ semanal), la cuenta pasa a `PRE_COOLDOWN`.
 > documentada. El formato debe tratarse como frágil entre versiones del CLI
 > — parsear a la defensiva y no asumir que el template no va a cambiar.
 
-**Detección de cuota — reactiva (respaldo):** el diseño previo de 3a se
-mantiene como red de seguridad para el caso en que el parseo de `/usage`
-falle o el límite golpee sin aviso — preferir la salida estructurada
-JSON/stream-json de Claude Code sobre scraping de texto libre para detectar
-el error de rate-limit en sí. *(Las cadenas de señal exactas siguen sin
-verificar empíricamente — mismo caveat que ya aplicaba antes de esta
-revisión.)*
+**Detección de cuota — reactiva (respaldo):** se mantiene como red de
+seguridad para el caso en que el parseo de `/usage` falle o el límite golpee
+sin aviso — preferir la salida estructurada JSON/stream-json de Claude Code
+sobre scraping de texto libre para detectar el error de rate-limit en sí.
+*(Las cadenas de señal exactas siguen sin verificar empíricamente.)*
 
 **Failover:** al entrar una cuenta en `COOLING_DOWN`, su tarea en curso se
 reencola hacia la próxima cuenta `IDLE`. Si todas las cuentas están
@@ -163,14 +161,84 @@ cerrando/cerradas, la tarea se marca visiblemente en Vibe Kanban como
   `docker-socket-proxy` (Tecnativa) con allow-list estricta, para el caso en
   que `sysbox` no sea viable en el entorno final.
 
+## 5. Flujo operativo end-to-end **[Aprobada]**
+
+Traducción del diagrama y la secuencia originales de `proyecto.md` al
+vocabulario y mecánica definidos en las secciones 1-4 (Vibe Kanban en vez de
+Conductor.build, máquina de estados del dispatcher, doble handoff). No
+introduce decisiones nuevas.
+
+**Diagrama actualizado:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ UBUNTU SERVER (24/7, ya corre Coolify)                                  │
+│                                                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │ VIBE KANBAN (UI de control)                                        │ │
+│  │ • Backlog, kanban, diffs y aprobaciones — única fuente de verdad   │ │
+│  │ • Expuesto de forma privada vía Tailscale                          │ │
+│  └─────────────────────────────────┬─────────────────────────────────┘ │
+│                                     │ docker exec                        │
+│                                     ▼                                    │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │ SMART DISPATCHER                                                   │ │
+│  │ • Máquina de estados por cuenta: IDLE / BUSY / PRE_COOLDOWN /      │ │
+│  │   COOLING_DOWN (persistida en disco)                               │ │
+│  │ • Antes de despachar: poll de `/usage` (just-in-time, gratis)      │ │
+│  │ • Resuelve -w según proyecto/tarea; guarda session_id por tarea    │ │
+│  └───────┬───────────────────────────────────────────┬───────────────┘ │
+│          ▼                                           ▼                  │
+│  ┌──────────────────────────┐            ┌──────────────────────────┐  │
+│  │ CONTENEDOR AGENTE 1       │            │ CONTENEDOR AGENTE 2       │  │
+│  │ Claude CLI (Cuenta Pro 1) │            │ Claude CLI (Cuenta Pro 2) │  │
+│  └────────────┬──────────────┘            └─────────────┬─────────────┘  │
+│               └───────────────────┬────────────────────┘                │
+│                                    ▼                                     │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │ VOLÚMENES                                                          │ │
+│  │ • ~/.claude compartido (sesiones+config), sombreado por credencial│ │
+│  │   propia de cada cuenta (sección 3)                                │ │
+│  │ • /data/projects/<slug>/worktrees/<task-id> (git worktrees)        │ │
+│  │ • .hive/checkpoint.md por tarea (handoff entre roles)               │ │
+│  │ • socket Docker host (DooD, vía sysbox — sección 4b)                │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Secuencia operativa:**
+
+1. **Definición de tarea:** desde Vibe Kanban se crea/asigna una tarjeta con
+   el proyecto (y subproyecto si aplica) destino.
+2. **Fase Arquitecto:** el dispatcher, según la máquina de estados, elige
+   una cuenta disponible y ejecuta
+   `docker exec -w .../worktrees/<task-id> <contenedor> claude -p "..."` con
+   rol Arquitecto. Antes de despachar, consultó `/usage` de esa cuenta. La
+   especificación resultante se escribe en el repo y el checkpoint en
+   `.hive/checkpoint.md`.
+3. **Handoff a Implementador:** cold-start deliberado vía checkpoint
+   (mecanismo 1 de la sección 4a) — el dispatcher despacha al rol
+   Implementador, mismo u otro contenedor/cuenta, sin arrastrar el contexto
+   del Arquitecto.
+4. **Durante la implementación, agotamiento de cuota (caso nuevo):** si la
+   cuenta activa entra en `COOLING_DOWN` (proactivo por `/usage` o reactivo
+   por error 429), el dispatcher reencola la tarea hacia la próxima cuenta
+   `IDLE` usando `claude --resume <session_id>` (mecanismo 2 de la sección
+   4a) — sin perder el trabajo en curso del rol Implementador. Si el resume
+   falla, cae a checkpoint como red de seguridad.
+5. **Fase Revisor/Auditor:** nuevo cold-start vía checkpoint, valida el diff
+   contra la especificación del Arquitecto.
+6. **Aprobación final:** desde Vibe Kanban (vía Tailscale), se inspecciona
+   el resultado y se hace merge a la rama principal.
+
 ## Pendiente
 
-- Confirmar si quedan más secciones de diseño por cubrir (p. ej. detalle
-  operativo de despliegue de Vibe Kanban, convivencia exacta con Coolify —
-  hoy heredado sin cambios de `proyecto.md`) o si el diseño ya cubre los 4
-  pilares originales y se puede pasar a auto-revisión del spec.
+- Las 5 secciones del diseño (control/UI, enrutamiento multi-proyecto,
+  volúmenes/credenciales, smart dispatcher con sus dos subsecciones, y flujo
+  operativo end-to-end) están **[Aprobada]**. Los 4 pilares originales de
+  `proyecto.md` quedan cubiertos.
 - Auto-revisión del spec (placeholders, consistencia interna, alcance,
-  ambigüedad) — no realizada todavía porque el diseño sigue abierto.
+  ambigüedad) — pendiente de ejecutar ahora que el diseño está cerrado.
 - Revisión final por parte del usuario del spec completo.
 - Recién después de la aprobación final: invocar `writing-plans` para el
   plan de implementación. Ninguna otra acción de implementación está
