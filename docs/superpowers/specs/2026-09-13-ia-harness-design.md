@@ -17,9 +17,10 @@ OAuth legítima de una suscripción Claude Pro distinta. Corre íntegramente en
 un servidor Ubuntu local, ya usado por Coolify, expuesto de forma privada
 vía Tailscale.
 
-Documento origen: [`proyecto.md`](../../../proyecto.md) (propuesta inicial,
-sin modificar — este spec reemplaza sus decisiones de diseño donde difieran,
-p. ej. la UI de control).
+Documento origen: `proyecto.md` (propuesta inicial). Este spec reemplaza sus
+decisiones de diseño donde difieran (p. ej. la UI de control) y es ahora la
+fuente de verdad completa y autocontenida; `proyecto.md` fue eliminado del
+repo tras la aprobación de este documento.
 
 ## Decisiones de alcance
 
@@ -28,6 +29,9 @@ p. ej. la UI de control).
 - **Backlog:** vive únicamente en la herramienta de control (Vibe Kanban).
   No hay una fuente de verdad paralela (issues de GitHub, Markdown suelto,
   etc.) para el trabajo en curso.
+- **Alcance actual vs. futuro:** ver sección 8 — el workflow implementado
+  ahora es serial (una cuenta a la vez); paralelismo/balanceo de carga
+  queda documentado como trabajo futuro, no como parte de este spec.
 
 ## 1. Herramienta de control / UI — Vibe Kanban **[Aprobada]**
 
@@ -111,18 +115,43 @@ sin aviso — preferir la salida estructurada JSON/stream-json de Claude Code
 sobre scraping de texto libre para detectar el error de rate-limit en sí.
 *(Las cadenas de señal exactas siguen sin verificar empíricamente.)*
 
-**Failover:** al entrar una cuenta en `COOLING_DOWN`, su tarea en curso se
-reencola hacia la próxima cuenta `IDLE`. Si todas las cuentas están
+**Failover:** al entrar una cuenta en `COOLING_DOWN` (proactivo o reactivo),
+su tarea en curso se reencola hacia la próxima cuenta `IDLE`, retomando vía
+`session_id` (mecanismo 2 abajo). Si todas las cuentas están
 cerrando/cerradas, la tarea se marca visiblemente en Vibe Kanban como
 "bloqueada, esperando cupo".
 
+**Caso adicional — contenedor caído sin señal limpia:** un crash o cuelgue
+de contenedor no dispara ninguno de los dos mecanismos de detección de
+cuota anteriores (ni 429 reactivo, ni `/usage` proactivo). Este caso se
+cubre con el heartbeat/TTL del lock de `.hive/tasks/<task-id>.md` (ver
+mecanismo 1, abajo): si el heartbeat no se refresca dentro del TTL, el
+dispatcher considera el contenedor caído, libera el lock y reencola la
+tarea hacia la próxima cuenta `IDLE` vía `session_id`/`--resume`
+(mecanismo 2), igual que en un failover por cuota — sin esperar
+indefinidamente a un contenedor que no va a responder.
+
 **Transferencia de contexto — dos mecanismos según el motivo del handoff:**
 
-1. **Transición entre roles** (Arquitecto → Implementador, etc.): se
-   mantiene `.hive/checkpoint.md` + commits de Git. Es un cold-start
-   deliberado — el rol siguiente arranca con contexto al 0% y un resumen de
-   ~500 palabras, lo cual es una ventaja (no arrastra el razonamiento interno
-   del rol anterior), no una limitación.
+1. **Transición entre roles** (Arquitecto → Implementador, etc.): en vez de
+   un único `checkpoint.md` de texto libre, cada tarea tiene su propio
+   archivo `.hive/tasks/<task-id>.md`:
+   - **Frontmatter** de estado: `status` (`pending`/`in_progress`/
+     `blocked`/`done`), `owner` (cuenta/contenedor que tiene la tarea
+     tomada), `depends_on` (IDs de tareas previas de las que depende).
+   - **Cuerpo:** el resumen de handoff (~500 palabras) — mismo espíritu que
+     el `checkpoint.md` original, un cold-start deliberado: el rol
+     siguiente arranca con contexto al 0%, lo cual es una ventaja (no
+     arrastra el razonamiento interno del rol anterior), no una limitación.
+   - **Lock con TTL/heartbeat:** al tomar una tarea, el dispatcher escribe
+     `owner` y un timestamp de heartbeat en el archivo, que refresca
+     periódicamente mientras el contenedor trabaja. Si el heartbeat no se
+     actualiza dentro del TTL, el lock se considera expirado (ver "Caso
+     adicional" arriba) y la tarea puede reasignarse sin esperar
+     indefinidamente a un contenedor colgado o caído.
+   - Los commits de Git siguen siendo el mecanismo de persistencia del
+     código en sí; `.hive/tasks/<task-id>.md` es solo el archivo de
+     control/handoff.
 2. **Agotamiento de cuota dentro del mismo rol** (la Cuenta 1 se queda sin
    tokens a mitad de una tarea): perder el contexto acá es puro costo. En su
    lugar:
@@ -134,7 +163,7 @@ cerrando/cerradas, la tarea se marca visiblemente en Vibe Kanban como
      invoca `claude --resume <session_id> -p "..." --output-format json` en
      el contenedor nuevo. La cuenta que retoma ve la conversación completa,
      no un resumen.
-   - `.hive/checkpoint.md` sigue como red de seguridad si la sesión no
+   - `.hive/tasks/<task-id>.md` sigue como red de seguridad si la sesión no
      resulta resumible (corrupción, sesión purgada, etc.) — cae al flujo de
      cold-start ya descrito en el punto 1.
 
@@ -155,11 +184,45 @@ cerrando/cerradas, la tarea se marca visiblemente en Vibe Kanban como
 
 ### 4b. Hardening de seguridad para Docker-out-of-Docker (DooD) **[Aprobada]**
 
-- **Recomendación primaria:** runtime `sysbox` (`--runtime=sysbox-runc`).
-  Evita exponer el socket del host y evita `--privileged`.
-- **Fallback / riesgo residual aceptado explícitamente:** proxy
-  `docker-socket-proxy` (Tecnativa) con allow-list estricta, para el caso en
-  que `sysbox` no sea viable en el entorno final.
+- **Enfoque único: sidecar `docker:dind` por agente.** Cada contenedor
+  agente tiene su propio contenedor sidecar `docker:dind`, con su propio
+  daemon Docker aislado — el agente nunca monta ni ve el socket del host.
+  Esto reemplaza tanto el montaje directo de `/var/run/docker.sock` del
+  diseño original de `proyecto.md` como cualquier variante de proxy sobre
+  el socket del host: se descartó explícitamente `docker-socket-proxy`
+  (Tecnativa) como respuesta al problema de permisos de DooD, porque un
+  daemon aislado por agente resuelve el aislamiento de forma más directa
+  que una allow-list de comandos sobre un socket compartido.
+- **Hardening del sidecar:** el `docker:dind` corre bajo runtime `sysbox`
+  (`--runtime=sysbox-runc`), **sin** `--privileged` — sysbox provee el
+  aislamiento de kernel que normalmente requeriría `--privileged` en un
+  DinD clásico, eliminando esa superficie de ataque.
+- **Alcance de comandos:** dentro de su propio daemon aislado, el agente
+  puede ejecutar libremente `docker compose up/down`, `docker logs`,
+  builds, tests, etc. — no hace falta una allow-list de comandos porque el
+  daemon en sí ya está confinado al sidecar del agente, sin visibilidad
+  de otros agentes ni del host.
+
+**Compartir imágenes/builds entre sidecars sin duplicar disco:**
+
+Cada sidecar `docker:dind` tiene su propio daemon y, por defecto, su
+propia cache de capas/imagenes — sin nada más, N agentes construyendo el
+mismo proyecto implican N descargas y N builds completos. Para evitarlo:
+
+- **Registry mirror local** (`registry:2` en modo proxy/pull-through
+  cache): todos los sidecars apuntan su `registry-mirrors` a este
+  registry local; una imagen base descargada por un agente queda cacheada
+  y los demás la obtienen del mirror en vez de re-descargarla de Docker
+  Hub/registries externos.
+- **BuildKit registry cache** (`--cache-to=type=registry
+  --cache-from=type=registry` apuntando al mismo registry local): permite
+  que las capas de build (no solo las imágenes base) se compartan entre
+  sidecars, evitando builds completos repetidos cuando el Dockerfile no
+  cambió.
+- **Prune periódico:** `docker system prune -af --volumes` corriendo con
+  cadencia periódica (p. ej. cron diario) en cada sidecar, para evitar que
+  el ahorro de disco del mirror/cache se pierda por acumulación de
+  imágenes/volúmenes intermedios sin usar.
 
 ## 5. Flujo operativo end-to-end **[Aprobada]**
 
@@ -200,8 +263,13 @@ introduce decisiones nuevas.
 │  │ • ~/.claude compartido (sesiones+config), sombreado por credencial│ │
 │  │   propia de cada cuenta (sección 3)                                │ │
 │  │ • /data/projects/<slug>/worktrees/<task-id> (git worktrees)        │ │
-│  │ • .hive/checkpoint.md por tarea (handoff entre roles)               │ │
-│  │ • socket Docker host (DooD, vía sysbox — sección 4b)                │ │
+│  │ • .hive/tasks/<task-id>.md por tarea (lock+heartbeat, handoff)     │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+│                                     │                                    │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │ SIDECARS docker:dind (uno por agente, DooD — sección 4b)            │ │
+│  │ • Daemon Docker aislado por agente, sysbox-runc, sin --privileged   │ │
+│  │ • Registry mirror local + BuildKit registry cache (imágenes/build) │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -213,30 +281,109 @@ introduce decisiones nuevas.
 2. **Fase Arquitecto:** el dispatcher, según la máquina de estados, elige
    una cuenta disponible y ejecuta
    `docker exec -w .../worktrees/<task-id> <contenedor> claude -p "..."` con
-   rol Arquitecto. Antes de despachar, consultó `/usage` de esa cuenta. La
-   especificación resultante se escribe en el repo y el checkpoint en
-   `.hive/checkpoint.md`.
-3. **Handoff a Implementador:** cold-start deliberado vía checkpoint
-   (mecanismo 1 de la sección 4a) — el dispatcher despacha al rol
-   Implementador, mismo u otro contenedor/cuenta, sin arrastrar el contexto
-   del Arquitecto.
-4. **Durante la implementación, agotamiento de cuota (caso nuevo):** si la
-   cuenta activa entra en `COOLING_DOWN` (proactivo por `/usage` o reactivo
-   por error 429), el dispatcher reencola la tarea hacia la próxima cuenta
-   `IDLE` usando `claude --resume <session_id>` (mecanismo 2 de la sección
-   4a) — sin perder el trabajo en curso del rol Implementador. Si el resume
-   falla, cae a checkpoint como red de seguridad.
-5. **Fase Revisor/Auditor:** nuevo cold-start vía checkpoint, valida el diff
-   contra la especificación del Arquitecto.
+   rol Arquitecto. Antes de despachar, consultó `/usage` de esa cuenta y
+   tomó el lock de `.hive/tasks/<task-id>.md` (heartbeat periódico mientras
+   dura la fase). La especificación resultante se escribe en el repo y el
+   resumen de handoff en el cuerpo de `.hive/tasks/<task-id>.md`.
+3. **Handoff a Implementador:** cold-start deliberado vía
+   `.hive/tasks/<task-id>.md` (mecanismo 1 de la sección 4a) — el
+   dispatcher libera el lock del Arquitecto, actualiza `status`/`owner` y
+   despacha al rol Implementador, mismo u otro contenedor/cuenta, sin
+   arrastrar el contexto del Arquitecto.
+4. **Durante la implementación, agotamiento de cuota o caída de contenedor
+   (caso nuevo):** si la cuenta activa entra en `COOLING_DOWN` (proactivo
+   por `/usage` o reactivo por error 429), o si el heartbeat del lock
+   expira por TTL (contenedor caído/colgado), el dispatcher reencola la
+   tarea hacia la próxima cuenta `IDLE` usando `claude --resume
+   <session_id>` (mecanismo 2 de la sección 4a) — sin perder el trabajo en
+   curso del rol Implementador. Si el resume falla, cae al resumen de
+   `.hive/tasks/<task-id>.md` como red de seguridad.
+5. **Fase Revisor/Auditor:** nuevo cold-start vía `.hive/tasks/<task-id>.md`,
+   valida el diff contra la especificación del Arquitecto.
 6. **Aprobación final:** desde Vibe Kanban (vía Tailscale), se inspecciona
    el resultado y se hace merge a la rama principal.
 
+## 6. Observabilidad **[Aprobada]**
+
+Patrón hooks → HTTP → SQLite → dashboard, para poder ver en un solo lugar
+qué está haciendo cada agente sin tener que entrar a cada contenedor.
+
+- **Emisión:** hooks de Claude Code (`PreToolUse`/`PostToolUse`/etc., o
+  equivalente) en cada contenedor emiten eventos vía HTTP a un colector
+  central. Cada evento se etiqueta con `source_app` = identificador del
+  contenedor/cuenta que lo generó, para poder filtrar por agente.
+- **Almacenamiento:** SQLite en modo WAL en el colector — suficiente para
+  el volumen de eventos de N agentes serializados (no hay escritura
+  concurrente masiva porque el workflow actual es serial, sección 8).
+- **Consumo:**
+  - **Dashboard:** expuesto en la red Tailscale, con su propia
+    autenticación (no basta con "está en la Tailnet" — el dashboard puede
+    exponer detalles de ejecución de varios proyectos/cuentas a la vez).
+  - **Smart Dispatcher:** puede consultar el mismo store SQLite para
+    decisiones operativas (p. ej. detectar un agente inactivo hace rato
+    como señal adicional a la del heartbeat de `.hive/tasks/<task-id>.md`,
+    sección 4a).
+
+## 7. Límites de recursos y convención de ramas **[Aprobada]**
+
+- **Límites de CPU/RAM por contenedor:** cada contenedor agente (y su
+  sidecar `docker:dind`, sección 4b) corre con límites explícitos de
+  CPU/RAM (`--cpus`, `--memory` o equivalentes en Compose/Swarm). Evita que
+  un agente con un build o test colgado acapare recursos del host y
+  degrade al resto de los agentes o a las apps de Coolify que conviven en
+  el mismo servidor. Valores concretos quedan como detalle de
+  implementación (dependen del hardware del servidor y N cuentas activas),
+  no del diseño.
+- **Convención de ramas/worktrees:** `agent/<rol>/<task-id>`, p. ej.
+  `agent/implementador/task-123`. Da trazabilidad directa entre una rama,
+  el rol que la generó y la tarea de `.hive/tasks/<task-id>.md` que la
+  originó, sin necesidad de cruzar con el dashboard de observabilidad para
+  saber de dónde salió un branch.
+
+## 8. Alcance actual / Trabajo futuro **[Aprobada]**
+
+**Alcance actual — workflow serial:**
+
+El diseño descrito en las secciones 1-7 apunta al workflow más simple:
+**una cuenta/sesión activa a la vez**. El dispatcher no reparte trabajo en
+paralelo entre cuentas; cambia a la siguiente cuenta recién cuando la
+actual termina su turno (fin de fase, agotamiento de cuota, o caída de
+contenedor — sección 4a). Esto es una decisión deliberada de alcance, no
+una limitación técnica del resto del diseño: simplifica el modelo de
+concurrencia (sin necesidad de coordinar escrituras simultáneas a
+`.hive/tasks/`, sin necesidad de políticas de reparto de carga) para la
+escala objetivo de 2 cuentas.
+
+**Trabajo futuro — workflow paralelo/balanceado (fuera de alcance de este spec):**
+
+Queda documentado, sin diseñar en detalle, un modo alternativo
+configurable (toggle) de paralelismo/balanceo de carga entre cuentas, con
+dos variantes posibles a evaluar cuando se aborde ese trabajo:
+
+- **Subagentes por cuenta según cuota:** el dispatcher spawnea subagentes
+  distribuidos entre las cuentas disponibles en función de la cuota
+  restante de cada una, en vez de servializar contra una sola cuenta
+  activa.
+- **Reclamo independiente de tareas con relevo por cuota:** cada
+  contenedor/cuenta reclama tareas de forma independiente (sin turnos
+  centralizados) y el relevo entre cuentas se dispara por señal de cuota
+  (mismo mecanismo de detección proactiva/reactiva de la sección 3), en
+  vez de por fin de fase.
+
+Ninguna de las dos variantes se implementa como parte de este spec; se
+deja como toggle futuro sobre la misma base (Smart Dispatcher,
+`.hive/tasks/<task-id>.md`, sidecars DooD, observabilidad) para no tener
+que rediseñar desde cero cuando se aborde.
+
 ## Pendiente
 
-- Las 5 secciones del diseño (control/UI, enrutamiento multi-proyecto,
-  volúmenes/credenciales, smart dispatcher con sus dos subsecciones, y flujo
-  operativo end-to-end) están **[Aprobada]**. Los 4 pilares originales de
-  `proyecto.md` quedan cubiertos.
+- Las 8 secciones del diseño (control/UI, enrutamiento multi-proyecto,
+  volúmenes/credenciales, smart dispatcher con sus dos subsecciones —
+  incluyendo el hardening de DooD por sidecar `docker:dind` de la sección
+  4b—, flujo operativo end-to-end, observabilidad, límites de
+  recursos/convención de ramas, y alcance actual/trabajo futuro) están
+  **[Aprobada]**. Los 4 pilares originales de `proyecto.md` quedan
+  cubiertos.
 - Auto-revisión del spec (placeholders, consistencia interna, alcance,
   ambigüedad) — pendiente de ejecutar ahora que el diseño está cerrado.
 - Revisión final por parte del usuario del spec completo.
