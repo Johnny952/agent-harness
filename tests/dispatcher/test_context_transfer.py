@@ -85,6 +85,19 @@ def test_handoff_sets_status_and_body_and_clears_lock(tmp_path: Path) -> None:
     assert task.depends_on == ["task-0"]
 
 
+def test_handoff_appends_to_existing_body_instead_of_replacing(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    acquire_lock(hive_dir, "task-1", owner="cuenta1")
+
+    handoff(hive_dir, "task-1", new_status="pending", body="## arquitecto\n\nfirst phase summary")
+    handoff(hive_dir, "task-1", new_status="done", body="## implementador\n\nsecond phase summary")
+
+    task = read_task_file(task_file_path(hive_dir, "task-1"))
+    assert "first phase summary" in task.body
+    assert "second phase summary" in task.body
+    assert task.status == "done"
+
+
 def test_list_task_ids(tmp_path: Path) -> None:
     hive_dir = str(tmp_path)
     acquire_lock(hive_dir, "task-1", owner="cuenta1")

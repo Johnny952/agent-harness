@@ -109,7 +109,9 @@ def handoff(
     task.status = new_status
     task.owner = None
     task.heartbeat = None
-    task.body = body
+    # Accumulate phase summaries rather than replacing task.body — the next
+    # role needs the full trail of prior phases, not just the last one.
+    task.body = f"{task.body}\n\n{body}" if task.body else body
     if depends_on is not None:
         task.depends_on = depends_on
     write_task_file(path, task)
