@@ -1,12 +1,11 @@
 # ia-harness — Diseño de arquitectura
 
-> **Estado: EN PROGRESO.** Este documento se actualiza de forma incremental a
-> medida que se aprueban secciones del diseño (a pedido explícito del
-> usuario, en vez de escribirse recién al final del proceso de
-> brainstorming). Las secciones marcadas **[Aprobada]** son firmes; el resto
-> del proceso (auto-revisión del spec, revisión final del usuario,
-> transición a `writing-plans`) ocurre solo cuando todas las secciones estén
-> aprobadas — ver `## Pendiente` al final.
+> **Estado: APROBADO.** Las 8 secciones quedaron **[Aprobada]**, la
+> auto-revisión del spec ya se ejecutó, y el usuario aprobó el documento
+> completo ("Apruebo la definición"). `proyecto.md` fue eliminado porque este
+> spec lo reemplaza como única fuente de verdad. El siguiente paso —
+> transición a `writing-plans` para producir el plan de implementación en
+> `docs/superpowers/plans/`— ya está en curso.
 
 ## Resumen
 
@@ -37,8 +36,20 @@ repo tras la aprobación de este documento.
 
 Evaluadas:
 
-- **Vibe Kanban** — elegida. Docker-nativo, orquesta vía `docker exec`, encaja
-  directo con el modelo de contenedores por agente.
+- **Vibe Kanban** — elegida, como backlog/kanban UI y punto de aprobación
+  final, **no** como motor de orquestación multi-cuenta: Vibe Kanban corre
+  como proceso local y lanza el CLI de Claude Code como **subproceso local**
+  para sus propias funciones de ejecución de agente — no hace `docker exec`
+  hacia contenedores por cuenta. La orquestación multi-contenedor/multi-cuenta
+  descrita en las secciones 2, 4 y 5 (`docker exec -w ...` por cuenta, máquina
+  de estados, handoff) es responsabilidad exclusiva del **Smart Dispatcher**
+  construido en este proyecto, no una capacidad nativa de Vibe Kanban.
+- **Integración Dispatcher ↔ Vibe Kanban:** Vibe Kanban expone un servidor
+  **MCP local** (no accesible por URL pública, solo loopback) con
+  herramientas para listar/crear/actualizar tareas y consultar su estado. El
+  Smart Dispatcher usa este servidor MCP para leer el backlog y actualizar
+  estado de tarjetas, en vez de leer directamente su base de datos interna
+  (superficie no documentada y sujeta a cambiar entre versiones).
 - **Conductor.build** — descartada: solo Mac, y el servidor objetivo es
   Ubuntu. `proyecto.md` la nombraba porque fue el punto de partida de la
   idea, pero no es viable en este entorno.
@@ -367,7 +378,7 @@ dos variantes posibles a evaluar cuando se aborde ese trabajo:
 - **Reclamo independiente de tareas con relevo por cuota:** cada
   contenedor/cuenta reclama tareas de forma independiente (sin turnos
   centralizados) y el relevo entre cuentas se dispara por señal de cuota
-  (mismo mecanismo de detección proactiva/reactiva de la sección 3), en
+  (mismo mecanismo de detección proactiva/reactiva de la sección 4a), en
   vez de por fin de fase.
 
 Ninguna de las dos variantes se implementa como parte de este spec; se
@@ -375,7 +386,7 @@ deja como toggle futuro sobre la misma base (Smart Dispatcher,
 `.hive/tasks/<task-id>.md`, sidecars DooD, observabilidad) para no tener
 que rediseñar desde cero cuando se aborde.
 
-## Pendiente
+## Cierre del proceso de diseño
 
 - Las 8 secciones del diseño (control/UI, enrutamiento multi-proyecto,
   volúmenes/credenciales, smart dispatcher con sus dos subsecciones —
@@ -385,8 +396,7 @@ que rediseñar desde cero cuando se aborde.
   **[Aprobada]**. Los 4 pilares originales de `proyecto.md` quedan
   cubiertos.
 - Auto-revisión del spec (placeholders, consistencia interna, alcance,
-  ambigüedad) — pendiente de ejecutar ahora que el diseño está cerrado.
-- Revisión final por parte del usuario del spec completo.
-- Recién después de la aprobación final: invocar `writing-plans` para el
-  plan de implementación. Ninguna otra acción de implementación está
-  autorizada antes de ese punto.
+  ambigüedad) — completada.
+- Revisión final del usuario — completada ("Apruebo la definición").
+- `writing-plans` — invocado. El plan de implementación se guarda en
+  `docs/superpowers/plans/2026-09-13-ia-harness.md`.
