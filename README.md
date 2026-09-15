@@ -278,12 +278,43 @@ python3 -m venv .venv
 Documented but **not designed or implemented** — evaluate when the work is
 actually taken on, not before:
 
+- **Mid-phase context-window compaction.** For a single role's run that
+  fills its context window before finishing (long implementation with many
+  tool calls), watch context usage and, past a threshold, dump a
+  role-specific summary to disk (for implementador: what's implemented,
+  current state, what's left, considerations) then `/clear` and reinject
+  that summary so the role continues with a compacted context instead of
+  running out mid-task. Not implemented: today `dispatch_phase` →
+  `exec_claude` runs each phase as a single one-shot, non-interactive
+  `claude -p ... --output-format json` call that returns one JSON blob
+  after exit — the dispatcher never observes context usage or intervenes
+  mid-call, so there's no live session to inject a `/clear` into. Doing
+  this for real needs a driven/streaming session (or SDK-style loop) the
+  dispatcher can watch turn-by-turn, which is a bigger change than a
+  threshold check. Also note this only helps *within* one role's run —
+  the *between*-phase case is already handled by `context_transfer`'s
+  handoff file (role-specific dump → next phase reads it fresh).
 - **Parallel/load-balanced dispatch across accounts.** The dispatcher
   currently serializes on a single active account (see "Architecture"
   above). A configurable parallel mode is noted as future work in the
   design spec (section 8), with two candidate variants: per-account
   subagents scheduled by remaining quota, or independent task-claiming per
   account with quota-triggered handoff instead of end-of-phase handoff.
+- **Per-role model selection and richer effort escalation.** Today
+  `default_model` (`config.example.yaml`) applies the same model to every
+  role, and effort only escalates once the implementador/revisor loop
+  crosses `escalate_effort_after_round` (see "Configuration" above). Two
+  refinements were discussed but not implemented: (1) a per-role model
+  override — e.g. opus for arquitecto/revisor/auditor (planning/judgment
+  roles) and sonnet for implementador (execution) — instead of one
+  `default_model` for all four; (2) escalating effort (or switching model)
+  on signals other than round count, e.g. the revisor repeating the same
+  `VERDICT: CHANGES_REQUESTED` complaint, or a role's result text coming
+  back suspiciously short. Not designed: a config schema for per-role
+  model overrides (`default_model` becoming a fallback vs. a
+  `models: {arquitecto: opus, ...}` map), and how "the same complaint" or
+  "suspiciously short" would be detected from freeform `result_text`
+  without over-engineering a heuristic that never fires as intended.
 - **Multi-provider agent containers.** Everything under `docker/agent/`,
   `dispatcher/docker_exec.py`, and `dispatcher/quota.py` is Claude-specific
   today: the agent image installs only `@anthropic-ai/claude-code`
@@ -309,3 +340,63 @@ actually taken on, not before:
     the spec) leans on that for mid-role quota-exhaustion handoff.
   This is not designed in detail; the bullets above are the seams the
   current Claude-only implementation already has, not a spec.
+- **Skills for the four agent roles.** Port a
+  [superpowers](https://github.com/obra/superpowers)-style skills system
+  into the per-role prompts each agent container invokes (arquitecto,
+  implementador, revisor, auditor), instead of relying on one flat
+  system prompt per role. Candidates: a plan-before-code discipline for
+  implementador, "run the full suite before declaring done" for auditor,
+  and a systematic-debugging skill invoked when a role gets stuck across
+  more than one retry. Not designed: this needs a decision on where
+  per-role skill files would live (baked into `docker/agent/` at build
+  time vs. mounted alongside `.hive`) and how a role would be told which
+  skill applies.
+- **Structured `.hive/tasks/<task-id>.md` handoff body.** The YAML
+  frontmatter (`status`/`owner`/`depends_on`/`heartbeat`) is already
+  structured; the body each role leaves for the next one is freeform
+  prose. A semi-structured body (what changed / what was verified /
+  what's pending / known risks) would make the next role's context load
+  cheaper and more consistent than re-reading unstructured notes. Not
+  designed: no schema drafted yet, and it's unclear whether this should
+  be enforced by convention (prompt instructions) or parsed/validated by
+  the dispatcher.
+- **Per-project `CLAUDE.md` for cloned repos.** Projects checked out
+  under `.data/projects/<slug>` (see "Create volumes" above) are
+  arbitrary target repos, not ia-harness itself. Today every role
+  rediscovers that repo's conventions from scratch each phase. Dropping
+  or generating a `CLAUDE.md` in the checkout (by convention, or
+  auto-written by arquitecto on first contact with a project) would let
+  later roles/phases skip that rediscovery. Not designed: whether this
+  is hand-authored once per project or agent-generated, and how it
+  survives a project being re-cloned.
+- **Code-inspection/code-intelligence tooling in agent containers.**
+  Personal setups (e.g. a tree-sitter-parsed knowledge-graph MCP server
+  queried for callers/callees/impact) give an agent structural answers
+  ("what calls this," "what would break") far cheaper than grep. Nothing
+  like this ships in `docker/agent/` today — each role works from plain
+  file reads and shell commands. A few real options exist, none
+  evaluated in this repo yet:
+  - Knowledge-graph/semantic-navigation MCP servers — the same category
+    as a personal CodeGraph setup — e.g.
+    [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)
+    (tree-sitter, CLI + MCP, graph database) or
+    [Serena](https://github.com/oraios/serena) (LSP-backed symbol-level
+    retrieval/editing across 20+ languages via MCP). Best fit for
+    arquitecto/implementador: cheaper "where is X" / "what calls Y"
+    answers when onboarding onto a project or planning a change.
+  - Pattern-based static/security analysis with MCP support, e.g.
+    [Semgrep MCP](https://mcp.directory/blog/semgrep-mcp-complete-guide-2026)
+    (Semgrep's Guardian product scans agent-written code for
+    vulnerabilities/bug patterns before commit, also usable ad hoc via
+    its MCP server). Best fit for revisor/auditor: a systematic
+    security/quality pass instead of relying on the LLM's own read of
+    the diff.
+  - These are not mutually exclusive — since each role already runs as
+    a separate `claude -p` invocation, different roles could get
+    different MCP servers configured (navigation-oriented for
+    arquitecto/implementador, analysis-oriented for revisor/auditor)
+    rather than every role carrying every tool. Not designed: whether
+    tooling is baked into `docker/agent/Dockerfile` (one image, all MCP
+    servers available) or made role-conditional at container-start time,
+    and — for anything indexing the whole checkout — added container
+    build time/size cost per project.

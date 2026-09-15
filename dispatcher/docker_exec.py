@@ -30,12 +30,17 @@ def exec_claude(
     workdir: str,
     prompt: str,
     resume_session_id: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> ClaudeResult:
     command = ["claude"]
     if resume_session_id:
         command += ["--resume", resume_session_id]
+    if model:
+        command += ["--model", model]
     command += ["-p", prompt, "--output-format", "json"]
-    proc = run_docker_exec(container, workdir, command)
+    env = {"CLAUDE_CODE_EFFORT_LEVEL": effort} if effort else None
+    proc = run_docker_exec(container, workdir, command, env=env)
     raw = json.loads(proc.stdout) if proc.stdout.strip() else {}
     return ClaudeResult(session_id=raw.get("session_id"), result_text=raw.get("result", ""), raw=raw)
 

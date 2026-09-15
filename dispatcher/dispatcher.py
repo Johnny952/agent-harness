@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import threading
 
 from dispatcher import context_transfer, docker_exec, quota, state_machine
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import VibeKanbanClient
-
-ROLE_SEQUENCE = ["arquitecto", "implementador", "revisor", "auditor"]
 
 
 @dataclasses.dataclass
@@ -111,6 +110,35 @@ def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
     return not result.raw.get("is_error", False)
 
 
+_VERDICT_RE = re.compile(r"VERDICT:\s*APPROVED\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def revisor_approved(result_text: str) -> bool:
+    # No structured verdict field exists in the task handoff or Kanban clients
+    # (design spec caveat) — the revisor is instructed (see _role_prompt) to end
+    # its response with a literal "VERDICT: APPROVED"/"VERDICT: CHANGES_REQUESTED"
+    # line, and this fails closed (treated as not-approved) on anything else,
+    # so a malformed or missing verdict still burns a revision round instead of
+    # silently passing.
+    return bool(_VERDICT_RE.search(result_text or ""))
+
+
+def _role_prompt(role: str, task_id: str, task_file: str, round_num: int | None = None) -> str:
+    prompt = (
+        f"Role: {role}. Task: {task_id}. "
+        f"Read {task_file} for context handed off from the previous phase before starting."
+    )
+    if round_num is not None:
+        prompt += f" This is revision round {round_num}."
+    if role == "revisor":
+        prompt += (
+            " End your response with a line reading exactly 'VERDICT: APPROVED' if the "
+            "implementation is ready to proceed to the next phase, or exactly "
+            "'VERDICT: CHANGES_REQUESTED' if it needs another revision round."
+        )
+    return prompt
+
+
 def reap_expired_locks(cfg: Config) -> list[str]:
     reaped = []
     for task_id in context_transfer.list_task_ids(cfg.hive_tasks_dir):
@@ -128,6 +156,8 @@ def dispatch_phase(
     role: str,
     prompt: str,
     resume_session_id: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> DispatchResult:
     tried: set[str] = set()
     while True:
@@ -151,7 +181,10 @@ def dispatch_phase(
             context_transfer.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account)
             lock_acquired = True
             with _HeartbeatLoop(cfg.hive_tasks_dir, task_id, cfg.heartbeat_interval_seconds):
-                result = docker_exec.exec_claude(container, workdir, prompt, resume_session_id=resume_session_id)
+                result = docker_exec.exec_claude(
+                    container, workdir, prompt,
+                    resume_session_id=resume_session_id, model=model, effort=effort,
+                )
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives
             # restart) because of an exception between claiming it and
@@ -179,24 +212,50 @@ def dispatch_phase(
 def run_task_cycle(cfg: Config, task_id: str, slug: str, kanban: VibeKanbanClient) -> None:
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
-    resume_session_id: str | None = None
-    for role in ROLE_SEQUENCE:
+
+    def run_phase(role: str, round_num: int | None = None, final: bool = False) -> DispatchResult | None:
         kanban.update_task_status(task_id, f"in_progress:{role}")
+        effort = (
+            cfg.escalated_effort
+            if round_num is not None and round_num > cfg.escalate_effort_after_round
+            else None
+        )
         result = dispatch_phase(
             cfg, task_id, slug, role,
-            prompt=(
-                f"Role: {role}. Task: {task_id}. "
-                f"Read {task_file} for context handed off from the previous phase before starting."
-            ),
-            resume_session_id=resume_session_id,
+            prompt=_role_prompt(role, task_id, task_file, round_num=round_num),
+            model=cfg.default_model,
+            effort=effort,
         )
         if not result.success:
             kanban.update_task_status(task_id, "blocked")
-            return
+            return None
+        label = role if round_num is None else f"{role} (round {round_num})"
         context_transfer.handoff(
             cfg.hive_tasks_dir, task_id,
-            new_status="done" if role == ROLE_SEQUENCE[-1] else "pending",
-            body=f"## {role}\n\n{result.result_text[:2000]}",
+            new_status="done" if final else "pending",
+            body=f"## {label}\n\n{result.result_text[:2000]}",
         )
-        resume_session_id = None
+        return result
+
+    if run_phase("arquitecto") is None:
+        return
+
+    approved = False
+    for round_num in range(1, cfg.max_revision_rounds + 1):
+        if run_phase("implementador", round_num=round_num) is None:
+            return
+        revisor_result = run_phase("revisor", round_num=round_num)
+        if revisor_result is None:
+            return
+        if revisor_approved(revisor_result.result_text):
+            approved = True
+            break
+
+    if not approved:
+        kanban.update_task_status(task_id, "blocked")
+        return
+
+    if run_phase("auditor", final=True) is None:
+        return
+
     kanban.update_task_status(task_id, "done")

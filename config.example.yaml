@@ -48,3 +48,27 @@ vibe_kanban_mcp_url: http://vibe-kanban:9100/sse
 
 # Observability collector URL, reached over ia_harness_net by service name.
 collector_url: http://collector:8787
+
+# Model passed as `claude --model <default_model>` for every role
+# (arquitecto/implementador/revisor/auditor). Optional; defaults to opus.
+default_model: opus
+
+# Cap on implementador/revisor rounds per task: after arquitecto hands off,
+# implementador and revisor alternate until the revisor's response ends with
+# a literal "VERDICT: APPROVED" line, or this many rounds have run without
+# one — at which point the task is marked "blocked" instead of looping
+# forever. Optional; defaults to 3.
+max_revision_rounds: 3
+
+# Once a revision round exceeds this number without the revisor approving,
+# subsequent implementador/revisor rounds run with CLAUDE_CODE_EFFORT_LEVEL
+# set to `escalated_effort` instead of the CLI's own default, on the theory
+# that a task still bouncing between implementador and revisor this many
+# times over may need more reasoning effort, not just another attempt.
+# Optional; defaults to 2 (i.e. escalate starting round 3).
+escalate_effort_after_round: 2
+
+# Effort level applied once escalate_effort_after_round is exceeded. Passed
+# through as the CLAUDE_CODE_EFFORT_LEVEL env var on the agent container's
+# `claude` invocation. Optional; defaults to high.
+escalated_effort: high

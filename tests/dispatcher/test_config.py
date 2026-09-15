@@ -31,3 +31,23 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.heartbeat_ttl_seconds == 120
     assert cfg.projects_root == "/data/projects"
     assert cfg.vibe_kanban_mcp_url == "http://127.0.0.1:9100/sse"
+    assert cfg.default_model == "opus"
+    assert cfg.max_revision_rounds == 3
+    assert cfg.escalate_effort_after_round == 2
+    assert cfg.escalated_effort == "high"
+
+
+def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML
+        + "\ndefault_model: sonnet\nmax_revision_rounds: 5\n"
+        "escalate_effort_after_round: 1\nescalated_effort: max\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.default_model == "sonnet"
+    assert cfg.max_revision_rounds == 5
+    assert cfg.escalate_effort_after_round == 1
+    assert cfg.escalated_effort == "max"

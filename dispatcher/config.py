@@ -22,6 +22,10 @@ class Config:
     state_dir: str
     vibe_kanban_mcp_url: str
     collector_url: str
+    default_model: str
+    max_revision_rounds: int
+    escalate_effort_after_round: int
+    escalated_effort: str
 
 
 def load_config(path: str) -> Config:
@@ -38,4 +42,8 @@ def load_config(path: str) -> Config:
         state_dir=raw["state_dir"],
         vibe_kanban_mcp_url=raw["vibe_kanban_mcp_url"],
         collector_url=raw["collector_url"],
+        default_model=raw.get("default_model", "opus"),
+        max_revision_rounds=raw.get("max_revision_rounds", 3),
+        escalate_effort_after_round=raw.get("escalate_effort_after_round", 2),
+        escalated_effort=raw.get("escalated_effort", "high"),
     )

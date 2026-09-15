@@ -53,6 +53,51 @@ def test_exec_claude_passes_resume_flag(monkeypatch) -> None:
     assert "sess-123" in captured["cmd"]
 
 
+def test_exec_claude_passes_model_flag(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", model="opus")
+
+    assert "--model" in captured["cmd"]
+    assert "opus" in captured["cmd"]
+
+
+def test_exec_claude_sets_effort_env_var(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", effort="high")
+
+    assert "-e" in captured["cmd"]
+    assert "CLAUDE_CODE_EFFORT_LEVEL=high" in captured["cmd"]
+
+
+def test_exec_claude_omits_model_and_effort_when_not_given(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it")
+
+    assert "--model" not in captured["cmd"]
+    assert "-e" not in captured["cmd"]
+
+
 def test_create_worktree_builds_branch_name_and_tolerates_existing(monkeypatch) -> None:
     captured = {}
 
