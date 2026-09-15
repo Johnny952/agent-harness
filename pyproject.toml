@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ia-harness"
 version = "0.1.0"
@@ -7,10 +11,20 @@ dependencies = [
     "flask>=3.0",
     "requests>=2.31",
     "mcp>=1.0.0",
+    # Imported directly by observability/dashboard/app.py; do not rely on
+    # Flask pulling it in transitively.
+    "markupsafe>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["dispatcher*", "observability*", "hooks*"]
+
+[tool.setuptools.package-data]
+# db.py reads this next to itself at runtime, so it has to ship in the wheel.
+"observability.collector" = ["schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
