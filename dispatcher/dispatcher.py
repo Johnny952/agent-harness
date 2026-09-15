@@ -47,7 +47,7 @@ class _HeartbeatLoop:
         self._thread.join()
 
 
-def _container_for(cfg: Config, account: str) -> str:
+def container_for(cfg: Config, account: str) -> str:
     for acc in cfg.accounts:
         if acc.name == account:
             return acc.container
@@ -60,7 +60,7 @@ def pick_idle_account(cfg: Config) -> str | None:
 
 
 def check_quota_ok(cfg: Config, account: str) -> bool:
-    container = _container_for(cfg, account)
+    container = container_for(cfg, account)
     result = docker_exec.exec_claude(container, cfg.projects_root, "/usage")
     usage = quota.parse_usage_output(result.result_text)
     if quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
@@ -82,7 +82,7 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
         state = state_machine.get_state(cfg.state_dir, acc.name)
         if state not in (AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN):
             continue
-        container = _container_for(cfg, acc.name)
+        container = container_for(cfg, acc.name)
         result = docker_exec.exec_claude(container, cfg.projects_root, "/usage")
         usage = quota.parse_usage_output(result.result_text)
         if not quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
@@ -143,7 +143,7 @@ def dispatch_phase(
         if not check_quota_ok(cfg, account):
             continue
 
-        container = _container_for(cfg, account)
+        container = container_for(cfg, account)
         state_machine.set_state(cfg.state_dir, account, AccountState.BUSY, current_task_id=task_id)
         lock_acquired = False
         try:
