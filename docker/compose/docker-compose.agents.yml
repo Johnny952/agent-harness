@@ -1,0 +1,72 @@
+# docker/compose/docker-compose.agents.yml
+# One agent+sidecar block per Claude Pro account. Duplicate the pair for
+# additional accounts — no dispatcher code changes required (design spec,
+# "Decisiones de alcance": N accounts without structural changes).
+services:
+  agent-cuenta1:
+    image: ia-harness-agent
+    container_name: agent-cuenta1
+    restart: unless-stopped
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_HOST=tcp://dind-cuenta1:2375
+    volumes:
+      - claude_shared:/root/.claude
+      - claude_creds_cuenta1:/root/.claude/credentials
+      - projects_data:/data/projects
+    depends_on:
+      - dind-cuenta1
+
+  dind-cuenta1:
+    image: ia-harness-dind-sidecar
+    container_name: dind-cuenta1
+    restart: unless-stopped
+    runtime: sysbox-runc
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--registry-mirror=http://registry-mirror:5000"]
+    volumes:
+      - dind_cuenta1_data:/var/lib/docker
+
+  agent-cuenta2:
+    image: ia-harness-agent
+    container_name: agent-cuenta2
+    restart: unless-stopped
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_HOST=tcp://dind-cuenta2:2375
+    volumes:
+      - claude_shared:/root/.claude
+      - claude_creds_cuenta2:/root/.claude/credentials
+      - projects_data:/data/projects
+    depends_on:
+      - dind-cuenta2
+
+  dind-cuenta2:
+    image: ia-harness-dind-sidecar
+    container_name: dind-cuenta2
+    restart: unless-stopped
+    runtime: sysbox-runc
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--registry-mirror=http://registry-mirror:5000"]
+    volumes:
+      - dind_cuenta2_data:/var/lib/docker
+
+volumes:
+  claude_shared:
+    external: true
+  claude_creds_cuenta1:
+    external: true
+  claude_creds_cuenta2:
+    external: true
+  projects_data:
+    external: true
+  dind_cuenta1_data:
+  dind_cuenta2_data:

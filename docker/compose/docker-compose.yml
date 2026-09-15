@@ -1,0 +1,78 @@
+# docker/compose/docker-compose.yml
+services:
+  vibe-kanban:
+    image: ghcr.io/bloopai/vibe-kanban:latest
+    restart: unless-stopped
+    network_mode: "host"  # MCP server must stay loopback-only (spec sec. 1)
+    volumes:
+      - vibe_kanban_data:/data
+
+  collector:
+    build:
+      context: ../..
+      dockerfile: observability/collector/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - observability_data:/data
+    environment:
+      - COLLECTOR_DB_PATH=/data/events.db
+
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: observability/dashboard/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - observability_data:/data
+    environment:
+      - COLLECTOR_DB_PATH=/data/events.db
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+
+  registry-mirror:
+    image: registry:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry_mirror_data:/var/lib/registry
+      - ../registry-mirror/config.yml:/etc/docker/registry/config.yml:ro
+
+  # dispatcher.run_task_cycle (dispatcher/dispatcher.py) processes exactly
+  # one task through the full role lifecycle and then exits — there is no
+  # daemon/polling loop. This service is therefore single-shot per
+  # invocation, not a long-running process: no restart policy is set, and
+  # `command` below is an example invocation matching dispatcher/cli.py's
+  # real argparse shape (`--config <path> run-task --task-id <id> --project
+  # <slug>`). Override `command` (or use `docker compose run --rm
+  # dispatcher ...`) with real --task-id/--project values per task.
+  dispatcher:
+    build:
+      context: ../..
+      dockerfile: docker/dispatcher/Dockerfile
+    restart: "no"
+    command: ["--config", "/app/config.yaml", "run-task", "--task-id", "CHANGE_ME", "--project", "CHANGE_ME"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../dispatcher_state:/state
+      - ../../.hive:/data/.hive
+      - claude_shared:/root/.claude
+      # No config.yaml exists in this repo yet — the operator must supply one
+      # (see dispatcher/config.py for the required schema: accounts,
+      # projects_root, hive_tasks_dir, state_dir, vibe_kanban_mcp_url,
+      # collector_url) at this host path before `docker compose up`.
+      - ../../config.yaml:/app/config.yaml:ro
+    depends_on:
+      - vibe-kanban
+      - collector
+
+volumes:
+  vibe_kanban_data:
+  observability_data:
+  registry_mirror_data:
+  claude_shared:
+    external: true
