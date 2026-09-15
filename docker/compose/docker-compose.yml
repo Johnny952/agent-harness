@@ -85,10 +85,9 @@ services:
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
-      # No config.yaml exists in this repo yet — the operator must supply one
-      # (see dispatcher/config.py for the required schema: accounts,
-      # projects_root, hive_tasks_dir, state_dir, vibe_kanban_mcp_url,
-      # collector_url) at this host path before `docker compose up`.
+      # No config.yaml exists in this repo yet — the operator must copy
+      # ../../config.example.yaml to ../../config.yaml (and adjust values)
+      # at this host path before `docker compose up`.
       - ../../config.yaml:/app/config.yaml:ro
     depends_on:
       - vibe-kanban

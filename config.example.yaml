@@ -1,0 +1,49 @@
+# config.example.yaml
+#
+# Template for the dispatcher's config.yaml (see dispatcher/config.py for the
+# schema this must satisfy). Copy this file to config.yaml at the repo root
+# and adjust values for your deployment — docker-compose.yml mounts
+# ../../config.yaml into the dispatcher container at /app/config.yaml.
+#
+# Hostnames below use service names (vibe-kanban, collector) rather than
+# 127.0.0.1 because the dispatcher container reaches them over the shared
+# ia_harness_net bridge network, not the host's loopback interface.
+
+# One entry per Claude Pro account the dispatcher can dispatch work to.
+# `container` must match a container_name in docker-compose.agents.yml.
+accounts:
+  - name: cuenta1
+    container: agent-cuenta1
+  - name: cuenta2
+    container: agent-cuenta2
+
+# Percentage of an account's quota usage at which the dispatcher stops
+# assigning it new work and lets it cool down. Optional; defaults to 90.
+quota_threshold_pct: 90
+
+# How long a heartbeat is considered fresh before a lock is treated as
+# abandoned and reaped. Optional; defaults to 120.
+heartbeat_ttl_seconds: 120
+
+# How often a running role writes a heartbeat. Optional; defaults to 30.
+heartbeat_interval_seconds: 30
+
+# Root directory (inside each agent/dind container) under which per-project
+# checkouts live, as projects_root/<slug>. Matches the projects_data volume
+# mount (/data/projects) in docker-compose.agents.yml.
+projects_root: /data/projects
+
+# Directory (inside each agent container) holding per-task lock/handoff
+# files. Matches the ../../.hive:/data/.hive mount in both compose files.
+hive_tasks_dir: /data/.hive/tasks
+
+# Directory (inside the dispatcher container) where dispatcher state is
+# persisted. Matches the ../../dispatcher_state:/state mount in
+# docker-compose.yml.
+state_dir: /state
+
+# Vibe Kanban MCP server URL, reached over ia_harness_net by service name.
+vibe_kanban_mcp_url: http://vibe-kanban:9100/sse
+
+# Observability collector URL, reached over ia_harness_net by service name.
+collector_url: http://collector:8787
