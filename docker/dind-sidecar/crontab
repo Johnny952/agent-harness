@@ -1,0 +1,2 @@
+# docker/dind-sidecar/crontab
+0 3 * * * /usr/local/bin/prune.sh >> /var/log/prune.log 2>&1
