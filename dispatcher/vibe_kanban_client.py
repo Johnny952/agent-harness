@@ -20,9 +20,12 @@ class KanbanTask:
 class VibeKanbanClient:
     """Thin wrapper around the Vibe Kanban MCP server.
 
-    Vibe Kanban's MCP server is loopback-only. `mcp_url` is caller-supplied
-    (e.g. "http://127.0.0.1:9100/sse") — this client never hardcodes or
-    defaults to a public or Tailnet-routable address.
+    Vibe Kanban's MCP server is never exposed beyond this host: compose
+    publishes it on 127.0.0.1 only, and containers reach it over the private
+    `ia_harness_net` bridge. `mcp_url` is caller-supplied — from inside a
+    container "http://vibe-kanban:9100/sse", from the host itself
+    "http://127.0.0.1:9100/sse". This client never hardcodes or defaults to a
+    public or Tailnet-routable address.
     """
 
     def __init__(self, mcp_url: str):

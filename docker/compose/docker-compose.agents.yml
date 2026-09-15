@@ -2,6 +2,10 @@
 # One agent+sidecar block per Claude Pro account. Duplicate the pair for
 # additional accounts — no dispatcher code changes required (design spec,
 # "Decisiones de alcance": N accounts without structural changes).
+#
+# Bring up docker-compose.yml first: it creates `ia_harness_net`, which this
+# file joins as an external network so agents and sidecars can resolve
+# `collector`, `registry-mirror` and `vibe-kanban` by service name.
 services:
   agent-cuenta1:
     image: ia-harness-agent
@@ -11,12 +15,22 @@ services:
     mem_limit: "4g"
     environment:
       - DOCKER_HOST=tcp://dind-cuenta1:2375
+      # Consumed by hooks/emit_event.py, registered into Claude Code's
+      # settings.json by the agent image entrypoint.
+      - COLLECTOR_URL=http://collector:8787
+      - SOURCE_APP=agent-cuenta1
     volumes:
       - claude_shared:/root/.claude
       - claude_creds_cuenta1:/root/.claude/credentials
       - projects_data:/data/projects
+      # Agents read their task file (lock owner, role, handoff notes) from
+      # here; the dispatcher is the only writer. Path matches config.yaml's
+      # `hive_tasks_dir: /data/.hive/tasks`.
+      - ../../.hive:/data/.hive
     depends_on:
       - dind-cuenta1
+    networks:
+      - ia_harness_net
 
   dind-cuenta1:
     image: ia-harness-dind-sidecar
@@ -30,6 +44,8 @@ services:
     command: ["--registry-mirror=http://registry-mirror:5000"]
     volumes:
       - dind_cuenta1_data:/var/lib/docker
+    networks:
+      - ia_harness_net
 
   agent-cuenta2:
     image: ia-harness-agent
@@ -39,12 +55,17 @@ services:
     mem_limit: "4g"
     environment:
       - DOCKER_HOST=tcp://dind-cuenta2:2375
+      - COLLECTOR_URL=http://collector:8787
+      - SOURCE_APP=agent-cuenta2
     volumes:
       - claude_shared:/root/.claude
       - claude_creds_cuenta2:/root/.claude/credentials
       - projects_data:/data/projects
+      - ../../.hive:/data/.hive
     depends_on:
       - dind-cuenta2
+    networks:
+      - ia_harness_net
 
   dind-cuenta2:
     image: ia-harness-dind-sidecar
@@ -58,6 +79,15 @@ services:
     command: ["--registry-mirror=http://registry-mirror:5000"]
     volumes:
       - dind_cuenta2_data:/var/lib/docker
+    networks:
+      - ia_harness_net
+
+networks:
+  # Created by docker-compose.yml. `external: true` means this file joins it
+  # rather than creating a second, isolated network.
+  ia_harness_net:
+    external: true
+    name: ia_harness_net
 
 volumes:
   claude_shared:

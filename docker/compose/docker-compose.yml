@@ -1,11 +1,23 @@
 # docker/compose/docker-compose.yml
 services:
+  # `network_mode: host` was removed: agents and dind sidecars live in the
+  # other compose file and can only reach this MCP server by service name on
+  # the shared `ia_harness_net` bridge. The spec's "MCP server stays
+  # loopback-only" requirement (sec. 1) is still honoured — the host-side
+  # publish below is bound to 127.0.0.1, so nothing outside this host (or the
+  # internal network) can reach it.
   vibe-kanban:
     image: ghcr.io/bloopai/vibe-kanban:latest
     restart: unless-stopped
-    network_mode: "host"  # MCP server must stay loopback-only (spec sec. 1)
+    ports:
+      # 9100 is the port every config/example in this repo points
+      # `vibe_kanban_mcp_url` at; the image must listen on it (supply the
+      # image's own port env var here if its default ever differs).
+      - "127.0.0.1:9100:9100"
     volumes:
       - vibe_kanban_data:/data
+    networks:
+      - ia_harness_net
 
   collector:
     build:
@@ -13,11 +25,15 @@ services:
       dockerfile: observability/collector/Dockerfile
     restart: unless-stopped
     ports:
+      # Host-side access only; agents POST to http://collector:8787 over
+      # ia_harness_net, not through this published port.
       - "127.0.0.1:8787:8787"
     volumes:
       - observability_data:/data
     environment:
       - COLLECTOR_DB_PATH=/data/events.db
+    networks:
+      - ia_harness_net
 
   dashboard:
     build:
@@ -32,6 +48,8 @@ services:
       - COLLECTOR_DB_PATH=/data/events.db
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
       - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+    networks:
+      - ia_harness_net
 
   registry-mirror:
     image: registry:2
@@ -41,6 +59,10 @@ services:
     volumes:
       - registry_mirror_data:/var/lib/registry
       - ../registry-mirror/config.yml:/etc/docker/registry/config.yml:ro
+    networks:
+      # dind-cuenta* pass --registry-mirror=http://registry-mirror:5000, which
+      # only resolves because they join this same network from the other file.
+      - ia_harness_net
 
   # dispatcher.run_task_cycle (dispatcher/dispatcher.py) processes exactly
   # one task through the full role lifecycle and then exits — there is no
@@ -69,6 +91,15 @@ services:
     depends_on:
       - vibe-kanban
       - collector
+    networks:
+      - ia_harness_net
+
+networks:
+  # Created by this file, joined as `external: true` by
+  # docker-compose.agents.yml so agents/sidecars resolve collector,
+  # registry-mirror and vibe-kanban by service name.
+  ia_harness_net:
+    name: ia_harness_net
 
 volumes:
   vibe_kanban_data:
