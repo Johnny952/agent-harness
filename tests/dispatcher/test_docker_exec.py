@@ -1,6 +1,8 @@
 import json
 import subprocess
 
+import pytest
+
 import dispatcher.docker_exec as docker_exec_mod
 from dispatcher.docker_exec import create_worktree, exec_claude, run_docker_exec
 
@@ -56,11 +58,72 @@ def test_create_worktree_builds_branch_name_and_tolerates_existing(monkeypatch) 
 
     def fake_run(cmd, capture_output, text):
         captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="fatal: already exists")
+        return subprocess.CompletedProcess(
+            cmd, 128, stdout="", stderr="fatal: a branch named 'agent/implementador/task-1' already exists\n"
+        )
 
     monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
 
     path = create_worktree("agent-cuenta1", "/data/projects", "myproj", "task-1", "implementador")
 
-    assert path == "/data/projects/myproj/worktrees/task-1"
+    assert path == "/data/projects/myproj/worktrees/task-1/implementador"
     assert "agent/implementador/task-1" in captured["cmd"]
+
+
+def test_create_worktree_paths_differ_per_role(monkeypatch) -> None:
+    def fake_run(cmd, capture_output, text):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    paths = {
+        role: create_worktree("agent-cuenta1", "/data/projects", "myproj", "task-1", role)
+        for role in ("arquitecto", "implementador", "revisor", "auditor")
+    }
+
+    assert len(set(paths.values())) == 4
+
+
+def test_create_worktree_tolerates_existing_worktree_directory(monkeypatch) -> None:
+    def fake_run(cmd, capture_output, text):
+        return subprocess.CompletedProcess(
+            cmd,
+            128,
+            stdout="",
+            stderr="fatal: '/data/projects/myproj/worktrees/task-1/revisor' already exists\n",
+        )
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    path = create_worktree("agent-cuenta1", "/data/projects", "myproj", "task-1", "revisor")
+
+    assert path == "/data/projects/myproj/worktrees/task-1/revisor"
+
+
+def test_create_worktree_raises_on_unrelated_already_exists_error(monkeypatch) -> None:
+    def fake_run(cmd, capture_output, text):
+        return subprocess.CompletedProcess(
+            cmd,
+            128,
+            stdout="",
+            stderr="fatal: a branch named 'agent/otro/task-9' already exists\n",
+        )
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="git worktree add failed"):
+        create_worktree("agent-cuenta1", "/data/projects", "myproj", "task-1", "implementador")
+
+
+def test_create_worktree_pins_git_locale(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, capture_output, text):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    create_worktree("agent-cuenta1", "/data/projects", "myproj", "task-1", "implementador")
+
+    assert "LC_ALL=C" in captured["cmd"]
