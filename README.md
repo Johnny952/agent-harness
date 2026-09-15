@@ -122,3 +122,40 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/python -m pytest
 ```
+
+## Future work
+
+Documented but **not designed or implemented** — evaluate when the work is
+actually taken on, not before:
+
+- **Parallel/load-balanced dispatch across accounts.** The dispatcher
+  currently serializes on a single active account (see "Architecture"
+  above). A configurable parallel mode is noted as future work in the
+  design spec (section 8), with two candidate variants: per-account
+  subagents scheduled by remaining quota, or independent task-claiming per
+  account with quota-triggered handoff instead of end-of-phase handoff.
+- **Multi-provider agent containers.** Everything under `docker/agent/`,
+  `dispatcher/docker_exec.py`, and `dispatcher/quota.py` is Claude-specific
+  today: the agent image installs only `@anthropic-ai/claude-code`
+  (`docker/agent/Dockerfile`), credentials are isolated per Claude Pro
+  account via a shadowed `/root/.claude/credentials` volume
+  (`claude_creds_<account>`, see `scripts/setup_volumes.sh`), `exec_claude`
+  shells out to the `claude` binary with `--output-format json`, and
+  `quota.parse_usage_output` parses Claude Code's `/usage` text verbatim.
+  Extending this to other AI coding CLIs/accounts (e.g. ChatGPT/Codex CLI,
+  Gemini CLI) would need, per provider:
+  - A dedicated agent image (or a `provider` build arg) installing that
+    CLI instead of/alongside Claude Code.
+  - Its own account-scoped credential volume and shadow-mount path,
+    mirroring the `claude_creds_<account>` pattern but at that CLI's config
+    location (e.g. `~/.codex`, `~/.gemini`) rather than `~/.claude`.
+  - A `provider` field on `AccountConfig` (`dispatcher/config.py`), and a
+    small provider abstraction behind `docker_exec.exec_claude` so the
+    dispatcher can invoke the right binary/flags and parse that CLI's
+    session-id/result/usage output instead of assuming Claude Code's JSON
+    shape.
+  - Confirmation that the target CLI supports a session-resume equivalent
+    to `--resume <session_id>` — the context-transfer design (section 5 of
+    the spec) leans on that for mid-role quota-exhaustion handoff.
+  This is not designed in detail; the bullets above are the seams the
+  current Claude-only implementation already has, not a spec.
