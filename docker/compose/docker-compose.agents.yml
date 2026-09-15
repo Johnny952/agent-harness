@@ -22,7 +22,11 @@ services:
     volumes:
       - claude_shared:/root/.claude
       - claude_creds_cuenta1:/root/.claude/credentials
-      - projects_data:/data/projects
+      # Repo-relative bind mount (not a named volume) so cloned project repos
+      # live at <repo-root>/.data/projects on the host, inspectable directly.
+      # NOTE: the agent image has no USER directive, so files written here
+      # from inside the container will show up root-owned on the host.
+      - ../../.data/projects:/data/projects
       # Agents read their task file (lock owner, role, handoff notes) from
       # here; the dispatcher is the only writer. Path matches config.yaml's
       # `hive_tasks_dir: /data/.hive/tasks`.
@@ -60,7 +64,7 @@ services:
     volumes:
       - claude_shared:/root/.claude
       - claude_creds_cuenta2:/root/.claude/credentials
-      - projects_data:/data/projects
+      - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
     depends_on:
       - dind-cuenta2
@@ -95,8 +99,6 @@ volumes:
   claude_creds_cuenta1:
     external: true
   claude_creds_cuenta2:
-    external: true
-  projects_data:
     external: true
   dind_cuenta1_data:
   dind_cuenta2_data:

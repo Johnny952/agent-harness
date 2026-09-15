@@ -4,6 +4,14 @@ set -euo pipefail
 # Creates the shared ~/.claude volume plus one shadowed credentials volume
 # per account (design spec sec. 3). Run once before the first
 # `docker compose -f docker-compose.agents.yml up`.
+#
+# projects_data is NOT created here: docker-compose.agents.yml bind-mounts
+# <repo-root>/.data/projects instead of a named volume, so cloned project
+# repos live inside this checkout. We still create that directory ourselves
+# (rather than letting Docker auto-create it on first mount) so it's owned
+# by the invoking user instead of root.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ACCOUNTS=("$@")
 if [ ${#ACCOUNTS[@]} -eq 0 ]; then
@@ -12,7 +20,7 @@ if [ ${#ACCOUNTS[@]} -eq 0 ]; then
 fi
 
 docker volume inspect claude_shared >/dev/null 2>&1 || docker volume create claude_shared
-docker volume inspect projects_data >/dev/null 2>&1 || docker volume create projects_data
+mkdir -p "$REPO_ROOT/.data/projects"
 
 for account in "${ACCOUNTS[@]}"; do
     vol="claude_creds_${account}"

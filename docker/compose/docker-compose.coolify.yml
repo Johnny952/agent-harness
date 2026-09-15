@@ -1,0 +1,207 @@
+# docker/compose/docker-compose.coolify.yml
+#
+# Single-file variant of docker-compose.yml + docker-compose.agents.yml,
+# meant to be imported as ONE Coolify "Docker Compose" resource for a
+# one-shot deploy. Differences from the split files (which remain the
+# recommended layout for manual/host `docker compose` use — see the two
+# files above and the README):
+#
+#   - Every image builds from source (agent, dind-sidecar included), so
+#     nothing has to be `docker build`'d by hand before first deploy.
+#   - `claude_shared`/`claude_creds_<account>` are plain named volumes here,
+#     not `external: true` — Coolify/Compose creates them on first `up`, so
+#     `scripts/setup_volumes.sh` is not required. The tradeoff: removing this
+#     resource in Coolify with its "delete volumes" option ticked deletes the
+#     Claude OAuth sessions along with it, where the split files' external
+#     volumes deliberately survive a `docker compose down`.
+#   - `ia_harness_net` is a plain network owned by this file, not split
+#     across two files joined via `external: true`.
+#   - Cloned project repos still bind-mount `<repo-root>/.data/projects`
+#     (see docker-compose.agents.yml's comment) rather than using a volume.
+#   - `dispatcher` is gated behind the `dispatcher` Compose profile so it
+#     never starts as part of the resource's default `up` — Coolify (or you,
+#     over SSH) runs it ad hoc. See the README's "Deploying with Coolify"
+#     section.
+#
+# Still required before/at first deploy, same as the split-file path:
+#   - A config.yaml at the repo root (e.g. via a Coolify pre-deployment
+#     command: `test -f config.yaml || cp config.example.yaml config.yaml` —
+#     config.yaml holds no secrets, only paths/thresholds/account names, so
+#     the shipped example is a safe default for the stock cuenta1/cuenta2
+#     setup).
+#   - DASHBOARD_USERNAME / DASHBOARD_PASSWORD_HASH set as Coolify environment
+#     variables on this resource (Coolify substitutes ${VARS} into compose
+#     the same way a .env file would — no need to run scripts/configure.sh's
+#     dashboard wizard for a Coolify deploy).
+#   - Per-account Claude Pro OAuth login, done once per agent container after
+#     it's up (`docker exec -it agent-cuenta1 claude login` or equivalent) —
+#     inherently a manual, interactive step no compose file can automate.
+services:
+  vibe-kanban:
+    image: ghcr.io/bloopai/vibe-kanban:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - vibe_kanban_data:/data
+    networks:
+      - ia_harness_net
+
+  collector:
+    build:
+      context: ../..
+      dockerfile: observability/collector/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - observability_data:/data
+    environment:
+      - COLLECTOR_DB_PATH=/data/events.db
+    networks:
+      - ia_harness_net
+
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: observability/dashboard/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - observability_data:/data
+    environment:
+      - COLLECTOR_DB_PATH=/data/events.db
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+    depends_on:
+      - collector
+    networks:
+      - ia_harness_net
+
+  registry-mirror:
+    image: registry:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry_mirror_data:/var/lib/registry
+      - ../registry-mirror/config.yml:/etc/docker/registry/config.yml:ro
+    networks:
+      - ia_harness_net
+
+  # Not a persistent service: gated behind the "dispatcher" profile so
+  # `docker compose up` / Coolify's default deploy never starts it. Run it
+  # ad hoc: `docker compose -f docker-compose.coolify.yml --profile dispatcher
+  # run --rm dispatcher --config /app/config.yaml run-task --task-id <id>
+  # --project <slug>`.
+  dispatcher:
+    profiles: ["dispatcher"]
+    build:
+      context: ../..
+      dockerfile: docker/dispatcher/Dockerfile
+    restart: "no"
+    command: ["--config", "/app/config.yaml", "run-task", "--task-id", "CHANGE_ME", "--project", "CHANGE_ME"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../dispatcher_state:/state
+      - ../../.hive:/data/.hive
+      - claude_shared:/root/.claude
+      - ../../config.yaml:/app/config.yaml:ro
+    depends_on:
+      - vibe-kanban
+      - collector
+    networks:
+      - ia_harness_net
+
+  agent-cuenta1:
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    container_name: agent-cuenta1
+    restart: unless-stopped
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_HOST=tcp://dind-cuenta1:2375
+      - COLLECTOR_URL=http://collector:8787
+      - SOURCE_APP=agent-cuenta1
+    volumes:
+      - claude_shared:/root/.claude
+      - claude_creds_cuenta1:/root/.claude/credentials
+      - ../../.data/projects:/data/projects
+      - ../../.hive:/data/.hive
+    depends_on:
+      - dind-cuenta1
+    networks:
+      - ia_harness_net
+
+  dind-cuenta1:
+    build:
+      context: ../dind-sidecar
+      dockerfile: Dockerfile
+    container_name: dind-cuenta1
+    restart: unless-stopped
+    runtime: sysbox-runc
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--registry-mirror=http://registry-mirror:5000"]
+    volumes:
+      - dind_cuenta1_data:/var/lib/docker
+    networks:
+      - ia_harness_net
+
+  agent-cuenta2:
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    container_name: agent-cuenta2
+    restart: unless-stopped
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_HOST=tcp://dind-cuenta2:2375
+      - COLLECTOR_URL=http://collector:8787
+      - SOURCE_APP=agent-cuenta2
+    volumes:
+      - claude_shared:/root/.claude
+      - claude_creds_cuenta2:/root/.claude/credentials
+      - ../../.data/projects:/data/projects
+      - ../../.hive:/data/.hive
+    depends_on:
+      - dind-cuenta2
+    networks:
+      - ia_harness_net
+
+  dind-cuenta2:
+    build:
+      context: ../dind-sidecar
+      dockerfile: Dockerfile
+    container_name: dind-cuenta2
+    restart: unless-stopped
+    runtime: sysbox-runc
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--registry-mirror=http://registry-mirror:5000"]
+    volumes:
+      - dind_cuenta2_data:/var/lib/docker
+    networks:
+      - ia_harness_net
+
+networks:
+  ia_harness_net:
+    name: ia_harness_net
+
+volumes:
+  vibe_kanban_data:
+  observability_data:
+  registry_mirror_data:
+  claude_shared:
+  claude_creds_cuenta1:
+  claude_creds_cuenta2:
+  dind_cuenta1_data:
+  dind_cuenta2_data:

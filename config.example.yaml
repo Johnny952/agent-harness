@@ -29,8 +29,9 @@ heartbeat_ttl_seconds: 120
 heartbeat_interval_seconds: 30
 
 # Root directory (inside each agent/dind container) under which per-project
-# checkouts live, as projects_root/<slug>. Matches the projects_data volume
-# mount (/data/projects) in docker-compose.agents.yml.
+# checkouts live, as projects_root/<slug>. Matches the
+# ../../.data/projects:/data/projects bind mount in docker-compose.agents.yml
+# (host-side, those checkouts live at <repo-root>/.data/projects).
 projects_root: /data/projects
 
 # Directory (inside each agent container) holding per-task lock/handoff

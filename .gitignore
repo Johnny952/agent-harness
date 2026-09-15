@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 dispatcher_state/
 .hive/
+.data/
 *.db
 *.db-wal
 *.db-shm
