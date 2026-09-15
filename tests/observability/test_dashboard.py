@@ -33,3 +33,15 @@ def test_index_with_valid_auth_shows_events(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     assert b"agent-cuenta1" in resp.data
+
+
+def test_index_works_before_the_collector_has_created_the_database(tmp_path: Path) -> None:
+    # Cold start: nothing has run init_db, so the dashboard must create the
+    # schema itself instead of 500ing on a missing events table.
+    db_path = str(tmp_path / "events.db")
+    app = create_app(db_path, "admin", "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8")
+    client = app.test_client()
+
+    resp = client.get("/", headers=_auth_header("admin", "password"))
+
+    assert resp.status_code == 200

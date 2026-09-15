@@ -11,6 +11,10 @@ from observability.collector import db
 
 
 def create_app(db_path: str, username: str, password_hash: str) -> Flask:
+    # Same call the collector makes: schema.sql is idempotent (CREATE TABLE IF
+    # NOT EXISTS), and without it a dashboard that wins the cold-start race
+    # queries a database file that has no events table yet and 500s.
+    db.init_db(db_path)
     app = Flask(__name__)
 
     def check_auth(user: str, password: str) -> bool:
