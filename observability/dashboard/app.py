@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 from functools import wraps
 
@@ -18,13 +19,25 @@ def create_app(db_path: str, username: str, password_hash: str) -> Flask:
     app = Flask(__name__)
 
     def check_auth(user: str, password: str) -> bool:
-        return user == username and hashlib.sha256(password.encode()).hexdigest() == password_hash
+        # hmac.compare_digest on str requires ASCII (a non-ASCII Basic-Auth
+        # username would otherwise raise TypeError and turn into a 500), so
+        # compare encoded bytes. Both comparisons are computed unconditionally
+        # before the `and` so a wrong username doesn't return faster than a
+        # wrong password.
+        user_ok = hmac.compare_digest(user.encode(), username.encode())
+        password_ok = hmac.compare_digest(
+            hashlib.sha256(password.encode()).hexdigest().encode(), password_hash.encode()
+        )
+        return user_ok and password_ok
 
     def requires_auth(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
             auth = request.authorization
-            if not auth or not check_auth(auth.username, auth.password):
+            # Bearer/Digest headers parse into an Authorization object whose
+            # .username/.password are None; check auth.type first so
+            # check_auth never sees None instead of a str.
+            if not auth or auth.type != "basic" or not check_auth(auth.username, auth.password):
                 return Response(
                     "Authentication required", 401,
                     {"WWW-Authenticate": 'Basic realm="ia-harness dashboard"'},

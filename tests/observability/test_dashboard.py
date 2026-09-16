@@ -35,6 +35,63 @@ def test_index_with_valid_auth_shows_events(tmp_path: Path) -> None:
     assert b"agent-cuenta1" in resp.data
 
 
+def test_index_with_wrong_username_and_correct_password(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "events.db")
+    collector_db.init_db(db_path)
+    app = create_app(db_path, "admin", "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8")
+    client = app.test_client()
+
+    resp = client.get("/", headers=_auth_header("not-admin", "password"))
+
+    assert resp.status_code == 401
+
+
+def test_index_with_non_ascii_username_returns_401_not_500(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "events.db")
+    collector_db.init_db(db_path)
+    app = create_app(db_path, "admin", "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8")
+    client = app.test_client()
+
+    resp = client.get("/", headers=_auth_header("josé", "password"))
+
+    assert resp.status_code == 401
+
+
+def test_index_with_bearer_auth_returns_401_not_500(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "events.db")
+    collector_db.init_db(db_path)
+    app = create_app(db_path, "admin", "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8")
+    client = app.test_client()
+
+    resp = client.get("/", headers={"Authorization": "Bearer abc"})
+
+    assert resp.status_code == 401
+
+
+def test_index_with_digest_auth_returns_401_not_500(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "events.db")
+    collector_db.init_db(db_path)
+    app = create_app(db_path, "admin", "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8")
+    client = app.test_client()
+
+    resp = client.get("/", headers={"Authorization": 'Digest username="admin", realm="x"'})
+
+    assert resp.status_code == 401
+
+
+def test_index_with_non_ascii_password_hash_returns_401_not_500(tmp_path: Path) -> None:
+    # A misconfigured DASHBOARD_PASSWORD_HASH shouldn't 500 every login;
+    # compare_digest needs bytes on both sides to tolerate that.
+    db_path = str(tmp_path / "events.db")
+    collector_db.init_db(db_path)
+    app = create_app(db_path, "admin", "not-ascii-é")
+    client = app.test_client()
+
+    resp = client.get("/", headers=_auth_header("admin", "password"))
+
+    assert resp.status_code == 401
+
+
 def test_index_works_before_the_collector_has_created_the_database(tmp_path: Path) -> None:
     # Cold start: nothing has run init_db, so the dashboard must create the
     # schema itself instead of 500ing on a missing events table.
