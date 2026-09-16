@@ -29,8 +29,11 @@ repo tras la aprobación de este documento.
   No hay una fuente de verdad paralela (issues de GitHub, Markdown suelto,
   etc.) para el trabajo en curso.
 - **Alcance actual vs. futuro:** ver sección 8 — el workflow implementado
-  ahora es serial (una cuenta a la vez); paralelismo/balanceo de carga
-  queda documentado como trabajo futuro, no como parte de este spec.
+  ahora es serial (una cuenta a la vez); paralelismo/balanceo de carga y
+  el resto de las mejoras (memoria de proyecto, economía de tokens,
+  operación 24/7, modelo por rol, perfiles de tarea, hardening, entre
+  otras) quedan documentados como trabajo futuro, no como parte de este
+  spec.
 
 ## 1. Herramienta de control / UI — Vibe Kanban **[Aprobada]**
 
@@ -385,6 +388,568 @@ Ninguna de las dos variantes se implementa como parte de este spec; se
 deja como toggle futuro sobre la misma base (Smart Dispatcher,
 `.hive/tasks/<task-id>.md`, sidecars DooD, observabilidad) para no tener
 que rediseñar desde cero cuando se aborde.
+
+Los bloques siguientes se agregaron el 2026-09-16, después de la
+aprobación, y no cambian el alcance aprobado. Van de mayor a menor
+prioridad; en ese orden, el workflow paralelo de arriba cae entre la
+compactación a mitad de fase y los contenedores multiproveedor (ver la nota
+de prioridad más abajo). Antes que todo esto van los huecos conocidos de la
+implementación, que viven solo en `README.md` (*Future work*, *Known gaps*)
+porque son defectos del código, no trabajo de diseño.
+
+**Trabajo futuro — memoria de proyecto (fuera de alcance de este spec):**
+
+Cada fase es un `claude -p` que arranca en frío: el rol es solo un nombre
+en el prompt, redescubre el repo objetivo desde cero y le deja al rol
+siguiente prosa libre. Queda documentado, sin diseñar en detalle, darles a
+los agentes una memoria que viva en el propio proyecto:
+
+- **Skills por rol (método, no convenciones):** un juego chico de skills
+  sobre cómo trabajar para el Claude de cada contenedor agente
+  (Arquitecto, Implementador, Revisor, Auditor), en vez de un prompt plano
+  por rol. Cada skill es un `SKILL.md` corto más referencias que se abren
+  bajo demanda. La fuente del método general es
+  [superpowers](https://github.com/obra/superpowers), copiando skills
+  sueltas y recortadas, no instalando el plugin en la imagen: su hook
+  `SessionStart` inyecta `using-superpowers`, cuya regla de "invocar una
+  skill si hay un 1% de chance de que aplique" gasta turnos en cada fase,
+  y algunas skills esperan a un humano (`brainstorming` pide aprobar el
+  diseño antes de escribir código, `finishing-a-development-branch`
+  pregunta si mergear o abrir un PR), así que bajo `-p` la fase termina en
+  una pregunta después de gastar la cuota. Vale copiar `writing-plans`
+  (Arquitecto), `test-driven-development` y
+  `verification-before-completion` (Implementador, Auditor),
+  `receiving-code-review` (Implementador en rondas de revisión) y
+  `systematic-debugging` (cualquier rol trabado más de un reintento). Se
+  saltan `subagent-driven-development` y `using-git-worktrees`, porque el
+  dispatcher ya reparte por rol y crea los worktrees. Las convenciones de
+  un proyecto viven en sus docs, y si el proyecto trae sus propias
+  `.claude/skills`, esas ganan en su dominio. Incluye la regla **revivir antes de
+  relanzar**: para retomar el trabajo de un subagente, primero intentar
+  revivirlo por su ID (`SendMessage` al agent ID, que lo continúa con su
+  contexto intacto), y solo si eso falla lanzar uno nuevo con el brief del
+  handoff. Evidencia de otro setup multiagente sobre el mismo CLI: un
+  subagente muerto por rate limit se revive solo por su `agent_id` crudo
+  (no por el nombre con que se despachó) y solo mientras la sesión padre
+  siga viva. *Sin verificar:* si un `claude -p --resume` de la sesión
+  padre, posiblemente en otra cuenta, vuelve a hacerlos direccionables. Si
+  no, el plan B es retomar la sesión previa del rol en la siguiente ronda.
+  Material de partida para las skills de Revisor y Auditor: el plugin
+  [thermos](https://github.com/cursor/plugins/tree/main/thermos) de Cursor
+  (una revisión de correctitud y seguridad más otra de calidad de código,
+  en paralelo y sintetizadas). Vale tomar: alcance limitado al diff,
+  verificar un hallazgo antes de reportarlo, calibrar severidad, una lista
+  de roturas de devex (variables de entorno, puertos, secretos), una vara
+  de aprobación explícita y leer el diff antes que el resumen del
+  Implementador. Hay que adaptarlo, no instalarlo: `thermo-nuclear-review`
+  pasa a ser la skill del Revisor, que bloquea solo por correctitud,
+  seguridad y regresiones claras (si las sugerencias de calidad bloquean,
+  el loop de rondas acotadas no converge);
+  `thermo-nuclear-code-quality-review` pasa a ser una pasada no bloqueante
+  dentro de la fase del Auditor, con notas para un humano; y se descarta
+  el orquestador `thermos`, porque su empaquetado supone Cursor, su paso
+  de PR/BugBot no tiene PR que leer acá y dos revisores por ronda duplican
+  la cuota. También hay que bajarle el tono en mayúsculas de "nada se
+  puede escapar", que empuja a sobrerreportar.
+- **Docs por proyecto, commiteadas con su código:** `decisions.md` (ADRs
+  de negocio y de arquitectura, con estado cerrada / en pausa /
+  reabierta), `learnings/` (fallos típicos), `debt/` (deuda declarada),
+  `architecture.md`, `business.md` e `implementations/<task-id>.md`. Si
+  el proyecto no tiene índice de docs, una fase de mapeo acotada (modelo
+  más barato, presupuesto de turnos, opt-in porque gasta cuota) corre
+  antes del Arquitecto y arma el mapa sin reescribir las docs que ya
+  existan; después el mapa crece con cada tarea. El Arquitecto lee los
+  índices y registra un ADR cuando la tarea decide algo, el Implementador
+  declara deuda y propone aprendizajes, el Revisor trata como hallazgo un
+  cambio de contrato sin su doc, y el Auditor es el **único escritor** de
+  los índices. Las decisiones de negocio que un agente infiere del código
+  quedan "sin confirmar" hasta que un humano las valide. Las fricciones
+  con las skills mismas vuelven a ia-harness para revisión humana y nunca
+  se instalan solas; las trampas del código van a `learnings/` del
+  proyecto.
+- **Índices y punteros:** cada índice tiene una columna de disparo
+  ("cuándo aplica"), escrita como condición evaluable contra la tarea; el
+  agente lee el índice completo y abre una entrada solo si su disparo
+  coincide. `CLAUDE.md` es solo índice, nunca fuente. Se cita por ancla
+  estable (ID, heading, símbolo), nunca por número de línea: una cita
+  rancia que todavía resuelve apunta con confianza al lugar equivocado.
+  Lo grande (diffs, logs, planes) viaja como ruta, y va inline solo bajo
+  un umbral de bytes medido. Precedencia: docs > skills > `CLAUDE.md`; una
+  contradicción entre capas es un bug de docs.
+- **Handoff estructurado:** el cuerpo de `.hive/tasks/<task-id>.md`
+  (mecanismo 1 de la sección 4a) pasa de prosa acumulada a un resumen
+  corto por rol devuelto vía `--json-schema` (estado, qué cambió, qué se
+  verificó, qué falta, riesgos, IDs de subagentes, aprendizajes y deuda
+  propuestos, rutas al detalle y el veredicto del Revisor como campo en
+  vez de una línea de texto), con tope de bytes por rol. Hoy el recorte es
+  ciego: `_truncate_for_handoff` guarda los primeros 500 y los últimos
+  1.500 caracteres, y el medio de un retorno largo, justo donde suelen ir
+  los hallazgos, se pierde. El tope lo impone el propio dispatcher: a un
+  retorno que se pasa le hace un `--resume` pidiendo uno más corto, acepta
+  el reintento tal cual y loguea el exceso para ajustar los topes con
+  datos. El detalle va a archivos separados por vida útil: lo durable
+  (ADRs, aprendizajes, `implementations/<task-id>.md`) en la rama de la
+  tarea, y lo efímero de cada ronda (hallazgos de revisión, logs de tests)
+  en `.hive/tasks/<task-id>/`; `.hive` guarda el resumen y las rutas. Lo
+  que queda en disco sobrevive solo si se commitea o vive fuera del
+  worktree.
+
+Depende de que los agentes reciban la descripción de la tarea y de que el
+trabajo de cada rol se commitee; hoy no pasa ninguna de las dos cosas (ver
+*Known gaps* en `README.md`).
+
+**Trabajo futuro — economía de tokens (fuera de alcance de este spec):**
+
+Con 2 cuentas Pro la cuota es el cuello de botella. Otro setup multiagente
+sobre el mismo CLI midió sus transcripts: releer contexto fue el 74% del
+costo de sus subagentes y toda la prosa que escribieron, el 1,3%; un agente
+carga 23–35K tokens fijos antes de hacer nada; el costo siguió las vueltas
+de verificación e iteración, no el tamaño de la tarea; y la intuición sobre
+dónde se iban los tokens falló las tres veces que se contrastó con datos.
+Queda documentado, sin diseñar en detalle:
+
+- **Medir por fase antes de optimizar:** guardar `usage`, `num_turns`,
+  `total_cost_usd` y `duration_ms` de cada `claude -p` (hoy se descartan)
+  con rol, modelo, effort, ronda y una huella de la config del agente
+  (versión del CLI, skills, servidores MCP, ventana de compactación), y
+  comparar tasas entre regímenes de config, no totales. La selección de
+  modelo por rol depende de estos datos.
+- **Cuota como subproducto:** el CLI (revisado en 2.1.273) define un
+  evento `rate_limit_event` con `utilization`, `resetsAt` y
+  `rateLimitType`. Si `--output-format stream-json --verbose` lo emite en
+  cuentas Pro (*sin verificar*), reemplaza el sondeo proactivo de `/usage`
+  de la sección 4a: ese sondeo no cobra turno, pero arranca el CLI entero
+  por cuenta y parsea texto libre frágil, mientras que el evento llega con
+  cada fase, estructurado y con la hora exacta de reset para reintentar
+  las tareas bloqueadas por cuota.
+- **Contexto fijo mínimo:** solo los plugins y servidores MCP que el rol
+  usa, `CLAUDE.md` como índice y skills bajo demanda; el `usage` del
+  primer turno mide el resultado.
+- **Menos turnos:** en las skills, agrupar llamadas independientes en una
+  respuesta, leer archivos por rango, recortar salidas largas y pasar
+  artefactos como rutas. El Arquitecto fija la verificación más barata que
+  pruebe cada paso.
+- **Tope a lo que devuelve cada rol, en dos niveles:** todo lo que queda
+  en el handoff se relee en cada fase siguiente. Lo que un rol le devuelve
+  al dispatcher lo lee Python, que no cuesta tokens, pero termina en el
+  handoff: lo acotan el schema y el tope del dispatcher del bloque
+  anterior. Lo que los subagentes propios de un rol le devuelven a su
+  sesión lo relee un LLM en cada turno que le queda: para eso la
+  configuración de la imagen del agente instala un hook `SubagentStop`
+  que rechaza una vez el retorno largo (pidiendo el detalle a disco y un
+  resumen corto) y deja pasar el reintento. Así ese otro setup mantiene
+  sus retornos en 3–4 KB; antes del hook midió un retorno de 14.030
+  caracteres donde el contrato pedía siete líneas, así que una regla en el
+  prompt sola no alcanza. Su hook reconoce el rol por un comentario
+  centinela en el prompt del subagente y no por `agent_type`, que llegó
+  poblado solo en el ~7% de los cierres, y loguea cada exceso. Los
+  formatos de línea compactos para esos retornos se toman de `cavecrew`
+  (bloque siguiente).
+- **Retomar vs. reiniciar:** `--resume` (mecanismo 2 de la sección 4a)
+  relee el transcript entero, y tras un cooldown o en otra cuenta el caché
+  de prompt casi seguro está frío. Conviene si la fase ya había avanzado;
+  si apenas empezó, sale más barato un cold-start desde el handoff. El
+  umbral lo fijan las mediciones.
+- **Ventana de auto-compact:** bajar `autoCompactWindow` en la
+  configuración de la imagen del agente acota lo que una fase larga relee
+  por turno (ese setup simuló 120K como ~12% más barato que 150K).
+- **[caveman](https://github.com/JuliusBrussee/caveman), pieza por
+  pieza:** junta varios ahorradores de tokens con evidencia muy distinta
+  detrás. Evaluado para el Claude de los contenedores agente:
+  - *Skill de estilo de salida (MIT):* no por defecto. Hace que el agente
+    escriba prosa telegráfica, pero en una fase agéntica la mayoría de los
+    tokens es releer contexto, código y llamadas a herramientas que la
+    skill no toca. El único A/B de terceros sobre tareas reales de Claude
+    Code (JetBrains, 86 tareas) midió 8,5% menos tokens de salida, cerca
+    de 10% del costo, sin cambio de calidad, mientras que sus ~1K tokens de
+    reglas se releen en cada turno. Su propio `docs/HONEST-NUMBERS.md`
+    lista casos netos negativos y pide medirla con los totales del
+    proveedor. Sus límites (código, commits, docs y PRs en prosa normal;
+    claridad completa en advertencias de seguridad y acciones
+    irreversibles) no chocan con las docs por proyecto. Queda como A/B
+    detrás de un flag cuando existan las mediciones por fase, acotada a lo
+    que las fases siguientes releen (retornos y campos del handoff), que
+    el schema y los topes ya acotan de forma determinista.
+  - *`cavecrew` (MIT):* tomar sus contratos de retorno, no sus agentes. El
+    investigador devuelve líneas `path:line — símbolo — nota`; el
+    constructor, `path:line-range — cambio` más `verified:` o un rechazo de
+    una palabra (`too-big.`, `needs-confirm.`, `ambiguous.`,
+    `regressed.`); y el revisor, `path:line: severidad: problema. fix.` más
+    totales, o `No issues.`. Encajan en los retornos de subagentes y en el
+    archivo de hallazgos del Revisor. Los agentes traen política propia (el
+    revisor fijo en haiku, el constructor rechaza cambios de más de dos
+    archivos) que deben decidir las skills por rol y la selección de
+    modelo por rol.
+  - *`caveman-compress` (MIT):* no. Gasta llamadas a Claude en reescribir
+    en el lugar `CLAUDE.md` y archivos de memoria, guarda el respaldo fuera
+    del repo (se pierde con el contenedor), y su ~46% menos de entrada
+    sobre cinco fixtures no viene con ninguna afirmación de calidad
+    equivalente. Las docs por proyecto se commitean en el repo objetivo y
+    también las leen humanos; `CLAUDE.md` como índice más entradas que se
+    abren por disparo ataca el mismo costo sin una reescritura con
+    pérdida.
+  - *Proxy y motor de compresión (`caveman wrap claude`; CLI MIT, runtime
+    BSL-1.1):* la única pieza que ataca la relectura, y la de mejores
+    números. Un benchmark fijado sobre Claude Code con salidas de
+    herramientas de 60–95 KB (logs, salida de tests, JSON, CSV, YAML)
+    midió 33,2% menos tokens de entrada reportados por el proveedor, con
+    18 de 18 respuestas correctas (IC 95%: 14,6–48,5%), lo que calza con
+    Implementador y Auditor corriendo suites y leyendo logs. La letra
+    chica: fixtures controlados, no producción, y HTML empeoró 9,9%; la
+    compresión es con pérdida (los originales quedan en un almacén local
+    con un handle de recuperación, pero un agente igual puede actuar
+    sobre un log recortado); según su doc de despliegue, un proxy
+    compartido autenticado por token no funciona con logins Claude
+    Pro/Max, así que correría como wrap local dentro de cada contenedor
+    agente (un CLI de Node.js 22 más un binario Go en la imagen, y un
+    salto más entre la cuenta y Anthropic); y BSL-1.1 permite uso propio
+    autoalojado, producción incluida, pero ofrecer ia-harness a terceros
+    como servicio alojado pediría licencia comercial. Es el mejor
+    candidato del conjunto, como experimento en la imagen de una cuenta y
+    con A/B sobre las mediciones por fase antes de adoptarlo. *Sin
+    verificar:* que `-p --output-format json`, sus cifras de `usage` y
+    `--resume` se comporten igual a través del wrap.
+
+No aplican acá la disciplina de compactar un hilo principal de larga vida
+(ninguna sesión vive más que su fase), ni la conclusión de que el reparto
+Opus/Sonnet casi no mueve el costo, que se midió con precio por token y no
+con los límites del plan Pro.
+
+**Trabajo futuro — operación 24/7 desatendida (fuera de alcance de este spec):**
+
+El Resumen y el diagrama de la sección 5 describen una plataforma
+persistente 24/7, pero el dispatcher implementado es un CLI de una sola
+pasada (`run-task` para una tarea), así que correr sin pausa todavía depende
+de automatización externa. Queda documentado, sin diseñar en detalle, lo
+que haría falta para que aguante sin supervisión:
+
+- **Loop de larga vida:** toma las tareas listas respetando `depends_on`,
+  que hoy se guarda en el frontmatter pero nunca se chequea.
+- **Distinguir bloqueo por cuota de fallo:** hoy una tarea que no encuentra
+  cuenta disponible queda `blocked` hasta que intervenga un humano. Las
+  bloqueadas por cuota podrían reintentarse solas: a la hora `resetsAt` del
+  `rate_limit_event` (bloque de economía de tokens) si el CLI lo emite; si
+  no, a las horas de reset del texto de `/usage` cuando se puedan parsear;
+  y si no, con un rechequeo periódico.
+- **Ejecuciones superpuestas:** un guard de instancia única (p. ej. `flock`
+  sobre `state_dir`) para que dos corridas no tomen la misma cuenta.
+  `acquire_lock` ya rechaza un lock vivo sobre la tarea, pero dos corridas
+  de tareas distintas todavía compiten por los archivos de estado de las
+  cuentas.
+- **Cuentas `BUSY` huérfanas:** un SIGKILL, un OOM o un reinicio del host
+  dejan la cuenta `BUSY` en disco, y el `except` de `dispatch_phase` no
+  alcanza a capturarlo. Un Ctrl+C también la deja `BUSY`, a propósito:
+  matar el `docker exec` del host no detiene el `claude` dentro del
+  contenedor, que sigue corriendo hasta `phase_timeout_seconds`. Hace falta
+  un recolector; una regla candidata es liberar una cuenta `BUSY` cuyo
+  archivo de estado sea más viejo que `phase_timeout_seconds` más los 30
+  segundos de gracia del kill.
+- **Fase huérfana tras Ctrl+C:** el heartbeat muere con el proceso del
+  host, así que el lock de la tarea expira a los `heartbeat_ttl_seconds`
+  (120 por defecto) mientras ese `claude` huérfano puede seguir hasta
+  `phase_timeout_seconds` (7200). Una re-ejecución en esa ventana toma la
+  tarea en otra cuenta y puede trabajar el mismo worktree a la vez, porque
+  los checkouts de `projects_root` se comparten entre contenedores. El
+  recolector de arriba podría sostener el lock (o saltarse la tarea)
+  mientras alguna cuenta siga `BUSY` con ese task ID.
+- **Estado de Kanban pisado:** una segunda corrida que choca con un lock
+  vivo marca la tarea `blocked` en Vibe Kanban y pisa el
+  `in_progress:<rol>` bajo el que la primera sigue trabajando. Conviene
+  chequear el lock antes de escribir `in_progress`, o reportar un estado
+  distinto.
+- **Timeout por llamada a Vibe Kanban:** `VibeKanbanClient._call_async` no
+  pasa `read_timeout_seconds` a `ClientSession` ni a `call_tool`, así que
+  un servidor que acepta la conexión y nunca responde deja colgada una
+  actualización de estado que debía ser best-effort.
+- **Configuración de logging:** `dispatcher/cli.py` no configura ningún
+  handler, así que los warnings del dispatcher (actualización de Kanban
+  fallida, lock de otro dueño, `/usage` imparseable) llegan a stderr solo
+  por el handler de último recurso de `logging`, sin timestamps ni
+  contexto.
+- **Prompt corto al retomar:** tras un rate limit, un "continúa donde
+  quedaste" en vez de reenviar el prompt completo del rol.
+
+**Trabajo futuro — modelo por rol y escalado de effort (fuera de alcance de este spec):**
+
+Correr opus en los cuatro roles es lo que más rápido gasta la cuota. Hoy
+`default_model` (`config.example.yaml`) aplica el mismo modelo a todos los
+roles, y el effort solo escala cuando el loop Implementador/Revisor supera
+`escalate_effort_after_round`. Queda documentado, sin diseñar en detalle:
+
+- **Modelo por rol:** p. ej. opus para Arquitecto y Auditor (planificación
+  y juicio) y sonnet para Implementador (ejecución), quizá también para las
+  primeras rondas del Revisor. El reparto se decide primero con las
+  mediciones por fase del bloque de economía de tokens, que muestran qué
+  roles consumen de verdad la cuota.
+- **Escalar por otras señales además de la ronda:** subir el effort (o
+  cambiar de modelo) si el Revisor repite la misma objeción, o si un rol
+  devuelve un resultado sospechosamente corto.
+
+Sin diseñar: el schema de config (`default_model` como fallback vs. un mapa
+`models: {arquitecto: opus, ...}`), y cómo detectar "la misma objeción" o
+"sospechosamente corto" en un `result_text` libre sin armar una heurística
+que nunca se dispare como se esperaba.
+
+**Trabajo futuro — perfiles de tarea y roles nuevos (fuera de alcance de este spec):**
+
+Las skills por rol (bloque de memoria de proyecto) dicen cómo trabaja un
+rol, no de qué trata la tarea. Una tarea de frontend gana con skills de
+diseño y de verificación en navegador que una de backend pagaría sin usar:
+la descripción de cada skill instalada está en contexto en cada turno, y
+el `skills:` de un subagente toma de las mismas skills instaladas, así que
+esconder un pack detrás de un subagente no lo saca del contexto del padre.
+Queda documentado, sin diseñar en detalle:
+
+- **Mecanismo:** la tarea lleva un perfil (`web-frontend`, `e2e`, `3d`,
+  …), puesto por un humano como etiqueta en Vibe Kanban o, si falta,
+  elegido por el Arquitecto desde un catálogo corto de nombres con una
+  línea de descripción (nunca las skills). El dispatcher lo guarda en
+  `.hive/tasks/<task-id>.md` y agrega `--plugin-dir
+  /opt/packs/<perfil>/<rol>` al `claude -p` de esa fase, en el mismo
+  contenedor de la cuenta (el flag se repite, así que los packs se
+  apilan). Ninguna sesión orquestadora necesita saber que existen. El flag
+  se vuelve a pasar en cada `--resume`, incluido el traspaso por cuota:
+  *sin verificar* si una sesión retomada conserva los plugins de la
+  llamada original. Una segunda imagen (`agent-web`) solo se justifica
+  por dependencias pesadas; la imagen actual (`node:20-slim`) no trae
+  Chromium.
+- **Candidatos para `web-frontend`, evaluados:**
+  - [playwright-skill](https://github.com/willmarple/playwright-skill):
+    sí, y el más valioso, porque cierra el ciclo que los demás dejan
+    abierto: el agente renderiza, saca una captura (`playwright-cli
+    screenshot`) y lee el PNG, en vez de juzgar la UI por su código.
+    Necesita Chromium y `@playwright/cli`.
+  - [impeccable](https://github.com/pbakaus/impeccable): sí, adaptado. Sus
+    comandos calzan con los roles: `shape` para el Arquitecto, su flujo de
+    construcción por defecto para el Implementador, `audit` (a11y,
+    rendimiento, responsive) para el Revisor, `critique` y `polish` para
+    el Auditor. Para headless hay que quitar las paradas que esperan
+    AskUserQuestion (`init`, `document`, `extract`, `quieter`, `overdrive`
+    y la pregunta final de `critique`) y los hooks `PostToolUse`
+    (Edit|Write) y `Stop` del plugin.
+  - [ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill):
+    solo la skill `ui-ux-pro-max`, cuyo `search.py` consulta bajo demanda
+    una base local de estilos, paletas y tipografías (para el Arquitecto).
+    El resto no: `design`, `banner-design`, `brand` y `slides` generan
+    imágenes con APIs externas que piden sus propias keys, y `ui-styling`
+    se solapa con impeccable.
+  - [taste-skill](https://github.com/leonxlnx/taste-skill): mayormente no.
+    Su `SKILL.md` principal pesa ~87 KB (~22K tokens) cada vez que se
+    dispara, y su regla de salida completa choca con los topes de retorno
+    por rol del bloque de economía de tokens. A lo sumo, tomar algunos de
+    sus antipatrones para el pack de impeccable.
+  - [awesome-design-skills](https://github.com/bergside/awesome-design-skills):
+    no va en la imagen. Cada entrada es un estilo visual; el proyecto
+    trae a su repo el que eligió (`npx typeui.sh pull <estilo>`) como parte
+    de sus docs de diseño.
+  - [img2threejs](https://github.com/img2threejs/img2threejs) (reconstruye
+    un objeto de una imagen de referencia como modelo procedural en
+    Three.js): solo en un perfil `3d` opt-in, para tareas que construyen
+    esas escenas.
+- **Reglas de los packs:** una sola dirección de diseño por pack; dos
+  skills de estilo tiran para lados distintos y el Revisor no sabe cuál
+  debía seguir el diff. El estilo mismo (tokens, componentes, tono) vive
+  en `DESIGN.md` y `PRODUCT.md` del proyecto objetivo, que ganan sobre
+  cualquier pack, igual que las docs ganan sobre las skills por rol. Cada
+  pack se vendoriza, se fija la versión y se recorta para headless (sin
+  preguntas a un humano, sin hooks innecesarios), y un perfil se queda
+  solo después de comparar algunas tareas reales con y sin él usando las
+  mediciones por fase.
+- **¿Un rol Diseñador? No como fase.** Una fase fija de diseño suma un
+  arranque en frío y un handoff a cada tarea con cuota escasa, y diseña
+  antes de que haya nada renderizado. La decisión de diseño que más pide
+  criterio, la dirección visual, es de un humano; las propias paradas de
+  impeccable caen justo en los comandos que la fijan. En su lugar:
+  - Una **tarea de bootstrap del sistema de diseño**, única y opt-in por
+    proyecto, como la fase de mapeo: escribe `PRODUCT.md` y `DESIGN.md`
+    (desde la UI existente en un proyecto viejo, desde el brief en uno
+    nuevo), marca como "sin confirmar" lo inferido y un humano la aprueba
+    en Vibe Kanban (paso 6 de la sección 5). Las tareas de UI hacen
+    `depends_on` de esa aprobación, no solo de que el pipeline termine.
+  - El **perfil `web-frontend` sobre los roles existentes:** el Arquitecto
+    especifica la UI (estados vacío, cargando y error; breakpoints; qué
+    tokens y componentes de `DESIGN.md`), el Implementador la construye y
+    revisa sus propias capturas, el Revisor compara capturas contra
+    `DESIGN.md` y bloquea solo por fallos de accesibilidad (WCAG), layout
+    roto o regresiones, y el Auditor deja el pulido de diseño como notas
+    no bloqueantes para un humano.
+
+  Se reevalúa una fase de Diseñador solo si las mediciones por fase
+  muestran tareas de UI rebotando entre Implementador y Revisor por
+  hallazgos de diseño.
+- **Otros roles:** un rol nuevo tiene que aportar algo que un perfil no
+  puede: un agente independiente que verifique el trabajo, un artefacto
+  con vida propia o una puerta humana. Con esa vara:
+  - *Mapeador:* ya es la fase de mapeo; formalizarla con skill propia y
+    modelo más barato (bloque de modelo por rol).
+  - *Tester/QA:* sin fase aparte. El Arquitecto escribe los criterios de
+    aceptación y el Auditor corre las pruebas e2e con un perfil `e2e`.
+    Que otro agente escriba los tests antes que el código (tests
+    adversariales) vale como experimento, no como default.
+  - *Revisor de seguridad:* un pack del Revisor (la revisión de
+    correctitud y seguridad de thermos más Semgrep, bloque de inspección
+    de código), activado en tareas que tocan auth, pagos o secretos.
+  - *Documentador:* no; rompería la regla del Auditor como único escritor
+    de los índices.
+  - *Integrador:* commitear, rebasear y abrir el PR es código determinista
+    del dispatcher (ver *Known gaps* en `README.md`). Una fase LLM solo
+    paga su cuota resolviendo conflictos de rebase, que crecen con el
+    workflow paralelo.
+  - *Descomposición de épicas:* un modo del Arquitecto que propone tareas
+    hijas, cada una con `depends_on` y perfil, para que un humano las
+    apruebe. *Sin verificar:* si el MCP de Vibe Kanban permite crear
+    tareas.
+  - *Bugfix* (reproducir antes de arreglar), *infra/DevOps*, *rendimiento*
+    y *migraciones de datos* (puerta humana antes de cualquier cosa
+    irreversible): perfiles o tipos de tarea, no roles.
+
+Depende de las skills por rol y de los mismos *Known gaps*. *Sin
+verificar:* si un dev server más Chromium headless caben en el `mem_limit`
+de 4 GB del contenedor agente (`docker/compose/docker-compose.agents.yml`),
+o si el navegador puede correr en el sidecar dind de la cuenta (p. ej. la
+imagen de Playwright) y aun así llegar al dev server. Sin diseñar: el
+catálogo de perfiles, la convención de etiquetas en Vibe Kanban y dónde
+viven los packs (horneados en `/opt/packs` vs. montados).
+
+**Trabajo futuro — observabilidad y hardening (fuera de alcance de este spec):**
+
+Aceptable para un solo operador en loopback más Tailscale, pero conviene
+endurecerlo, porque los contenedores agente corren código arbitrario de
+repos clonados en la misma red:
+
+- **Colector sin autenticación:** `POST`/`GET /events` no piden
+  credenciales, así que cualquier cosa en `ia_harness_net`, agentes
+  incluidos, puede leer o falsificar eventos. Un token compartido lo
+  cierra.
+- **Secretos en los eventos:** los payloads de los hooks incluyen entradas y
+  salidas de herramientas (contenido de archivos, archivos de entorno,
+  tokens) y llegan tal cual a SQLite. Hay que redactarlos en
+  `hooks/emit_event.py`.
+- **Autenticación del dashboard (sección 6):** ya compara en tiempo
+  constante (`hmac.compare_digest`), pero lo guardado sigue siendo un
+  SHA-256 sin salt de la contraseña. Un digest con salt (p. ej.
+  `salt$sha256(salt + password)`) mantiene `scripts/configure.sh` sin
+  Python; ojo con que compose interpola `$` en los valores de `.env`.
+  Colector y dashboard corren además el servidor de desarrollo de Flask,
+  no un servidor WSGI de producción.
+- **Vista por tarea:** el dashboard muestra solo los últimos 200 eventos
+  crudos; una vista por tarea (fase, cuenta, duración, rondas, veredicto,
+  costo) respondería directo "qué le pasó a esta tarea".
+- **Socket de Docker del dispatcher:** el servicio `dispatcher` monta el
+  `/var/run/docker.sock` del host, que equivale a root en el host. Un proxy
+  de socket limitado a `exec` lo acotaría. No contradice la sección 4b: ahí
+  se descartó el proxy para aislar a los agentes, que tienen su propio
+  daemon en el sidecar; el dispatcher sí necesita el daemon del host para
+  hacer `docker exec` en los contenedores agente.
+
+**Trabajo futuro — inspección de código en los contenedores agente (fuera de alcance de este spec):**
+
+Un servidor MCP de grafo de conocimiento (p. ej. uno parseado con
+tree-sitter que responde llamadores, llamados e impacto) le da a un agente
+respuestas estructurales ("qué llama a esto", "qué se rompería") mucho más
+baratas que grep. Hoy `docker/agent/` no trae nada de eso: cada rol trabaja
+con lecturas de archivos y comandos de shell. Conviene empezar por análisis
+estático para Revisor y Auditor, que es determinista y barato; los
+servidores de navegación rinden sobre todo en repos grandes, y las
+definiciones de herramientas de cada servidor MCP ocupan contexto en cada
+turno, que en Claude Pro es cuota (bloque de economía de tokens). Opciones
+reales, ninguna evaluada todavía en este repo:
+
+- **Navegación semántica vía MCP**, para Arquitecto e Implementador:
+  [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)
+  (tree-sitter, CLI + MCP, base de datos de grafos) o
+  [Serena](https://github.com/oraios/serena) (recuperación y edición a
+  nivel de símbolo sobre LSP, más de 20 lenguajes).
+- **Análisis estático y de seguridad por patrones**, para Revisor y
+  Auditor: [Semgrep MCP](https://mcp.directory/blog/semgrep-mcp-complete-guide-2026),
+  una pasada sistemática de seguridad y calidad en vez de depender de la
+  lectura del diff que haga el propio modelo.
+- **Linters propios del proyecto objetivo**, que las skills por rol
+  mandan a correr. Para proyectos objetivo en TS/JS,
+  [anti-slop](https://github.com/dmmulroy/anti-slop) es un set listo:
+  reglas de Oxlint contra patrones de poca evidencia que los agentes
+  suelen escribir (`unknown` sin validar, aserciones de tipo encadenadas,
+  mocks de módulos). Se vendoriza una vez en el repo objetivo con su skill
+  `install-anti-slop`, que copia las reglas a `tools/oxlint/anti-slop/`,
+  fija `oxlint` y `@oxlint/plugins`, fusiona `oxlint.config.ts` y activa
+  todas las reglas genéricas como `error` (las de Effect solo si el repo
+  usa Effect). Desde ahí es determinista y no cuesta tokens por corrida,
+  así que el Revisor deja de gastar turnos en esos patrones. No es
+  automático: cambia las dependencias y la política de lint del proyecto,
+  codifica el gusto de un autor (`no-module-mocking` prohíbe
+  `vi.mock`/`jest.mock`), y en un repo existente todo en `error` inunda el
+  lint con violaciones ajenas a la tarea, así que el Implementador quema
+  cuota arreglando código viejo o el Revisor bloquea por eso. La skill
+  puede ir en la imagen del agente (solo carga su descripción), pero corre
+  solo cuando una tarea humana lo pide; encaja mejor en proyectos TS
+  nuevos, con el Arquitecto proponiéndolo como ADR. Una vez instalado es
+  un linter más del proyecto: se bloquea solo por violaciones en líneas
+  que toca el diff.
+- **Por rol, no todo para todos:** como cada rol ya es un `claude -p`
+  separado, cada uno puede recibir sus propios servidores MCP.
+
+Sin diseñar: si las herramientas se hornean en `docker/agent/Dockerfile`
+(una imagen con todo) o se activan por rol al arrancar el contenedor, y el
+costo en tiempo de build y tamaño, por proyecto, de todo lo que indexe el
+checkout completo. El bloque de perfiles de tarea agrega una tercera
+opción: las herramientas quedan en la imagen y cada `claude -p` carga solo
+las de su rol y su perfil (`--mcp-config`, igual que `--plugin-dir`), sin
+reiniciar el contenedor.
+
+**Trabajo futuro — compactación a mitad de fase (fuera de alcance de este spec):**
+
+Para la fase de un rol que llena su ventana de contexto antes de terminar
+(p. ej. una implementación larga con muchas llamadas a herramientas):
+vigilar el uso de contexto y, pasado un umbral, volcar a disco un resumen
+específico del rol (para el Implementador: qué está hecho, estado actual,
+qué falta, consideraciones), hacer `/clear` y reinyectar ese resumen.
+Prioridad baja: Claude Code ya compacta solo una sesión que se acerca a su
+límite, y `autoCompactWindow` (bloque de economía de tokens) mueve ese
+umbral sin código, así que solo importa si se observa que las fases largas
+fallan o se degradan igual. Hoy no hay dónde engancharlo: cada fase es un
+único `claude -p ... --output-format json` no interactivo que devuelve un
+JSON al salir, sin sesión viva en la que inyectar un `/clear`. Hacerlo de
+verdad requiere una sesión conducida o en streaming (o un loop estilo SDK)
+que el dispatcher observe turno a turno. Además solo ayuda *dentro* de la
+fase de un rol: *entre* fases ya lo cubre el handoff de
+`.hive/tasks/<task-id>.md` (mecanismo 1 de la sección 4a).
+
+**Nota de prioridad sobre el workflow paralelo/balanceado:**
+
+Con 2 cuentas Pro el límite es la cuota, no el throughput: correr ambas a la
+vez sobre todo la gasta más rápido y suma conflictos de merge entre ramas
+concurrentes. Conviene retomarlo con más cuentas, y preferir paralelizar
+tareas independientes (vía `depends_on`) antes que partir una misma tarea.
+
+**Trabajo futuro — contenedores agente multiproveedor (fuera de alcance de este spec):**
+
+La menor prioridad: es lo que más trabajo lleva, y si el objetivo es más
+capacidad, agregar otra cuenta Claude es solo configuración (el diseño ya
+soporta N cuentas, ver *Decisiones de alcance*). Todo lo que está bajo
+`docker/agent/`, `dispatcher/docker_exec.py` y `dispatcher/quota.py` es
+específico de Claude: la imagen agente instala solo
+`@anthropic-ai/claude-code`, las credenciales se aíslan por cuenta con un
+volumen que sombrea `/root/.claude/credentials` (`claude_creds_<cuenta>`,
+sección 3), `exec_claude` invoca el binario `claude` con
+`--output-format json`, y `quota.parse_usage_output` parsea el texto de
+`/usage` tal cual. Extenderlo a otros CLIs (p. ej. Codex CLI, Gemini CLI)
+requeriría, por proveedor:
+
+- Una imagen agente propia (o un build arg `provider`) que instale ese CLI
+  en vez de Claude Code o junto a él.
+- Su propio volumen de credenciales por cuenta y su ruta sombreada, con el
+  mismo patrón que `claude_creds_<cuenta>` pero en el directorio de config
+  de ese CLI (p. ej. `~/.codex`, `~/.gemini`).
+- Un campo `provider` en `AccountConfig` (`dispatcher/config.py`) y una
+  abstracción de proveedor detrás de `docker_exec.exec_claude`, para
+  invocar el binario y los flags correctos y parsear su session id,
+  resultado y uso en vez de asumir el JSON de Claude Code.
+- Confirmar que el CLI destino tiene un equivalente de
+  `--resume <session_id>`: el mecanismo 2 de la sección 4a depende de eso
+  para el relevo por agotamiento de cuota a mitad de rol.
+
+Esto no está diseñado en detalle: los puntos de arriba son las costuras que
+ya tiene la implementación actual, solo para Claude, no un spec.
 
 ## Cierre del proceso de diseño
 

@@ -38,7 +38,9 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   Account state is a small JSON file per account (`state_dir`), written
   atomically. Rate-limit responses move an account to `COOLING_DOWN` and
   retry on another account, resuming the same Claude session via
-  `--resume <session_id>` once one is available again.
+  `--resume <session_id>` once one is available again. Each phase runs
+  under an in-container `timeout` (`phase_timeout_seconds`, 2 hours by
+  default) and counts as failed when it expires.
 - **Agent containers** — one per Claude Pro account, each with its own OAuth
   session isolated via a shadowed `/root/.claude/credentials` volume over a
   shared `/root/.claude` volume (`claude_shared` + `claude_creds_<account>`).
@@ -50,7 +52,8 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   each phase's handoff notes. Used for cold-start role transitions; mid-role
   quota exhaustion instead resumes the same Claude session directly via
   `--resume`. Stale locks (heartbeat older than `heartbeat_ttl_seconds`) are
-  reaped at the start of each task cycle. Each role works on its own branch,
+  reaped at the start of each task cycle; a live lock held by another owner
+  is refused, and the task goes `blocked`. Each role works on its own branch,
   `agent/<role>/<task-id>`, in its own git worktree.
 - **Observability** (`observability/`) — Claude Code hooks
   (`hooks/emit_event.py`, registered by `hooks/install_settings.py` on
@@ -276,127 +279,636 @@ python3 -m venv .venv
 ## Future work
 
 Documented but **not designed or implemented** — evaluate when the work is
-actually taken on, not before:
+actually taken on, not before. The known gaps come first; the items after
+them are ordered by priority, highest first.
 
-- **Mid-phase context-window compaction.** For a single role's run that
-  fills its context window before finishing (long implementation with many
-  tool calls), watch context usage and, past a threshold, dump a
-  role-specific summary to disk (for implementador: what's implemented,
-  current state, what's left, considerations) then `/clear` and reinject
-  that summary so the role continues with a compacted context instead of
-  running out mid-task. Not implemented: today `dispatch_phase` →
-  `exec_claude` runs each phase as a single one-shot, non-interactive
-  `claude -p ... --output-format json` call that returns one JSON blob
-  after exit — the dispatcher never observes context usage or intervenes
-  mid-call, so there's no live session to inject a `/clear` into. Doing
-  this for real needs a driven/streaming session (or SDK-style loop) the
-  dispatcher can watch turn-by-turn, which is a bigger change than a
-  threshold check. Also note this only helps *within* one role's run —
-  the *between*-phase case is already handled by `context_transfer`'s
-  handoff file (role-specific dump → next phase reads it fresh).
-- **Parallel/load-balanced dispatch across accounts.** The dispatcher
-  currently serializes on a single active account (see "Architecture"
-  above). A configurable parallel mode is noted as future work in the
-  design spec (section 8), with two candidate variants: per-account
-  subagents scheduled by remaining quota, or independent task-claiming per
-  account with quota-triggered handoff instead of end-of-phase handoff.
-- **Per-role model selection and richer effort escalation.** Today
-  `default_model` (`config.example.yaml`) applies the same model to every
-  role, and effort only escalates once the implementador/revisor loop
-  crosses `escalate_effort_after_round` (see "Configuration" above). Two
-  refinements were discussed but not implemented: (1) a per-role model
-  override — e.g. opus for arquitecto/revisor/auditor (planning/judgment
-  roles) and sonnet for implementador (execution) — instead of one
-  `default_model` for all four; (2) escalating effort (or switching model)
-  on signals other than round count, e.g. the revisor repeating the same
-  `VERDICT: CHANGES_REQUESTED` complaint, or a role's result text coming
-  back suspiciously short. Not designed: a config schema for per-role
-  model overrides (`default_model` becoming a fallback vs. a
-  `models: {arquitecto: opus, ...}` map), and how "the same complaint" or
-  "suspiciously short" would be detected from freeform `result_text`
-  without over-engineering a heuristic that never fires as intended.
-- **Multi-provider agent containers.** Everything under `docker/agent/`,
-  `dispatcher/docker_exec.py`, and `dispatcher/quota.py` is Claude-specific
-  today: the agent image installs only `@anthropic-ai/claude-code`
-  (`docker/agent/Dockerfile`), credentials are isolated per Claude Pro
-  account via a shadowed `/root/.claude/credentials` volume
-  (`claude_creds_<account>`, see `scripts/setup_volumes.sh`), `exec_claude`
-  shells out to the `claude` binary with `--output-format json`, and
-  `quota.parse_usage_output` parses Claude Code's `/usage` text verbatim.
-  Extending this to other AI coding CLIs/accounts (e.g. ChatGPT/Codex CLI,
-  Gemini CLI) would need, per provider:
-  - A dedicated agent image (or a `provider` build arg) installing that
-    CLI instead of/alongside Claude Code.
-  - Its own account-scoped credential volume and shadow-mount path,
-    mirroring the `claude_creds_<account>` pattern but at that CLI's config
-    location (e.g. `~/.codex`, `~/.gemini`) rather than `~/.claude`.
-  - A `provider` field on `AccountConfig` (`dispatcher/config.py`), and a
-    small provider abstraction behind `docker_exec.exec_claude` so the
-    dispatcher can invoke the right binary/flags and parse that CLI's
-    session-id/result/usage output instead of assuming Claude Code's JSON
-    shape.
-  - Confirmation that the target CLI supports a session-resume equivalent
-    to `--resume <session_id>` — the context-transfer design (section 5 of
-    the spec) leans on that for mid-role quota-exhaustion handoff.
-  This is not designed in detail; the bullets above are the seams the
-  current Claude-only implementation already has, not a spec.
-- **Skills for the four agent roles.** Port a
-  [superpowers](https://github.com/obra/superpowers)-style skills system
-  into the per-role prompts each agent container invokes (arquitecto,
-  implementador, revisor, auditor), instead of relying on one flat
-  system prompt per role. Candidates: a plan-before-code discipline for
-  implementador, "run the full suite before declaring done" for auditor,
-  and a systematic-debugging skill invoked when a role gets stuck across
-  more than one retry. Not designed: this needs a decision on where
-  per-role skill files would live (baked into `docker/agent/` at build
-  time vs. mounted alongside `.hive`) and how a role would be told which
-  skill applies.
-- **Structured `.hive/tasks/<task-id>.md` handoff body.** The YAML
-  frontmatter (`status`/`owner`/`depends_on`/`heartbeat`) is already
-  structured; the body each role leaves for the next one is freeform
-  prose. A semi-structured body (what changed / what was verified /
-  what's pending / known risks) would make the next role's context load
-  cheaper and more consistent than re-reading unstructured notes. Not
-  designed: no schema drafted yet, and it's unclear whether this should
-  be enforced by convention (prompt instructions) or parsed/validated by
-  the dispatcher.
-- **Per-project `CLAUDE.md` for cloned repos.** Projects checked out
-  under `.data/projects/<slug>` (see "Create volumes" above) are
-  arbitrary target repos, not ia-harness itself. Today every role
-  rediscovers that repo's conventions from scratch each phase. Dropping
-  or generating a `CLAUDE.md` in the checkout (by convention, or
-  auto-written by arquitecto on first contact with a project) would let
-  later roles/phases skip that rediscovery. Not designed: whether this
-  is hand-authored once per project or agent-generated, and how it
-  survives a project being re-cloned.
-- **Code-inspection/code-intelligence tooling in agent containers.**
-  Personal setups (e.g. a tree-sitter-parsed knowledge-graph MCP server
-  queried for callers/callees/impact) give an agent structural answers
-  ("what calls this," "what would break") far cheaper than grep. Nothing
-  like this ships in `docker/agent/` today — each role works from plain
-  file reads and shell commands. A few real options exist, none
-  evaluated in this repo yet:
-  - Knowledge-graph/semantic-navigation MCP servers — the same category
-    as a personal CodeGraph setup — e.g.
-    [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)
-    (tree-sitter, CLI + MCP, graph database) or
-    [Serena](https://github.com/oraios/serena) (LSP-backed symbol-level
-    retrieval/editing across 20+ languages via MCP). Best fit for
-    arquitecto/implementador: cheaper "where is X" / "what calls Y"
-    answers when onboarding onto a project or planning a change.
-  - Pattern-based static/security analysis with MCP support, e.g.
-    [Semgrep MCP](https://mcp.directory/blog/semgrep-mcp-complete-guide-2026)
-    (Semgrep's Guardian product scans agent-written code for
-    vulnerabilities/bug patterns before commit, also usable ad hoc via
-    its MCP server). Best fit for revisor/auditor: a systematic
-    security/quality pass instead of relying on the LLM's own read of
-    the diff.
-  - These are not mutually exclusive — since each role already runs as
-    a separate `claude -p` invocation, different roles could get
-    different MCP servers configured (navigation-oriented for
-    arquitecto/implementador, analysis-oriented for revisor/auditor)
-    rather than every role carrying every tool. Not designed: whether
-    tooling is baked into `docker/agent/Dockerfile` (one image, all MCP
-    servers available) or made role-conditional at container-start time,
-    and — for anything indexing the whole checkout — added container
-    build time/size cost per project.
+### Known gaps (fix first)
+
+These sit in the core pipeline rather than on top of it, and likely keep a
+task from producing a usable result end to end today. The unit tests mock
+Claude Code, Docker, and Vibe Kanban, so none of them catch these.
+
+- **Agents never see the task.** `_role_prompt`
+  (`dispatcher/dispatcher.py`) sends only the role, task ID, and `.hive`
+  file path; the task file starts with an empty body, and `run-task` never
+  reads the task from Vibe Kanban (`VibeKanbanClient.list_tasks` keeps only
+  the title, and nothing fetches the description). The arquitecto has
+  nothing to plan from. Seed the body with the task
+  description (from Vibe Kanban, or a `--description` flag on `run-task`)
+  before the first phase.
+- **Roles don't see each other's code.** `create_worktree` branches every
+  role off the project's `HEAD` (`agent/<role>/<task-id>`), nothing commits
+  the implementador's changes, and later rounds reuse the revisor's
+  original worktree, so the revisor and auditor review a clean checkout.
+  Nothing merges or opens a PR at the end either. Candidate fix: one
+  branch per task that the implementador works on, the dispatcher
+  committing after each implementador phase, and detached revisor/auditor
+  worktrees recreated at that branch's tip every round.
+- **Unverified assumptions.** Worth a manual check before building on
+  them:
+  - Headless permissions: `exec_claude` passes no `--permission-mode` and
+    `hooks/install_settings.py` sets no `permissions`, so tools that need
+    approval (Edit, Bash) may be denied under `-p`. The agent image also
+    runs as root, where Claude Code may refuse to bypass permissions
+    outside a declared sandbox.
+  - Cross-account `--resume`: the design spec only tested one account.
+  - Vibe Kanban's MCP surface: tool names, argument names (`project`,
+    `id`), status values (`in_progress:<role>`, `blocked`), and the SSE
+    transport at `vibe_kanban_mcp_url` are assumed, not checked against
+    the real server.
+
+### Prioritized
+
+1. **Project memory: role skills, per-project docs, and a pointer-based
+   handoff.** Highest leverage for the least code. Every phase is a fresh
+   `claude -p` session that starts cold: a role is only a name in the
+   prompt, it rediscovers the target repo from scratch, and what it leaves
+   the next role is truncated freeform prose. Five pieces, which pay off
+   together:
+   - *Role skills (method).* Give Claude in each agent container
+     (arquitecto, implementador, revisor, auditor) a small set of skills
+     on how to work, instead of one flat system prompt per role. Skills
+     describe how to work, never a project's conventions, which belong in
+     that project's docs; a project that ships its own `.claude/skills`
+     wins on its domain. Keep each skill a short `SKILL.md` plus reference
+     files opened on demand, so a role doesn't pay context for sections it
+     doesn't use. Candidate delivery: `--append-system-prompt-file` or
+     `--agents` on the `claude -p` call. Two sources, both vendored and
+     trimmed rather than installed:
+     - [superpowers](https://github.com/obra/superpowers), for the
+       general method. Don't install the plugin in the agent image: its
+       `SessionStart` hook injects `using-superpowers`, whose "invoke a
+       skill if there's even a 1% chance it applies" rule spends turns in
+       every phase, and some of its skills wait on a human
+       (`brainstorming` wants the design approved before any code,
+       `finishing-a-development-branch` asks whether to merge or open a
+       PR), so under `-p` the phase ends on a question after spending the
+       quota. Worth copying: `writing-plans` (arquitecto),
+       `test-driven-development` and `verification-before-completion`
+       (implementador, auditor), `receiving-code-review` (implementador in
+       revision rounds), and `systematic-debugging` (any role stuck across
+       more than one retry), plus the reading discipline from item 2. Skip
+       `subagent-driven-development` and `using-git-worktrees`: the
+       dispatcher already splits the work by role and creates the
+       worktrees.
+     - Cursor's
+       [thermos](https://github.com/cursor/plugins/tree/main/thermos)
+       plugin, for the revisor and auditor (a correctness/security review
+       plus a code-quality review, run in parallel and synthesized). Worth
+       borrowing: diff-only scope, verifying a finding before reporting
+       it, severity calibration, a devex breakage checklist (env vars,
+       ports, secrets), an explicit approval bar, and reading the diff
+       before the implementador's summary. `thermo-nuclear-review` becomes
+       the revisor skill, blocking only on correctness, security, and
+       clear regressions; quality suggestions block nothing, or a capped
+       revision loop never converges. `thermo-nuclear-code-quality-review`
+       becomes a non-blocking pass in the auditor phase, whose notes go to
+       a human. Drop the `thermos` orchestrator skill: its packaging
+       assumes Cursor, its PR/BugBot step has no PR to read here, and two
+       reviewers per round double the quota. Tone down its all-caps
+       "nothing can slip through" wording too, which invites
+       over-reporting.
+   - *Revive before respawn.* Every role skill gets this rule: to resume
+     work delegated to a subagent, first try to revive that subagent by its
+     ID (Claude Code's `SendMessage` to the agent ID continues it with its
+     context intact), and only spawn a fresh one, briefed from the handoff,
+     if the revive fails. A fresh spawn starts cold and re-derives context
+     the original already had, which costs quota. Another multi-agent
+     setup on the same CLI found that a subagent killed by a rate limit
+     revives only by its raw agent ID (not by name, and `ListAgents`
+     doesn't list it), and only while its parent session is alive.
+     Unverified: whether `claude -p --resume` of the parent, possibly on
+     another account, makes its subagents addressable again. If it
+     doesn't, the dispatcher can resume the role's previous session for
+     the next revision round instead of starting that role cold.
+   - *Per-project docs.* Replaces a hand-written per-project `CLAUDE.md`.
+     Projects checked out under `.data/projects/<slug>` (see "Create
+     volumes" above) are arbitrary target repos; their docs live in the
+     project and are committed with its code, so they survive a re-clone.
+     A possible layout under the project's `docs/`:
+     - `decisions.md`: numbered ADRs, business and architecture alike
+       (context, decision, consequences, and a status: closed, paused, or
+       reopened). A superseded decision is struck through with a pointer
+       to its replacement, never rewritten.
+     - `learnings/`: typical failures and traps, one file per entry.
+     - `debt/`: declared debt.
+     - `architecture.md` and `business.md`: the map and the domain.
+     - `implementations/<task-id>.md`: how each task was built and why.
+
+     When a project has no docs index (e.g. no `docs/README.md`), a
+     bounded mapping phase runs before the arquitecto, on a cheaper model
+     with a turn budget: stack, modules, how to build and test, visible
+     contracts, and an index of the docs that already exist, without
+     rewriting them. After that the map grows with each task, which
+     documents what it touched instead of re-exploring the repo. Make it
+     opt-in, or at least announced, since it spends quota. Per role: the
+     arquitecto reads the indexes and records an ADR when a task decides
+     something; the implementador declares debt and proposes learnings;
+     the revisor treats a contract change without a doc update as a
+     finding; the auditor is the **single writer** of the indexes, taking
+     the others' proposals from the handoff, so no two phases ever edit
+     them. Business decisions an agent infers from code are marked
+     unconfirmed and surfaced to a human: docs take precedence over skills
+     and `CLAUDE.md`, so a hallucinated decision would become canon, and a
+     contradiction between those layers is a doc bug to fix. Frictions
+     with the skills themselves (a rule that misled, a missing step) are
+     logged back to ia-harness and staged for human review, never
+     installed automatically; traps in the code go to the project's
+     `learnings/`.
+   - *Indexes and pointers.* What keeps that memory cheap to read as it
+     grows:
+     - Every index has a trigger column ("when it applies" for learnings,
+       "where" for debt), written as a condition an agent can check
+       against its own task. Agents read the whole index and open an
+       entry only when its trigger matches.
+     - `CLAUDE.md` is an index into docs and skills, never a source:
+       anything it says also lives somewhere else.
+     - Cite by stable anchor (ADR or entry ID, heading, symbol name), never
+       by line number: a stale line reference that still resolves points
+       confidently at the wrong thing.
+     - Debt whose fix a later spec decides gets a pointer to that spec's
+       section, not a copy of it.
+     - Large artifacts (diffs, logs, plans) travel as paths. Content goes
+       inline only below a byte threshold measured with `wc -c` (a few KB),
+       since anything inline is reread on every later turn; above it, pass
+       the path and the section to read.
+   - *Structured handoff.* The YAML frontmatter
+     (`status`/`owner`/`depends_on`/`heartbeat`) is already structured, but
+     the body is prose that `run_task_cycle` truncates and accumulates, so
+     every later phase rereads all earlier ones. The truncation is blind
+     too: `_truncate_for_handoff` keeps the first 500 and last 1,500
+     characters, so the middle of a long return, often the findings, is
+     lost. Instead, each role returns a short schema through
+     `--json-schema` (status, what changed, what was verified, what's
+     pending, known risks, subagent IDs and what each was doing, proposed
+     learnings and debt, paths to the detail, and the revisor's verdict as
+     a field instead of a regex) within a per-role byte budget. The
+     dispatcher enforces the budget itself: a return over it gets one
+     `--resume` asking for a shorter one, the retry is accepted as is, and
+     the overage is logged so the budgets can be tuned from data. The
+     detail goes to files, split by lifetime: durable docs (the ADRs,
+     learnings, and `docs/implementations/<task-id>.md` above) on the task
+     branch, and per-round scratch (review findings, test logs) under
+     `.hive/tasks/<task-id>/`. The `.hive` task file keeps the summary plus
+     the paths. Detail on disk only survives if it's committed or lives
+     outside the worktree (see the known gaps). The recorded subagent IDs
+     are what let a resumed or later phase attempt the revive above.
+
+   Depends on the known gaps: agents must see the task, and docs written
+   in a worktree nobody commits are lost with it. Not designed: the
+   handoff schema, where skill files live (baked into `docker/agent/` at
+   build time vs. mounted alongside `.hive`), and how a role is told which
+   skill applies (for skills that depend on the kind of task rather than
+   the role, see item 5).
+2. **Token economy.** With two Claude Pro accounts quota is the bottleneck,
+   so measure where it goes before optimizing. Another multi-agent setup
+   on the same CLI measured its own transcripts and found that rereading
+   context, not writing output, dominated (cache reads and writes were 74%
+   of subagent cost; all prose they wrote was 1.3%), that an agent carries
+   23–35K tokens of fixed context before doing anything, that cost tracked
+   verification and iteration rounds rather than task size, and that
+   intuition about where tokens went was wrong all three times it was
+   checked against the data. What carries over:
+   - *Record usage per phase.* The `claude -p` JSON already carries
+     `usage` (input, cache creation, cache read, output), `total_cost_usd`,
+     `num_turns`, and `duration_ms`, which `exec_claude` keeps in
+     `ClaudeResult.raw` and then discards. Send them to the collector
+     tagged with role, model, effort, round, and a fingerprint of the
+     agent config (CLI version, skills, MCP servers, compaction window).
+     Compare rates across config versions (cache reads per turn, turns per
+     phase), not totals, and count a task that spans a config change as
+     mixed. Item 4's model split depends on this.
+   - *Stop probing quota.* `check_quota_ok` runs a whole `claude -p
+     "/usage"` before every dispatch, `_recheck_cooling_accounts` runs one
+     per cooling account, and both parse free text. The CLI (checked in
+     2.1.273) defines a `rate_limit_event` stream message whose
+     `rate_limit_info` carries `status`, `utilization`, `resetsAt`,
+     `rateLimitType`, and `surpassedThreshold`. If
+     `--output-format stream-json --verbose` emits it for a Pro account
+     (unverified), every phase reports quota as a by-product: no extra CLI
+     run, no text parsing, and a machine-readable reset time for item 3's
+     retries. `exec_claude` would then read the final `result` message
+     from the stream instead of a single JSON object.
+   - *Trim the fixed startup context.* Every phase pays its startup
+     context (system prompt, tool and MCP schemas, `CLAUDE.md`, skill
+     listings) and rereads it on every turn. Ship only the plugins and MCP
+     servers a role uses, keep `CLAUDE.md` an index (item 1), and load
+     skill bodies on demand. The first turn's recorded `usage` measures
+     the result.
+   - *Fewer turns.* Put this in the role skills: batch independent tool
+     calls into one response, read files by range, pipe long command
+     output through `tail`, and pass artifacts as paths. The arquitecto
+     also picks the cheapest verification that proves each step: in that
+     setup, three tasks touching two files each took 42, 59, and 69
+     responses, and the spread came from verification and iteration
+     rounds, not from files or steps.
+   - *Cap what a role returns.* Every later phase rereads the handoff, so
+     item 1's byte budget is a cost control, not tidiness. It applies at
+     two levels. A role's return to the dispatcher is read by Python,
+     which costs nothing, but it lands in the handoff; item 1's schema and
+     dispatcher-side cap handle that. A role's own subagents return to the
+     role's session, an LLM that rereads every byte on every later turn.
+     For those, the agent image's settings install a `SubagentStop` hook
+     that blocks an overlong return once, asking for the detail on disk and
+     a short summary, and lets the retry through. That setup holds its
+     subagents to 3–4 KB this way. Its hook identifies the role from a
+     sentinel comment in the subagent's prompt rather than `agent_type`,
+     which it found populated in only ~7% of closes, and logs every
+     overage to tune the caps. Before the hook, it measured a 14,030-character
+     return where the contract asked for seven lines, so a prompt rule
+     alone doesn't hold. Compact line formats for those returns are borrowed
+     from caveman's `cavecrew` (next bullet).
+   - *Resume or restart.* `--resume` rereads the whole previous transcript,
+     and after a cooldown, or on another account, its prompt cache is
+     almost certainly cold, so the transcript is paid again. Resuming still
+     wins when the phase had done real work (that setup revived a reviewer
+     killed by a rate limit, and it finished in 2 tool calls and ~52K
+     tokens instead of redoing the review); for a phase that barely
+     started, a fresh run from the handoff is cheaper. The recorded usage
+     sets the threshold.
+   - *Compaction window.* A lower `autoCompactWindow` in the agent image's
+     settings bounds how much context a long phase rereads per turn (that
+     setup simulated 120K as ~12% cheaper than 150K). It only matters for
+     long single phases, since each role already starts fresh; this is the
+     cheap version of item 8.
+   - *caveman, piece by piece.*
+     [caveman](https://github.com/JuliusBrussee/caveman) bundles several
+     token savers with very different evidence behind them; judged for
+     Claude inside the agent containers:
+     - Output-style skill (MIT): not by default. It makes the agent write
+       terse prose, but in an agentic phase most tokens are rereading
+       context, and code and tool calls it never touches. The one
+       third-party A/B on real Claude Code tasks (JetBrains, 86 tasks)
+       measured 8.5% fewer output tokens, about 10% of cost, with no
+       quality change, while its ~1K-token ruleset is reread on every
+       turn. Its own `docs/HONEST-NUMBERS.md` lists net-negative cases
+       (terse Q&A, re-injection and retries outweighing the savings) and
+       says to A/B it on provider-reported totals. Its boundaries (code,
+       commits, docs, and PRs stay in normal prose; security warnings and
+       irreversible actions get full clarity) don't conflict with item 1.
+       Worth an A/B behind a flag once per-phase usage is recorded, scoped
+       to what later phases reread (returns and handoff fields), which the
+       schema and byte caps already bound deterministically.
+     - `cavecrew` (MIT): borrow its return contracts, not its agents. The
+       investigator returns `path:line — symbol — note` lines, the builder
+       `path:line-range — change` plus `verified:` or a one-word refusal
+       (`too-big.`, `needs-confirm.`, `ambiguous.`, `regressed.`), and the
+       reviewer `path:line: severity: problem. fix.` plus totals, or
+       `No issues.` They fit the subagent returns above and the revisor's
+       findings file. The agents themselves carry their own policy (the
+       reviewer is pinned to haiku, the builder refuses edits over two
+       files), which the role skills and item 4 should decide instead.
+     - `caveman-compress` (MIT): no. It spends Claude calls to rewrite
+       `CLAUDE.md` and memory files in place, keeps the backup outside the
+       repo (lost with the container), and its ~46% input cut on five
+       fixtures comes with no quality-equivalence claim. The per-project
+       docs in item 1 are committed in the target repo and read by humans
+       too; keeping `CLAUDE.md` an index and opening entries by trigger
+       goes after the same cost without a lossy rewrite.
+     - Proxy and compression engine (`caveman wrap claude`; MIT CLI,
+       BSL-1.1 runtime): the only piece that attacks rereading, and the
+       one with the strongest numbers. A pinned benchmark on Claude Code
+       with 60–95 KB tool outputs (logs, test output, JSON, CSV, YAML)
+       measured 33.2% fewer provider-reported input tokens with 18 of 18
+       answers correct (95% CI 14.6–48.5%), which fits implementador and
+       auditor phases that run test suites and read logs. The fine print:
+       controlled fixtures, not production, and HTML regressed 9.9%; the
+       compression is lossy (originals stay in a local store with a
+       recovery handle, so an agent can still act on an elided log);
+       their deploy docs say a shared, token-authenticated proxy doesn't
+       work with Claude Pro/Max logins, so it would run as a local wrap
+       inside each agent container (a Node.js 22 CLI plus a Go binary in
+       the image, and one more hop between the account and Anthropic);
+       and BSL-1.1 allows first-party self-hosted use, production
+       included, but offering ia-harness to third parties as a hosted
+       service would need a commercial license. The best candidate of the
+       set, as an experiment on one account's image, A/B'd on per-phase
+       usage before adopting. Unverified: that `-p --output-format json`,
+       its `usage` figures, and `--resume` behave the same through the
+       wrap.
+
+   What doesn't carry over: compaction discipline for a long-lived main
+   thread (compact between tasks, never with a subagent running), since
+   here no session outlives its phase; and the finding that the
+   Opus/Sonnet split barely moved cost, which came from per-token pricing
+   and doesn't map directly onto Pro plan limits.
+3. **Unattended 24/7 operation.** The dispatcher is a one-shot CLI (see
+   "Run a task" above), so running around the clock still depends on
+   external automation. Pieces that would make it hold up unattended:
+   - A long-running loop that picks up ready tasks, honoring `depends_on`
+     (stored in the task file today but never checked).
+   - Telling quota-blocked apart from failed: a task that finds no
+     account available goes `blocked` and stays there. Quota-blocked
+     tasks could be retried on a schedule instead of waiting for a human,
+     at the `resetsAt` time from item 2's `rate_limit_event` if the CLI
+     emits it, else at `/usage`'s free-text reset times where they parse,
+     else on a periodic re-check.
+   - A single-instance guard (e.g. `flock` on `state_dir`) so overlapping
+     runs can't claim the same account. `acquire_lock` already refuses a
+     live lock on the task, but two runs of different tasks still race on
+     account state files.
+   - A reaper for accounts left `BUSY` by a SIGKILL, OOM, or host reboot,
+     which the `except` in `dispatch_phase` can't catch. Ctrl+C also leaves
+     the account `BUSY`, on purpose: killing the host `docker exec` doesn't
+     stop the `claude` inside the container, which keeps running until
+     `phase_timeout_seconds`. A candidate rule: reap a `BUSY` account
+     whose state file is older than `phase_timeout_seconds` plus the
+     30-second kill grace.
+   - An orphan phase after Ctrl+C: the heartbeat stops with the host
+     process, so the task lock expires after `heartbeat_ttl_seconds`
+     (120 by default) while that orphan `claude` may run for up to
+     `phase_timeout_seconds` (7200). A re-run in that window takes the
+     task on another account and can work the same worktree
+     concurrently, since checkouts under `projects_root` are shared
+     across agent containers. The reaper above could hold the lock (or
+     skip the task) while an account is still `BUSY` with that task ID.
+   - A second run that hits a live lock marks the task `blocked` in Vibe
+     Kanban, overwriting the `in_progress:<role>` the first run is still
+     working under. Check the lock before writing `in_progress`, or report
+     a distinct status.
+   - A per-call timeout for Vibe Kanban: `VibeKanbanClient._call_async`
+     passes no `read_timeout_seconds` to `ClientSession`/`call_tool`, so a
+     server that accepts the connection and never answers stalls a
+     best-effort status update indefinitely.
+   - Logging setup: `dispatcher/cli.py` configures no handler, so the
+     dispatcher's warnings (a failed Kanban update, a lock held by another
+     owner, an unparseable `/usage`) reach stderr only through logging's
+     last-resort handler, without timestamps or context.
+   - A short "continue where you left off" prompt when resuming after a
+     rate limit, instead of re-sending the full role prompt.
+4. **Per-role model selection and richer effort escalation.** Running
+   opus for all four roles spends the quota fastest. Today `default_model`
+   (`config.example.yaml`) applies the same model to every role, and
+   effort only escalates once the implementador/revisor loop crosses
+   `escalate_effort_after_round`. Two refinements were discussed but not
+   implemented: (1) a per-role model override, e.g. opus for arquitecto
+   and auditor (planning/judgment roles) and sonnet for implementador
+   (execution), possibly also for early revisor rounds, instead of one
+   `default_model` for all four; (2) escalating effort (or switching
+   model) on signals other than round count, e.g. the revisor repeating
+   the same `VERDICT: CHANGES_REQUESTED` complaint, or a role's result
+   text coming back suspiciously short. Make the split data-driven first,
+   from item 2's per-phase usage records, which show which roles actually
+   consume the quota. Not designed: a config schema for per-role model overrides (`default_model` becoming a
+   fallback vs. a `models: {arquitecto: opus, ...}` map), and how "the
+   same complaint" or "suspiciously short" would be detected from
+   freeform `result_text` without over-engineering a heuristic that never
+   fires as intended.
+5. **Task profiles: skill packs per kind of task, not new roles.** Role
+   skills (item 1) say how a role works, not what the task is about. A
+   frontend task gains from design and browser-verification skills that a
+   backend task would pay for and never use: every installed skill's
+   description is in context on every turn, and a subagent's `skills:`
+   preload draws from the same installed skills, so hiding a pack behind
+   a subagent doesn't keep it out of the parent's context. So a pack isn't
+   installed by default; each phase gets only the one its task needs:
+   - *Mechanism.* A task carries a profile (`web-frontend`, `e2e`, `3d`,
+     …): from a label a human puts on the Vibe Kanban card or, failing
+     that, from the arquitecto, which picks from a short catalog of
+     profile names and one-line descriptions, never the skills
+     themselves. The dispatcher records the profile in the `.hive` task
+     file and adds `--plugin-dir /opt/packs/<profile>/<role>` to that
+     phase's `claude -p` in the same account container (the flag is
+     repeatable, so packs stack). No orchestrating session needs to know
+     the packs exist. Pass the flag again on every `--resume`, a quota
+     handoff included: whether a resumed session keeps the original
+     call's plugins is unverified. A second image (`agent-web`) is only
+     worth it for heavy dependencies; the agent image (`node:20-slim`)
+     has no Chromium today.
+   - *`web-frontend` candidates, evaluated.*
+     - [playwright-skill](https://github.com/willmarple/playwright-skill):
+       yes, and the most valuable of the set, because it closes the loop
+       the others leave open: the agent renders the page, takes a
+       screenshot (`playwright-cli screenshot`), and reads the PNG,
+       instead of judging a UI from its code. Needs Chromium and
+       `@playwright/cli`.
+     - [impeccable](https://github.com/pbakaus/impeccable): yes, adapted.
+       Its commands map onto the roles: `shape` for the arquitecto, its
+       default build flow for the implementador, `audit` (a11y,
+       performance, responsive) for the revisor, `critique` and `polish`
+       for the auditor. For headless use, strip the stops that wait on
+       AskUserQuestion (`init`, `document`, `extract`, `quieter`,
+       `overdrive`, and `critique`'s closing question) and the plugin's
+       `PostToolUse` (Edit|Write) and `Stop` hooks.
+     - [ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill):
+       only the `ui-ux-pro-max` skill, whose `search.py` queries a local
+       database of styles, palettes, and font pairings on demand (for
+       the arquitecto). Drop the rest: `design`, `banner-design`,
+       `brand`, and `slides` generate images through external APIs that
+       need their own keys, and `ui-styling` overlaps impeccable.
+     - [taste-skill](https://github.com/leonxlnx/taste-skill): mostly no.
+       Its main `SKILL.md` is about 87 KB (~22K tokens) every time it
+       triggers, and its full-output enforcement contradicts the capped
+       role returns of item 2. At most, borrow a few of its anti-patterns
+       into the impeccable pack.
+     - [awesome-design-skills](https://github.com/bergside/awesome-design-skills):
+       not in the image. Each entry is one visual style; the project
+       pulls the one it chose into its own repo (`npx typeui.sh pull
+       <style>`) as part of its design docs.
+     - [img2threejs](https://github.com/img2threejs/img2threejs) (rebuilds
+       an object from a reference image as a procedural Three.js model):
+       only in an opt-in `3d` profile, for tasks that build such scenes.
+   - *Pack rules.* One design direction per pack: two style skills pull
+     different ways, and the revisor can't tell which one the diff should
+     follow. The style itself (tokens, components, tone) lives in the
+     target project's `DESIGN.md` and `PRODUCT.md`, which win over any
+     pack, as project docs win over role skills. Vendor, pin, and trim
+     every pack for headless use (no questions to a human, no hooks it
+     doesn't need), and keep a profile only after comparing a few real
+     tasks with and without it on item 2's per-phase usage records.
+   - *A designer role? Not as a phase.* A fixed designer phase adds a
+     cold start and a handoff to every task on scarce quota, and it
+     designs before anything renders. The design decision that most
+     needs judgment, the visual direction, belongs to a human; impeccable's
+     own stops for a human sit exactly on the commands that set it.
+     Instead:
+     - A one-off, opt-in design-system bootstrap task per project, like
+       item 1's mapping phase. It writes `PRODUCT.md` and `DESIGN.md`
+       (from the existing UI on an old project, from the brief on a new
+       one), marks inferred choices unconfirmed, and a human approves it
+       in Vibe Kanban. UI tasks `depends_on` that approval, not just on
+       the pipeline finishing.
+     - The `web-frontend` profile on the existing roles. The arquitecto
+       specifies the UI (empty, loading, and error states; breakpoints;
+       which `DESIGN.md` tokens and components). The implementador builds
+       it and checks its own screenshots. The revisor reviews screenshots
+       against `DESIGN.md` and blocks only on accessibility (WCAG)
+       failures, broken layout, or regressions. The auditor leaves design
+       polish as non-blocking notes to a human.
+
+     Revisit a designer phase only if item 2's per-phase usage records
+     show UI tasks bouncing between implementador and revisor on design
+     findings.
+   - *Other roles.* A new role has to bring something a profile can't: an
+     independent agent checking the work, an artifact with its own
+     lifetime, or a human gate. By that bar:
+     - Mapper: already item 1's mapping phase. Formalize it with its own
+       skill and a cheaper model (item 4).
+     - Tester/QA: no separate phase. The arquitecto writes the acceptance
+       criteria and the auditor runs e2e checks under an `e2e` profile.
+       Tests written before the code by a different agent (adversarial
+       tests) are worth an experiment, not a default.
+     - Security reviewer: a revisor pack (thermos's correctness/security
+       review plus Semgrep, item 7), turned on for tasks that touch auth,
+       payments, or secrets.
+     - Documenter: no. It would break the auditor's single-writer rule
+       for the doc indexes (item 1).
+     - Integrator: committing, rebasing, and opening the PR is
+       deterministic dispatcher code (see the known gaps). An LLM phase
+       only earns its quota resolving rebase conflicts, which grow with
+       parallel dispatch (item 9).
+     - Epic decomposition: an arquitecto mode that proposes child tasks,
+       each with `depends_on` and a profile, for a human to approve.
+       Whether Vibe Kanban's MCP can create tasks is unverified.
+     - Bug fixing (reproduce before fixing), infra/DevOps, performance,
+       and data migrations (a human gate before anything irreversible):
+       profiles or task types, not roles.
+
+   Depends on item 1, whose role skills the packs extend, and on the
+   known gaps. Unverified: whether a dev server plus headless Chromium fit
+   in the agent container's 4 GB `mem_limit`
+   (`docker/compose/docker-compose.agents.yml`), or whether the browser
+   can run in the account's dind sidecar instead (e.g. the Playwright
+   image) and still reach the dev server. Not designed: the
+   profile catalog, the Vibe Kanban label convention, and where packs
+   live (baked under `/opt/packs` vs. mounted).
+6. **Observability and hardening.** Acceptable for a single operator on
+   loopback plus Tailscale, but worth tightening, since agent containers
+   run arbitrary code from cloned repos on the same network:
+   - The collector's `POST`/`GET /events` have no auth, so anything on
+     `ia_harness_net`, agent containers included, can read or forge
+     events. A shared token would close that.
+   - Hook payloads include tool inputs and outputs (file contents, env
+     files, tokens) and land in SQLite as-is. Redact them in
+     `hooks/emit_event.py`.
+   - The dashboard compares in constant time (`hmac.compare_digest`), but
+     the stored digest is still an unsalted SHA-256 of the password. A
+     salted digest (e.g. `salt$sha256(salt + password)`) keeps
+     `scripts/configure.sh` Python-free; mind that compose interpolates
+     `$` in `.env` values. The collector and dashboard also run Flask's
+     development server rather than a production WSGI server.
+   - The dashboard shows only the last 200 raw events. A per-task view
+     (phase, account, duration, rounds, verdict, cost) would answer "what
+     happened to this task" directly.
+   - The dispatcher mounts the host's `/var/run/docker.sock`, which is root
+     on the host. A socket proxy limited to `exec` would narrow that.
+7. **Code-inspection/code-intelligence tooling in agent containers.**
+   Personal setups (e.g. a tree-sitter-parsed knowledge-graph MCP server
+   queried for callers/callees/impact) give an agent structural answers
+   ("what calls this," "what would break") far cheaper than grep. Nothing
+   like this ships in `docker/agent/` today — each role works from plain
+   file reads and shell commands. Start with static analysis for
+   revisor/auditor, which is deterministic and cheap; navigation servers
+   pay off mainly on large repos, and every MCP server's tool definitions
+   take context on every turn, which on Claude Pro is quota (see item 2).
+   A few real options exist,
+   none evaluated in this repo yet:
+   - Knowledge-graph/semantic-navigation MCP servers — the same category
+     as a personal CodeGraph setup — e.g.
+     [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext)
+     (tree-sitter, CLI + MCP, graph database) or
+     [Serena](https://github.com/oraios/serena) (LSP-backed symbol-level
+     retrieval/editing across 20+ languages via MCP). Best fit for
+     arquitecto/implementador: cheaper "where is X" / "what calls Y"
+     answers when onboarding onto a project or planning a change.
+   - Pattern-based static/security analysis with MCP support, e.g.
+     [Semgrep MCP](https://mcp.directory/blog/semgrep-mcp-complete-guide-2026)
+     (Semgrep's Guardian product scans agent-written code for
+     vulnerabilities/bug patterns before commit, also usable ad hoc via
+     its MCP server). Best fit for revisor/auditor: a systematic
+     security/quality pass instead of relying on the LLM's own read of
+     the diff.
+   - The target project's own linters, which the role skills tell every
+     role to run. For TS/JS targets,
+     [anti-slop](https://github.com/dmmulroy/anti-slop) is a ready-made
+     set: Oxlint rules against low-evidence patterns agents tend to write
+     (unchecked `unknown`, chained type assertions, module mocking). It's
+     vendored into the target repo once, by its `install-anti-slop` skill:
+     that copies the rules to `tools/oxlint/anti-slop/`, pins `oxlint` and
+     `@oxlint/plugins`, merges `oxlint.config.ts`, and turns every generic
+     rule on as `error` (its Effect rules only if the repo uses Effect).
+     After that it's deterministic and costs no tokens per run, so the
+     revisor stops spending turns on those patterns. Not automatic, though:
+     it changes the project's dependencies and lint policy, it encodes one
+     author's taste (`no-module-mocking` bans `vi.mock`/`jest.mock`), and
+     on an existing repo all-`error` floods the lint run with violations
+     unrelated to the task, so the implementador burns quota fixing old
+     code or the revisor blocks on it. The skill can ship in the agent
+     image (only its description loads) but runs only when a human task
+     asks for it; greenfield TS projects fit best, with the arquitecto
+     proposing it as an ADR. Once installed it's just the project's
+     linter: block only on violations in lines the diff touches.
+   - These are not mutually exclusive — since each role already runs as
+     a separate `claude -p` invocation, different roles could get
+     different MCP servers configured (navigation-oriented for
+     arquitecto/implementador, analysis-oriented for revisor/auditor)
+     rather than every role carrying every tool. Not designed: whether
+     tooling is baked into `docker/agent/Dockerfile` (one image, all MCP
+     servers available) or made role-conditional at container-start time,
+     and — for anything indexing the whole checkout — added container
+     build time/size cost per project. Item 5's per-phase flags are a
+     third option: tools stay in the image, and each `claude -p` call
+     loads only its role's and task profile's servers (`--mcp-config`,
+     like `--plugin-dir`), with no container restart.
+8. **Mid-phase context-window compaction.** For a single role's run that
+   fills its context window before finishing (long implementation with
+   many tool calls), watch context usage and, past a threshold, dump a
+   role-specific summary to disk (for implementador: what's implemented,
+   current state, what's left, considerations) then `/clear` and reinject
+   that summary so the role continues with a compacted context instead of
+   running out mid-task. Low priority: Claude Code already auto-compacts a
+   session that nears its context limit, and item 2's `autoCompactWindow`
+   moves that threshold without code, so this only matters if long runs
+   are observed failing or degrading anyway. Not implemented: today
+   `dispatch_phase` → `exec_claude` runs each phase as a single one-shot,
+   non-interactive `claude -p ... --output-format json` call that returns
+   one JSON blob after exit — the dispatcher never observes context usage
+   or intervenes mid-call, so there's no live session to inject a `/clear`
+   into. Doing this for real needs a driven/streaming session (or
+   SDK-style loop) the dispatcher can watch turn-by-turn, which is a
+   bigger change than a threshold check. Also note this only helps
+   *within* one role's run — the *between*-phase case is already handled
+   by `context_transfer`'s handoff file (role-specific dump → next phase
+   reads it fresh; see item 1).
+9. **Parallel/load-balanced dispatch across accounts.** The dispatcher
+   currently serializes on a single active account (see "Architecture"
+   above). A configurable parallel mode is noted as future work in the
+   design spec (section 8), with two candidate variants: per-account
+   subagents scheduled by remaining quota, or independent task-claiming
+   per account with quota-triggered handoff instead of end-of-phase
+   handoff. Low priority with two Pro accounts: the limit is quota, not
+   throughput, so running both at once mostly spends it faster and adds
+   merge conflicts between concurrent branches. Revisit with more
+   accounts, and prefer parallelism across independent tasks (via
+   `depends_on`) over splitting one task.
+10. **Multi-provider agent containers.** Lowest priority: the most work,
+   and if the goal is more capacity, adding another Claude account is
+   config-only (see "Run a task" above). Everything under
+   `docker/agent/`, `dispatcher/docker_exec.py`, and `dispatcher/quota.py`
+   is Claude-specific today: the agent image installs only
+   `@anthropic-ai/claude-code` (`docker/agent/Dockerfile`), credentials
+   are isolated per Claude Pro account via a shadowed
+   `/root/.claude/credentials` volume (`claude_creds_<account>`, see
+   `scripts/setup_volumes.sh`), `exec_claude` shells out to the `claude`
+   binary with `--output-format json`, and `quota.parse_usage_output`
+   parses Claude Code's `/usage` text verbatim. Extending this to other AI
+   coding CLIs/accounts (e.g. ChatGPT/Codex CLI, Gemini CLI) would need,
+   per provider:
+   - A dedicated agent image (or a `provider` build arg) installing that
+     CLI instead of/alongside Claude Code.
+   - Its own account-scoped credential volume and shadow-mount path,
+     mirroring the `claude_creds_<account>` pattern but at that CLI's
+     config location (e.g. `~/.codex`, `~/.gemini`) rather than
+     `~/.claude`.
+   - A `provider` field on `AccountConfig` (`dispatcher/config.py`), and a
+     small provider abstraction behind `docker_exec.exec_claude` so the
+     dispatcher can invoke the right binary/flags and parse that CLI's
+     session-id/result/usage output instead of assuming Claude Code's JSON
+     shape.
+   - Confirmation that the target CLI supports a session-resume
+     equivalent to `--resume <session_id>` — the context-transfer design
+     (section 5 of the spec) leans on that for mid-role quota-exhaustion
+     handoff.
+
+   This is not designed in detail; the bullets above are the seams the
+   current Claude-only implementation already has, not a spec.
