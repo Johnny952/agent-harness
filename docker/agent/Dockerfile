@@ -17,7 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
-RUN npm install -g @anthropic-ai/claude-code
+# The dispatcher parses this CLI's --output-format json shape, /usage text,
+# and rate-limit messages, so bump this version deliberately and re-verify.
+ARG CLAUDE_CODE_VERSION=2.1.273
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Observability hook: emit_event.py POSTs each Claude Code hook event to the
 # collector (COLLECTOR_URL / SOURCE_APP are set per agent service in
