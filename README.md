@@ -323,7 +323,7 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
    handoff.** Highest leverage for the least code. Every phase is a fresh
    `claude -p` session that starts cold: a role is only a name in the
    prompt, it rediscovers the target repo from scratch, and what it leaves
-   the next role is truncated freeform prose. Five pieces, which pay off
+   the next role is truncated freeform prose. Eight pieces, which pay off
    together:
    - *Role skills (method).* Give Claude in each agent container
      (arquitecto, implementador, revisor, auditor) a small set of skills
@@ -332,9 +332,11 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
      that project's docs; a project that ships its own `.claude/skills`
      wins on its domain. Keep each skill a short `SKILL.md` plus reference
      files opened on demand, so a role doesn't pay context for sections it
-     doesn't use. Candidate delivery: `--append-system-prompt-file` or
-     `--agents` on the `claude -p` call. Two sources, both vendored and
-     trimmed rather than installed:
+     doesn't use. Deliver them per call, not by installing them in the
+     shared `/root/.claude` (see item 5): candidates are
+     `--append-system-prompt-file`, `--agents`, or a per-role
+     `--plugin-dir`, the same flag item 5 uses for packs. Two sources, both
+     vendored and trimmed rather than installed:
      - [superpowers](https://github.com/obra/superpowers), for the
        general method. Don't install the plugin in the agent image: its
        `SessionStart` hook injects `using-superpowers`, whose "invoke a
@@ -423,9 +425,9 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
        entry only when its trigger matches.
      - `CLAUDE.md` is an index into docs and skills, never a source:
        anything it says also lives somewhere else.
-     - Cite by stable anchor (ADR or entry ID, heading, symbol name), never
-       by line number: a stale line reference that still resolves points
-       confidently at the wrong thing.
+     - Cite by path plus a stable anchor (ADR or entry ID, heading, or
+       symbol name), never by line number: a stale line reference that
+       still resolves points confidently at the wrong thing.
      - Debt whose fix a later spec decides gets a pointer to that spec's
        section, not a copy of it.
      - Large artifacts (diffs, logs, plans) travel as paths. Content goes
@@ -453,13 +455,135 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
      the paths. Detail on disk only survives if it's committed or lives
      outside the worktree (see the known gaps). The recorded subagent IDs
      are what let a resumed or later phase attempt the revive above.
+   - *Docs and tests kept current, enforced outside the model.* Today
+     nothing requires either: `_role_prompt` sends only the role, the task
+     ID, and the task file; the dispatcher never runs tests or looks at the
+     diff; and the only hook (`hooks/emit_event.py`) is for observability.
+     The duties above (TDD, the revisor's contract rule, the auditor's
+     indexes) are instructions, which hold only while one model follows
+     them and another notices when it doesn't. Three layers, strictest
+     first:
+     - Dispatcher gates between the implementador and the revisor. They
+       are deterministic, spend no quota, and are out of the agent's reach.
+       - Tests in the diff: if `git diff --name-only` shows code changed
+         and no test, the task doesn't reach the revisor. The implementador
+         gets a `--resume` asking for tests or an explicit justification,
+         which the revisor then judges.
+       - Tests run: the project's test command, recorded by the mapping
+         phase, runs through `docker exec` without `claude`. A failure
+         starts another round with the log's path, without spending a
+         revisor call. This also checks the implementador's claim that
+         tests pass instead of trusting it. Open: a fresh worktree has no
+         `node_modules`, so dependencies need installing or a cache.
+       - Contracts without docs: a changed OpenAPI spec, `.env.example`,
+         migration, public export, or CLI flag with no doc change becomes
+         a finding the revisor must answer.
+       - Broken pointers: docs cite by path plus a stable anchor (see
+         indexes and pointers above), so a grep tells whether the target
+         still exists. A missing one becomes a task for the auditor.
+     - Claude Code hooks in the agent container, for feedback within the
+       session only. A `PostToolUse` hook on Edit/Write that runs the
+       formatter or typecheck on the touched file is cheap and catches
+       errors early. A `Stop` hook that refuses to finish until tests ran
+       is not recommended: under `-p` every refusal is another paid turn,
+       it needs the `stop_hook_active` guard to avoid looping, and it sees
+       only its own session, while the dispatcher gate sees the whole diff
+       for free.
+     - Role instructions: the arquitecto's acceptance criteria name the
+       tests that prove the task and the docs it changes, so the revisor
+       has something concrete to check against.
+
+     Two risks. A "no code without tests" rule is easy to meet with
+     trivial tests, hence "tests or a justification", tests that must pass,
+     and a revisor that still judges their quality. And the docs gate stays
+     limited to contracts: requiring docs on every change piles up docs
+     nobody reads.
+   - *Declared debt, mirrored to Vibe Kanban.* The `debt/` index above
+     stays the source of truth. Agents read it filtered by its "where"
+     column, it's versioned with the code, and it doesn't depend on Vibe
+     Kanban, which in this design is a visibility aid whose MCP surface is
+     still unverified. The flow:
+     1. The implementador declares debt in its structured return: whether
+        it was introduced or found, what it is, why it stays, the cost of
+        leaving it, and what would fix it. Found debt counts only in files
+        the task touched and not already in the index. Declaring debt
+        never replaces blocking: whatever would block the task (e.g. a
+        decision the task doesn't specify, or a schema change) still
+        blocks it.
+     2. The revisor rules on each declaration. Accepted debt moves on.
+        Rejected debt becomes a finding to fix in the next round, and like
+        any finding it counts toward `max_revision_rounds`, after which
+        the task ends blocked. A disguised block marks the task blocked.
+     3. The auditor, as single writer, adds accepted entries to `debt/`.
+        When a later spec decides the fix, the entry points to that
+        section.
+     4. The dispatcher, not an agent, creates one card per accepted entry
+        with `VibeKanbanClient.create_task`, which exists but nothing
+        calls yet. The card is labeled `debt`, sits in the backlog, and is
+        never dispatched on its own. The entry and the card each record
+        the other's ID. Cards created by agents would be duplicated every
+        round, and an agent that can create tasks can assign itself work.
+     5. A human moving the card out of the backlog approves the work. The
+        task that resolves the debt says so in its return, and on merge
+        the dispatcher marks the entry resolved and closes the card.
+
+     To keep the board from flooding, only accepted debt gets a card, and
+     only after checking the index for a duplicate.
+   - *Shared learnings that survive a dead phase.* The `learnings/` index
+     above already gives a two-level read: agents read the whole index and
+     open an entry only when its "when it applies" matches their task.
+     What's missing is how a learning reaches other agents. Every phase is
+     an isolated `claude -p` and the entry travels on the task branch, so
+     a concurrent task doesn't see it until merge, and a rejected task
+     loses it. A phase killed by a rate limit or timeout, or a task that
+     ends blocked, never reaches the auditor at all, and those walls are
+     the ones most worth recording. So:
+     - Inbox: any phase can add an entry at any time, including right
+       before it dies, under `.hive/learnings/inbox/`. That directory is
+       outside the worktree and already mounted in both agent containers.
+       Each entry is its own file, so concurrent phases never edit the
+       same one. Agents grep the inbox along with the index, so an entry
+       reaches other tasks right away instead of waiting for a merge.
+     - Single writer: the auditor promotes its task's inbox entries into
+       the index on the task branch; they leave the inbox when that branch
+       merges. When a task fails, ends blocked, or its branch is discarded,
+       the dispatcher, without an LLM, marks its entries unconfirmed and
+       leaves them in the inbox, and the next task in that project to reach
+       the auditor carries them into its branch.
+     - Two scopes. Traps in the project go to its `learnings/` and are
+       committed on merge. Traps in the environment, the harness, or the
+       CLI (e.g. "a fresh worktree has no `node_modules`") go to a
+       cross-project store in ia-harness. As with the skill frictions
+       above, a human reviews those before agents in other projects see
+       them.
+     - Format: the index has `# | Learning | When it applies | Status`
+       columns. An entry has when it applies, where it was discovered
+       (task and phase), the symptom with the exact error, why, and the
+       rule. Since the error is verbatim, role skills can say "before
+       debugging, grep the learnings and the inbox for the exact message",
+       so an agent that hits a wall finds the entry even when its task
+       didn't look related. As the index grows, the dispatcher passes each phase only
+       the rows matching the task's profile, labels, or the paths its plan
+       names.
+     - Poisoning guard: an agent that misunderstood something would turn
+       that misunderstanding into a rule for everyone. An entry stays
+       unconfirmed until another task hits the same wall or a human
+       confirms it; agents still read unconfirmed entries, marked as such.
+       Every entry needs evidence (the error and the command), and one
+       whose pointers no longer resolve is flagged (see the broken-pointer
+       gate above).
+
+     A trap is "don't step on this"; half-finished code is debt, not a
+     learning.
 
    Depends on the known gaps: agents must see the task, and docs written
-   in a worktree nobody commits are lost with it. Not designed: the
-   handoff schema, where skill files live (baked into `docker/agent/` at
-   build time vs. mounted alongside `.hive`), and how a role is told which
+   in a worktree nobody commits are lost with it. The debt cards also need
+   Vibe Kanban's MCP to create tasks, which is unverified. Not designed:
+   the handoff schema, where skill files live (baked into `docker/agent/`
+   at build time vs. mounted alongside `.hive`), how a role is told which
    skill applies (for skills that depend on the kind of task rather than
-   the role, see item 5).
+   the role, see item 5), the inbox entry format, and where the
+   cross-project learnings store lives.
 2. **Token economy.** With two Claude Pro accounts quota is the bottleneck,
    so measure where it goes before optimizing. Another multi-agent setup
    on the same CLI measured its own transcripts and found that rereading
@@ -517,7 +641,7 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
      overage to tune the caps. Before the hook, it measured a 14,030-character
      return where the contract asked for seven lines, so a prompt rule
      alone doesn't hold. Compact line formats for those returns are borrowed
-     from caveman's `cavecrew` (next bullet).
+     from caveman's `cavecrew` (see the caveman bullet below).
    - *Resume or restart.* `--resume` rereads the whole previous transcript,
      and after a cooldown, or on another account, its prompt cache is
      almost certainly cold, so the transcript is paid again. Resuming still
@@ -649,8 +773,9 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
    the same `VERDICT: CHANGES_REQUESTED` complaint, or a role's result
    text coming back suspiciously short. Make the split data-driven first,
    from item 2's per-phase usage records, which show which roles actually
-   consume the quota. Not designed: a config schema for per-role model overrides (`default_model` becoming a
-   fallback vs. a `models: {arquitecto: opus, ...}` map), and how "the
+   consume the quota. Not designed: a config schema for per-role model
+   overrides (`default_model` becoming a fallback vs. a
+   `models: {arquitecto: opus, ...}` map), and how "the
    same complaint" or "suspiciously short" would be detected from
    freeform `result_text` without over-engineering a heuristic that never
    fires as intended.
@@ -675,6 +800,42 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
      call's plugins is unverified. A second image (`agent-web`) is only
      worth it for heavy dependencies; the agent image (`node:20-slim`)
      has no Chromium today.
+   - *Project default profile.* Most tasks in a project want the same
+     packs, so the project carries default profiles and a task label adds
+     to them: a phase gets the project's profiles plus the task's.
+     - Enable, never disable. `/root/.claude` is the `claude_shared`
+       volume, shared by both accounts and every project, so disabling a
+       skill there for one project disables it for all of them. CLI
+       2.1.273 also has no per-call switch for a single skill
+       (`--disable-slash-commands` turns them all off). Hence nothing
+       project-specific in the shared volume: a minimal base of role skills,
+       always on for their role and delivered per call like the packs
+       (item 1), plus packs added per call with `--plugin-dir`.
+     - The signal is a file ia-harness owns, committed in the project
+       (e.g. `.ia-harness.yaml` with `profiles: [web-frontend, e2e]` and
+       the evidence for each), not `CLAUDE.md` or `.claude/`. Many projects
+       already have those, written for humans, and they say nothing about
+       packs.
+     - When the file is missing, detection reads manifests and spends no
+       quota:
+
+       | If the project has… | Profile |
+       |---|---|
+       | react, vue, svelte, or next in `package.json` | `web-frontend` |
+       | `playwright.config.*` or cypress | `e2e` |
+       | `three` | `3d` |
+       | a Dockerfile or terraform | `infra` |
+       | prisma or `migrations/` | `migrations` |
+
+       An LLM decides only the ambiguous cases, such as a monorepo, inside
+       item 1's mapping phase, and a human approves the result in Vibe
+       Kanban.
+     - The file stores a hash of the manifests it read. When dependencies
+       change, detection reruns and the change is proposed to a human,
+       never applied on its own.
+     - When in doubt, a pack stays off. A missing pack shows up in that
+       task's review; an extra one spends tokens on every turn without
+       anyone noticing.
    - *`web-frontend` candidates, evaluated.*
      - [playwright-skill](https://github.com/willmarple/playwright-skill):
        yes, and the most valuable of the set, because it closes the loop
@@ -770,8 +931,9 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
    (`docker/compose/docker-compose.agents.yml`), or whether the browser
    can run in the account's dind sidecar instead (e.g. the Playwright
    image) and still reach the dev server. Not designed: the
-   profile catalog, the Vibe Kanban label convention, and where packs
-   live (baked under `/opt/packs` vs. mounted).
+   profile catalog, the `.ia-harness.yaml` schema, the Vibe Kanban label
+   convention, and where packs live (baked under `/opt/packs` vs.
+   mounted).
 6. **Observability and hardening.** Acceptable for a single operator on
    loopback plus Tailscale, but worth tightening, since agent containers
    run arbitrary code from cloned repos on the same network:
@@ -882,33 +1044,33 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
    accounts, and prefer parallelism across independent tasks (via
    `depends_on`) over splitting one task.
 10. **Multi-provider agent containers.** Lowest priority: the most work,
-   and if the goal is more capacity, adding another Claude account is
-   config-only (see "Run a task" above). Everything under
-   `docker/agent/`, `dispatcher/docker_exec.py`, and `dispatcher/quota.py`
-   is Claude-specific today: the agent image installs only
-   `@anthropic-ai/claude-code` (`docker/agent/Dockerfile`), credentials
-   are isolated per Claude Pro account via a shadowed
-   `/root/.claude/credentials` volume (`claude_creds_<account>`, see
-   `scripts/setup_volumes.sh`), `exec_claude` shells out to the `claude`
-   binary with `--output-format json`, and `quota.parse_usage_output`
-   parses Claude Code's `/usage` text verbatim. Extending this to other AI
-   coding CLIs/accounts (e.g. ChatGPT/Codex CLI, Gemini CLI) would need,
-   per provider:
-   - A dedicated agent image (or a `provider` build arg) installing that
-     CLI instead of/alongside Claude Code.
-   - Its own account-scoped credential volume and shadow-mount path,
-     mirroring the `claude_creds_<account>` pattern but at that CLI's
-     config location (e.g. `~/.codex`, `~/.gemini`) rather than
-     `~/.claude`.
-   - A `provider` field on `AccountConfig` (`dispatcher/config.py`), and a
-     small provider abstraction behind `docker_exec.exec_claude` so the
-     dispatcher can invoke the right binary/flags and parse that CLI's
-     session-id/result/usage output instead of assuming Claude Code's JSON
-     shape.
-   - Confirmation that the target CLI supports a session-resume
-     equivalent to `--resume <session_id>` — the context-transfer design
-     (section 5 of the spec) leans on that for mid-role quota-exhaustion
-     handoff.
+    and if the goal is more capacity, adding another Claude account is
+    config-only (see "Run a task" above). Everything under
+    `docker/agent/`, `dispatcher/docker_exec.py`, and `dispatcher/quota.py`
+    is Claude-specific today: the agent image installs only
+    `@anthropic-ai/claude-code` (`docker/agent/Dockerfile`), credentials
+    are isolated per Claude Pro account via a shadowed
+    `/root/.claude/credentials` volume (`claude_creds_<account>`, see
+    `scripts/setup_volumes.sh`), `exec_claude` shells out to the `claude`
+    binary with `--output-format json`, and `quota.parse_usage_output`
+    parses Claude Code's `/usage` text verbatim. Extending this to other AI
+    coding CLIs/accounts (e.g. ChatGPT/Codex CLI, Gemini CLI) would need,
+    per provider:
+    - A dedicated agent image (or a `provider` build arg) installing that
+      CLI instead of/alongside Claude Code.
+    - Its own account-scoped credential volume and shadow-mount path,
+      mirroring the `claude_creds_<account>` pattern but at that CLI's
+      config location (e.g. `~/.codex`, `~/.gemini`) rather than
+      `~/.claude`.
+    - A `provider` field on `AccountConfig` (`dispatcher/config.py`), and a
+      small provider abstraction behind `docker_exec.exec_claude` so the
+      dispatcher can invoke the right binary/flags and parse that CLI's
+      session-id/result/usage output instead of assuming Claude Code's JSON
+      shape.
+    - Confirmation that the target CLI supports a session-resume
+      equivalent to `--resume <session_id>` — the context-transfer design
+      (section 4a of the spec, mechanism 2) leans on that for mid-role
+      quota-exhaustion handoff.
 
-   This is not designed in detail; the bullets above are the seams the
-   current Claude-only implementation already has, not a spec.
+    This is not designed in detail; the bullets above are the seams the
+    current Claude-only implementation already has, not a spec.

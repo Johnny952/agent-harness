@@ -424,8 +424,11 @@ los agentes una memoria que viva en el propio proyecto:
   saltan `subagent-driven-development` y `using-git-worktrees`, porque el
   dispatcher ya reparte por rol y crea los worktrees. Las convenciones de
   un proyecto viven en sus docs, y si el proyecto trae sus propias
-  `.claude/skills`, esas ganan en su dominio. Incluye la regla **revivir antes de
-  relanzar**: para retomar el trabajo de un subagente, primero intentar
+  `.claude/skills`, esas ganan en su dominio. Se entregan por llamada, no
+  instaladas en el `/root/.claude` compartido (ver el bloque de perfiles):
+  candidatos `--append-system-prompt-file`, `--agents` o un
+  `--plugin-dir` por rol, el mismo flag que usan los packs. Incluye la
+  regla **revivir antes de relanzar**: para retomar el trabajo de un subagente, primero intentar
   revivirlo por su ID (`SendMessage` al agent ID, que lo continúa con su
   contexto intacto), y solo si eso falla lanzar uno nuevo con el brief del
   handoff. Evidencia de otro setup multiagente sobre el mismo CLI: un
@@ -470,8 +473,9 @@ los agentes una memoria que viva en el propio proyecto:
 - **Índices y punteros:** cada índice tiene una columna de disparo
   ("cuándo aplica"), escrita como condición evaluable contra la tarea; el
   agente lee el índice completo y abre una entrada solo si su disparo
-  coincide. `CLAUDE.md` es solo índice, nunca fuente. Se cita por ancla
-  estable (ID, heading, símbolo), nunca por número de línea: una cita
+  coincide. `CLAUDE.md` es solo índice, nunca fuente. Se cita por ruta
+  más un ancla estable (ID de ADR o de entrada, heading o nombre de
+  símbolo), nunca por número de línea: una cita
   rancia que todavía resuelve apunta con confianza al lugar equivocado.
   Lo grande (diffs, logs, planes) viaja como ruta, y va inline solo bajo
   un umbral de bytes medido. Precedencia: docs > skills > `CLAUDE.md`; una
@@ -479,8 +483,8 @@ los agentes una memoria que viva en el propio proyecto:
 - **Handoff estructurado:** el cuerpo de `.hive/tasks/<task-id>.md`
   (mecanismo 1 de la sección 4a) pasa de prosa acumulada a un resumen
   corto por rol devuelto vía `--json-schema` (estado, qué cambió, qué se
-  verificó, qué falta, riesgos, IDs de subagentes, aprendizajes y deuda
-  propuestos, rutas al detalle y el veredicto del Revisor como campo en
+  verificó, qué falta, riesgos, IDs de subagentes y qué hacía cada uno,
+  aprendizajes y deuda propuestos, rutas al detalle y el veredicto del Revisor como campo en
   vez de una línea de texto), con tope de bytes por rol. Hoy el recorte es
   ciego: `_truncate_for_handoff` guarda los primeros 500 y los últimos
   1.500 caracteres, y el medio de un retorno largo, justo donde suelen ir
@@ -492,11 +496,140 @@ los agentes una memoria que viva en el propio proyecto:
   tarea, y lo efímero de cada ronda (hallazgos de revisión, logs de tests)
   en `.hive/tasks/<task-id>/`; `.hive` guarda el resumen y las rutas. Lo
   que queda en disco sobrevive solo si se commitea o vive fuera del
-  worktree.
+  worktree. Los IDs de subagentes registrados son los que permiten que una
+  fase retomada o posterior intente revivirlos.
+- **Docs y tests al día, exigidos fuera del modelo:** hoy nada lo exige.
+  `_role_prompt` solo manda rol, tarea y archivo; el dispatcher no corre
+  tests ni mira el diff, y el único hook (`hooks/emit_event.py`) es de
+  observabilidad. Los deberes de arriba (TDD, la regla de contratos del
+  Revisor, los índices del Auditor) son instrucciones: se cumplen mientras
+  un modelo las siga y otro note cuando no. Tres capas, de la más estricta
+  a la más flexible:
+  - *Controles del dispatcher entre Implementador y Revisor:* deterministas,
+    sin cuota y fuera del alcance del agente.
+    - Tests en el diff: si `git diff --name-only` muestra código cambiado
+      sin tests, la tarea no llega al Revisor. El Implementador recibe un
+      `--resume` que pide tests o una justificación explícita, y el
+      Revisor juzga esa justificación.
+    - Correr los tests: el comando de tests del proyecto (registrado por
+      la fase de mapeo) corre con `docker exec` sin `claude`. Si falla,
+      arranca otra ronda con la ruta al log, sin gastar una llamada al
+      Revisor. Así también se verifica, en vez de creerle, que el
+      Implementador diga que pasan. Pendiente: un worktree nuevo no tiene
+      `node_modules`, así que falta decidir si se instalan dependencias o
+      se reutiliza una caché.
+    - Contratos sin docs: un cambio en OpenAPI, `.env.example`,
+      migraciones, exports públicos o flags de CLI sin cambio de docs es
+      un hallazgo que el Revisor tiene que responder.
+    - Punteros rotos: las docs citan por ruta más un ancla estable (ver
+      índices y punteros), así que un grep dice si lo citado todavía existe. Si no, pasa a ser tarea del
+      Auditor.
+  - *Hooks de Claude Code en el contenedor*, solo como feedback dentro de
+    la sesión: un `PostToolUse` sobre Edit/Write que corra el formatter o
+    el typecheck del archivo tocado es barato y avisa temprano. Se
+    desaconseja un hook `Stop` que impida terminar sin tests: bajo `-p`
+    cada rechazo es otro turno pagado, necesita revisar `stop_hook_active`
+    para no entrar en loop y solo ve su propia sesión, mientras que el
+    control del dispatcher ve el diff completo sin gastar cuota.
+  - *Instrucciones por rol:* los criterios de aceptación del Arquitecto
+    nombran qué tests prueban la tarea y qué docs cambian, para que el
+    Revisor tenga algo concreto contra qué comparar.
+
+  Riesgos: "nada de código sin tests" se cumple con tests triviales; por
+  eso la regla es "tests o justificación", los tests tienen que pasar y el
+  Revisor sigue juzgando su calidad. Y el control de docs se limita a
+  contratos, porque exigir docs en cualquier cambio acumula docs que nadie
+  lee.
+- **Deuda declarada, reflejada en Vibe Kanban:** el índice `debt/` sigue
+  siendo la fuente de verdad. Los agentes lo leen filtrando por su columna
+  "dónde", está versionado con el código y no depende de Vibe Kanban, que
+  en este diseño es una ayuda visual con un MCP todavía sin verificar. El
+  flujo:
+  1. El Implementador declara la deuda en su retorno estructurado: si es
+     introducida o encontrada, qué es, por qué queda así, cuánto cuesta no
+     arreglarla y qué la resolvería. La deuda encontrada cuenta solo en
+     archivos que la tarea tocó y que no estén ya en el índice. Declarar
+     deuda nunca reemplaza bloquear: lo que bloquearía la tarea (p. ej.
+     una decisión que la tarea no especifica o un cambio de esquema) la
+     sigue bloqueando.
+  2. El Revisor da un veredicto por declaración. La aceptada sigue. La
+     rechazada pasa a ser un hallazgo a corregir en la ronda siguiente y,
+     como cualquier hallazgo, cuenta para `max_revision_rounds`, tras lo
+     cual la tarea queda bloqueada. Un bloqueo disfrazado deja la tarea
+     bloqueada.
+  3. El Auditor, como único escritor, agrega las aceptadas a `debt/`. Si
+     un spec posterior decide el arreglo, la entrada apunta a esa sección.
+  4. El dispatcher, no un agente, crea una tarjeta por entrada aceptada con
+     `VibeKanbanClient.create_task`, que existe pero nadie llama todavía.
+     La tarjeta lleva la etiqueta `debt`, queda en backlog y nunca se
+     despacha sola. La entrada y la tarjeta guardan cada una el ID de la
+     otra. Si los agentes crearan tarjetas, se duplicarían en cada ronda,
+     y un agente que puede crear tareas puede asignarse trabajo.
+  5. Que un humano saque la tarjeta del backlog aprueba el trabajo. La
+     tarea que resuelve la deuda lo dice en su retorno, y al mergear el
+     dispatcher marca la entrada como resuelta y cierra la tarjeta.
+
+  Para no inundar el tablero, solo la deuda aceptada tiene tarjeta, y solo
+  después de buscar duplicados en el índice.
+- **Aprendizajes compartidos que sobreviven a una fase muerta:** el índice
+  `learnings/` ya da una lectura en dos niveles: el agente lee el índice
+  completo y abre una entrada solo si su "cuándo aplica" coincide con su
+  tarea. Lo que falta es cómo le llega un aprendizaje a otros agentes.
+  Cada fase es un `claude -p` aislado y la entrada viaja en la rama de la
+  tarea, así que una tarea concurrente no la ve hasta el merge y una tarea
+  rechazada la pierde. Una fase que muere por rate limit o timeout, o una
+  tarea que termina bloqueada, ni siquiera llega al Auditor, y justo esas
+  paredes son las que más vale registrar. Por eso:
+  - *Buzón:* cualquier fase puede agregar una entrada en cualquier momento,
+    incluso justo antes de morir, en `.hive/learnings/inbox/`. Ese
+    directorio está fuera del worktree y ya montado en los dos
+    contenedores agente. Cada entrada es su propio archivo, así que dos
+    fases concurrentes nunca editan el mismo. Los agentes buscan con grep
+    en el buzón además del índice, así que una entrada llega a otras
+    tareas de inmediato, sin esperar un merge.
+  - *Único escritor:* el Auditor promueve las entradas del buzón de su
+    tarea al índice, en la rama de la tarea; salen del buzón cuando esa
+    rama se mergea. Si la tarea falla, termina bloqueada o su rama se
+    descarta, el dispatcher, sin LLM, marca sus entradas "sin confirmar" y
+    las deja en el buzón, y la siguiente tarea de ese proyecto que llegue
+    al Auditor las lleva a su rama.
+  - *Dos alcances:* las trampas del proyecto van a su `learnings/` y se
+    commitean con el merge. Las trampas del entorno, del harness o del CLI
+    (p. ej. "un worktree nuevo no trae `node_modules`") van a un almacén de
+    ia-harness compartido entre proyectos. Igual que las fricciones con las
+    skills, un humano las revisa antes de que las vean agentes de otros
+    proyectos.
+  - *Formato:* el índice tiene las columnas `# | Aprendizaje | Cuándo aplica
+    | Estado`. Una entrada tiene cuándo aplica, dónde se descubrió (tarea y
+    fase), el síntoma con el error exacto, por qué pasa y la regla. Como el
+    error queda textual, las skills por rol pueden pedir "antes de depurar,
+    busca con grep el mensaje exacto en los aprendizajes y en el buzón", y
+    así un agente
+    que choca con una pared encuentra la entrada aunque su tarea no
+    pareciera relacionada. Cuando el índice crezca, el dispatcher le pasa a
+    cada fase solo las filas que coinciden con el perfil, las etiquetas o
+    las rutas que nombra el plan de la tarea.
+  - *Contra el envenenamiento:* un agente que entendió mal algo convertiría
+    ese error en regla para todos. Una entrada queda "sin confirmar" hasta
+    que otra tarea choque con la misma pared o un humano la confirme; los
+    agentes igual leen las entradas sin confirmar, marcadas como tales.
+    Toda entrada necesita evidencia (el error y el comando), y la que tiene
+    punteros que ya no resuelven queda marcada (control de punteros rotos,
+    más arriba).
+
+  Una trampa es "no pises esto"; un código a medio hacer es deuda, no un
+  aprendizaje.
 
 Depende de que los agentes reciban la descripción de la tarea y de que el
 trabajo de cada rol se commitee; hoy no pasa ninguna de las dos cosas (ver
-*Known gaps* en `README.md`).
+*Known gaps* en `README.md`). Las tarjetas de deuda dependen además de que
+el MCP de Vibe Kanban permita crear tareas, algo sin verificar. Sin
+diseñar: el esquema del handoff, dónde viven los archivos de skills
+(horneados en `docker/agent/` al construir la imagen vs. montados junto a
+`.hive`), cómo se le indica a un rol qué skill aplica (para las que
+dependen del tipo de tarea y no del rol, ver el bloque de perfiles), el
+formato de las entradas del buzón y dónde vive el almacén de aprendizajes
+compartido entre proyectos.
 
 **Trabajo futuro — economía de tokens (fuera de alcance de este spec):**
 
@@ -544,7 +677,7 @@ Queda documentado, sin diseñar en detalle:
   centinela en el prompt del subagente y no por `agent_type`, que llegó
   poblado solo en el ~7% de los cierres, y loguea cada exceso. Los
   formatos de línea compactos para esos retornos se toman de `cavecrew`
-  (bloque siguiente).
+  (ver el punto de caveman, más abajo).
 - **Retomar vs. reiniciar:** `--resume` (mecanismo 2 de la sección 4a)
   relee el transcript entero, y tras un cooldown o en otra cuenta el caché
   de prompt casi seguro está frío. Conviene si la fase ya había avanzado;
@@ -713,6 +846,35 @@ Queda documentado, sin diseñar en detalle:
   llamada original. Una segunda imagen (`agent-web`) solo se justifica
   por dependencias pesadas; la imagen actual (`node:20-slim`) no trae
   Chromium.
+- **Perfil por defecto del proyecto:** la mayoría de las tareas de un
+  proyecto quieren los mismos packs, así que el proyecto lleva perfiles
+  por defecto y la etiqueta de la tarea les suma: una fase recibe los
+  perfiles del proyecto más los de la tarea.
+  - *Activar, nunca desactivar:* `/root/.claude` es el volumen
+    `claude_shared`, compartido por las dos cuentas y todos los proyectos,
+    así que apagar ahí una skill para un proyecto la apaga para todos. El
+    CLI 2.1.273 tampoco permite apagar una sola skill por llamada
+    (`--disable-slash-commands` las apaga todas). Por eso, nada propio de
+    un proyecto en el volumen compartido: una base mínima con las skills
+    por rol, siempre activa para su rol y entregada por llamada igual que
+    los packs (bloque de memoria), más los packs que se agregan por llamada
+    con `--plugin-dir`.
+  - *La señal es un archivo de ia-harness commiteado en el proyecto* (p. ej.
+    `.ia-harness.yaml` con `profiles: [web-frontend, e2e]` y la evidencia
+    de cada uno), no `CLAUDE.md` ni `.claude/`: muchos proyectos ya los
+    traen, escritos para humanos, y no dicen nada de packs.
+  - *Si el archivo falta, la detección lee manifiestos sin gastar cuota:*
+    react, vue, svelte o next en `package.json` → `web-frontend`;
+    `playwright.config.*` o cypress → `e2e`; `three` → `3d`; Dockerfile o
+    terraform → `infra`; prisma o `migrations/` → `migrations`. Un LLM
+    decide solo los casos ambiguos (p. ej. un monorepo), dentro de la fase
+    de mapeo, y un humano aprueba el resultado en Vibe Kanban.
+  - El archivo guarda un hash de los manifiestos que leyó. Si cambian las
+    dependencias, la detección se repite y el cambio se le propone a un
+    humano; nunca se aplica solo.
+  - *Ante la duda, el pack queda apagado:* uno que falta se nota en la
+    revisión de esa tarea; uno que sobra gasta tokens en cada turno sin que
+    nadie lo vea.
 - **Candidatos para `web-frontend`, evaluados:**
   - [playwright-skill](https://github.com/willmarple/playwright-skill):
     sí, y el más valioso, porque cierra el ciclo que los demás dejan
@@ -808,8 +970,9 @@ verificar:* si un dev server más Chromium headless caben en el `mem_limit`
 de 4 GB del contenedor agente (`docker/compose/docker-compose.agents.yml`),
 o si el navegador puede correr en el sidecar dind de la cuenta (p. ej. la
 imagen de Playwright) y aun así llegar al dev server. Sin diseñar: el
-catálogo de perfiles, la convención de etiquetas en Vibe Kanban y dónde
-viven los packs (horneados en `/opt/packs` vs. montados).
+catálogo de perfiles, el esquema de `.ia-harness.yaml`, la convención de
+etiquetas en Vibe Kanban y dónde viven los packs (horneados en
+`/opt/packs` vs. montados).
 
 **Trabajo futuro — observabilidad y hardening (fuera de alcance de este spec):**
 
