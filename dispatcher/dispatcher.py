@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 import threading
 
@@ -9,6 +10,13 @@ from dispatcher import context_transfer, docker_exec, quota, state_machine
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import VibeKanbanClient
+
+logger = logging.getLogger(__name__)
+
+# The /usage probe is a short, fixed-shape command, not user work — it never
+# needs the (potentially very long) configured phase timeout, so it gets its
+# own short fixed budget instead of cfg.phase_timeout_seconds.
+_USAGE_PROBE_TIMEOUT_SECONDS = 120
 
 
 @dataclasses.dataclass
@@ -53,15 +61,27 @@ def container_for(cfg: Config, account: str) -> str:
     raise ValueError(f"Unknown account: {account}")
 
 
-def pick_idle_account(cfg: Config) -> str | None:
+def pick_idle_account(cfg: Config, exclude: set[str] | None = None) -> str | None:
     idle = state_machine.list_idle_accounts(cfg.state_dir, cfg.accounts)
+    if exclude:
+        idle = [a for a in idle if a not in exclude]
     return idle[0] if idle else None
 
 
 def check_quota_ok(cfg: Config, account: str) -> bool:
     container = container_for(cfg, account)
-    result = docker_exec.exec_claude(container, cfg.projects_root, "/usage")
-    usage = quota.parse_usage_output(result.result_text)
+    # The /usage probe parses free-text CLI output (design spec sec. 4a
+    # caveat), so any drift in that format must not crash dispatch — fail
+    # open here and let the reactive rate-limit handling in dispatch_phase
+    # (is_rate_limit_error on the real phase call) be the fallback.
+    try:
+        result = docker_exec.exec_claude(
+            container, cfg.projects_root, "/usage", timeout_seconds=_USAGE_PROBE_TIMEOUT_SECONDS,
+        )
+        usage = quota.parse_usage_output(result.result_text)
+    except Exception as exc:
+        logger.warning("quota probe failed for account %s: %s", account, exc)
+        return True
     if quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
         state_machine.set_state(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
         return False
@@ -74,7 +94,7 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
     # so recovery is re-check-on-dispatch rather than a scheduled expiry:
     # every account parked in PRE_COOLDOWN/COOLING_DOWN gets a fresh /usage
     # probe whenever no account is IDLE, and flips back to IDLE the moment
-    # it clears the threshold. Without this, a account that ever crosses the
+    # it clears the threshold. Without this, an account that ever crosses the
     # threshold stays dead for the life of the process.
     recovered = []
     for acc in cfg.accounts:
@@ -82,22 +102,39 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
         if state not in (AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN):
             continue
         container = container_for(cfg, acc.name)
-        result = docker_exec.exec_claude(container, cfg.projects_root, "/usage")
-        usage = quota.parse_usage_output(result.result_text)
-        if not quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
+        # Same free-text format drift risk as check_quota_ok: a probe failure
+        # here must not strand the account in COOLING_DOWN forever. Treat it
+        # as recovered (fail open) rather than leaving the account stuck. It
+        # can't loop: dispatch_phase picks each account at most once per call,
+        # and only a pick can put an account back into cooling, so a
+        # still-limited account just falls back to the reactive rate-limit
+        # handling.
+        try:
+            result = docker_exec.exec_claude(
+                container, cfg.projects_root, "/usage", timeout_seconds=_USAGE_PROBE_TIMEOUT_SECONDS,
+            )
+            usage = quota.parse_usage_output(result.result_text)
+            exceeds = quota.exceeds_threshold(usage, cfg.quota_threshold_pct)
+        except Exception as exc:
+            logger.warning("quota recheck failed for account %s: %s", acc.name, exc)
+            exceeds = False
+        if not exceeds:
             state_machine.set_state(cfg.state_dir, acc.name, AccountState.IDLE)
             recovered.append(acc.name)
     return recovered
 
 
 def is_rate_limit_error(result: docker_exec.ClaudeResult) -> bool:
-    # Exact reactive signal strings are unverified against the real Claude
-    # Code CLI (design spec sec. 4a caveat) — match conservatively and
-    # tighten once confirmed empirically.
+    # Verified against the real Claude Code CLI 2.1.273 result JSON: an error
+    # result sets `is_error` and, for an API-side error, `api_error_status`
+    # (the HTTP status). "Context limit reached" is a distinct, non-quota
+    # error that must not match, so there's no bare "quota" term below.
     if not result.raw.get("is_error"):
         return False
+    if result.raw.get("api_error_status") in (429, "429"):
+        return True
     text = (result.result_text or "").lower()
-    return any(term in text for term in ("rate limit", "usage limit", "quota"))
+    return any(term in text for term in ("rate limit", "rate_limit", "usage limit", "hit your limit"))
 
 
 def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
@@ -110,7 +147,7 @@ def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
     return not result.raw.get("is_error", False)
 
 
-_VERDICT_RE = re.compile(r"VERDICT:\s*APPROVED\s*$", re.IGNORECASE | re.MULTILINE)
+_VERDICT_RE = re.compile(r"VERDICT:\s*APPROVED", re.IGNORECASE)
 
 
 def revisor_approved(result_text: str) -> bool:
@@ -120,7 +157,37 @@ def revisor_approved(result_text: str) -> bool:
     # line, and this fails closed (treated as not-approved) on anything else,
     # so a malformed or missing verdict still burns a revision round instead of
     # silently passing.
-    return bool(_VERDICT_RE.search(result_text or ""))
+    #
+    # Only the last non-empty line counts — a bare `MULTILINE` search matched
+    # any line ending in "VERDICT: APPROVED", including a quoted one above a
+    # real "VERDICT: CHANGES_REQUESTED", or a hypothetical mention embedded in
+    # prose ("Not VERDICT: APPROVED").
+    #
+    # Each line is normalized before matching, not just edge-stripped: markdown
+    # emphasis can wrap just the label ("**VERDICT:** APPROVED"), and a
+    # trailing closing code fence or blockquote marker must not become (or
+    # hide) the line that decides the verdict.
+    lines = []
+    for line in (result_text or "").splitlines():
+        normalized = re.sub(r"[*_`>]", "", line).strip()
+        if normalized:
+            lines.append(normalized)
+    if not lines:
+        return False
+    return bool(_VERDICT_RE.fullmatch(lines[-1]))
+
+
+def _truncate_for_handoff(text: str, head: int = 500, tail: int = 1500) -> str:
+    # Interim measure until the structured handoff (README Future work:
+    # "Structured handoff") replaces free-text phase output with a bounded,
+    # per-role schema. The tail is kept, not just the head, because a
+    # revisor's verdict line always closes its response — a head-only cut
+    # (the old `result.result_text[:2000]`) drops that verdict on any long
+    # response.
+    if len(text) <= head + tail:
+        return text
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n\n[… {omitted} chars omitted …]\n\n{text[-tail:]}"
 
 
 def _role_prompt(role: str, task_id: str, task_file: str, round_num: int | None = None) -> str:
@@ -161,12 +228,19 @@ def dispatch_phase(
 ) -> DispatchResult:
     tried: set[str] = set()
     while True:
-        account = pick_idle_account(cfg)
+        # Exclude `tried` up front rather than picking idle[0] and bailing
+        # when it's already been tried: a recheck can recover the very
+        # account this call just rate-limited (it's IDLE again) alongside
+        # others that were cooling before this call started, and those
+        # never-tried accounts are still worth a shot.
+        account = pick_idle_account(cfg, exclude=tried)
         if account is None:
-            if _recheck_cooling_accounts(cfg):
+            # Only loop back if the recheck freed an account this call hasn't
+            # tried: recovering just the one that rate-limited a moment ago
+            # would re-probe every cooling account for nothing. Each loop-back
+            # is followed by a fresh pick, so this is bounded by 2N+1 passes.
+            if any(acc not in tried for acc in _recheck_cooling_accounts(cfg)):
                 continue
-            return DispatchResult(success=False, session_id=resume_session_id, result_text="no accounts available", account="")
-        if account in tried:
             return DispatchResult(success=False, session_id=resume_session_id, result_text="no accounts available", account="")
         tried.add(account)
 
@@ -177,13 +251,17 @@ def dispatch_phase(
         state_machine.set_state(cfg.state_dir, account, AccountState.BUSY, current_task_id=task_id)
         lock_acquired = False
         try:
-            workdir = docker_exec.create_worktree(container, cfg.projects_root, slug, task_id, role)
-            context_transfer.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account)
+            # Claim the task before touching the worktree: a task another
+            # account still owns (live heartbeat) must be refused outright,
+            # not after work has already started on disk.
+            context_transfer.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account, ttl_seconds=cfg.heartbeat_ttl_seconds)
             lock_acquired = True
+            workdir = docker_exec.create_worktree(container, cfg.projects_root, slug, task_id, role)
             with _HeartbeatLoop(cfg.hive_tasks_dir, task_id, cfg.heartbeat_interval_seconds):
                 result = docker_exec.exec_claude(
                     container, workdir, prompt,
                     resume_session_id=resume_session_id, model=model, effort=effort,
+                    timeout_seconds=cfg.phase_timeout_seconds,
                 )
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives
@@ -209,31 +287,53 @@ def dispatch_phase(
         return DispatchResult(success=True, session_id=result.session_id, result_text=result.result_text, account=account)
 
 
+def _update_task_status(kanban: VibeKanbanClient, task_id: str, status: str) -> None:
+    # Vibe Kanban is a visibility aid, not the source of truth for dispatch
+    # state (that's the task file / account state machine) — an outage or
+    # API error there must not abort an otherwise-healthy phase run.
+    try:
+        kanban.update_task_status(task_id, status)
+    except Exception as exc:
+        logger.warning("kanban status update failed for task %s (%s): %s", task_id, status, exc)
+
+
 def run_task_cycle(cfg: Config, task_id: str, slug: str, kanban: VibeKanbanClient) -> None:
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
 
     def run_phase(role: str, round_num: int | None = None, final: bool = False) -> DispatchResult | None:
-        kanban.update_task_status(task_id, f"in_progress:{role}")
+        _update_task_status(kanban, task_id, f"in_progress:{role}")
         effort = (
             cfg.escalated_effort
             if round_num is not None and round_num > cfg.escalate_effort_after_round
             else None
         )
-        result = dispatch_phase(
-            cfg, task_id, slug, role,
-            prompt=_role_prompt(role, task_id, task_file, round_num=round_num),
-            model=cfg.default_model,
-            effort=effort,
-        )
+        try:
+            result = dispatch_phase(
+                cfg, task_id, slug, role,
+                prompt=_role_prompt(role, task_id, task_file, round_num=round_num),
+                model=cfg.default_model,
+                effort=effort,
+            )
+        except context_transfer.LockHeldError as exc:
+            # A re-run within the TTL after a Ctrl+C, or a second dispatcher
+            # process, hits this on every phase. Block the task instead of
+            # letting the LockHeldError climb out as a CLI traceback and
+            # leave Kanban stuck at in_progress. The foreign lock is left
+            # alone: after a Ctrl+C the in-container claude keeps running
+            # until its own timeout, so the heartbeat TTL, not this run,
+            # decides when the task can be taken over.
+            logger.warning("task %s is locked by another owner: %s", task_id, exc)
+            _update_task_status(kanban, task_id, "blocked")
+            return None
         if not result.success:
-            kanban.update_task_status(task_id, "blocked")
+            _update_task_status(kanban, task_id, "blocked")
             return None
         label = role if round_num is None else f"{role} (round {round_num})"
         context_transfer.handoff(
             cfg.hive_tasks_dir, task_id,
             new_status="done" if final else "pending",
-            body=f"## {label}\n\n{result.result_text[:2000]}",
+            body=f"## {label}\n\n{_truncate_for_handoff(result.result_text)}",
         )
         return result
 
@@ -252,10 +352,10 @@ def run_task_cycle(cfg: Config, task_id: str, slug: str, kanban: VibeKanbanClien
             break
 
     if not approved:
-        kanban.update_task_status(task_id, "blocked")
+        _update_task_status(kanban, task_id, "blocked")
         return
 
     if run_phase("auditor", final=True) is None:
         return
 
-    kanban.update_task_status(task_id, "done")
+    _update_task_status(kanban, task_id, "done")

@@ -61,7 +61,7 @@ default_model: opus
 max_revision_rounds: 3
 
 # Once a revision round exceeds this number without the revisor approving,
-# subsequent implementador/revisor rounds run with CLAUDE_CODE_EFFORT_LEVEL
+# subsequent implementador/revisor rounds run with the `claude --effort` flag
 # set to `escalated_effort` instead of the CLI's own default, on the theory
 # that a task still bouncing between implementador and revisor this many
 # times over may need more reasoning effort, not just another attempt.
@@ -69,6 +69,12 @@ max_revision_rounds: 3
 escalate_effort_after_round: 2
 
 # Effort level applied once escalate_effort_after_round is exceeded. Passed
-# through as the CLAUDE_CODE_EFFORT_LEVEL env var on the agent container's
-# `claude` invocation. Optional; defaults to high.
+# through as the `claude --effort` flag on the agent container's `claude`
+# invocation. Optional; defaults to high.
 escalated_effort: high
+
+# Wall-clock timeout for a single phase's `claude` invocation, in seconds.
+# Bounds a hung run inside the agent container (it's killed there); once
+# killed, the phase counts as failed rather than hanging the dispatcher
+# indefinitely. Optional; defaults to 7200 (2 hours).
+phase_timeout_seconds: 7200

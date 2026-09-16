@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from dispatcher.config import load_config
 
 CONFIG_YAML = """
@@ -35,6 +37,7 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.max_revision_rounds == 3
     assert cfg.escalate_effort_after_round == 2
     assert cfg.escalated_effort == "high"
+    assert cfg.phase_timeout_seconds == 7200
 
 
 def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
@@ -43,6 +46,7 @@ def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
         CONFIG_YAML
         + "\ndefault_model: sonnet\nmax_revision_rounds: 5\n"
         "escalate_effort_after_round: 1\nescalated_effort: max\n"
+        "phase_timeout_seconds: 3600\n"
     )
 
     cfg = load_config(str(config_path))
@@ -51,3 +55,13 @@ def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
     assert cfg.max_revision_rounds == 5
     assert cfg.escalate_effort_after_round == 1
     assert cfg.escalated_effort == "max"
+    assert cfg.phase_timeout_seconds == 3600
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "2h", "true"])
+def test_load_config_rejects_invalid_phase_timeout_seconds(tmp_path: Path, bad_value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nphase_timeout_seconds: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="phase_timeout_seconds must be a positive integer"):
+        load_config(str(config_path))
