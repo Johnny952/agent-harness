@@ -551,9 +551,9 @@ los agentes una memoria que viva en el propio proyecto:
   worktree. Los IDs de subagentes registrados son los que permiten que una
   fase retomada o posterior intente revivirlos.
 - **Docs y tests al día, exigidos fuera del modelo:** hoy nada lo exige.
-  `_role_prompt` solo manda rol, tarea y archivo; el dispatcher no corre
-  tests ni mira el diff, y el único hook (`hooks/emit_event.py`) es de
-  observabilidad. Los deberes de arriba (TDD, la regla de contratos del
+  `_role_prompt` manda rol, tarea, archivo y la descripción, pero nada más;
+  el dispatcher no corre tests ni mira el diff, y el único hook
+  (`hooks/emit_event.py`) es de observabilidad. Los deberes de arriba (TDD, la regla de contratos del
   Revisor, los índices del Auditor) son instrucciones: se cumplen mientras
   un modelo las siga y otro note cuando no. Tres capas, de la más estricta
   a la más flexible:
@@ -674,8 +674,10 @@ los agentes una memoria que viva en el propio proyecto:
   aprendizaje.
 
 Depende de que los agentes reciban la descripción de la tarea y de que el
-trabajo de cada rol se commitee; hoy no pasa ninguna de las dos cosas (ver
-*Known gaps* en `README.md`). Las tarjetas de deuda dependen además de que
+trabajo de cada rol se commitee. Lo primero está resuelto desde el
+2026-09-19: `run-task` toma `--description`/`--description-file`, lo guarda
+en el frontmatter del archivo de tarea y lo mete entero en el prompt de
+cada rol. Lo segundo sigue abierto (ver *Known gaps* en `README.md`). Las tarjetas de deuda dependen además de que
 el MCP de Vibe Kanban permita crear tareas, algo sin verificar. Sin
 diseñar: el esquema del handoff, dónde viven los archivos de skills
 (horneados en `docker/agent/` al construir la imagen vs. montados junto a

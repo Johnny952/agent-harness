@@ -190,9 +190,21 @@ def _truncate_for_handoff(text: str, head: int = 500, tail: int = 1500) -> str:
     return f"{text[:head]}\n\n[… {omitted} chars omitted …]\n\n{text[-tail:]}"
 
 
-def _role_prompt(role: str, task_id: str, task_file: str, round_num: int | None = None) -> str:
+def _role_prompt(
+    role: str,
+    task_id: str,
+    task_file: str,
+    description: str,
+    round_num: int | None = None,
+) -> str:
+    # The description is embedded whole, never run through
+    # _truncate_for_handoff: a cut phase summary loses detail, but a cut
+    # ask misinforms — the role would confidently build the wrong thing.
+    # It also stays in the task file, so this is belt and braces: the role
+    # has the ask even if it never opens the file.
     prompt = (
-        f"Role: {role}. Task: {task_id}. "
+        f"Role: {role}. Task: {task_id}.\n\n"
+        f"Task description:\n{description}\n\n"
         f"Read {task_file} for context handed off from the previous phase before starting."
     )
     if round_num is not None:
@@ -297,9 +309,34 @@ def _update_task_status(kanban: VibeKanbanClient, task_id: str, status: str) -> 
         logger.warning("kanban status update failed for task %s (%s): %s", task_id, status, exc)
 
 
-def run_task_cycle(cfg: Config, task_id: str, slug: str, kanban: VibeKanbanClient) -> None:
+def run_task_cycle(
+    cfg: Config,
+    task_id: str,
+    slug: str,
+    kanban: VibeKanbanClient,
+    description: str | None = None,
+) -> None:
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+
+    if description is not None:
+        context_transfer.set_description(cfg.hive_tasks_dir, task_id, description)
+    else:
+        # A resume (or a task seeded by an earlier `run-task`) already has
+        # the ask on disk; nothing to write.
+        description = context_transfer.read_description(cfg.hive_tasks_dir, task_id)
+    if not (description or "").strip():
+        # Dispatching here would burn four phases of quota on roles that
+        # were told a task id and nothing else. The CLI rejects this case
+        # before it gets here; this is the backstop for library callers.
+        logger.error(
+            "task %s has no description: pass --description/--description-file to run-task, "
+            "or add a `description:` key to %s",
+            task_id,
+            task_file,
+        )
+        _update_task_status(kanban, task_id, "blocked")
+        return
 
     def run_phase(role: str, round_num: int | None = None, final: bool = False) -> DispatchResult | None:
         _update_task_status(kanban, task_id, f"in_progress:{role}")
@@ -311,7 +348,7 @@ def run_task_cycle(cfg: Config, task_id: str, slug: str, kanban: VibeKanbanClien
         try:
             result = dispatch_phase(
                 cfg, task_id, slug, role,
-                prompt=_role_prompt(role, task_id, task_file, round_num=round_num),
+                prompt=_role_prompt(role, task_id, task_file, description, round_num=round_num),
                 model=cfg.default_model,
                 effort=effort,
             )

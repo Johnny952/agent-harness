@@ -12,9 +12,11 @@ from dispatcher.context_transfer import (
     is_lock_expired,
     list_task_ids,
     LockHeldError,
+    read_description,
     read_task_file,
     refresh_heartbeat,
     release_stale_lock,
+    set_description,
     task_file_path,
     TaskFile,
     write_task_file,
@@ -329,3 +331,83 @@ def test_acquire_lock_after_handoff_by_different_owner_succeeds(tmp_path: Path) 
     task = acquire_lock(hive_dir, "task-1", owner="cuenta2")
 
     assert task.owner == "cuenta2"
+
+
+_MULTILINE_DESCRIPTION = """Add a /healthz endpoint.
+
+It must return 200 with {"status": "ok"} and skip auth.
+"""
+
+
+def test_description_roundtrips_and_is_written_as_a_block_scalar(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    set_description(hive_dir, "task-1", _MULTILINE_DESCRIPTION)
+
+    assert read_description(hive_dir, "task-1") == _MULTILINE_DESCRIPTION
+    # Not just readable by us: a description is written by a human and read by
+    # one while debugging a run, so it has to survive as the lines they typed
+    # instead of safe_dump's default single-quoted scalar with folded newlines.
+    raw = Path(task_file_path(hive_dir, "task-1")).read_text()
+    assert "description: |" in raw
+    assert "  It must return 200" in raw
+
+
+def test_description_with_trailing_whitespace_still_roundtrips(tmp_path: Path) -> None:
+    """A block scalar can't represent a line with trailing spaces; the emitter
+    falls back to a quoted style on its own, so fidelity doesn't depend on the
+    value being block-friendly."""
+    hive_dir = str(tmp_path)
+    description = "first line   \nsecond line"
+
+    set_description(hive_dir, "task-1", description)
+
+    assert read_description(hive_dir, "task-1") == description
+
+
+def test_set_description_keeps_the_phase_history_already_in_the_body(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    acquire_lock(hive_dir, "task-1", owner="cuenta1")
+    handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready", depends_on=["task-0"])
+
+    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
+
+    task = read_task_file(task_file_path(hive_dir, "task-1"))
+    assert task.description == "Add a /healthz endpoint."
+    # Re-seeding a task mid-cycle replaces the ask and nothing else.
+    assert task.body.strip() == "arquitecto: plan ready"
+    assert task.status == "review"
+    assert task.depends_on == ["task-0"]
+
+
+def test_handoff_keeps_the_description_out_of_the_body(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    set_description(hive_dir, "task-1", _MULTILINE_DESCRIPTION)
+
+    handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready")
+    handoff(hive_dir, "task-1", new_status="review", body="implementador: done")
+
+    task = read_task_file(task_file_path(hive_dir, "task-1"))
+    # The body accumulates phase summaries, which is exactly why the ask lives
+    # in the frontmatter: here it would have been appended twice.
+    assert task.description == _MULTILINE_DESCRIPTION
+    assert "healthz" not in task.body
+
+
+def test_task_file_written_before_descriptions_existed_is_still_readable(tmp_path: Path) -> None:
+    path = str(tmp_path / "task-1.md")
+    Path(path).write_text(
+        "---\ntask_id: task-1\nstatus: pending\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\n---\n\nold body\n"
+    )
+
+    task = read_task_file(path)
+
+    assert task.description is None
+    assert task.body.strip() == "old body"
+
+
+def test_read_description_of_an_unseeded_task_is_none(tmp_path: Path) -> None:
+    assert read_description(str(tmp_path), "task-1") is None
+    # Reading must not create the file: list_task_ids feeds the dispatcher.
+    assert list_task_ids(str(tmp_path)) == []

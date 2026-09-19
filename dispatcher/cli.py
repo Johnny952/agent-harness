@@ -1,11 +1,50 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
-from dispatcher import docker_exec
-from dispatcher.config import load_config
+from dispatcher import context_transfer, docker_exec
+from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import container_for, run_task_cycle
 from dispatcher.vibe_kanban_client import VibeKanbanClient
+
+
+def _resolve_description(
+    args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser
+) -> str | None:
+    """The description to seed this run with, or None to keep the stored one.
+
+    Refuses to dispatch a task nobody described: without an ask, the four
+    phases can only produce noise at full quota cost. argparse's own
+    parser.error is used so the failure reads like any other usage error
+    and exits 2.
+    """
+    if args.description_file is not None:
+        # "-" is the shape that makes piping work from a compose run:
+        #   docker compose run --rm -T dispatcher ... --description-file - < spec.md
+        if args.description_file == "-":
+            text = sys.stdin.read()
+        else:
+            try:
+                text = Path(args.description_file).read_text()
+            except OSError as exc:
+                parser.error(f"--description-file: {exc}")
+    elif args.description is not None:
+        text = args.description
+    else:
+        stored = context_transfer.read_description(cfg.hive_tasks_dir, args.task_id)
+        if (stored or "").strip():
+            return None  # a resume: the ask is already on disk, don't rewrite it
+        parser.error(
+            f"task {args.task_id} has no description: pass --description or "
+            "--description-file (use '-' to read stdin). Without one the "
+            "roles are dispatched with nothing to work from."
+        )
+
+    if not text.strip():
+        parser.error("the task description is empty")
+    return text
 
 
 def main() -> None:
@@ -16,6 +55,18 @@ def main() -> None:
     run_parser = sub.add_parser("run-task", help="Run the full role cycle for one task")
     run_parser.add_argument("--task-id", required=True)
     run_parser.add_argument("--project", required=True, help="Project slug")
+    description_group = run_parser.add_mutually_exclusive_group()
+    description_group.add_argument(
+        "--description",
+        help="What the task actually asks for. Stored in the task file's frontmatter "
+        "and embedded in every role's prompt. Optional only when the task file "
+        "already carries a description (i.e. re-running a task).",
+    )
+    description_group.add_argument(
+        "--description-file",
+        help="Read the description from this file instead of the command line; "
+        "'-' reads stdin. Use it for anything longer than a sentence.",
+    )
 
     bootstrap_parser = sub.add_parser(
         "bootstrap-project",
@@ -28,8 +79,9 @@ def main() -> None:
     cfg = load_config(args.config)
 
     if args.command == "run-task":
+        description = _resolve_description(args, cfg, parser)
         kanban = VibeKanbanClient(cfg.vibe_kanban_mcp_url)
-        run_task_cycle(cfg, args.task_id, args.project, kanban)
+        run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
         # config schema has no repo-source field, so cloning the actual

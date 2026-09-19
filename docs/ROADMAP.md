@@ -351,8 +351,11 @@ EOF
 - **V2.5 Task description.**
   - Question: can a task's description be read back (`get_task` or
     similar)?
-  - This is where stage 1's fix for "agents never see the task" gets the
-    body. If it can't, use a `--description` flag on `run-task`.
+  - This was where stage 1's fix for "agents never see the task" would
+    have got the description. It no longer gates that fix: `run-task`
+    takes `--description`/`--description-file` as of 2026-09-19. Reading
+    it back from Kanban stays worth having, so an operator driving the
+    board doesn't retype the ask on the command line.
 - **V2.6 Task creation.**
   - Question: does `create_task` exist and return an ID?
   - This gates item 1's debt cards and item 5's epic decomposition.
@@ -368,28 +371,15 @@ The first real `run-task`, with costs capped.
   - `escalate_effort_after_round: 0`, so round 1 already passes
     `--effort high`.
   - `phase_timeout_seconds: 1800`.
-- **Task.** "Agents never see the task" is already confirmed by reading
-  the code. Don't spend quota proving it: seed the task file by hand as a
-  stand-in for that fix (`acquire_lock` keeps an existing body).
+- **Task.** Passed on the command line now that `--description` exists;
+  no hand-seeded task file. If V2.3 showed Kanban assigns its own IDs,
+  create the card there too and record both IDs.
+- **Run:**
   ```bash
-  mkdir -p .hive/tasks && cat > .hive/tasks/T-001.md <<'EOF'
-  ---
-  task_id: T-001
-  status: pending
-  owner: null
-  depends_on: []
-  heartbeat: null
-  ---
-
-  ## Task
-
-  Add a `subtract(a, b)` function to `sum.js`, export it, and cover it with a
-  test in `sum.test.js`. Run `node --test` before finishing.
-  EOF
+  dispatch run-task --task-id T-001 --project scratch --description "Add a
+  subtract(a, b) function to sum.js, export it, and cover it with a test in
+  sum.test.js. Run node --test before finishing."
   ```
-  If V2.3 showed Kanban assigns its own IDs, create the card there too and
-  record both IDs.
-- **Run:** `dispatch run-task --task-id T-001 --project scratch`
 - **While it runs:**
   - `procs agent-cuenta1` shows `timeout --kill-after=30 1800 claude
     --model opus …`. From the implementador on, it also shows
@@ -591,13 +581,19 @@ logins.
      config and why `hive_tasks_dir` can't be one.
    - A compose profile for the one-shot `dispatcher` service (confirmed
      unguarded, V0.2 dispatcher service: no profile gates it, so a bare
-     `up -d` fires `run-task --task-id CHANGE_ME --project CHANGE_ME`):
-     add `profiles: ["dispatcher"]` (as `docker-compose.coolify.yml`
-     already does), or name services explicitly in README step 4.
+     `up -d` fires `run-task --task-id CHANGE_ME --project CHANGE_ME`).
+     Fixed 2026-09-19: `profiles: ["dispatcher"]` in `docker-compose.yml`
+     too, with a test parametrized over both compose files so neither can
+     lose it, verified with `docker compose config --services`.
    - dind bind mounts (V0.7), if confirmed.
 2. Fix the README's *Known gaps*:
-   - **Agents never see the task:** seed the task body from Vibe Kanban
-     (V2.5) or a `--description` flag.
+   - **Agents never see the task.** Fixed 2026-09-19 with a
+     `--description`/`--description-file` flag on `run-task`, stored in
+     the task file's frontmatter (not the body, which accumulates phase
+     summaries) and embedded whole in every role's prompt; a task with no
+     description anywhere is a usage error instead of four phases of
+     quota. Seeding it from Vibe Kanban (V2.5) stays open, and needs the
+     cloud-login wall (V2.6) cleared first.
    - **Roles don't see each other's code:** one branch per task, a
      dispatcher commit after each implementador phase (needs V0.9's
      identity), and revisor/auditor worktrees rebuilt at that tip every

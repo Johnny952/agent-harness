@@ -222,11 +222,12 @@ The `dispatcher` service is deliberately **not** a persistent service —
 its compose entry exists only as a template (`restart: "no"`, placeholder
 `--task-id`/`--project`). See step 5.
 
-Stage-0 verification found two problems with the two-liner above: a plain
-`up -d` will hit the `vibe-kanban` pull failure (the image can't be
-pulled); and, once an account is logged in, that same bare `up -d` also
-fires the `dispatcher` service, since it has no Compose profile. See
-Known gaps below.
+Stage-0 verification found two problems with the two-liner above. One is
+still open: a plain `up -d` will hit the `vibe-kanban` pull failure (the
+image can't be pulled) — see Known gaps below. The other is fixed: that
+same bare `up -d` used to also fire the `dispatcher` service and run a
+task, which is now gated behind `profiles: ["dispatcher"]` in both
+compose files.
 
 ### 5. Run a task
 
@@ -237,11 +238,29 @@ through the full role cycle:
 python -m dispatcher.cli --config config.yaml bootstrap-project \
   --account cuenta1 --project my-project
 python -m dispatcher.cli --config config.yaml run-task \
-  --task-id T-001 --project my-project
+  --task-id T-001 --project my-project \
+  --description "Add a /healthz endpoint that returns 200 without auth."
 ```
 
 (Or, without a host Python install, run the same commands inside the
-already-built dispatcher image: `docker compose -f docker/compose/docker-compose.yml run --rm dispatcher --config /app/config.yaml run-task --task-id T-001 --project my-project`.)
+already-built dispatcher image: `docker compose -f docker/compose/docker-compose.yml --profile dispatcher run --rm dispatcher --config /app/config.yaml run-task --task-id T-001 --project my-project --description "…"`.)
+
+`--description` is what every role is actually told to work on: it goes
+into each phase's prompt verbatim and is stored in the task file's
+frontmatter (`<hive_tasks_dir>/T-001.md`), separate from the body where
+the phase summaries accumulate. Re-running the same task ID reuses the
+stored description, so `--description` can be omitted on a resume;
+running a task that has none anywhere is rejected as a usage error
+rather than spending four phases on roles that know only an ID. For
+anything longer than a sentence use `--description-file spec.md`, or
+`--description-file -` to read stdin — which is the shape that works
+from a container without bind-mounting the file:
+
+```bash
+docker compose -f docker/compose/docker-compose.yml --profile dispatcher \
+  run --rm -T dispatcher --config /app/config.yaml run-task \
+  --task-id T-001 --project my-project --description-file - < spec.md
+```
 
 `bootstrap-project` only creates the directory; cloning the actual project
 repository into it is still a manual, one-time step.
@@ -352,14 +371,6 @@ a task from producing a usable result end to end today, and the rest tax
 every phase that runs. The unit tests mock Claude Code, Docker, and Vibe
 Kanban, so none of them catch these.
 
-- **Agents never see the task.** `_role_prompt`
-  (`dispatcher/dispatcher.py`) sends only the role, task ID, and `.hive`
-  file path; the task file starts with an empty body, and `run-task` never
-  reads the task from Vibe Kanban (`VibeKanbanClient.list_tasks` keeps only
-  the title, and nothing fetches the description). The arquitecto has
-  nothing to plan from. Seed the body with the task
-  description (from Vibe Kanban, or a `--description` flag on `run-task`)
-  before the first phase.
 - **Roles don't see each other's code.** `create_worktree` branches every
   role off the project's `HEAD` (`agent/<role>/<task-id>`), nothing commits
   the implementador's changes, and later rounds reuse the revisor's
@@ -368,14 +379,6 @@ Kanban, so none of them catch these.
   branch per task that the implementador works on, the dispatcher
   committing after each implementador phase, and detached revisor/auditor
   worktrees recreated at that branch's tip every round.
-- **A bare `docker compose up -d` can fire a task.** `docker-compose.yml`'s
-  `dispatcher` service has no Compose profile (`--profiles` returns empty,
-  `--services` lists it unconditionally), so `restart: "no"` /
-  `command: run-task --task-id CHANGE_ME --project CHANGE_ME` runs on any
-  plain `up -d` once an account is logged in — including the `up -d` in
-  step 4 above. Fix: add `profiles: ["dispatcher"]` (`docker-compose.coolify.yml`
-  already does this) or name services explicitly in step 4. (V0.2 dispatcher
-  service)
 - **Commits inside `/data/projects` fail without setup.** The
   bind-mounted project tree is host-owned, so any git command in the
   container hits `fatal: detected dubious ownership`, and no git identity

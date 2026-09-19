@@ -17,6 +17,12 @@ from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import AccountState, get_state, set_state
 
 
+# run_task_cycle refuses to dispatch a task with no description (it would
+# spend four phases of quota on roles told nothing but an id), so every
+# cycle test has to supply one.
+_DESCRIPTION = "Add a /healthz endpoint that returns 200."
+
+
 class _FakeKanban:
     def __init__(self):
         self.statuses = []
@@ -457,7 +463,7 @@ def test_run_task_cycle_reaps_expired_locks_before_dispatching(tmp_path, monkeyp
     )
 
     kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     assert len(reap_calls) == 1
     assert ("task-1", "blocked") in kanban.statuses
@@ -490,7 +496,7 @@ def test_run_task_cycle_blocks_without_raising_when_task_locked_by_other_owner(
 
     kanban = _FakeKanban()
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     assert worktree_calls == []
     assert ("task-1", "blocked") in kanban.statuses
@@ -510,11 +516,117 @@ def test_run_task_cycle_prompt_references_task_file(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     expected_path = task_file_path(cfg.hive_tasks_dir, "task-1")
     assert captured_prompts
     assert expected_path in captured_prompts[0]
+
+
+def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, monkeypatch) -> None:
+    """The roles used to get a role name, a task id and a file path — the
+    arquitecto had nothing to plan from. The description goes in the prompt
+    whole (never truncated: a cut ask misinforms) for every phase, not just
+    the first, so a revisor or auditor can check the work against what was
+    actually asked for."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    captured = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+        captured.append((role, prompt))
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    description = "Add a /healthz endpoint.\n\nIt must return 200 and no body."
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=description)
+
+    assert [role for role, _ in captured] == ["arquitecto", "implementador", "revisor", "auditor"]
+    for role, prompt in captured:
+        assert description in prompt, f"{role}'s prompt does not carry the description"
+
+    # The revisor's verdict instruction has to stay the last thing it reads,
+    # or a description ending in prose could bury it.
+    revisor_prompt = next(prompt for role, prompt in captured if role == "revisor")
+    assert revisor_prompt.rstrip().endswith("if it needs another revision round.")
+
+
+def test_run_task_cycle_seeds_the_description_into_the_task_file(tmp_path, monkeypatch) -> None:
+    """Seeded once, then read from the file on a re-run: the roles open the
+    task file for handoff context anyway, and a resume (`run-task` with no
+    --description after a Ctrl+C) has to find the original ask there."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    prompts = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+        prompts.append(prompt)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.description == _DESCRIPTION
+    # handoff() appended four phase summaries to the body; the description
+    # must not be one of them, or a re-run would stack copies of the ask.
+    assert _DESCRIPTION not in task.body
+
+    prompts.clear()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban())
+
+    assert prompts, "the re-run should have dispatched using the stored description"
+    assert all(_DESCRIPTION in prompt for prompt in prompts)
+
+
+def test_run_task_cycle_blocks_without_dispatching_when_no_description_exists(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """No description anywhere (no argument, no task file) means the four
+    phases can only produce noise at full quota cost, so nothing is
+    dispatched at all and the task goes straight to blocked."""
+    cfg = _make_config(tmp_path)
+    calls = []
+
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        lambda *a, **kw: calls.append(a) or dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="ok", account="cuenta1",
+        ),
+    )
+
+    kanban = _FakeKanban()
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+
+    assert calls == []
+    assert ("task-1", "blocked") in kanban.statuses
+    assert "description" in caplog.text
+
+
+def test_run_task_cycle_blocks_when_the_stored_description_is_blank(tmp_path, monkeypatch) -> None:
+    """A task file whose description is whitespace is as useless as none at
+    all — the guard is on content, not on the key being present."""
+    cfg = _make_config(tmp_path)
+    write_task_file(
+        task_file_path(cfg.hive_tasks_dir, "task-1"),
+        dispatcher_mod.context_transfer.TaskFile(
+            task_id="task-1", status="pending", owner=None, depends_on=[],
+            heartbeat=None, body="", description="   \n",
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+
+    assert calls == []
+    assert ("task-1", "blocked") in kanban.statuses
 
 
 def test_revisor_approved_matches_verdict_line() -> None:
@@ -645,7 +757,7 @@ def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monke
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert "T" * 1500 in task.body
@@ -671,7 +783,7 @@ def test_run_task_cycle_approves_on_first_round(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     roles = [c["role"] for c in calls]
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
@@ -698,7 +810,7 @@ def test_run_task_cycle_completes_when_kanban_status_updates_always_raise(tmp_pa
         def update_task_status(self, task_id, status):
             raise RuntimeError("kanban is down")
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _RaisingKanban())
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _RaisingKanban(), description=_DESCRIPTION)
 
     assert calls == ["arquitecto", "implementador", "revisor", "auditor"]
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
@@ -724,7 +836,7 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     early_rounds = [
         c for c in calls
@@ -752,7 +864,7 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     assert calls.count("revisor") == 2
     assert "auditor" not in calls
