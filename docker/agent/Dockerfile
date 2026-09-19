@@ -22,6 +22,13 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 ARG CLAUDE_CODE_VERSION=2.1.273
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Without this the CLI's background auto-updater runs `npm install -g` inside
+# the running container, silently replacing the pinned version above until
+# the next recreate; an update cut off mid-install (the session ends) leaves
+# no `claude` on PATH at all. Upgrades go through a rebuild with a new
+# CLAUDE_CODE_VERSION instead. Image env so `docker exec` sessions see it.
+ENV DISABLE_AUTOUPDATER=1
+
 # Observability hook: emit_event.py POSTs each Claude Code hook event to the
 # collector (COLLECTOR_URL / SOURCE_APP are set per agent service in
 # docker/compose/docker-compose.agents.yml); install_settings.py registers it

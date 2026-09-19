@@ -61,6 +61,21 @@ def test_final_stage_sets_claude_config_dir() -> None:
     ), "expected `ENV CLAUDE_CONFIG_DIR=/root/.claude-account` in the final build stage"
 
 
+def test_final_stage_disables_cli_autoupdater() -> None:
+    """The pin only holds if the CLI's background auto-updater is off: it
+    otherwise runs `npm install -g` inside the running container, replacing
+    the pinned version until the next recreate, and an update cut off
+    mid-install leaves no `claude` on PATH (found in the 2026-09-19 V0.4
+    re-run, see docs/ROADMAP.md). Image env for the same `docker exec` reason
+    as CLAUDE_CONFIG_DIR above.
+    """
+    joined = _read().replace("\\\n", " ")
+    final_stage = joined[joined.rfind("\nFROM "):]
+    assert re.search(
+        r"^ENV DISABLE_AUTOUPDATER=1\s*$", final_stage, re.MULTILINE
+    ), "expected `ENV DISABLE_AUTOUPDATER=1` in the final build stage"
+
+
 def _at_latest(text: str) -> str:
     return text.replace(
         "RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}",
