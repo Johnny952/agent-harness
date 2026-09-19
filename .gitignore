@@ -10,3 +10,5 @@ dispatcher_state/
 *.db-shm
 build/
 *.egg-info/
+/config.yaml
+docker/compose/.env

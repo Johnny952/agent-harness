@@ -29,8 +29,9 @@ Agent container (per Claude Pro account)
 Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
 ```
 
-- **Vibe Kanban** — task backlog / control UI, runs as a local MCP server
-  bound to `127.0.0.1` only (never exposed off-host).
+- **Vibe Kanban** — task backlog / control UI (web UI bound to
+  `127.0.0.1` only, never exposed off-host); its MCP server runs over
+  stdio, not the network.
 - **Smart Dispatcher** (`dispatcher/`) — for one task, runs the role sequence
   `arquitecto → implementador → revisor → auditor`. Before each phase it
   picks an IDLE account, probes `/usage` to keep it under
@@ -175,6 +176,12 @@ The `dispatcher` service is deliberately **not** a persistent service —
 its compose entry exists only as a template (`restart: "no"`, placeholder
 `--task-id`/`--project`). See step 5.
 
+Stage-0 verification found two problems with the two-liner above: a plain
+`up -d` will hit the `vibe-kanban` pull failure (the image can't be
+pulled); and, once an account is logged in, that same bare `up -d` also
+fires the `dispatcher` service, since it has no Compose profile. See
+Known gaps below.
+
 ### 5. Run a task
 
 Bootstrap a project directory on an account's container, then run a task
@@ -196,7 +203,8 @@ repository into it is still a manual, one-time step.
 **What "issuing commands from the interface" means today:** Vibe Kanban
 (`http://127.0.0.1:9100`, loopback-only) is a task backlog/MCP store —
 useful for tracking and for driving it via MCP tools from your own Claude
-session — but it is *not* wired to the dispatcher. Creating or updating a
+session (once logged in to its cloud account — see Known gaps) — but it
+is *not* wired to the dispatcher. Creating or updating a
 task in Vibe Kanban does not make anything run. The dispatcher is a
 one-shot CLI, not a daemon watching for new tasks, so `run-task` above
 still has to be invoked manually (or from your own automation/cron) per
@@ -282,6 +290,15 @@ Documented but **not designed or implemented** — evaluate when the work is
 actually taken on, not before. The known gaps come first; the items after
 them are ordered by priority, highest first.
 
+Stage-0 no-quota checks against the real stack ran on 2026-09-16; each
+Known-gaps bullet below cites the result rows that confirmed it. Stage-0
+covered stack plumbing and the Vibe Kanban MCP surface; CLI contracts
+beyond the flag listing (V1.1–V1.3), a first end-to-end task, failure
+paths, and cross-account failover needed quota and remain unverified — see
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results log and what's
+still pending. Their results decide how the known gaps get fixed, and each
+prioritized item lists the checks it depends on.
+
 ### Known gaps (fix first)
 
 These sit in the core pipeline rather than on top of it, and likely keep a
@@ -304,18 +321,72 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
   branch per task that the implementador works on, the dispatcher
   committing after each implementador phase, and detached revisor/auditor
   worktrees recreated at that branch's tip every round.
+- **A bare `docker compose up -d` can fire a task.** `docker-compose.yml`'s
+  `dispatcher` service has no Compose profile (`--profiles` returns empty,
+  `--services` lists it unconditionally), so `restart: "no"` /
+  `command: run-task --task-id CHANGE_ME --project CHANGE_ME` runs on any
+  plain `up -d` once an account is logged in — including the `up -d` in
+  step 4 above. Fix: add `profiles: ["dispatcher"]` (`docker-compose.coolify.yml`
+  already does this) or name services explicitly in step 4. (V0.2 dispatcher
+  service)
+- **Commits inside `/data/projects` fail without setup.** The
+  bind-mounted project tree is host-owned, so any git command in the
+  container hits `fatal: detected dubious ownership`, and no git identity
+  is configured, so a commit then fails with `Author identity unknown`.
+  The image ships git 2.39.5, where `safe.directory` only matches an
+  exact path or the literal `*` — trailing `/*` prefix matching needs git
+  ≥2.46. Fix: `safe.directory=*` in the image's system gitconfig (or one
+  exact per-project entry written at bootstrap or by the entrypoint),
+  plus a git identity (image default, or `-c user.name=…/user.email=…`
+  per commit). (V0.9)
+- **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
+  Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
+  see below): the server speaks stdio via an `mcp` subcommand, not the
+  assumed SSE transport; there is no `list_tasks`/`create_task`/
+  `update_task` — the real vocabulary is `list_issues`/`create_issue`/
+  `get_issue`/`update_issue`/`delete_issue`, keyed on `issue_id`, not
+  `id`; every schema types its id fields `format: "uuid"`, so IDs look
+  server-assigned, not caller-minted (not yet confirmed live — no issue
+  could be created, see V2.6); and `update_issue.status` is documented as
+  a fixed, per-project set of names, not arbitrary strings, though the
+  live names and the update-rejection text are still unconfirmed. A cloud
+  login at `api.vibekanban.com` appears to gate every project/issue call
+  (`list_organizations` returns 401, and `list_projects` needs an
+  organization ID that can't be obtained without it), so the description
+  round-trip (`get_issue`) couldn't be confirmed live either — re-run once
+  credentials exist. `vibe_kanban_client.py` needs a full rewrite, not a
+  patch. (V2.1–V2.4, V2.5, V2.6)
+- **The Vibe Kanban image can't be pulled.**
+  `ghcr.io/bloopai/vibe-kanban:latest` (`docker-compose.yml:10`) is denied
+  on an anonymous pull — anonymous GHCR pulls work on this host for other
+  images, so this looks like an image-reference defect (private or
+  nonexistent image), not a credentials problem. Step 4's plain `up -d`
+  above will hit this same pull failure, since Compose pre-pulls every
+  named image before starting any of them. Until an image source is
+  picked (build from upstream, `npx vibe-kanban@0.1.44`, or a vetted
+  community image), bring up the other three control-plane services by
+  name instead: `docker compose -f docker/compose/docker-compose.yml
+  up -d collector dashboard registry-mirror`. (V0.2 control plane, V0.8)
 - **Unverified assumptions.** Worth a manual check before building on
-  them:
+  them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
+  along with others not listed here (credential isolation — V0.4, not yet
+  run, needs an operator login; the `/usage` probe under `-p` — V1.3, not
+  yet run; dind isolation, the registry mirror and bind mounts — V0.7,
+  not yet run, blocked by V0.1 (no `sysbox-runc` on the verification
+  host)):
   - Headless permissions: `exec_claude` passes no `--permission-mode` and
     `hooks/install_settings.py` sets no `permissions`, so tools that need
     approval (Edit, Bash) may be denied under `-p`. The agent image also
     runs as root, where Claude Code may refuse to bypass permissions
-    outside a declared sandbox.
+    outside a declared sandbox. (V1.2)
   - Cross-account `--resume`: the design spec only tested one account.
-  - Vibe Kanban's MCP surface: tool names, argument names (`project`,
-    `id`), status values (`in_progress:<role>`, `blocked`), and the SSE
-    transport at `vibe_kanban_mcp_url` are assumed, not checked against
-    the real server.
+    (V5.1)
+  - Vibe Kanban's MCP surface: confirmed mismatched live against
+    `vibe_kanban_client.py` (tool names, transport, V2.1–V2.2); ID and
+    status-name behavior is known only from the schemas, not confirmed
+    live (V2.3–V2.4),
+    and the description round-trip (V2.5) still needs a run past the
+    cloud-login gate (V2.6). See the Known-gaps bullet above. (V2.1–V2.6)
 
 ### Prioritized
 
@@ -501,8 +572,9 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
    - *Declared debt, mirrored to Vibe Kanban.* The `debt/` index above
      stays the source of truth. Agents read it filtered by its "where"
      column, it's versioned with the code, and it doesn't depend on Vibe
-     Kanban, which in this design is a visibility aid whose MCP surface is
-     still unverified. The flow:
+     Kanban, which in this design is a visibility aid whose MCP surface
+     doesn't yet match the dispatcher's client (see Known gaps). The
+     flow:
      1. The implementador declares debt in its structured return: whether
         it was introduced or found, what it is, why it stays, the cost of
         leaving it, and what would fix it. Found debt counts only in files

@@ -48,11 +48,25 @@ Evaluadas:
   de estados, handoff) es responsabilidad exclusiva del **Smart Dispatcher**
   construido en este proyecto, no una capacidad nativa de Vibe Kanban.
 - **Integración Dispatcher ↔ Vibe Kanban:** Vibe Kanban expone un servidor
-  **MCP local** (no accesible por URL pública, solo loopback) con
-  herramientas para listar/crear/actualizar tareas y consultar su estado. El
-  Smart Dispatcher usa este servidor MCP para leer el backlog y actualizar
-  estado de tarjetas, en vez de leer directamente su base de datos interna
-  (superficie no documentada y sujeta a cambiar entre versiones).
+  **MCP local** que habla por `stdio` vía el subcomando `mcp` del propio
+  binario (no por SSE como asumía `dispatcher/vibe_kanban_client.py`); no
+  se expone por red — solo su UI web escucha, y únicamente en loopback.
+  Sus herramientas usan
+  vocabulario de **issue**, no de tarea
+  (`list_issues`/`create_issue`/`get_issue`/`update_issue`/`delete_issue`,
+  indexadas por `issue_id`), el servidor asigna un UUID propio a cada issue
+  (`simple_id` es un candidato de clave legible aún sin confirmar), cada
+  proyecto trae su propio conjunto fijo de estados (ambos a nivel de
+  esquema; falta confirmarlos en vivo, filas V2.3–V2.4), y hay un muro de
+  login en la nube (`api.vibekanban.com`) que puede bloquear el acceso. El
+  Smart Dispatcher debe usar este servidor MCP con ese vocabulario para leer
+  el backlog y actualizar el estado de los issues, en vez de leer
+  directamente la base de datos interna (superficie no documentada y sujeta
+  a cambiar entre versiones). Verificado contra `vibe-kanban@0.1.44`
+  (`docs/ROADMAP.md`, filas V2.1–V2.6): transporte, herramientas y muro de
+  login confirmados en vivo; IDs y estados (V2.3–V2.4) solo a nivel de
+  esquema, y la ida y vuelta de la descripción (V2.5) todavía necesita una
+  corrida en vivo.
 - **Conductor.build** — descartada: solo Mac, y el servidor objetivo es
   Ubuntu. `proyecto.md` la nombraba porque fue el punto de partida de la
   idea, pero no es viable en este entorno.
@@ -397,6 +411,17 @@ de prioridad más abajo). Antes que todo esto van los huecos conocidos de la
 implementación, que viven solo en `README.md` (*Future work*, *Known gaps*)
 porque son defectos del código, no trabajo de diseño.
 
+Y antes de los huecos conocidos van las verificaciones de los flujos reales,
+con los contenedores levantados, que están en `docs/ROADMAP.md`. Los tests
+unitarios simulan `docker exec`, el CLI de Claude Code y el MCP de Vibe
+Kanban, así que ninguno de esos contratos está comprobado. El roadmap fija
+el orden: etapa 0, verificar (V0–V5); etapa 1, corregir los huecos conocidos
+con esos resultados y aceptar con una tarea de punta a punta; etapa 2, este
+trabajo futuro, en el que cada bloque corre antes sus propias verificaciones
+diferidas (D1–D6). Si una verificación falla, es un hallazgo: se registra y
+se actualizan este spec y el README antes de diseñar el bloque que depende
+de ella.
+
 **Trabajo futuro — memoria de proyecto (fuera de alcance de este spec):**
 
 Cada fase es un `claude -p` que arranca en frío: el rol es solo un nombre
@@ -543,8 +568,9 @@ los agentes una memoria que viva en el propio proyecto:
 - **Deuda declarada, reflejada en Vibe Kanban:** el índice `debt/` sigue
   siendo la fuente de verdad. Los agentes lo leen filtrando por su columna
   "dónde", está versionado con el código y no depende de Vibe Kanban, que
-  en este diseño es una ayuda visual con un MCP todavía sin verificar. El
-  flujo:
+  en este diseño es una ayuda visual cuyo MCP todavía no coincide con el
+  cliente del dispatcher (ver la integración Dispatcher ↔ Vibe Kanban más
+  arriba). El flujo:
   1. El Implementador declara la deuda en su retorno estructurado: si es
      introducida o encontrada, qué es, por qué queda así, cuánto cuesta no
      arreglarla y qué la resolvería. La deuda encontrada cuenta solo en
