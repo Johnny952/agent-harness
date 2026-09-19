@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -75,3 +76,35 @@ def test_install_refuses_to_clobber_malformed_settings(tmp_path: Path) -> None:
         install_settings.install(str(settings_path))
 
     assert settings_path.read_text() == "{not json"
+
+
+def test_install_through_symlink_writes_target_and_keeps_link(tmp_path: Path) -> None:
+    target = tmp_path / "shared" / "settings.json"
+    target.parent.mkdir()
+    link = tmp_path / "account" / "settings.json"
+    link.parent.mkdir()
+    link.symlink_to(target)
+
+    install_settings.install(str(link))
+
+    assert link.is_symlink()
+    assert os.path.realpath(link) == str(target)
+    hooks = json.loads(target.read_text())["hooks"]
+    commands = [h["command"] for group in hooks["PreToolUse"] for h in group["hooks"]]
+    assert commands == [install_settings.HOOK_COMMAND]
+
+
+def test_install_through_dangling_symlink_creates_target(tmp_path: Path) -> None:
+    target = tmp_path / "shared" / "settings.json"
+    link = tmp_path / "account" / "settings.json"
+    link.parent.mkdir()
+    link.symlink_to(target)  # target, and even its parent dir, don't exist yet
+
+    install_settings.install(str(link))
+
+    assert link.is_symlink()
+    assert os.path.realpath(link) == str(target)
+    assert target.exists()
+    hooks = json.loads(target.read_text())["hooks"]
+    commands = [h["command"] for group in hooks["PreToolUse"] for h in group["hooks"]]
+    assert commands == [install_settings.HOOK_COMMAND]

@@ -42,10 +42,14 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   `--resume <session_id>` once one is available again. Each phase runs
   under an in-container `timeout` (`phase_timeout_seconds`, 2 hours by
   default) and counts as failed when it expires.
-- **Agent containers** — one per Claude Pro account, each with its own OAuth
-  session isolated via a shadowed `/root/.claude/credentials` volume over a
-  shared `/root/.claude` volume (`claude_shared` + `claude_creds_<account>`).
-  Each pairs with its own `docker:dind` sidecar (`DOCKER_HOST` pointed at the
+- **Agent containers** — one per Claude Pro account, each with its own Claude
+  Code config home (`CLAUDE_CONFIG_DIR=/root/.claude-account`, backed by that
+  account's own `claude_creds_<account>` volume), so `.credentials.json` and
+  `.claude.json` never leave that account's volume. Names every account
+  shares (session history, skills/agents/commands/plugins, `settings.json`)
+  live in the `claude_shared` volume at `/root/.claude` and are symlinked
+  into each account's config home by the image entrypoint. Each pairs with
+  its own `docker:dind` sidecar (`DOCKER_HOST` pointed at the
   sidecar, `sysbox-runc` runtime, no `--privileged`) so agents can build/run
   containers without touching the host Docker daemon.
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
@@ -138,6 +142,48 @@ volume per account — both declared `external: true` in
 `docker-compose.agents.yml`, so they must exist before step 4. (The
 per-account `dind_<account>_data` volumes are *not* external; Compose
 creates those itself.)
+
+`claude_shared` mounts at `/root/.claude` on every agent and holds only the
+names every account shares — session history, skills/agents/commands/
+plugins, `settings.json` — symlinked into place by the agent image
+entrypoint. Each `claude_creds_<account>` mounts at `/root/.claude-account`
+(`CLAUDE_CONFIG_DIR`, set in `docker/agent/Dockerfile`) and is that account's
+real Claude Code config home: `.credentials.json`, `.claude.json` and
+everything else the CLI keeps in its config home live there. One known
+exception: the CLI hardcodes the path of `.device-keys.json` to
+`~/.claude/`, i.e. `claude_shared`, whatever `CLAUDE_CONFIG_DIR` says, so if
+that file is ever created, every account shares it. Login, `/status` and a
+recreate didn't create it in the 2026-09-19 V0.4 re-run.
+
+> **Upgrading from the shared-login layout:** before this change a login
+> landed in `claude_shared` (`/root/.claude/.credentials.json`, and
+> possibly `backups/`), readable by every agent, and `/root/.claude.json`
+> lived in the container layer, so a recreate loses it. Either log in again
+> per account after upgrading (`docker exec -it agent-cuentaN claude`, then
+> `/login`), or move the existing login **before** recreating. Under the
+> old layout that account's `claude_creds_<account>` volume is mounted at
+> `/root/.claude/credentials`, so a `cp -p` inside the still-running old
+> container moves it without printing anything or mounting `claude_shared`
+> anywhere new (shown for cuenta1):
+>
+> ```bash
+> docker exec agent-cuenta1 sh -c 'cp -p /root/.claude/.credentials.json /root/.claude/credentials/ && chmod 600 /root/.claude/credentials/.credentials.json && { [ ! -f /root/.claude.json ] || { cp -p /root/.claude.json /root/.claude/credentials/.claude.json && chmod 600 /root/.claude/credentials/.claude.json; }; } && rm -rf /root/.claude/.credentials.json /root/.claude/backups'
+> ```
+>
+> That login belongs to whichever one account logged in before the
+> upgrade; copy it into that account's volume only. Every other account
+> logs in again after upgrading (`docker exec -it agent-cuentaN claude`,
+> then `/login`). The command above is a single `&&` chain, so nothing is
+> removed from `claude_shared` unless the copies (and their `chmod`)
+> already succeeded.
+>
+> Then rebuild the agent image (see above) and recreate the agents with
+> named services and `--no-deps`, from the repo root:
+> `docker compose -f docker/compose/docker-compose.agents.yml up -d --force-recreate --no-deps agent-cuenta1 agent-cuenta2`.
+> The entrypoint warns on every start while `.credentials.json`,
+> `.claude.json` or `backups/` is still in `claude_shared`. The empty
+> `credentials/` directory left in `claude_shared` is harmless. Unverified:
+> whether a missing `.claude.json` forces onboarding again.
 
 Cloned project repos are **not** a named Docker volume — `agent-*` bind-mounts
 `.data/projects` from the repo root itself (`../../.data/projects:/data/projects`
@@ -248,8 +294,8 @@ included:
   Coolify substitutes `${VARS}` into compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based
   step done once per agent container after it's up (e.g.
-  `docker exec -it agent-cuenta1 claude login`). No import can do this for
-  you.
+  `docker exec -it agent-cuenta1 claude`, then `/login`). No import can do
+  this for you.
 
 **Alternative: two Compose resources.** If you're already managing the
 agent/dind-sidecar images or the `claude_shared`/`claude_creds_<account>`
@@ -369,9 +415,8 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
   up -d collector dashboard registry-mirror`. (V0.2 control plane, V0.8)
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
-  along with others not listed here (credential isolation — V0.4, not yet
-  run, needs an operator login; the `/usage` probe under `-p` — V1.3, not
-  yet run; dind isolation, the registry mirror and bind mounts — V0.7,
+  along with others not listed here (the `/usage` probe under `-p` — V1.3,
+  not yet run; dind isolation, the registry mirror and bind mounts — V0.7,
   not yet run, blocked by V0.1 (no `sysbox-runc` on the verification
   host)):
   - Headless permissions: `exec_claude` passes no `--permission-mode` and
@@ -876,8 +921,12 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
      packs, so the project carries default profiles and a task label adds
      to them: a phase gets the project's profiles plus the task's.
      - Enable, never disable. `/root/.claude` is the `claude_shared`
-       volume, shared by both accounts and every project, so disabling a
-       skill there for one project disables it for all of them. CLI
+       volume, shared by both accounts and every project — it's the part
+       of each account's config home (`skills/`, `agents/`, `commands/`,
+       `plugins/`, `settings.json`) the entrypoint symlinks in from that
+       one volume, while logins and everything else per-account stay in
+       `claude_creds_<account>` — so disabling a skill there for one
+       project disables it for all of them. CLI
        2.1.273 also has no per-call switch for a single skill
        (`--disable-slash-commands` turns them all off). Hence nothing
        project-specific in the shared volume: a minimal base of role skills,
@@ -1121,8 +1170,9 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
     `docker/agent/`, `dispatcher/docker_exec.py`, and `dispatcher/quota.py`
     is Claude-specific today: the agent image installs only
     `@anthropic-ai/claude-code` (`docker/agent/Dockerfile`), credentials
-    are isolated per Claude Pro account via a shadowed
-    `/root/.claude/credentials` volume (`claude_creds_<account>`, see
+    are isolated per Claude Pro account via that account's own
+    `claude_creds_<account>` volume, mounted at the image's
+    `CLAUDE_CONFIG_DIR` (`/root/.claude-account`, see
     `scripts/setup_volumes.sh`), `exec_claude` shells out to the `claude`
     binary with `--output-format json`, and `quota.parse_usage_output`
     parses Claude Code's `/usage` text verbatim. Extending this to other AI
@@ -1130,10 +1180,10 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
     per provider:
     - A dedicated agent image (or a `provider` build arg) installing that
       CLI instead of/alongside Claude Code.
-    - Its own account-scoped credential volume and shadow-mount path,
-      mirroring the `claude_creds_<account>` pattern but at that CLI's
-      config location (e.g. `~/.codex`, `~/.gemini`) rather than
-      `~/.claude`.
+    - Its own account-scoped credential volume and config-dir mount
+      point, mirroring the `claude_creds_<account>` pattern but at that
+      CLI's config location (e.g. `~/.codex`, `~/.gemini`) rather than
+      `CLAUDE_CONFIG_DIR`.
     - A `provider` field on `AccountConfig` (`dispatcher/config.py`), and a
       small provider abstraction behind `docker_exec.exec_claude` so the
       dispatcher can invoke the right binary/flags and parse that CLI's

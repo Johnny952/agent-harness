@@ -13,7 +13,14 @@
 #     `scripts/setup_volumes.sh` is not required. The tradeoff: removing this
 #     resource in Coolify with its "delete volumes" option ticked deletes the
 #     Claude OAuth sessions along with it, where the split files' external
-#     volumes deliberately survive a `docker compose down`.
+#     volumes deliberately survive a `docker compose down`. `claude_shared`
+#     mounts at `/root/.claude` on every agent and holds only the names every
+#     account shares (session history, skills/agents/commands/plugins,
+#     settings.json), symlinked into place by the agent image entrypoint.
+#     Each `claude_creds_<account>` mounts at `/root/.claude-account`
+#     (`CLAUDE_CONFIG_DIR`, set in docker/agent/Dockerfile) and holds that
+#     account's login and everything else per-account (except
+#     `.device-keys.json`, whose path the CLI hardcodes to /root/.claude).
 #   - `ia_harness_net` is a plain network owned by this file, not split
 #     across two files joined via `external: true`.
 #   - Cloned project repos still bind-mount `<repo-root>/.data/projects`
@@ -127,8 +134,10 @@ services:
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta1
     volumes:
+      # See the header comment above: claude_shared is the shared allowlist,
+      # claude_creds_cuenta1 is this account's own config home.
       - claude_shared:/root/.claude
-      - claude_creds_cuenta1:/root/.claude/credentials
+      - claude_creds_cuenta1:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
     depends_on:
@@ -166,8 +175,9 @@ services:
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta2
     volumes:
+      # See agent-cuenta1 above.
       - claude_shared:/root/.claude
-      - claude_creds_cuenta2:/root/.claude/credentials
+      - claude_creds_cuenta2:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
     depends_on:

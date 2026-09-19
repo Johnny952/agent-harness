@@ -1,14 +1,19 @@
 """Register hooks/emit_event.py into Claude Code's settings.json.
 
-Claude Code reads hook configuration from ``~/.claude/settings.json``. In the
-agent image that directory is the ``claude_shared`` Docker volume mount point
-(docker/compose/docker-compose.agents.yml), which shadows anything baked into
-the image at ``/root/.claude`` — so the hook has to be registered when the
-container starts (docker/agent/entrypoint.sh), not at build time.
+Claude Code reads hook configuration from settings.json in its config home
+(``CLAUDE_CONFIG_DIR``, set per agent account in docker/agent/Dockerfile).
+settings.json itself is real only in the ``claude_shared`` volume, at
+``/root/.claude/settings.json``; docker/agent/entrypoint.sh symlinks it into
+every account's config home, so all accounts share one hook registration.
+The hook has to be registered when the container starts, not at build time,
+because the volume mount shadows anything baked into the image at
+``/root/.claude``.
 
 The merge is idempotent and additive: hook groups already present in
 settings.json are preserved, and the ia-harness command is only appended to an
-event when it is not registered there yet.
+event when it is not registered there yet. `install()` resolves its path with
+`os.path.realpath` first, so writing through the shared-name symlink lands on
+the real file instead of replacing the symlink with a private one.
 """
 
 from __future__ import annotations
@@ -93,8 +98,15 @@ def load_settings(path: Path) -> dict:
 
 
 def install(path: str = DEFAULT_SETTINGS_PATH, command: str = HOOK_COMMAND) -> dict:
-    """Idempotently register `command` on every hook event in `path`."""
-    settings_path = Path(path)
+    """Idempotently register `command` on every hook event in `path`.
+
+    `path` is resolved with `os.path.realpath` first, so when it is a
+    symlink — for example the shared `settings.json` name symlinked into a
+    per-account config home — the write lands on the symlink's target rather
+    than replacing the symlink itself. This also holds for a dangling
+    symlink, whose target does not exist yet.
+    """
+    settings_path = Path(os.path.realpath(path))
     settings = load_settings(settings_path)
     merged = merge_hooks(settings, build_hooks(command))
     if merged == settings:

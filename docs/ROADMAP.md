@@ -124,24 +124,44 @@ login.
   1. Log in on each account: `docker exec -it agent-cuentaN claude`, then
      `/login`.
   2. Find where the credentials landed:
-     `docker exec agent-cuenta1 sh -c 'ls -la /root/.claude /root/.claude/credentials /root/.claude.json'`.
+     `docker exec agent-cuentaN sh -c 'ls -la "$CLAUDE_CONFIG_DIR" /root/.claude'`.
   3. In each container, check which account `/status` reports (an
      interactive session; no model turn).
 - Pass:
-  - The OAuth credentials file sits under `/root/.claude/credentials/`
-    (the per-account volume).
+  - `.credentials.json` and `.claude.json` sit under `$CLAUDE_CONFIG_DIR`
+    (`/root/.claude-account`, that account's own `claude_creds_<account>`
+    volume) — never in `/root/.claude` (`claude_shared`).
+  - In `$CLAUDE_CONFIG_DIR`, each shared name is a symlink to
+    `/root/.claude/<name>` (`projects`, `todos`, `file-history`,
+    `session-env`, `plans`, `skills`, `agents`, `commands`, `plugins`,
+    `output-styles`, `settings.json`, `CLAUDE.md`); `/root/.claude`
+    (`claude_shared`) holds the real shared entries and no
+    `.credentials.json`, `.claude.json` or `backups/`.
+  - `docker logs agent-cuentaN 2>&1 | grep -c 'still in the shared claude_shared volume'`
+    prints `0` (no leftover warning).
   - `/status` reports a different account in each container.
-- Expected failure (hypothesis): Claude Code writes
-  `/root/.claude/.credentials.json`, which is inside the `claude_shared`
-  volume. Then the second login overwrites the first.
-  - Candidate fixes: have the entrypoint symlink that file into
-    `credentials/`, or give each account its own config dir.
-  - Either fix is part of stage 1, and V0.4 has to be re-run after it.
+  - After login, record whether `/root/.claude/.device-keys.json` exists
+    (`ls -la /root/.claude`, names only).
+- History: first run (2026-09-17, see Results log below) failed. The
+  per-account `claude_creds_<account>` volume was mounted at
+  `/root/.claude/credentials` but stayed empty: Claude Code writes
+  `.credentials.json` at the root of its config home (`/root/.claude`,
+  i.e. `claude_shared`), never into a `credentials/` sub-directory, and it
+  kept `.claude.json` at `/root/.claude.json`, in the container layer.
+  Fixed in stage 1 by giving each agent its own
+  `CLAUDE_CONFIG_DIR=/root/.claude-account`, backed by that account's
+  `claude_creds_<account>` volume, with the shared names symlinked back in
+  by the entrypoint. Re-run against the fix on 2026-09-19: PASS (see
+  Results log below).
 - Persistence:
-  1. Run `$DA up -d --force-recreate`.
+  1. Run `$DA up -d --force-recreate --no-deps agent-cuenta1 agent-cuenta2`.
   2. Repeat the `/status` step.
   3. Pass: no re-login and no onboarding prompt.
-  - This matters because `/root/.claude.json` is not in any volume.
+  - This matters because `.claude.json` now lives at
+    `$CLAUDE_CONFIG_DIR/.claude.json`, on that account's
+    `claude_creds_<account>` volume, so it persists across a recreate
+    (before the fix it was `/root/.claude.json`, in the container layer,
+    and was lost on recreate).
 
 **V0.5 Hooks reach the collector.**
 - Run:
@@ -461,7 +481,9 @@ logins.
   - Pass: cuenta2 answers PELICAN with `is_error: false`.
   - Record whether the returned `session_id` is the same or a new one.
   - The working directory has to match on both sides: the transcript lives
-    in `claude_shared` under a folder derived from it.
+    under `projects/` in each account's config home, which is one of the
+    names the entrypoint symlinks back into the shared `claude_shared`
+    volume — so it's visible at the same path on both agents.
 - **V5.2 Dispatcher failover, with a fault injected.** Waiting for a real
   quota exhaustion is too slow and too expensive. Instead, make cuenta1
   report a 429 after doing the real work, and pass `/usage` through
@@ -485,7 +507,7 @@ logins.
     - The later phases run on cuenta2.
   - Then remove the wrapper:
     - `docker exec agent-cuenta1 sh -c 'p=$(command -v claude); mv "$p.real" "$p"'`
-    - Or `$DA up -d --force-recreate agent-cuenta1`, which also
+    - Or `$DA up -d --force-recreate --no-deps agent-cuenta1`, which also
       re-checks V0.4's persistence.
 - **V5.3 Recovery re-check.**
   1. Leave `cuenta1.json` at `COOLING_DOWN`.
@@ -517,7 +539,18 @@ logins.
 ## Stage 1 — Fix the known gaps, then accept
 
 1. Apply V0–V2's decisions. Likely candidates, depending on the results:
-   - Credential isolation (V0.4).
+   - Credential isolation (V0.4 FAIL, 2026-09-17): fixed by giving each
+     agent its own `CLAUDE_CONFIG_DIR=/root/.claude-account`, backed by
+     that account's `claude_creds_<account>` volume, with the names every
+     account shares symlinked back into `claude_shared` by the entrypoint.
+     Implemented; V0.4 passed against it on 2026-09-19.
+   - The CLI auto-updater (found 2026-09-19 during the V0.4 re-run): in
+     each container the CLI runs `npm install -g` on its own, replacing the
+     pinned 2.1.273 until the next recreate (2.1.274 on 2026-09-17, 2.1.278
+     on 2026-09-19). One update was cut off mid-install when the
+     interactive session ended, which left `agent-cuenta1` with no
+     `claude` on `PATH`. Candidate fix: `ENV DISABLE_AUTOUPDATER=1` in the
+     agent image, so the pin holds and upgrades go through a rebuild.
    - Sysbox for the dind sidecars (confirmed missing, V0.1 FAIL — no
      `sysbox-runc` runtime, which also blocks V0.7): install sysbox, add a
      verification-only privileged-`dind` compose override, or defer both.
@@ -673,3 +706,4 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-09-16 | V0.10 | PASS | — | `docker exec agent-cuenta1 timeout --kill-after=30 5 sleep 100` -> exit 124; `docker exec agent-cuenta1 timeout --kill-after=2 2 sh -c 'trap "" TERM; sleep 100'` -> exit 137. Matches the 124-then-137 pair `exec_claude` maps to "timed out". Evidence: `.data/verify/v0.10-timeout.txt`. |
 | 2026-09-16 | V1 (flags) | PASS | Claude Code CLI 2.1.273 | `docker exec agent-cuenta1 claude --version` -> `2.1.273 (Claude Code)`, matches the expected pin. `claude --help` lists `-r, --resume [value]`, `--model <model>`, `--effort <level>`, and `--output-format <format>`. Also lists `--permission-mode <mode>`, `--allowedTools, --allowed-tools <tools...>`, and `--dangerously-skip-permissions` (needed later for V1.2). No model turn made (`--version`/`--help` only). Evidence: `.data/verify/v1-help.txt`. |
 | 2026-09-17 | V0.4 | FAIL | Claude Code CLI 2.1.273; ia-harness-agent `13e602bda885` | Operator logged in on `agent-cuenta1` only (`/status`: Claude Pro account; no prompt sent). The OAuth file landed at `/root/.claude/.credentials.json`, inside the `claude_shared` volume, not under `/root/.claude/credentials/` (the per-account `claude_creds_cuenta1` volume, still empty). `agent-cuenta2` sees the identical file (sha256 compared, hashes not recorded), so it is already running as account 1 and a login there would overwrite account 1. `/root/.claude.json` (account and onboarding state) is in no volume, so a recreate loses it; the persistence step was not run. Decision: stage 1 fix before logging in on `agent-cuenta2`; re-run V0.4 after it. Evidence: `.data/verify/v0.4-login.txt`. |
+| 2026-09-19 | V0.4 | PASS | Claude Code CLI 2.1.273 (image pin); ia-harness-agent `a497162d6ca0` | Re-run against stage 1's per-account `CLAUDE_CONFIG_DIR`. cuenta1's old shared login was moved into `claude_creds_cuenta1` with the README *Upgrading from the shared-login layout* chain (exit 0), the image rebuilt and both agents recreated with `--no-deps`; the operator then logged in on `agent-cuenta2` (no prompt sent). Both agents: `.credentials.json` and `.claude.json` sit in `$CLAUDE_CONFIG_DIR` with mode 600, none in `claude_shared`, `/root/.claude.json` absent; 12/12 shared names are symlinks to `/root/.claude/<name>`; leftover-warning count 0. `oauthAccount.accountUuid` differs between the two agents (sha256 compared in shell, values not recorded). Persistence: after `$DA up -d --force-recreate --no-deps agent-cuenta1 agent-cuenta2` the operator reported no login prompt and the same accounts, the accountUuid hashes were unchanged, and `hasCompletedOnboarding` is true on both (onboarding itself not reported). `.device-keys.json` was never created, in `claude_shared` or in either config dir. Also per account now: `history.jsonl`, `sessions/`, `cache/`, `backups/`. Stale copies from the old layout remain in `claude_shared` (`cache/`, `history.jsonl`, `sessions/`, `.last-update-result.json`, an empty `credentials/`). Finding: the CLI auto-updater overrides the pin inside the containers (2.1.278 installed at 20:28Z in cuenta1's pre-recreate container), and a later update cut off mid-install left `agent-cuenta1` with no `claude` on `PATH`; `agent-cuenta2` still runs 2.1.273. Decision: V0.4 closed; the auto-updater goes to stage 1 (candidate: `DISABLE_AUTOUPDATER=1` in the agent image). Evidence: `.data/verify/v0.4-rerun.txt`. |

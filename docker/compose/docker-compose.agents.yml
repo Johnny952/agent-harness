@@ -20,8 +20,16 @@ services:
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta1
     volumes:
+      # Names every account shares (session history, skills/agents/commands/
+      # plugins, settings.json) — symlinked into CLAUDE_CONFIG_DIR by the
+      # agent image entrypoint. Never holds a login; see claude_creds_cuenta1.
       - claude_shared:/root/.claude
-      - claude_creds_cuenta1:/root/.claude/credentials
+      # This account's Claude Code config home (CLAUDE_CONFIG_DIR, set in
+      # docker/agent/Dockerfile). Holds .credentials.json, .claude.json and
+      # everything else per-account (except .device-keys.json, whose path the
+      # CLI hardcodes to /root/.claude), so cuenta1's login stays out of
+      # claude_shared and out of cuenta2's reach.
+      - claude_creds_cuenta1:/root/.claude-account
       # Repo-relative bind mount (not a named volume) so cloned project repos
       # live at <repo-root>/.data/projects on the host, inspectable directly.
       # NOTE: the agent image has no USER directive, so files written here
@@ -62,8 +70,10 @@ services:
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta2
     volumes:
+      # See agent-cuenta1 above: claude_shared is the read/write-shared
+      # allowlist, claude_creds_cuenta2 is this account's own config home.
       - claude_shared:/root/.claude
-      - claude_creds_cuenta2:/root/.claude/credentials
+      - claude_creds_cuenta2:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
     depends_on:

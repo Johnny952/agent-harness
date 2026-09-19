@@ -25,12 +25,21 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 # Observability hook: emit_event.py POSTs each Claude Code hook event to the
 # collector (COLLECTOR_URL / SOURCE_APP are set per agent service in
 # docker/compose/docker-compose.agents.yml); install_settings.py registers it
-# in ~/.claude/settings.json at container start (see entrypoint.sh).
+# in /root/.claude/settings.json (the shared volume, symlinked into
+# CLAUDE_CONFIG_DIR by the entrypoint) at container start (see entrypoint.sh).
 COPY hooks/emit_event.py /usr/local/lib/ia-harness/emit_event.py
 COPY hooks/install_settings.py /usr/local/lib/ia-harness/install_settings.py
 
 COPY docker/agent/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# The Claude Code config home: must be image env, not something the
+# entrypoint exports, because `docker exec` sessions (the dispatcher's
+# `claude -p` and the operator's `/login`) inherit container env but never
+# variables an entrypoint sets at runtime. Each agent service mounts its own
+# claude_creds_<account> volume here; /root/.claude (claude_shared) holds the
+# names every account shares, symlinked in by the entrypoint.
+ENV CLAUDE_CONFIG_DIR=/root/.claude-account
 
 WORKDIR /data/projects
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -48,6 +48,19 @@ def test_real_dockerfile_pins_claude_code_version() -> None:
     _assert_claude_code_pinned(_read())
 
 
+def test_final_stage_sets_claude_config_dir() -> None:
+    """CLAUDE_CONFIG_DIR must be image env (a Dockerfile ENV), not something
+    the entrypoint exports: `docker exec` sessions (the dispatcher's
+    `claude -p`, an operator's `/login`) inherit container env but never
+    variables an entrypoint sets at runtime (see docker/agent/entrypoint.sh).
+    """
+    joined = _read().replace("\\\n", " ")
+    final_stage = joined[joined.rfind("\nFROM "):]
+    assert re.search(
+        r"^ENV CLAUDE_CONFIG_DIR=/root/\.claude-account\s*$", final_stage, re.MULTILINE
+    ), "expected `ENV CLAUDE_CONFIG_DIR=/root/.claude-account` in the final build stage"
+
+
 def _at_latest(text: str) -> str:
     return text.replace(
         "RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}",

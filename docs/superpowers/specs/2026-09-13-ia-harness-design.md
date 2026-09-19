@@ -94,10 +94,37 @@ Evaluadas:
 
 ## 3. Volúmenes y separación de credenciales **[Aprobada]**
 
-- Los volúmenes Docker se montan de forma **anidada**: hay un volumen
-  `~/.claude` compartido entre todos los contenedores (sesiones, config),
-  pero dentro de él, el sub-path de credenciales queda **sombreado** por un
-  volumen más específico, distinto por cuenta.
+> **Nota de revisión (2026-09-17):** el diseño original de esta sección
+> (el volumen `claude_creds_<cuenta>` montado en
+> `/root/.claude/credentials`, anidado dentro del volumen compartido
+> `~/.claude`) falló en V0.4. El montaje anidado sí funcionaba —el volumen
+> estaba montado, pero vacío—: el problema es que Claude Code nunca
+> escribe en un subdirectorio `credentials/`. Guarda `.credentials.json`
+> en la raíz de su *config home* (`~/.claude/.credentials.json`, es decir,
+> en `claude_shared`, visible para las demás cuentas) y `.claude.json` en
+> `~/.claude.json`, fuera de cualquier volumen, así que se perdía al
+> recrear el contenedor. El texto que sigue describe el diseño corregido,
+> ya implementado y verificado en V0.4 el 2026-09-19.
+
+- Cada contenedor de agente tiene su propio *config home* de Claude Code,
+  fijado en la imagen vía `ENV CLAUDE_CONFIG_DIR=/root/.claude-account`
+  (`docker/agent/Dockerfile`) y respaldado por el volumen
+  `claude_creds_<cuenta>` de esa cuenta. Ahí viven `.credentials.json`,
+  `.claude.json` y todo lo demás que Claude Code guarda en su *config
+  home*, así que una cuenta no puede leer las credenciales de otra. La
+  única excepción conocida es `.device-keys.json`: el CLI tiene fija su
+  ruta en `~/.claude/` (es decir, en `claude_shared`), con o sin
+  `CLAUDE_CONFIG_DIR`, así que, si llega a crearse, lo comparten todas las
+  cuentas. En la nueva ejecución de V0.4 (2026-09-19) no lo crearon ni el
+  login, ni `/status`, ni recrear el contenedor.
+- Lo que sí comparten todas las cuentas (histórico de sesiones, skills,
+  agents, commands, plugins, `settings.json`) vive en el volumen
+  `claude_shared`, montado en `/root/.claude`. El entrypoint de la imagen
+  (`docker/agent/entrypoint.sh`) crea en cada arranque, dentro de
+  `$CLAUDE_CONFIG_DIR`, un enlace simbólico hacia `/root/.claude/<nombre>`
+  para cada nombre de esa lista explícita — nunca al revés, y nunca nada
+  fuera de esa lista — así que el entrypoint nunca enlaza el login ni
+  `.claude.json` hacia el volumen compartido.
 - Resultado: cada contenedor ve el mismo histórico de sesiones y config
   general, pero autentica con una cuenta Claude Pro propia — sin que una
   cuenta pueda leer las credenciales de otra.
@@ -206,8 +233,8 @@ indefinidamente a un contenedor que no va a responder.
    > máquina — no hay todavía una segunda cuenta Pro disponible para
    > confirmar el caso realmente cross-account. La evidencia a favor es
    > fuerte por diseño (el almacenamiento de sesión se indexa solo por
-   > path, y la autenticación OAuth vive en una capa separada, ya resuelta
-   > por el sombreado de volúmenes de la sección 3), pero se recomienda
+   > path, y la autenticación OAuth vive en el config home separado y
+   > propio de cada cuenta, resuelto en la sección 3), pero se recomienda
    > validarlo empíricamente en cuanto la segunda cuenta esté provisionada.
 
 ### 4b. Hardening de seguridad para Docker-out-of-Docker (DooD) **[Aprobada]**
@@ -288,8 +315,8 @@ introduce decisiones nuevas.
 │                                    ▼                                     │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
 │  │ VOLÚMENES                                                          │ │
-│  │ • ~/.claude compartido (sesiones+config), sombreado por credencial│ │
-│  │   propia de cada cuenta (sección 3)                                │ │
+│  │ • ~/.claude compartido (sesiones+config); credencial propia de     │ │
+│  │   cada cuenta en su propio config home, CLAUDE_CONFIG_DIR (sec. 3) │ │
 │  │ • /data/projects/<slug>/worktrees/<task-id> (git worktrees)        │ │
 │  │ • .hive/tasks/<task-id>.md por tarea (lock+heartbeat, handoff)     │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
@@ -1117,18 +1144,19 @@ capacidad, agregar otra cuenta Claude es solo configuración (el diseño ya
 soporta N cuentas, ver *Decisiones de alcance*). Todo lo que está bajo
 `docker/agent/`, `dispatcher/docker_exec.py` y `dispatcher/quota.py` es
 específico de Claude: la imagen agente instala solo
-`@anthropic-ai/claude-code`, las credenciales se aíslan por cuenta con un
-volumen que sombrea `/root/.claude/credentials` (`claude_creds_<cuenta>`,
-sección 3), `exec_claude` invoca el binario `claude` con
+`@anthropic-ai/claude-code`, las credenciales se aíslan por cuenta con el
+volumen `claude_creds_<cuenta>` de esa cuenta, montado en
+`CLAUDE_CONFIG_DIR` (sección 3), `exec_claude` invoca el binario `claude` con
 `--output-format json`, y `quota.parse_usage_output` parsea el texto de
 `/usage` tal cual. Extenderlo a otros CLIs (p. ej. Codex CLI, Gemini CLI)
 requeriría, por proveedor:
 
 - Una imagen agente propia (o un build arg `provider`) que instale ese CLI
   en vez de Claude Code o junto a él.
-- Su propio volumen de credenciales por cuenta y su ruta sombreada, con el
-  mismo patrón que `claude_creds_<cuenta>` pero en el directorio de config
-  de ese CLI (p. ej. `~/.codex`, `~/.gemini`).
+- Su propio volumen de credenciales por cuenta y su propio punto de
+  montaje de config home, con el mismo patrón que `claude_creds_<cuenta>`
+  pero apuntando al directorio de config de ese CLI (p. ej. `~/.codex`,
+  `~/.gemini`) en vez de `CLAUDE_CONFIG_DIR`.
 - Un campo `provider` en `AccountConfig` (`dispatcher/config.py`) y una
   abstracción de proveedor detrás de `docker_exec.exec_claude`, para
   invocar el binario y los flags correctos y parsear su session id,
