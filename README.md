@@ -347,9 +347,10 @@ prioritized item lists the checks it depends on.
 
 ### Known gaps (fix first)
 
-These sit in the core pipeline rather than on top of it, and likely keep a
-task from producing a usable result end to end today. The unit tests mock
-Claude Code, Docker, and Vibe Kanban, so none of them catch these.
+These sit in the core pipeline rather than on top of it: most likely keep
+a task from producing a usable result end to end today, and the rest tax
+every phase that runs. The unit tests mock Claude Code, Docker, and Vibe
+Kanban, so none of them catch these.
 
 - **Agents never see the task.** `_role_prompt`
   (`dispatcher/dispatcher.py`) sends only the role, task ID, and `.hive`
@@ -413,6 +414,24 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
   community image), bring up the other three control-plane services by
   name instead: `docker compose -f docker/compose/docker-compose.yml
   up -d collector dashboard registry-mirror`. (V0.2 control plane, V0.8)
+- **Every phase pays for skills nobody chose.** The CLI syncs each
+  account's claude.ai skills into `~/.claude/skills/synced/<uuid>/`, and
+  the entrypoint symlinks `skills` in from `claude_shared`, which both
+  agents mount — so each container also carries the *other* account's
+  synced set. Measured in `agent-cuenta1` on 2026-09-19: two UUID-named
+  sets, 20 skills, 13,535 bytes of name and description (~3,400 tokens)
+  in the system prompt of every turn of every phase, for `docs`, `docx`,
+  `pdf`, `pptx`, `xlsx`, `morning`, `import-memory`, `skill-creator`,
+  `chrome-browser`, `computer-use`, `deep-research` and the rest — none
+  of which a coding role would ever invoke. It is exactly what item 5
+  rules out ("a pack isn't installed by default"), arriving by sync
+  instead of by install, and it leaks one account's skill list into the
+  other's container. Candidate fixes, none verified: a CLI setting or env
+  var that turns skill sync off; dropping `skills` from the entrypoint's
+  shared allowlist so each account's sync stays in its own
+  `claude_creds_<account>` (per-call delivery in items 1 and 5 leaves the
+  shared `skills/` with no other user); or pruning `synced/` at container
+  start, which the next sync undoes.
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
   along with others not listed here (the `/usage` probe under `-p` — V1.3,
@@ -451,8 +470,8 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
      doesn't use. Deliver them per call, not by installing them in the
      shared `/root/.claude` (see item 5): candidates are
      `--append-system-prompt-file`, `--agents`, or a per-role
-     `--plugin-dir`, the same flag item 5 uses for packs. Two sources, both
-     vendored and trimmed rather than installed:
+     `--plugin-dir`, the same flag item 5 uses for packs. Three sources,
+     all vendored and trimmed rather than installed:
      - [superpowers](https://github.com/obra/superpowers), for the
        general method. Don't install the plugin in the agent image: its
        `SessionStart` hook injects `using-superpowers`, whose "invoke a
@@ -486,6 +505,26 @@ Claude Code, Docker, and Vibe Kanban, so none of them catch these.
        reviewers per round double the quota. Tone down its all-caps
        "nothing can slip through" wording too, which invites
        over-reporting.
+     - [ponytail](https://github.com/DietrichGebert/ponytail), for scope
+       control, where the other two cover method and review. It's a YAGNI
+       ladder: before writing code, stop at the first rung that solves the
+       problem actually stated instead of building for the next one.
+       Independent testing by JetBrains measured −15% code, −10.3% cost
+       and −11% time against a no-skill baseline, with no quality
+       difference detectable at their ~80 pairs — a small sample, but on
+       exactly the axis that bottlenecks this harness (item 2), and less
+       code per round is also fewer revision rounds. Give it to the
+       arquitecto and implementador only: a revisor carrying a YAGNI bias
+       approves thin work instead of flagging it, and its bar already
+       comes from `thermo-nuclear-review` above. Vendor and trim it like
+       the other two rather than `/plugin install`-ing it, for a reason
+       beyond context cost: `claude_shared` is mounted by both agents and
+       tracks no version, so a third-party skill installed there drifts
+       inside running containers independently of the image — the same
+       class of defect as the CLI auto-updater (see
+       [`docs/ROADMAP.md`](docs/ROADMAP.md)). Unmeasured here: whether an
+       always-on ladder also suppresses work the task did ask for, which
+       would land on the revisor.
    - *Revive before respawn.* Every role skill gets this rule: to resume
      work delegated to a subagent, first try to revive that subagent by its
      ID (Claude Code's `SendMessage` to the agent ID continues it with its
