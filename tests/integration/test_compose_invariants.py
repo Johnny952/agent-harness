@@ -110,6 +110,33 @@ def test_every_dind_sidecar_uses_sysbox_runc_and_nothing_is_privileged() -> None
 
 
 @pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_dispatcher_is_gated_behind_its_own_profile(compose_file: str) -> None:
+    """The dispatcher is single-shot (dispatcher.run_task_cycle runs one task
+    and exits) and its `command` is a placeholder example, so an unprofiled
+    service turns a plain `docker compose up -d` into a real `run-task
+    --task-id CHANGE_ME` against a logged-in account. A profiled service is
+    skipped unless named explicitly or its profile is enabled, which still
+    leaves `docker compose run --rm dispatcher ...` working. Asserted on both
+    files that define the service, since only the Coolify one carried the
+    profile originally."""
+    compose = _load(compose_file)
+    dispatcher = compose["services"]["dispatcher"]
+
+    assert dispatcher.get("profiles") == ["dispatcher"], (
+        f"dispatcher in {compose_file} must be gated behind profiles: "
+        f'["dispatcher"], found {dispatcher.get("profiles")!r} -- without it '
+        "`docker compose up` runs its placeholder command as a real task"
+    )
+
+    assert dispatcher.get("restart", "no") == "no", (
+        f"dispatcher in {compose_file} must not be restarted: it exits after "
+        f'one task, so any policy but "no" re-runs that task forever'
+    )
+
+
+@pytest.mark.parametrize(
     "compose_file", ["docker-compose.agents.yml", "docker-compose.coolify.yml"]
 )
 def test_every_agent_service_isolates_its_config_home(compose_file: str) -> None:

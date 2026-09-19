@@ -74,7 +74,17 @@ services:
   # real argparse shape (`--config <path> run-task --task-id <id> --project
   # <slug>`). Override `command` (or use `docker compose run --rm
   # dispatcher ...`) with real --task-id/--project values per task.
+  #
+  # The `dispatcher` profile keeps that example `command` from ever running
+  # by accident: without it a plain `docker compose up -d` starts this
+  # service like any other and fires `run-task --task-id CHANGE_ME
+  # --project CHANGE_ME` against a logged-in account, spending quota on a
+  # task nobody asked for. A profiled service is skipped unless it is named
+  # explicitly or its profile is enabled, so `docker compose run --rm
+  # dispatcher ...` and `--profile dispatcher up` still work unchanged.
+  # docker-compose.coolify.yml has carried this since it was written.
   dispatcher:
+    profiles: ["dispatcher"]
     build:
       context: ../..
       dockerfile: docker/dispatcher/Dockerfile
