@@ -361,6 +361,41 @@ def _update_task_status(kanban: VibeKanbanClient, task_id: str, status: str) -> 
         logger.warning("kanban status update failed for task %s (%s): %s", task_id, status, exc)
 
 
+def cleanup_container(cfg: Config) -> str | None:
+    """Which container to run worktree housekeeping in.
+
+    Any of them: every agent container bind-mounts the same host projects root
+    (see docker/compose/docker-compose.agents.yml), so this does not have to be
+    the account that ran the phases — which by then may be rate-limited.
+    """
+    return cfg.accounts[0].container if cfg.accounts else None
+
+
+def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
+    """Remove a finished task's reviewing checkouts, keeping the writers' one.
+
+    Best-effort: this runs on the way out of a cycle that may already have
+    failed, so it must never be the thing that raises, and a removal that does
+    not happen only costs disk — create_worktree rebuilds these anyway.
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return
+    project_dir = f"{cfg.projects_root}/{slug}"
+    owner = docker_exec.read_owner(container, project_dir)
+    try:
+        removed = docker_exec.remove_review_worktrees(container, cfg.projects_root, slug, task_id)
+    except Exception as exc:
+        logger.warning("could not clean up review worktrees for task %s: %s", task_id, exc)
+        return
+    finally:
+        # `git worktree prune` writes to .git/worktrees/ as root, same as the
+        # phases do, so the tree goes back to the host user either way.
+        docker_exec.restore_owner(container, project_dir, owner)
+    if removed:
+        logger.info("task %s: removed review worktrees %s", task_id, ", ".join(removed))
+
+
 def run_task_cycle(
     cfg: Config,
     task_id: str,
@@ -390,7 +425,12 @@ def run_task_cycle(
         _update_task_status(kanban, task_id, "blocked")
         return
 
+    # Set when a phase bounced off another owner's lock: that run's worktrees
+    # are in use, so the cleanup below has to keep its hands off them.
+    foreign_lock = False
+
     def run_phase(role: str, round_num: int | None = None, final: bool = False) -> DispatchResult | None:
+        nonlocal foreign_lock
         _update_task_status(kanban, task_id, f"in_progress:{role}")
         effort = (
             cfg.escalated_effort
@@ -415,6 +455,7 @@ def run_task_cycle(
             # decides when the task can be taken over.
             logger.warning("task %s is locked by another owner: %s", task_id, exc)
             _update_task_status(kanban, task_id, "blocked")
+            foreign_lock = True
             return None
         if not result.success:
             _update_task_status(kanban, task_id, "blocked")
@@ -427,25 +468,33 @@ def run_task_cycle(
         )
         return result
 
-    if run_phase("arquitecto") is None:
-        return
-
-    approved = False
-    for round_num in range(1, cfg.max_revision_rounds + 1):
-        if run_phase("implementador", round_num=round_num) is None:
+    try:
+        if run_phase("arquitecto") is None:
             return
-        revisor_result = run_phase("revisor", round_num=round_num)
-        if revisor_result is None:
+
+        approved = False
+        for round_num in range(1, cfg.max_revision_rounds + 1):
+            if run_phase("implementador", round_num=round_num) is None:
+                return
+            revisor_result = run_phase("revisor", round_num=round_num)
+            if revisor_result is None:
+                return
+            if revisor_approved(revisor_result.result_text):
+                approved = True
+                break
+
+        if not approved:
+            _update_task_status(kanban, task_id, "blocked")
             return
-        if revisor_approved(revisor_result.result_text):
-            approved = True
-            break
 
-    if not approved:
-        _update_task_status(kanban, task_id, "blocked")
-        return
+        if run_phase("auditor", final=True) is None:
+            return
 
-    if run_phase("auditor", final=True) is None:
-        return
-
-    _update_task_status(kanban, task_id, "done")
+        _update_task_status(kanban, task_id, "done")
+    finally:
+        # Every way out of here is terminal for this run — done, blocked, or a
+        # crash — and the reviewing checkouts are rebuilt on demand, so they can
+        # go now rather than pile up per task. The exception is a task this run
+        # never owned: another dispatcher is still working in those worktrees.
+        if not foreign_lock:
+            _drop_review_worktrees(cfg, task_id, slug)

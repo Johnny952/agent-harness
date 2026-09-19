@@ -64,6 +64,7 @@ class _FakeGit:
     def __init__(self):
         self.commits = []
         self.restored = []
+        self.review_cleanups = []
 
     def commit_worktree(self, container, workdir, message, author_name, author_email):
         self.commits.append(
@@ -83,6 +84,10 @@ class _FakeGit:
     def restore_owner(self, container, path, owner):
         self.restored.append((path, owner))
 
+    def remove_review_worktrees(self, container, projects_root, slug, task_id):
+        self.review_cleanups.append((container, projects_root, slug, task_id))
+        return ["revisor", "auditor"]
+
 
 @pytest.fixture(autouse=True)
 def fake_git(monkeypatch):
@@ -90,6 +95,9 @@ def fake_git(monkeypatch):
     monkeypatch.setattr(dispatcher_mod.docker_exec, "commit_worktree", fake.commit_worktree)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "read_owner", fake.read_owner)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "restore_owner", fake.restore_owner)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "remove_review_worktrees", fake.remove_review_worktrees
+    )
     return fake
 
 
@@ -911,6 +919,121 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
     assert "auditor" not in calls
     assert ("task-1", "blocked") in kanban.statuses
     assert ("task-1", "done") not in kanban.statuses
+
+
+def _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    """Every phase works and the revisor approves on the first round."""
+    return dispatcher_mod.DispatchResult(
+        success=True,
+        session_id=None,
+        result_text="VERDICT: APPROVED" if role == "revisor" else "ok",
+        account="cuenta1",
+    )
+
+
+def _rejecting_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    """Every phase works but the revisor never approves: the task ends blocked."""
+    return dispatcher_mod.DispatchResult(
+        success=True,
+        session_id=None,
+        result_text="VERDICT: CHANGES_REQUESTED" if role == "revisor" else "ok",
+        account="cuenta1",
+    )
+
+
+@pytest.mark.parametrize(
+    "dispatch,status",
+    [(_approving_dispatch_phase, "done"), (_rejecting_dispatch_phase, "blocked")],
+    ids=["done", "blocked"],
+)
+def test_run_task_cycle_drops_the_review_worktrees_when_the_task_ends(
+    tmp_path, monkeypatch, fake_git, dispatch, status,
+) -> None:
+    """Blocked is as terminal as done here: nobody is reading those checkouts."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", dispatch)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", status) in kanban.statuses
+    assert fake_git.review_cleanups == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
+
+
+def test_run_task_cycle_drops_the_review_worktrees_after_a_failed_phase(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """A cycle that stops early is over too, and left worktrees behind doing it."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        lambda *a, **kw: dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account=""),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert len(fake_git.review_cleanups) == 1
+
+
+def test_run_task_cycle_leaves_another_owners_worktrees_alone(tmp_path, monkeypatch, fake_git) -> None:
+    """The lock holder is still working in them; deleting them would break its phase."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="otro")
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 10% used · resets later\n"
+                "Current week (all models): 10% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert fake_git.review_cleanups == []
+    assert ("task-1", "blocked") in kanban.statuses
+
+
+def test_run_task_cycle_still_finishes_when_the_cleanup_fails(tmp_path, monkeypatch, caplog) -> None:
+    """Housekeeping must never turn a finished task into a traceback."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    def exploding_cleanup(container, projects_root, slug, task_id):
+        raise RuntimeError("docker daemon went away")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "remove_review_worktrees", exploding_cleanup)
+
+    kanban = _FakeKanban()
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", "done") in kanban.statuses
+    assert "docker daemon went away" in caplog.text
+
+
+def test_run_task_cycle_cleanup_does_not_swallow_a_real_failure(tmp_path, monkeypatch) -> None:
+    """The cleanup runs in a `finally`, which must not eat the exception it runs after."""
+    cfg = _make_config(tmp_path)
+
+    def exploding_dispatch_phase(*args, **kwargs):
+        raise RuntimeError("phase blew up")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", exploding_dispatch_phase)
+
+    with pytest.raises(RuntimeError, match="phase blew up"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+
+def test_cleanup_container_returns_none_without_accounts(tmp_path) -> None:
+    """A config with no accounts has nothing to run docker exec in."""
+    assert dispatcher_mod.cleanup_container(_make_config(tmp_path, accounts=[])) is None
 
 
 def _phase_exec(result):

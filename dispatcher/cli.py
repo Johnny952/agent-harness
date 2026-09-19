@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dispatcher import context_transfer, docker_exec
 from dispatcher.config import Config, load_config
-from dispatcher.dispatcher import container_for, run_task_cycle
+from dispatcher.dispatcher import cleanup_container, container_for, run_task_cycle
 from dispatcher.vibe_kanban_client import VibeKanbanClient
 
 
@@ -75,6 +75,16 @@ def main() -> None:
     bootstrap_parser.add_argument("--account", required=True, help="Account name from config.yaml's accounts list")
     bootstrap_parser.add_argument("--project", required=True, help="Project slug")
 
+    cleanup_parser = sub.add_parser(
+        "cleanup-task",
+        help="Delete every worktree of one task, including the writers' one. "
+        "The branch agent/task/<task-id> is kept, so no committed work is lost. "
+        "A finished cycle already drops the reviewing worktrees by itself; this "
+        "is the deliberate step that reclaims the rest, once you are done with it.",
+    )
+    cleanup_parser.add_argument("--task-id", required=True)
+    cleanup_parser.add_argument("--project", required=True, help="Project slug")
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -89,6 +99,21 @@ def main() -> None:
         container = container_for(cfg, args.account)
         project_dir = f"{cfg.projects_root}/{args.project}"
         docker_exec.run_docker_exec(container, "/", ["mkdir", "-p", project_dir])
+    elif args.command == "cleanup-task":
+        container = cleanup_container(cfg)
+        if container is None:
+            parser.error("no accounts configured: nothing to run the cleanup in")
+        project_dir = f"{cfg.projects_root}/{args.project}"
+        owner = docker_exec.read_owner(container, project_dir)
+        try:
+            removed = docker_exec.remove_task_worktrees(
+                container, cfg.projects_root, args.project, args.task_id
+            )
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
+        branch = docker_exec.task_branch(args.task_id)
+        print(f"removed {len(removed)} worktree(s): {', '.join(removed) or '(none)'}")
+        print(f"branch {branch} kept; `git worktree add <path> {branch}` checks it out again")
 
 
 if __name__ == "__main__":

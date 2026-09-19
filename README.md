@@ -64,7 +64,12 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   commits what each of those phases left before the next role runs. The
   reviewing roles (revisor, auditor) get their own checkout, detached at
   that branch's tip and rebuilt every round, so they always read the code
-  as it stands rather than a pristine `HEAD`.
+  as it stands rather than a pristine `HEAD`. When the cycle ends — `done`,
+  `blocked`, or a crash — those reviewing checkouts are removed, since the
+  next round would rebuild them anyway; the writers' one stays, holding
+  whatever a failed phase left uncommitted. The exception is a task this
+  run never owned: if it bounced off another dispatcher's lock, that other
+  run is still working in those worktrees, so they are left alone.
 - **Observability** (`observability/`) — Claude Code hooks
   (`hooks/emit_event.py`, registered by `hooks/install_settings.py` on
   container start) POST events to a collector (`observability/collector`,
@@ -291,6 +296,18 @@ docker compose -f docker/compose/docker-compose.yml --profile dispatcher \
 `bootstrap-project` only creates the directory; cloning the actual project
 repository into it is still a manual, one-time step.
 
+A finished cycle drops its reviewing worktrees by itself, but the writers'
+one is kept on purpose. Once you are done reading the result, reclaim it:
+
+```bash
+python -m dispatcher.cli --config config.yaml cleanup-task \
+  --task-id T-001 --project my-project
+```
+
+That deletes `worktrees/T-001/` whole. The branch `agent/task/T-001` is
+untouched — the commits are the work, these are only checkouts of them, so
+`git worktree add <path> agent/task/T-001` brings any of it back.
+
 **What "issuing commands from the interface" means today:** Vibe Kanban
 (`http://127.0.0.1:9100`, loopback-only) is a task backlog/MCP store —
 useful for tracking and for driving it via MCP tools from your own Claude
@@ -399,13 +416,14 @@ Kanban, so none of them catch these.
 
 - **A finished task goes nowhere.** The work now accumulates on
   `agent/task/<task-id>` (see "Context handoff" above), but nothing merges
-  that branch, opens a PR, or deletes the worktrees when the task ends
-  `done` — the result sits in `.data/projects/<slug>` for a human to find.
-  The half of this gap that kept the revisor and auditor reviewing a
-  pristine `HEAD` is fixed; what's left is the ending. Candidate fixes,
-  none designed: the dispatcher merging to the default branch after an
-  approving auditor verdict, or `gh pr create` from the task branch,
-  which needs a remote and a token neither container has today.
+  that branch or opens a PR when the task ends `done` — the result sits in
+  `.data/projects/<slug>` for a human to find. The two halves of this gap
+  that are fixed: the revisor and auditor no longer review a pristine
+  `HEAD`, and the worktrees no longer pile up per task. What's left is the
+  ending. Candidate fixes, none designed: the dispatcher merging to the
+  default branch after an approving auditor verdict, or `gh pr create`
+  from the task branch, which needs a remote and a token neither container
+  has today.
 - **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
   Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
   see below): the server speaks stdio via an `mcp` subcommand, not the

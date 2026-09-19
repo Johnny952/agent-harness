@@ -10,8 +10,11 @@ from dispatcher.docker_exec import (
     create_worktree,
     exec_claude,
     read_owner,
+    remove_review_worktrees,
+    remove_task_worktrees,
     restore_owner,
     run_docker_exec,
+    task_worktrees_dir,
 )
 
 
@@ -516,6 +519,138 @@ def test_create_worktree_pins_git_locale(monkeypatch) -> None:
     create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", "implementador")
 
     assert all("LC_ALL=C" in cmd for cmd in calls)
+
+
+_WORKTREES = f"{_PROJECT}/worktrees/task-1"
+
+
+def _listing(*names, returncode=0):
+    """`ls -1` of the task's worktrees directory answers with these names."""
+
+    def respond(args):
+        if args[0] == "ls":
+            return (returncode, "".join(f"{name}\n" for name in names), "")
+        return (0, "", "")
+
+    return respond
+
+
+def test_remove_review_worktrees_keeps_the_writers_worktree(monkeypatch) -> None:
+    """The reviewing checkouts are disposable; `work` holds the deliverable."""
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run", _fake_docker(calls, _listing("auditor", "revisor", "work"))
+    )
+
+    removed = remove_review_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert removed == ["auditor", "revisor"]
+    assert [_in_container(cmd) for cmd in calls] == [
+        ["ls", "-1", _WORKTREES],
+        ["rm", "-rf", f"{_WORKTREES}/auditor"],
+        ["rm", "-rf", f"{_WORKTREES}/revisor"],
+        ["git", "worktree", "prune"],
+    ]
+
+
+def test_remove_review_worktrees_cleans_up_a_role_nobody_listed(monkeypatch) -> None:
+    """create_worktree defines reviewers by negation, so cleanup must too.
+
+    A role added to the config later gets a review worktree without anything
+    here learning its name; finding them by listing the directory is what keeps
+    the two sides from drifting into a leak.
+    """
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _listing("work", "qa")))
+
+    assert remove_review_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1") == ["qa"]
+    assert ["rm", "-rf", f"{_WORKTREES}/qa"] in [_in_container(cmd) for cmd in calls]
+
+
+def test_remove_review_worktrees_touches_nothing_when_only_work_is_there(monkeypatch) -> None:
+    """No reviewers left means no rm and, with it, no pointless prune."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _listing("work")))
+
+    assert remove_review_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1") == []
+    assert [_in_container(cmd) for cmd in calls] == [["ls", "-1", _WORKTREES]]
+
+
+def test_remove_review_worktrees_is_quiet_when_the_task_never_ran(monkeypatch) -> None:
+    """ls fails on a task with no worktrees directory: nothing to clean, not an error."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _listing(returncode=2)))
+
+    assert remove_review_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1") == []
+    assert [_in_container(cmd) for cmd in calls] == [["ls", "-1", _WORKTREES]]
+
+
+def test_remove_task_worktrees_takes_the_whole_directory_but_not_the_branch(monkeypatch) -> None:
+    """The commits are the work; these are only checkouts of them."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _listing("revisor", "work")))
+
+    removed = remove_task_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert removed == ["revisor", "work"]
+    assert [_in_container(cmd) for cmd in calls] == [
+        ["ls", "-1", _WORKTREES],
+        ["rm", "-rf", _WORKTREES],
+        ["git", "worktree", "prune"],
+    ]
+    assert not any("branch" in cmd for cmd in calls)
+
+
+def test_remove_task_worktrees_raises_when_the_directory_survives(monkeypatch) -> None:
+    """Reporting a cleanup that did not happen would be worse than failing."""
+
+    def respond(args):
+        if args[0] == "rm":
+            return (1, "", "rm: cannot remove: Device or resource busy\n")
+        return _listing("work")(args)
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with pytest.raises(RuntimeError, match="could not remove"):
+        remove_task_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+
+@pytest.mark.parametrize(
+    "remove",
+    [remove_review_worktrees, remove_task_worktrees],
+    ids=["review", "task"],
+)
+@pytest.mark.parametrize(
+    "projects_root,slug,task_id",
+    [("", "myproj", "task-1"), ("/data/projects", "", "task-1"), ("/data/projects", "myproj", "")],
+)
+def test_removing_worktrees_rejects_empty_path_components(
+    monkeypatch, remove, projects_root, slug, task_id
+) -> None:
+    """Same guard as create_worktree: an empty component must not widen the rm -rf."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls))
+
+    with pytest.raises(ValueError):
+        remove(_CONTAINER, projects_root, slug, task_id)
+
+    assert calls == []
+
+
+def test_task_worktrees_dir_matches_the_path_create_worktree_builds() -> None:
+    """The two sides agree, or cleanup would walk a directory nobody writes to."""
+    built_path = task_worktrees_dir("/data/projects", "myproj", "task-1")
+
+    assert built_path == _WORKTREES
+
+
+def test_removing_worktrees_pins_git_locale(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _listing("revisor", "work")))
+
+    remove_review_worktrees(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert all("LC_ALL=C" in cmd for cmd in calls if _in_container(cmd)[0] != "ls")
 
 
 def test_commit_worktree_stages_everything_and_attributes_the_role(monkeypatch) -> None:

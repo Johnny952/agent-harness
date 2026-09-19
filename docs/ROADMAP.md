@@ -623,6 +623,22 @@ logins.
      precisely the stale-checkout bug. Still open, and now its own
      Known-gaps bullet: nothing merges the branch or opens a PR when the
      task ends.
+   - **Worktrees pile up per task.** Fixed 2026-09-19: `run_task_cycle`
+     drops the reviewing checkouts from a `finally`, so every terminal
+     exit is covered — `done`, `blocked`, an early return, or a crash —
+     and they are rebuilt on demand anyway. Two things the design turns
+     on. The reviewers are found by listing `worktrees/<task-id>/` and
+     keeping `work`, not by naming roles: `create_worktree` defines a
+     reviewer by negation (anything outside `WRITER_ROLES`), so a role
+     added later is cleaned up without this code learning its name.
+     And a phase that bounced off another owner's `LockHeldError` sets a
+     flag that suppresses the cleanup: that other dispatcher is still
+     working in those worktrees. The writers' one is kept — it holds what
+     a failed phase left uncommitted — and `dispatch cleanup-task
+     --task-id <id> --project <slug>` is the deliberate step that takes
+     the whole directory, branch intact. Same `chown` restore as the
+     phases, since `git worktree prune` writes to `.git/worktrees/` as
+     root. 16 new unit tests, 126 across the two dispatcher test files.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
