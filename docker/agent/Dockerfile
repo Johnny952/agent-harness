@@ -17,6 +17,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
+# Every git command the agents run works on /data/projects, a bind mount owned
+# by the host user, so without this each one dies with `fatal: detected
+# dubious ownership` — worktree add included, which is the first thing a role
+# needs. This image's git is 2.39.5, where safe.directory matches only an
+# exact path or the literal `*`; trailing-`/*` prefix matching landed in 2.46,
+# so `/data/projects/*` would silently not match here. `*` is the honest
+# choice for a single-purpose container that runs as root and only ever
+# touches repos under that one mount.
+#
+# The identity is a fallback so a commit can never die with `Author identity
+# unknown`. It is deliberately generic and unroutable (.invalid is reserved by
+# RFC 2606): real attribution comes from the dispatcher passing
+# `git -c user.name=… -c user.email=…` per commit, so this name only surfaces
+# when something commits outside that path. System scope, not --global, so it
+# holds no matter what HOME a `docker exec` session gets, and still loses to
+# both the per-commit -c and any repo-local config.
+RUN git config --system safe.directory '*' \
+    && git config --system user.name 'ia-harness agent' \
+    && git config --system user.email 'agent@ia-harness.invalid'
+
 # The dispatcher parses this CLI's --output-format json shape, /usage text,
 # and rate-limit messages, so bump this version deliberately and re-verify.
 ARG CLAUDE_CODE_VERSION=2.1.273

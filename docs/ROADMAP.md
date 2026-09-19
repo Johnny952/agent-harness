@@ -228,6 +228,10 @@ login.
     see each other's code" commits from the dispatcher, so it needs one.
     Set the identity in the image or entrypoint, or pass `-c user.name=…`
     on each commit. `/root/.gitconfig` isn't persisted.
+- Both findings reproduced as expected, and both are fixed as of
+  2026-09-19: the agent image's system gitconfig carries `safe.directory=*`
+  and a fallback identity (see the stage-1 decisions below). Re-running the
+  probe above on a rebuilt image needs no `-c safe.directory` workaround.
 - Clean up:
   ```bash
   docker exec -w /data/projects/scratch agent-cuenta1 git worktree remove --force worktrees/probe/x
@@ -549,10 +553,16 @@ logins.
      verification-only privileged-`dind` compose override, or defer both.
    - `safe.directory` and git identity in the image (confirmed, V0.9:
      the dubious-ownership and missing-identity errors both reproduce as
-     predicted; the image's git 2.39.5 needs `safe.directory=*` in the
-     system gitconfig or exact per-project entries written at bootstrap
-     or by the entrypoint — a trailing `/*` pattern needs git ≥2.46 — plus
-     a git identity).
+     predicted). Fixed 2026-09-19: the agent image's system gitconfig now
+     sets `safe.directory=*` (the literal `*`, since its git 2.39.5 has no
+     trailing-`/*` prefix matching) plus a generic unroutable identity that
+     the dispatcher overrides per commit. Verified by mounting a host-owned
+     repo into a throwaway container off the rebuilt image: `git status`,
+     `git worktree add -b agent/implementador/<task-id>` and a commit all
+     succeed, and a per-commit `-c user.name=…` wins over the image
+     default. Guarded by two tests in
+     `tests/integration/test_agent_dockerfile.py`, one of which rejects a
+     routable fallback email.
    - The headless permission mode (V1.2).
    - The `/usage` probe (V1.3).
    - Where the Vibe Kanban image comes from (confirmed unpullable, V0.2
@@ -595,9 +605,10 @@ logins.
      quota. Seeding it from Vibe Kanban (V2.5) stays open, and needs the
      cloud-login wall (V2.6) cleared first.
    - **Roles don't see each other's code:** one branch per task, a
-     dispatcher commit after each implementador phase (needs V0.9's
-     identity), and revisor/auditor worktrees rebuilt at that tip every
-     round.
+     dispatcher commit after each implementador phase, and revisor/auditor
+     worktrees rebuilt at that tip every round. V0.9's prerequisite (git
+     ownership and identity in the image) is done as of 2026-09-19, so
+     this is unblocked.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.

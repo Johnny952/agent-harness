@@ -76,6 +76,42 @@ def test_final_stage_disables_cli_autoupdater() -> None:
     ), "expected `ENV DISABLE_AUTOUPDATER=1` in the final build stage"
 
 
+def test_final_stage_marks_the_project_tree_safe_for_git() -> None:
+    """`/data/projects` is a host-owned bind mount, so every git command in
+    the container fails with `fatal: detected dubious ownership` until
+    safe.directory covers it (V0.9 reproduced this on `git worktree add`,
+    the first thing a role needs). The value must be the literal `*`: the
+    image ships git 2.39.5, where safe.directory matches only an exact path
+    or `*`, and the tempting `/data/projects/*` needs git >= 2.46.
+    """
+    joined = _read().replace("\\\n", " ")
+    final_stage = joined[joined.rfind("\nFROM "):]
+    assert re.search(
+        r"git config --system safe\.directory (['\"])\*\1", final_stage
+    ), "expected `git config --system safe.directory '*'` in the final build stage"
+
+
+def test_final_stage_sets_a_fallback_git_identity() -> None:
+    """Without one, a commit dies with `Author identity unknown` even after
+    safe.directory is fixed. The dispatcher overrides this per commit to
+    attribute work to the role and account, so the image value only has to
+    exist — but it must not be a routable address, since it ends up in the
+    author field of every commit made outside that path.
+    """
+    joined = _read().replace("\\\n", " ")
+    final_stage = joined[joined.rfind("\nFROM "):]
+
+    assert re.search(r"git config --system user\.name ", final_stage), \
+        "expected a `git config --system user.name` line in the final build stage"
+
+    email = re.search(r"git config --system user\.email (['\"])(.+?)\1", final_stage)
+    assert email, "expected a `git config --system user.email` line in the final build stage"
+    assert email.group(2).endswith((".invalid", ".example", ".test", ".localhost")), (
+        f"{email.group(2)!r} may resolve to a real mailbox; use a TLD reserved by "
+        "RFC 2606/6761 so the fallback identity can never reach anyone"
+    )
+
+
 def _at_latest(text: str) -> str:
     return text.replace(
         "RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}",

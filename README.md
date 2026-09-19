@@ -131,6 +131,23 @@ Note the different build contexts: the agent image needs the repo root
 (it copies in `hooks/`), the dind-sidecar image is self-contained in its
 own directory.
 
+The agent image sets `safe.directory=*` and a fallback `user.name` /
+`user.email` in its system gitconfig. Both are load-bearing: `/data/projects`
+is a host-owned bind mount, so without the first every git command in the
+container — `git worktree add` included, the first thing a role needs —
+fails with `fatal: detected dubious ownership`, and without the second the
+commit after it fails with `Author identity unknown`. The pattern is the
+literal `*` because this image's git is 2.39.5, where `safe.directory`
+matches only an exact path or `*`; the trailing-`/*` form needs git ≥2.46.
+The identity is only a floor — the dispatcher passes `-c user.name=… -c
+user.email=…` per commit to attribute work to the role and account.
+
+One consequence to know about: the agents run as root, so anything they
+write under `.data/projects` on the host is root-owned and your own user
+can't delete it. Remove such leftovers from inside a container
+(`docker exec agent-cuenta1 rm -rf /data/projects/<path>`), not with
+`sudo` on the host.
+
 ### 3. Create volumes
 
 ```bash
@@ -379,16 +396,6 @@ Kanban, so none of them catch these.
   branch per task that the implementador works on, the dispatcher
   committing after each implementador phase, and detached revisor/auditor
   worktrees recreated at that branch's tip every round.
-- **Commits inside `/data/projects` fail without setup.** The
-  bind-mounted project tree is host-owned, so any git command in the
-  container hits `fatal: detected dubious ownership`, and no git identity
-  is configured, so a commit then fails with `Author identity unknown`.
-  The image ships git 2.39.5, where `safe.directory` only matches an
-  exact path or the literal `*` — trailing `/*` prefix matching needs git
-  ≥2.46. Fix: `safe.directory=*` in the image's system gitconfig (or one
-  exact per-project entry written at bootstrap or by the entrypoint),
-  plus a git identity (image default, or `-c user.name=…/user.email=…`
-  per commit). (V0.9)
 - **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
   Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
   see below): the server speaks stdio via an `mcp` subcommand, not the
