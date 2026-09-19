@@ -604,11 +604,25 @@ logins.
      description anywhere is a usage error instead of four phases of
      quota. Seeding it from Vibe Kanban (V2.5) stays open, and needs the
      cloud-login wall (V2.6) cleared first.
-   - **Roles don't see each other's code:** one branch per task, a
-     dispatcher commit after each implementador phase, and revisor/auditor
-     worktrees rebuilt at that tip every round. V0.9's prerequisite (git
-     ownership and identity in the image) is done as of 2026-09-19, so
-     this is unblocked.
+   - **Roles don't see each other's code.** Fixed 2026-09-19, as
+     designed: one branch per task (`agent/task/<task-id>`), one shared
+     worktree on it for the writing roles (arquitecto, implementador), a
+     dispatcher commit after each of those phases naming the role,
+     account, round and session, and detached revisor/auditor checkouts
+     rebuilt at that branch's tip every round — git refuses to check one
+     branch out in two worktrees, and a reused review checkout is what
+     made the revisor read a clean tree. `dispatch_phase` also reads the
+     project directory's owner before the phase and `chown -R`s it back in
+     a `finally`, since the agents run as root against a uid-1000 bind
+     mount. V0.9's prerequisite (git ownership and identity in the image)
+     landed the same day. Guarded by 105 unit tests across
+     `tests/dispatcher/test_docker_exec.py` and `test_dispatcher.py`,
+     including the two hazards that would silently undo it: `git worktree
+     add -B`, which resets the branch and drops every commit so far, and
+     tolerating an "already exists" error on a reviewer path, which is
+     precisely the stale-checkout bug. Still open, and now its own
+     Known-gaps bullet: nothing merges the branch or opens a PR when the
+     task ends.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
@@ -639,7 +653,7 @@ depends on. A gate that fails reshapes the item before any design work.
 | 4. Per-role model selection | Item 2's usage records | Data-driven split, not a guess |
 | 5. Task profiles | D4, D5, D6, V2.6 | Epic decomposition needs `create_task` |
 | 6. Observability and hardening | V0.5, V0.6 | Note: the dispatcher mounts `claude_shared` and `docker.sock` |
-| 7. Code-intelligence tooling | D4 (for `--mcp-config`) | Memory headroom for indexers, as in D6 |
+| 7. Code-intelligence tooling | D4 (for `--mcp-config`), D7 | Memory headroom for indexers, as in D6; D7 sizes the per-worktree index |
 | 8. Mid-phase compaction | — | Only if V3 or stage 1 runs show long phases failing |
 | 9. Parallel dispatch | V5 | Low value with 2 accounts |
 | 10. Multi-provider containers | V1 and V5.1 per provider | The target CLI needs headless JSON output and session resume |
@@ -688,6 +702,24 @@ starts, not in stage 0.
     reaching the agent's dev server over the network.
   - Pass: one of the two fits under the 4 GB `mem_limit` and can reach the
     app.
+- **D7 — A code index per worktree** (item 7, no quota). The decision
+  already taken is that the *dispatcher* owns index freshness, not the
+  role skills: a role that forgets to re-index, or that dies mid-phase,
+  leaves the next one querying a stale graph and trusting it. One index
+  per worktree, rather than one at the project root, because the
+  indexers' default exclude lists have no `worktrees/` entry and would
+  index every role's copy of every file. What's unmeasured is the cost.
+  - Run: on a real target repo, build the index in a fresh worktree and
+    time it; repeat with the worktree already indexed to time an
+    incremental sync; measure the index's disk use and multiply by the
+    worktrees one task holds (one shared writer checkout plus one per
+    reviewing role); check the indexer's resident memory against the
+    agent container's 4 GB `mem_limit`.
+  - Pass: a full build is short enough to sit inside `create_worktree`
+    without stalling the phase, an incremental sync is negligible per
+    phase, and the disk and memory totals fit.
+  - Otherwise: index only the writer worktree and let reviewers query it
+    read-only, or drop to on-demand indexing for the roles that ask.
 
 ## Results log
 

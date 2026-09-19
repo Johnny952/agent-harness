@@ -228,6 +228,41 @@ def reap_expired_locks(cfg: Config) -> list[str]:
     return reaped
 
 
+def _should_commit(role: str, result: docker_exec.ClaudeResult) -> bool:
+    """Whether this phase's work belongs in a commit.
+
+    Only the writing roles produce any, and only a phase that actually ran to
+    completion: a rate-limited or failed exec is retried in the same worktree
+    (resuming the same session), so committing its half-done state would put
+    the same work in history twice.
+    """
+    return (
+        role in docker_exec.WRITER_ROLES
+        and _exec_succeeded(result)
+        and not is_rate_limit_error(result)
+    )
+
+
+def _commit_message(
+    role: str,
+    task_id: str,
+    account: str,
+    session_id: str | None,
+    round_num: int | None,
+) -> str:
+    subject = f"agent({role}): {task_id}"
+    if round_num is not None:
+        subject += f" round {round_num}"
+    # The session id is what lets a commit be traced back to the transcript
+    # that produced it, which is the only record of *why* the change is there.
+    return (
+        f"{subject}\n\n"
+        f"Committed by the ia-harness dispatcher after the {role} phase.\n\n"
+        f"Account: {account}\n"
+        f"Session: {session_id or 'unknown'}\n"
+    )
+
+
 def dispatch_phase(
     cfg: Config,
     task_id: str,
@@ -237,6 +272,7 @@ def dispatch_phase(
     resume_session_id: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    round_num: int | None = None,
 ) -> DispatchResult:
     tried: set[str] = set()
     while True:
@@ -262,6 +298,10 @@ def dispatch_phase(
         container = container_for(cfg, account)
         state_machine.set_state(cfg.state_dir, account, AccountState.BUSY, current_task_id=task_id)
         lock_acquired = False
+        project_dir = f"{cfg.projects_root}/{slug}"
+        # Read this before anything in the container touches the tree, while it
+        # is still whatever the host user owns.
+        owner = docker_exec.read_owner(container, project_dir)
         try:
             # Claim the task before touching the worktree: a task another
             # account still owns (live heartbeat) must be refused outright,
@@ -275,6 +315,13 @@ def dispatch_phase(
                     resume_session_id=resume_session_id, model=model, effort=effort,
                     timeout_seconds=cfg.phase_timeout_seconds,
                 )
+            if _should_commit(role, result):
+                docker_exec.commit_worktree(
+                    container, workdir,
+                    message=_commit_message(role, task_id, account, result.session_id, round_num),
+                    author_name=f"{role} ({account})",
+                    author_email=f"{role}@ia-harness.invalid",
+                )
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives
             # restart) because of an exception between claiming it and
@@ -283,6 +330,11 @@ def dispatch_phase(
             if lock_acquired:
                 context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
             raise
+        finally:
+            # Covers the failure paths too: `git worktree add` alone is enough
+            # to leave root-owned files behind. Nothing after this block writes
+            # to the tree.
+            docker_exec.restore_owner(container, project_dir, owner)
 
         if is_rate_limit_error(result):
             state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
@@ -351,6 +403,7 @@ def run_task_cycle(
                 prompt=_role_prompt(role, task_id, task_file, description, round_num=round_num),
                 model=cfg.default_model,
                 effort=effort,
+                round_num=round_num,
             )
         except context_transfer.LockHeldError as exc:
             # A re-run within the TTL after a Ctrl+C, or a second dispatcher

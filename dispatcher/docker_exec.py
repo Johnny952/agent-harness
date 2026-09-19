@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import subprocess
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -94,33 +97,92 @@ def exec_claude(
     return ClaudeResult(session_id=parsed.get("session_id"), result_text=parsed.get("result") or "", raw=parsed)
 
 
+# git translates its messages, and the tolerated-error checks below match the
+# English ones, so every git call here pins the locale rather than depending on
+# whatever the image happens to have.
+_GIT_ENV = {"LC_ALL": "C"}
+
+WRITER_ROLES = frozenset({"arquitecto", "implementador"})
+"""Roles that change the tree, and so share one worktree on the task branch.
+
+Everyone else reviews what they produced and gets a throwaway detached
+checkout instead — see create_worktree.
+"""
+
+
+def task_branch(task_id: str) -> str:
+    """The single branch a task's work accumulates on."""
+    return f"agent/task/{task_id}"
+
+
 def create_worktree(container: str, projects_root: str, slug: str, task_id: str, role: str) -> str:
     """Create (or re-use) the worktree a role works in for one task.
 
-    The path is scoped by role as well as task_id: every role of a task gets
-    its own branch (agent/<role>/<task-id>), and git refuses to check two
-    branches out in the same worktree directory, so a task_id-only path made
-    every role after the first collide.
+    A task has one branch, agent/task/<task-id>, and the roles that write to it
+    (WRITER_ROLES) share one worktree checked out on it, so the implementador
+    starts from what the arquitecto left rather than from a pristine HEAD.
 
-    Re-running the same role is tolerated — that is the resume case, where the
-    branch and directory are already there — but only for that exact branch or
-    path, so unrelated failures that happen to contain "already exists" still
-    raise.
+    The reviewing roles get their own path detached at that branch's tip, and
+    it is rebuilt from scratch on every call: git will not check one branch out
+    in two worktrees at once, and a reused checkout is exactly how the revisor
+    ended up reviewing a tree with none of the implementador's work in it.
     """
+    if not all([projects_root, slug, task_id, role]):
+        # The reviewing path rm -rf's a path built from these, so an empty
+        # component must never be allowed to widen it.
+        raise ValueError("projects_root, slug, task_id and role must all be non-empty")
+
     project_dir = f"{projects_root}/{slug}"
-    worktree_path = f"{project_dir}/worktrees/{task_id}/{role}"
-    branch = f"agent/{role}/{task_id}"
-    proc = run_docker_exec(
-        container,
-        project_dir,
-        ["git", "worktree", "add", "-b", branch, worktree_path],
-        # git translates its messages; the tolerated-error check below matches
-        # the English ones, so pin the locale rather than depend on the image's.
-        env={"LC_ALL": "C"},
-    )
+    branch = task_branch(task_id)
+    if role in WRITER_ROLES:
+        return _add_writer_worktree(container, project_dir, task_id, branch)
+    return _add_review_worktree(container, project_dir, task_id, role, branch)
+
+
+def _add_writer_worktree(container: str, project_dir: str, task_id: str, branch: str) -> str:
+    """Check the task branch out at a shared, persistent path."""
+    worktree_path = f"{project_dir}/worktrees/{task_id}/work"
+    if _branch_exists(container, project_dir, branch):
+        # Round 2+ and resumes: check the branch out where it is, never `-B`,
+        # which would reset it and throw away the commits made so far.
+        command = ["git", "worktree", "add", worktree_path, branch]
+    else:
+        command = ["git", "worktree", "add", "-b", branch, worktree_path]
+
+    proc = run_docker_exec(container, project_dir, command, env=_GIT_ENV)
     if proc.returncode != 0 and not _worktree_already_exists(proc.stderr, branch, worktree_path):
         raise RuntimeError(f"git worktree add failed: {proc.stderr}")
     return worktree_path
+
+
+def _add_review_worktree(container: str, project_dir: str, task_id: str, role: str, branch: str) -> str:
+    """Rebuild a detached checkout of the task branch's current tip."""
+    worktree_path = f"{project_dir}/worktrees/{task_id}/{role}"
+    # rm -rf rather than `git worktree remove`, so a leftover directory that
+    # git never registered (a crash between mkdir and bookkeeping) is cleared
+    # too; `prune` then drops the admin entry the way remove would have.
+    # Nothing unique lives here: a detached review checkout holds no commits of
+    # its own, and the role's findings travel in the task file, not the tree.
+    run_docker_exec(container, project_dir, ["rm", "-rf", worktree_path], env=_GIT_ENV)
+    run_docker_exec(container, project_dir, ["git", "worktree", "prune"], env=_GIT_ENV)
+
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "worktree", "add", "--detach", worktree_path, branch],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git worktree add --detach failed: {proc.stderr}")
+    return worktree_path
+
+
+def _branch_exists(container: str, project_dir: str, branch: str) -> bool:
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        env=_GIT_ENV,
+    )
+    return proc.returncode == 0
 
 
 def _worktree_already_exists(stderr: str, branch: str, worktree_path: str) -> bool:
@@ -129,4 +191,75 @@ def _worktree_already_exists(stderr: str, branch: str, worktree_path: str) -> bo
         f"a branch named '{branch}' already exists" in stderr
         or f"'{worktree_path}' already exists" in stderr
         or f"'{worktree_path}' is already registered" in stderr
+        # "already used by worktree at <path>" is only benign when the worktree
+        # git names is the one being asked for; any other path means two tasks
+        # are fighting over the branch.
+        or (f"'{branch}' is already used by worktree at" in stderr and worktree_path in stderr)
     )
+
+
+def commit_worktree(
+    container: str,
+    workdir: str,
+    message: str,
+    author_name: str,
+    author_email: str,
+) -> bool:
+    """Commit everything in a worktree. False when there was nothing to commit.
+
+    The identity is passed per invocation so each commit names the role and
+    account that produced it; `-c` outranks the image's --system fallback (see
+    docker/agent/Dockerfile) without writing any repo-local config.
+    """
+    add = run_docker_exec(container, workdir, ["git", "add", "-A"], env=_GIT_ENV)
+    if add.returncode != 0:
+        raise RuntimeError(f"git add failed: {add.stderr}")
+
+    proc = run_docker_exec(
+        container, workdir,
+        [
+            "git",
+            "-c", f"user.name={author_name}",
+            "-c", f"user.email={author_email}",
+            "commit", "-m", message,
+        ],
+        env=_GIT_ENV,
+    )
+    if proc.returncode == 0:
+        return True
+    if _nothing_to_commit(proc.stdout, proc.stderr):
+        # A phase that only read, or that re-ran after its work was already
+        # committed. Not an error, and not worth an empty commit.
+        return False
+    raise RuntimeError(f"git commit failed: {proc.stderr or proc.stdout}")
+
+
+def _nothing_to_commit(stdout: str, stderr: str) -> bool:
+    """git reports a clean tree on *stdout* with exit 1, not on stderr."""
+    combined = f"{stdout}\n{stderr}"
+    return "nothing to commit" in combined or "nothing added to commit" in combined
+
+
+def read_owner(container: str, path: str) -> str | None:
+    """The uid:gid owning `path` on the host, or None if it cannot be read."""
+    proc = run_docker_exec(container, path, ["stat", "-c", "%u:%g", path])
+    owner = proc.stdout.strip()
+    if proc.returncode != 0 or not owner:
+        return None
+    return owner
+
+
+def restore_owner(container: str, path: str, owner: str | None) -> None:
+    """Give `path` back to `owner` after the container (root) has written to it.
+
+    /data/projects is a bind mount owned by the host user, but the agents run
+    as root, so everything they create is root-owned and undeletable by the
+    person who owns the checkout. Best-effort by design: this is hygiene, and
+    it runs on the way out of a phase that may already be failing, so it must
+    never be the thing that raises.
+    """
+    if not owner:
+        return
+    proc = run_docker_exec(container, path, ["chown", "-R", owner, path])
+    if proc.returncode != 0:
+        logger.warning("could not restore ownership of %s to %s: %s", path, owner, _output_tail(proc))

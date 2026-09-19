@@ -58,8 +58,13 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   quota exhaustion instead resumes the same Claude session directly via
   `--resume`. Stale locks (heartbeat older than `heartbeat_ttl_seconds`) are
   reaped at the start of each task cycle; a live lock held by another owner
-  is refused, and the task goes `blocked`. Each role works on its own branch,
-  `agent/<role>/<task-id>`, in its own git worktree.
+  is refused, and the task goes `blocked`. A task has one branch,
+  `agent/task/<task-id>`: the roles that write to it (arquitecto,
+  implementador) share one worktree checked out on it, and the dispatcher
+  commits what each of those phases left before the next role runs. The
+  reviewing roles (revisor, auditor) get their own checkout, detached at
+  that branch's tip and rebuilt every round, so they always read the code
+  as it stands rather than a pristine `HEAD`.
 - **Observability** (`observability/`) — Claude Code hooks
   (`hooks/emit_event.py`, registered by `hooks/install_settings.py` on
   container start) POST events to a collector (`observability/collector`,
@@ -214,9 +219,13 @@ ia-harness's own git status.
 
 > **Root-owned files:** `docker/agent/Dockerfile` has no `USER` directive, so
 > the agent container runs as root — anything it writes under
-> `.data/projects` (clones, commits, build output) will show up root-owned on
-> the host. `ls -la .data/projects` and `sudo chown -R` are your friends if
-> you need to touch those files as your own user.
+> `.data/projects` (clones, commits, build output) is root-owned as it is
+> created. `dispatch_phase` reads the project directory's owner before the
+> phase and `chown -R`s the tree back to it afterwards, on the failure paths
+> too, so a finished phase leaves the checkout yours. That's best-effort
+> hygiene, not a guarantee: a phase killed outside the dispatcher (a `docker
+> kill`, a host reboot) skips it, so `ls -la .data/projects` and
+> `sudo chown -R` are still worth knowing.
 
 ### 4. Bring up the stack
 
@@ -388,14 +397,15 @@ a task from producing a usable result end to end today, and the rest tax
 every phase that runs. The unit tests mock Claude Code, Docker, and Vibe
 Kanban, so none of them catch these.
 
-- **Roles don't see each other's code.** `create_worktree` branches every
-  role off the project's `HEAD` (`agent/<role>/<task-id>`), nothing commits
-  the implementador's changes, and later rounds reuse the revisor's
-  original worktree, so the revisor and auditor review a clean checkout.
-  Nothing merges or opens a PR at the end either. Candidate fix: one
-  branch per task that the implementador works on, the dispatcher
-  committing after each implementador phase, and detached revisor/auditor
-  worktrees recreated at that branch's tip every round.
+- **A finished task goes nowhere.** The work now accumulates on
+  `agent/task/<task-id>` (see "Context handoff" above), but nothing merges
+  that branch, opens a PR, or deletes the worktrees when the task ends
+  `done` — the result sits in `.data/projects/<slug>` for a human to find.
+  The half of this gap that kept the revisor and auditor reviewing a
+  pristine `HEAD` is fixed; what's left is the ending. Candidate fixes,
+  none designed: the dispatcher merging to the default branch after an
+  approving auditor verdict, or `gh pr create` from the task branch,
+  which needs a remote and a token neither container has today.
 - **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
   Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
   see below): the server speaks stdio via an `mcp` subcommand, not the
@@ -618,7 +628,10 @@ Kanban, so none of them catch these.
      branch, and per-round scratch (review findings, test logs) under
      `.hive/tasks/<task-id>/`. The `.hive` task file keeps the summary plus
      the paths. Detail on disk only survives if it's committed or lives
-     outside the worktree (see the known gaps). The recorded subagent IDs
+     outside the worktree — the dispatcher's per-phase commit covers the
+     first case for writer roles, but a reviewing role's detached checkout
+     is rebuilt every round, so anything it writes there is gone. The
+     recorded subagent IDs
      are what let a resumed or later phase attempt the revive above.
    - *Docs and tests kept current, enforced outside the model.* Today
      nothing requires either: `_role_prompt` sends only the role, the task
@@ -742,9 +755,10 @@ Kanban, so none of them catch these.
      A trap is "don't step on this"; half-finished code is debt, not a
      learning.
 
-   Depends on the known gaps: agents must see the task, and docs written
-   in a worktree nobody commits are lost with it. The debt cards also need
-   Vibe Kanban's MCP to create tasks, which is unverified. Not designed:
+   Its two prerequisites are now in place: agents are given the task
+   description, and the dispatcher commits each writer phase, so docs a
+   role writes survive it. The debt cards still need Vibe Kanban's MCP to
+   create tasks, which is unverified. Not designed:
    the handoff schema, where skill files live (baked into `docker/agent/`
    at build time vs. mounted alongside `.hive`), how a role is told which
    skill applies (for skills that depend on the kind of task rather than
@@ -1143,6 +1157,18 @@ Kanban, so none of them catch these.
      retrieval/editing across 20+ languages via MCP). Best fit for
      arquitecto/implementador: cheaper "where is X" / "what calls Y"
      answers when onboarding onto a project or planning a change.
+     Whichever is picked, the index has to be *created and kept fresh by
+     the dispatcher*, not by asking roles to do it in their skills: a role
+     that forgets, or that is killed mid-phase, leaves the next one
+     querying a stale graph and trusting it, which is worse than having no
+     index at all. The shape that fits this repo's worktree layout is one
+     index per worktree, initialized in `create_worktree` and re-synced
+     around each phase, because the alternative — a single index at the
+     project root — would walk `worktrees/` and index every role's copy of
+     every file (CodeGraph's default `exclude` list has no `worktrees/`
+     entry). Cost, not yet measured: the indexer in the agent image, index
+     build time on a real target repo, and disk under `.data/projects`
+     multiplied by the number of live worktrees.
    - Pattern-based static/security analysis with MCP support, e.g.
      [Semgrep MCP](https://mcp.directory/blog/semgrep-mcp-complete-guide-2026)
      (Semgrep's Guardian product scans agent-written code for

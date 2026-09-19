@@ -52,6 +52,47 @@ def _make_config(tmp_path, **overrides):
     return Config(**defaults)
 
 
+class _FakeGit:
+    """Records the git/ownership calls dispatch_phase makes through docker_exec.
+
+    Those three shell out to a real `docker exec`, so without this every
+    dispatch test would go looking for a live container.
+    """
+
+    owner = "1000:1000"
+
+    def __init__(self):
+        self.commits = []
+        self.restored = []
+
+    def commit_worktree(self, container, workdir, message, author_name, author_email):
+        self.commits.append(
+            dict(
+                container=container,
+                workdir=workdir,
+                message=message,
+                author_name=author_name,
+                author_email=author_email,
+            )
+        )
+        return True
+
+    def read_owner(self, container, path):
+        return self.owner
+
+    def restore_owner(self, container, path, owner):
+        self.restored.append((path, owner))
+
+
+@pytest.fixture(autouse=True)
+def fake_git(monkeypatch):
+    fake = _FakeGit()
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "commit_worktree", fake.commit_worktree)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "read_owner", fake.read_owner)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "restore_owner", fake.restore_owner)
+    return fake
+
+
 def test_dispatch_phase_success(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
 
@@ -509,7 +550,7 @@ def test_run_task_cycle_prompt_references_task_file(tmp_path, monkeypatch) -> No
     cfg = _make_config(tmp_path)
     captured_prompts = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
         captured_prompts.append(prompt)
         return dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account="")
 
@@ -532,7 +573,7 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     captured = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
         captured.append((role, prompt))
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -560,7 +601,7 @@ def test_run_task_cycle_seeds_the_description_into_the_task_file(tmp_path, monke
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     prompts = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
         prompts.append(prompt)
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -745,7 +786,7 @@ def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monke
     cfg = _make_config(tmp_path)
     long_body = "H" * 600 + "M" * 5000 + "T" * 1600
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
         if role == "arquitecto":
             return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text=long_body, account="cuenta1")
         if role == "revisor":
@@ -764,16 +805,16 @@ def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monke
     assert "M" * 5000 not in task.body
 
 
-def _dispatch_call_kwargs(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
-    return dict(role=role, prompt=prompt, model=model, effort=effort)
+def _dispatch_call_kwargs(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    return dict(role=role, prompt=prompt, model=model, effort=effort, round_num=round_num)
 
 
 def test_run_task_cycle_approves_on_first_round(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
-        calls.append(_dispatch_call_kwargs(cfg_arg, task_id, slug, role, prompt, resume_session_id, model, effort))
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        calls.append(_dispatch_call_kwargs(cfg_arg, task_id, slug, role, prompt, resume_session_id, model, effort, round_num))
         if role == "revisor":
             return dispatcher_mod.DispatchResult(
                 success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -796,7 +837,7 @@ def test_run_task_cycle_completes_when_kanban_status_updates_always_raise(tmp_pa
     cfg = _make_config(tmp_path)
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
         calls.append(role)
         if role == "revisor":
             return dispatcher_mod.DispatchResult(
@@ -821,8 +862,8 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
     cfg = _make_config(tmp_path, max_revision_rounds=3, escalate_effort_after_round=2, escalated_effort="high")
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
-        calls.append(_dispatch_call_kwargs(cfg_arg, task_id, slug, role, prompt, resume_session_id, model, effort))
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        calls.append(_dispatch_call_kwargs(cfg_arg, task_id, slug, role, prompt, resume_session_id, model, effort, round_num))
         if role == "revisor" and "round 3" in prompt:
             return dispatcher_mod.DispatchResult(
                 success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -853,7 +894,7 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
     cfg = _make_config(tmp_path, max_revision_rounds=2)
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
         calls.append(role)
         if role == "revisor":
             return dispatcher_mod.DispatchResult(
@@ -870,3 +911,127 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
     assert "auditor" not in calls
     assert ("task-1", "blocked") in kanban.statuses
     assert ("task-1", "done") not in kanban.statuses
+
+
+def _phase_exec(result):
+    """A fake exec_claude that clears the usage probe and then returns `result`."""
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+        if "usage" in prompt.lower():
+            return ClaudeResult(
+                session_id=None,
+                result_text=(
+                    "Current session: 10% used · resets later\n"
+                    "Current week (all models): 10% used · resets later"
+                ),
+                raw={},
+            )
+        return result
+
+    return fake_exec_claude
+
+
+def _fake_worktree(monkeypatch):
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}/work",
+    )
+
+
+def test_dispatch_phase_commits_the_writing_phase(tmp_path, monkeypatch, fake_git) -> None:
+    """Nothing used to commit, so the revisor reviewed an empty diff."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it", round_num=2)
+
+    assert len(fake_git.commits) == 1
+    commit = fake_git.commits[0]
+    assert commit["workdir"].endswith("/worktrees/task-1/work")
+    assert commit["author_name"] == "implementador (cuenta1)"
+    assert commit["author_email"] == "implementador@ia-harness.invalid"
+    # The role, the task, the round and the session that produced it: enough to
+    # trace any commit back to the transcript that explains it.
+    assert commit["message"].startswith("agent(implementador): task-1 round 2")
+    assert "Account: cuenta1" in commit["message"]
+    assert "Session: sess-1" in commit["message"]
+
+
+def test_dispatch_phase_does_not_commit_a_reviewing_phase(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="VERDICT: APPROVED", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review it")
+
+    assert fake_git.commits == []
+
+
+def test_dispatch_phase_does_not_commit_a_failed_phase(tmp_path, monkeypatch, fake_git) -> None:
+    """A failed phase is retried in the same worktree, resuming the session."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="boom", raw={})),
+    )
+    _fake_worktree(monkeypatch)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert result.success is False
+    assert fake_git.commits == []
+
+
+def test_dispatch_phase_does_not_commit_a_rate_limited_phase(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(
+            session_id="sess-1", result_text="429 rate limit exceeded", raw={"is_error": True},
+        )),
+    )
+    _fake_worktree(monkeypatch)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    # The phase is retried on another account (there is none here), so its
+    # half-finished tree must not be committed as if it were the round's work.
+    assert result.success is False
+    assert fake_git.commits == []
+
+
+def test_dispatch_phase_hands_the_tree_back_to_its_owner(tmp_path, monkeypatch, fake_git) -> None:
+    """The agents run as root against a bind mount owned by the host user."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
+
+
+def test_dispatch_phase_hands_the_tree_back_even_when_the_phase_raises(tmp_path, monkeypatch, fake_git) -> None:
+    """`git worktree add` alone is enough to leave root-owned files behind."""
+    cfg = _make_config(tmp_path)
+
+    def raising_create_worktree(container, projects_root, slug, task_id, role):
+        raise RuntimeError("git worktree add failed")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", _phase_exec(None))
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "create_worktree", raising_create_worktree)
+
+    with pytest.raises(RuntimeError):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
