@@ -85,6 +85,16 @@ def main() -> None:
     cleanup_parser.add_argument("--task-id", required=True)
     cleanup_parser.add_argument("--project", required=True, help="Project slug")
 
+    merge_parser = sub.add_parser(
+        "merge-task",
+        help="Merge agent/task/<task-id> into the branch the project is checked out on. "
+        "A --no-ff merge that refuses on a detached HEAD or a dirty tree and rolls "
+        "itself back on a conflict; the task branch is never touched. Set "
+        "merge_on_done in config.yaml to have a finished cycle do this by itself.",
+    )
+    merge_parser.add_argument("--task-id", required=True)
+    merge_parser.add_argument("--project", required=True, help="Project slug")
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -114,6 +124,25 @@ def main() -> None:
         branch = docker_exec.task_branch(args.task_id)
         print(f"removed {len(removed)} worktree(s): {', '.join(removed) or '(none)'}")
         print(f"branch {branch} kept; `git worktree add <path> {branch}` checks it out again")
+    elif args.command == "merge-task":
+        container = cleanup_container(cfg)
+        if container is None:
+            parser.error("no accounts configured: nothing to run the merge in")
+        project_dir = f"{cfg.projects_root}/{args.project}"
+        owner = docker_exec.read_owner(container, project_dir)
+        try:
+            outcome = docker_exec.merge_task_branch(
+                container, cfg.projects_root, args.project, args.task_id
+            )
+        finally:
+            # git writes to .git/ as root here too — same restore as everywhere.
+            docker_exec.restore_owner(container, project_dir, owner)
+        if outcome.refused:
+            # Exit non-zero so a script that chains this can tell the refusal
+            # from the merge, which the wording alone would not give it.
+            print(outcome.detail, file=sys.stderr)
+            raise SystemExit(1)
+        print(outcome.detail)
 
 
 if __name__ == "__main__":

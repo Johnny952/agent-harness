@@ -9,6 +9,7 @@ from dispatcher.docker_exec import (
     commit_worktree,
     create_worktree,
     exec_claude,
+    merge_task_branch,
     read_owner,
     remove_review_worktrees,
     remove_task_worktrees,
@@ -762,3 +763,194 @@ def test_restore_owner_warns_instead_of_raising_when_chown_fails(monkeypatch, ca
         restore_owner(_CONTAINER, _PROJECT, "1000:1000")
 
     assert "could not restore ownership" in caplog.text
+
+
+def _merge_responder(status_out="", symbolic=("main", 0), merge=(0, "Merge made by the 'ort' strategy.\n", ""), branch_exists=True):
+    """A docker exec that answers each of the merge's probes separately."""
+
+    def respond(args):
+        if args[:2] == ["git", "show-ref"]:
+            return (0 if branch_exists else 1, "", "")
+        if args[:2] == ["git", "symbolic-ref"]:
+            name, rc = symbolic
+            return (rc, f"{name}\n" if name else "", "")
+        if args[:2] == ["git", "status"]:
+            return (0, status_out, "")
+        if "merge" in args and "--abort" in args:
+            return (128, "", "fatal: There is no merge to abort\n")
+        if "merge" in args:
+            return merge
+        return (0, "", "")
+
+    return respond
+
+
+def _merge_call(calls):
+    """The actual `git merge` out of a recorded run, or None."""
+    for args in map(_in_container, calls):
+        if "merge" in args and "--abort" not in args:
+            return args
+    return None
+
+
+def test_merge_task_branch_merges_into_the_branch_the_project_is_on(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _merge_responder()))
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.status == docker_exec_mod.MERGED
+    assert outcome.merged and not outcome.refused
+    assert outcome.target == "main"
+    merge = _merge_call(calls)
+    assert merge[-3:] == ["-m", f"Merge {_BRANCH}", _BRANCH]
+    assert "--no-ff" in merge and "--no-edit" in merge
+
+
+def test_merge_task_branch_runs_in_the_project_not_a_worktree(monkeypatch) -> None:
+    """The merge has to land in the checkout the human works from."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _merge_responder()))
+
+    merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert all(cmd[cmd.index("-w") + 1] == _PROJECT for cmd in calls)
+
+
+def test_merge_task_branch_reports_an_already_merged_branch_as_up_to_date(monkeypatch) -> None:
+    """Re-running the merge is not a failure, and must not read like one."""
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker([], _merge_responder(merge=(0, "Already up to date.\n", ""))),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.status == docker_exec_mod.UP_TO_DATE
+    assert not outcome.merged and not outcome.refused
+
+
+def test_merge_task_branch_ignores_untracked_files(monkeypatch) -> None:
+    """`worktrees/` lives in the repo, so untracked output would block every merge."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _merge_responder()))
+
+    merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    status = next(args for args in map(_in_container, calls) if args[:2] == ["git", "status"])
+    assert "--untracked-files=no" in status
+
+
+def test_merge_task_branch_refuses_a_dirty_tree_without_starting_a_merge(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _merge_responder(status_out=" M README.md\n")),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.refused
+    assert "uncommitted changes" in outcome.detail
+    assert _merge_call(calls) is None
+
+
+def test_merge_task_branch_refuses_a_detached_head(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _merge_responder(symbolic=("", 1))),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.refused
+    assert outcome.target is None
+    assert "detached HEAD" in outcome.detail
+    assert _merge_call(calls) is None
+
+
+def test_merge_task_branch_refuses_to_merge_a_branch_into_itself(monkeypatch) -> None:
+    """The writers' worktree can hold the branch, but so can the project checkout."""
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _merge_responder(symbolic=(_BRANCH, 0))),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.refused
+    assert _merge_call(calls) is None
+
+
+def test_merge_task_branch_refuses_when_the_task_branch_does_not_exist(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _merge_responder(branch_exists=False)),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.refused
+    assert _BRANCH in outcome.detail
+    assert _merge_call(calls) is None
+
+
+def test_merge_task_branch_aborts_a_conflicted_merge(monkeypatch) -> None:
+    """A conflict must not leave the project's checkout mid-merge."""
+    calls = []
+    conflict = (1, "CONFLICT (content): Merge conflict in app.py\n", "Automatic merge failed\n")
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run", _fake_docker(calls, _merge_responder(merge=conflict)),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.refused
+    assert "rolled back" in outcome.detail
+    assert _in_container(calls[-1]) == ["git", "merge", "--abort"]
+
+
+def test_merge_task_branch_survives_an_abort_that_had_nothing_to_abort(monkeypatch) -> None:
+    """git exits non-zero there, and that rc is not the caller's problem."""
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker([], _merge_responder(merge=(128, "", "fatal: refusing to merge unrelated histories\n"))),
+    )
+
+    outcome = merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert outcome.refused
+    assert "unrelated histories" in outcome.detail
+
+
+def test_merge_task_branch_never_deletes_the_task_branch(monkeypatch) -> None:
+    """The branch is the work; the merge only offers it somewhere else."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _merge_responder()))
+
+    merge_task_branch(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert not any("branch" in args and "-d" in args for args in map(_in_container, calls))
+    assert not any("--delete" in args for args in map(_in_container, calls))
+
+
+@pytest.mark.parametrize("projects_root,slug,task_id", [("", "myproj", "task-1"), ("/data/projects", "", "task-1"), ("/data/projects", "myproj", "")])
+def test_merge_task_branch_rejects_empty_path_components(monkeypatch, projects_root, slug, task_id) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls))
+
+    with pytest.raises(ValueError):
+        merge_task_branch(_CONTAINER, projects_root, slug, task_id)
+
+    assert calls == []
+
+
+def test_current_branch_returns_none_on_a_detached_head(monkeypatch) -> None:
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run", _fake_docker([], lambda args: (1, "", "")),
+    )
+
+    assert docker_exec_mod.current_branch(_CONTAINER, _PROJECT) is None

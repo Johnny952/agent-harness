@@ -258,6 +258,132 @@ def remove_task_worktrees(container: str, projects_root: str, slug: str, task_id
     return removed
 
 
+MERGED = "merged"
+UP_TO_DATE = "up-to-date"
+REFUSED = "refused"
+
+
+@dataclasses.dataclass(frozen=True)
+class MergeOutcome:
+    """What became of a task branch offered to the project's own branch.
+
+    Three outcomes, not two: a branch already in the target is neither a
+    success worth announcing nor a problem worth an exit code, and telling
+    them apart is the difference between a CLI that reads honestly and one
+    that cries wolf on a re-run.
+    """
+
+    status: str
+    target: str | None
+    detail: str
+
+    @property
+    def merged(self) -> bool:
+        return self.status == MERGED
+
+    @property
+    def refused(self) -> bool:
+        return self.status == REFUSED
+
+
+def current_branch(container: str, project_dir: str) -> str | None:
+    """The branch the project's main checkout is on, or None when detached."""
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _has_uncommitted_changes(container: str, project_dir: str) -> bool:
+    """Whether the main checkout has tracked changes a merge could tangle with.
+
+    Untracked files are deliberately not counted: `worktrees/` lives inside the
+    repository, so a project that has ever run a task always has some, and
+    treating that as dirty would refuse every merge forever. The case untracked
+    files actually matter in — a merge that wants to write over one — git
+    refuses on its own, and that refusal comes back as the merge failing.
+    """
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git status failed: {_output_tail(proc)}")
+    return bool(proc.stdout.strip())
+
+
+def merge_task_branch(
+    container: str,
+    projects_root: str,
+    slug: str,
+    task_id: str,
+    author_name: str = "ia-harness dispatcher",
+    author_email: str = "dispatcher@ia-harness.invalid",
+) -> MergeOutcome:
+    """Merge a task's branch into whatever branch the project is sitting on.
+
+    The target is read rather than configured: the branch checked out in
+    `projects_root/<slug>` is the one whoever set the project up chose to work
+    from, and a merge into a branch nobody is looking at helps no one.
+
+    Every refusal leaves the repository exactly as it was found. The task
+    branch is never touched, deleted, or rewritten by any path through here —
+    it stays as the record of the work and as the way back if the merge turns
+    out to be wrong.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
+    project_dir = f"{projects_root}/{slug}"
+    branch = task_branch(task_id)
+
+    if not _branch_exists(container, project_dir, branch):
+        return MergeOutcome(REFUSED, None, f"there is no branch {branch} to merge")
+
+    target = current_branch(container, project_dir)
+    if target is None:
+        return MergeOutcome(
+            REFUSED, None,
+            f"{project_dir} is on a detached HEAD, so there is no branch to merge into",
+        )
+    if target == branch:
+        return MergeOutcome(
+            REFUSED, target,
+            f"{project_dir} is checked out on {branch} itself",
+        )
+    if _has_uncommitted_changes(container, project_dir):
+        return MergeOutcome(
+            REFUSED, target,
+            f"{project_dir} has uncommitted changes; commit or stash them first",
+        )
+
+    proc = run_docker_exec(
+        container, project_dir,
+        [
+            "git",
+            "-c", f"user.name={author_name}",
+            "-c", f"user.email={author_email}",
+            "merge", "--no-ff", "--no-edit", "-m", f"Merge {branch}", branch,
+        ],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        # Conflicts leave the tree mid-merge; the earlier refusals (a dirty
+        # tree included) never start one at all, so the abort is allowed to
+        # fail — "there is no merge to abort" is the expected answer there.
+        run_docker_exec(container, project_dir, ["git", "merge", "--abort"], env=_GIT_ENV)
+        return MergeOutcome(
+            REFUSED, target,
+            f"merging {branch} into {target} failed, and was rolled back: {_output_tail(proc)}",
+        )
+    if "Already up to date" in proc.stdout:
+        return MergeOutcome(UP_TO_DATE, target, f"{target} already contains {branch}")
+    return MergeOutcome(MERGED, target, f"merged {branch} into {target}")
+
+
 def _branch_exists(container: str, project_dir: str, branch: str) -> bool:
     proc = run_docker_exec(
         container, project_dir,

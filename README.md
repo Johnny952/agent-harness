@@ -308,6 +308,32 @@ That deletes `worktrees/T-001/` whole. The branch `agent/task/T-001` is
 untouched — the commits are the work, these are only checkouts of them, so
 `git worktree add <path> agent/task/T-001` brings any of it back.
 
+The task branch is also where a finished task stops by default: nothing
+merges it unless you ask. Once you have read the result, offer it to the
+branch the project's own checkout is on:
+
+```bash
+python -m dispatcher.cli --config config.yaml merge-task \
+  --task-id T-001 --project my-project
+```
+
+That is a `--no-ff` merge, and the target is read rather than configured:
+whatever `.data/projects/my-project` is checked out on is the branch
+whoever set the project up works from. It refuses — printing why, and
+exiting non-zero — on a detached `HEAD`, on a checkout sitting on the task
+branch itself, or on uncommitted tracked changes; a conflict is rolled back
+with `git merge --abort`. A branch already merged is reported as up to
+date, not as a failure, so re-running it is harmless. No path through it
+touches, rewrites or deletes `agent/task/T-001`: the branch stays as the
+record of the work and as the way back if the merge turns out to be wrong.
+
+To have a cycle do this by itself the moment the auditor signs off, set
+`merge_on_done: true` in `config.yaml`. It defaults to `false`, because
+the merge is the one thing a run writes into the branch you work from. A
+refused merge there is logged and the task still ends `done` — the work is
+already committed on its own branch, and `merge-task` is the way back to
+it.
+
 **What "issuing commands from the interface" means today:** Vibe Kanban
 (`http://127.0.0.1:9100`, loopback-only) is a task backlog/MCP store —
 useful for tracking and for driving it via MCP tools from your own Claude
@@ -414,16 +440,6 @@ a task from producing a usable result end to end today, and the rest tax
 every phase that runs. The unit tests mock Claude Code, Docker, and Vibe
 Kanban, so none of them catch these.
 
-- **A finished task goes nowhere.** The work now accumulates on
-  `agent/task/<task-id>` (see "Context handoff" above), but nothing merges
-  that branch or opens a PR when the task ends `done` — the result sits in
-  `.data/projects/<slug>` for a human to find. The two halves of this gap
-  that are fixed: the revisor and auditor no longer review a pristine
-  `HEAD`, and the worktrees no longer pile up per task. What's left is the
-  ending. Candidate fixes, none designed: the dispatcher merging to the
-  default branch after an approving auditor verdict, or `gh pr create`
-  from the task branch, which needs a remote and a token neither container
-  has today.
 - **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
   Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
   see below): the server speaks stdio via an `mcp` subcommand, not the

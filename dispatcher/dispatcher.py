@@ -396,6 +396,33 @@ def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
         logger.info("task %s: removed review worktrees %s", task_id, ", ".join(removed))
 
 
+def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> None:
+    """Offer a finished task's branch to the branch the project sits on.
+
+    Best-effort in the same sense as the cleanup above: the task is already
+    done, the work is already committed on its own branch, and a merge that
+    did not happen is a `dispatch merge-task` away. So a refusal is logged
+    and the cycle ends normally rather than turning a finished task into a
+    crashed one.
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return
+    project_dir = f"{cfg.projects_root}/{slug}"
+    owner = docker_exec.read_owner(container, project_dir)
+    try:
+        outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
+    except Exception as exc:
+        logger.warning("could not merge task %s: %s", task_id, exc)
+        return
+    finally:
+        docker_exec.restore_owner(container, project_dir, owner)
+    if outcome.refused:
+        logger.warning("task %s: not merged: %s", task_id, outcome.detail)
+    else:
+        logger.info("task %s: %s", task_id, outcome.detail)
+
+
 def run_task_cycle(
     cfg: Config,
     task_id: str,
@@ -491,6 +518,8 @@ def run_task_cycle(
             return
 
         _update_task_status(kanban, task_id, "done")
+        if cfg.merge_on_done:
+            _merge_task_branch(cfg, task_id, slug)
     finally:
         # Every way out of here is terminal for this run — done, blocked, or a
         # crash — and the reviewing checkouts are rebuilt on demand, so they can

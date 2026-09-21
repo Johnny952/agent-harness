@@ -47,6 +47,7 @@ def _make_config(tmp_path, **overrides):
         escalate_effort_after_round=2,
         escalated_effort="high",
         phase_timeout_seconds=7200,
+        merge_on_done=False,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -61,10 +62,15 @@ class _FakeGit:
 
     owner = "1000:1000"
 
+    outcome = dispatcher_mod.docker_exec.MergeOutcome(
+        dispatcher_mod.docker_exec.MERGED, "main", "merged agent/task/task-1 into main"
+    )
+
     def __init__(self):
         self.commits = []
         self.restored = []
         self.review_cleanups = []
+        self.merges = []
 
     def commit_worktree(self, container, workdir, message, author_name, author_email):
         self.commits.append(
@@ -88,6 +94,10 @@ class _FakeGit:
         self.review_cleanups.append((container, projects_root, slug, task_id))
         return ["revisor", "auditor"]
 
+    def merge_task_branch(self, container, projects_root, slug, task_id):
+        self.merges.append((container, projects_root, slug, task_id))
+        return self.outcome
+
 
 @pytest.fixture(autouse=True)
 def fake_git(monkeypatch):
@@ -98,6 +108,7 @@ def fake_git(monkeypatch):
     monkeypatch.setattr(
         dispatcher_mod.docker_exec, "remove_review_worktrees", fake.remove_review_worktrees
     )
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", fake.merge_task_branch)
     return fake
 
 
@@ -1034,6 +1045,90 @@ def test_run_task_cycle_cleanup_does_not_swallow_a_real_failure(tmp_path, monkey
 def test_cleanup_container_returns_none_without_accounts(tmp_path) -> None:
     """A config with no accounts has nothing to run docker exec in."""
     assert dispatcher_mod.cleanup_container(_make_config(tmp_path, accounts=[])) is None
+
+
+def test_run_task_cycle_does_not_merge_by_default(tmp_path, monkeypatch, fake_git) -> None:
+    """merge_on_done is off, so a done task leaves the project's branch alone."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", "done") in kanban.statuses
+    assert fake_git.merges == []
+
+
+def test_run_task_cycle_merges_a_done_task_when_asked_to(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", "done") in kanban.statuses
+    assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+
+
+def test_run_task_cycle_does_not_merge_a_blocked_task(tmp_path, monkeypatch, fake_git) -> None:
+    """Nothing approved this work, so merge_on_done has nothing to act on."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", "blocked") in kanban.statuses
+    assert fake_git.merges == []
+
+
+def test_run_task_cycle_logs_a_refused_merge_and_still_finishes(tmp_path, monkeypatch, caplog) -> None:
+    """A merge that cannot happen is a warning, not a failed task: the work is committed."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    def refusing_merge(container, projects_root, slug, task_id):
+        return dispatcher_mod.docker_exec.MergeOutcome(
+            dispatcher_mod.docker_exec.REFUSED, "main", "has uncommitted changes"
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", refusing_merge)
+
+    kanban = _FakeKanban()
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", "done") in kanban.statuses
+    assert "has uncommitted changes" in caplog.text
+
+
+def test_run_task_cycle_survives_a_merge_that_raises(tmp_path, monkeypatch, caplog) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    def exploding_merge(container, projects_root, slug, task_id):
+        raise RuntimeError("docker daemon went away")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", exploding_merge)
+
+    kanban = _FakeKanban()
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("task-1", "done") in kanban.statuses
+    assert "docker daemon went away" in caplog.text
+
+
+def test_run_task_cycle_hands_the_tree_back_after_merging(tmp_path, monkeypatch, fake_git) -> None:
+    """git writes to .git/ as root here too, so the merge restores ownership as well."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    project_dir = f"{cfg.projects_root}/myproj"
+    # Once for the merge, once for the review-worktree cleanup that follows it.
+    assert fake_git.restored == [(project_dir, "1000:1000"), (project_dir, "1000:1000")]
 
 
 def _phase_exec(result):

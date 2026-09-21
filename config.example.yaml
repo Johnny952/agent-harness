@@ -78,3 +78,15 @@ escalated_effort: high
 # killed, the phase counts as failed rather than hanging the dispatcher
 # indefinitely. Optional; defaults to 7200 (2 hours).
 phase_timeout_seconds: 7200
+
+# Whether a task that reaches `done` has its branch merged into whatever
+# branch the project's checkout is on, right after the auditor signs off.
+# Off by default: the merge is the only thing a run writes into the branch
+# you work from, so it waits to be asked for. With this false, the same
+# merge is available by hand, whenever you have looked at the result:
+#   python -m dispatcher.cli --config config.yaml merge-task \
+#     --task-id T-001 --project my-project
+# Either way it is a --no-ff merge that refuses on a dirty tree and rolls
+# itself back on a conflict, and the task branch always survives.
+# Optional; defaults to false.
+merge_on_done: false

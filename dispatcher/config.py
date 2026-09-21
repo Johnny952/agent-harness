@@ -27,6 +27,7 @@ class Config:
     escalate_effort_after_round: int
     escalated_effort: str
     phase_timeout_seconds: int
+    merge_on_done: bool
 
 
 def load_config(path: str) -> Config:
@@ -55,4 +56,8 @@ def load_config(path: str) -> Config:
         escalate_effort_after_round=raw.get("escalate_effort_after_round", 2),
         escalated_effort=raw.get("escalated_effort", "high"),
         phase_timeout_seconds=phase_timeout_seconds,
+        # Off by default: merging is the one thing a run does to the branch the
+        # human works from, so it waits to be asked for. `dispatch merge-task`
+        # does the same merge by hand whenever this stays false.
+        merge_on_done=bool(raw.get("merge_on_done", False)),
     )

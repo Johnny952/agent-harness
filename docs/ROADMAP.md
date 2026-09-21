@@ -639,6 +639,34 @@ logins.
      the whole directory, branch intact. Same `chown` restore as the
      phases, since `git worktree prune` writes to `.git/worktrees/` as
      root. 16 new unit tests, 126 across the two dispatcher test files.
+   - **A finished task goes nowhere.** Fixed 2026-09-21 as chosen:
+     `dispatch merge-task --task-id <id> --project <slug>` always
+     available, plus `merge_on_done` in `config.yaml`, default `false`,
+     which runs the same merge right after the auditor signs off. `gh pr
+     create` was rejected — it needs a remote and a token neither
+     container has. The target branch is read, not configured: whatever
+     `projects_root/<slug>` is checked out on is what whoever set the
+     project up works from, and a merge into a branch nobody looks at
+     helps no one. Four refusals leave the repository exactly as found —
+     no such branch, detached `HEAD`, the project sitting on the task
+     branch itself, uncommitted tracked changes — and a conflicted merge
+     is rolled back with `git merge --abort`. Three outcomes, not two:
+     `--no-ff` on an already-merged branch exits 0 printing "Already up
+     to date.", which is `UP_TO_DATE`, so a re-run does not read as a
+     failure or exit non-zero. Two details the design turns on. The dirty
+     check passes `--untracked-files=no`, because `worktrees/` lives
+     inside the repository and any project that has ever run a task is
+     permanently untracked-dirty — treating that as dirty would refuse
+     every merge forever, and the case untracked files actually matter in
+     (a merge that would write over one) git refuses by itself, which
+     surfaces as the merge failing. And no path deletes or rewrites
+     `agent/task/<task-id>`: the branch is the record of the work and the
+     way back if the merge was wrong. Same `chown` restore as the phases
+     and the cleanup, in both the dispatcher hook and the CLI, since the
+     merge writes to `.git/` as root. From the dispatcher a refusal is
+     logged and the task still ends `done`; from the CLI it prints to
+     stderr and exits 1, so a script can tell a refusal from a merge. 20
+     new unit tests, 240 in the suite.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
