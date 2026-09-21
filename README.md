@@ -296,6 +296,18 @@ docker compose -f docker/compose/docker-compose.yml --profile dispatcher \
 `bootstrap-project` only creates the directory; cloning the actual project
 repository into it is still a manual, one-time step.
 
+Every worktree is checked out under `<project>/worktrees/`, inside the
+repository being worked on, so the first one the dispatcher creates also adds
+`/worktrees/` to that checkout's `.git/info/exclude`. It goes there rather
+than in a `.gitignore` because it is a fact about this clone — where the
+harness keeps its scratch checkouts — not something the project should carry
+in its own history. The entry is anchored to the repository root, so a
+project with a `src/worktrees/` of its own goes on seeing it, and the write
+is idempotent and best-effort: a directory nobody has cloned a repository
+into yet simply gets nothing. Without it, any project that has ever run a
+task reports an untracked `worktrees/` for good, and is one `git add -A` away
+from committing a worktree as an embedded repository.
+
 A finished cycle drops its reviewing worktrees by itself, but the writers'
 one is kept on purpose. Once you are done reading the result, reclaim it:
 

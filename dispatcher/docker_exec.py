@@ -135,6 +135,78 @@ def task_worktrees_dir(projects_root: str, slug: str, task_id: str) -> str:
     return f"{projects_root}/{slug}/worktrees/{task_id}"
 
 
+WORKTREES_EXCLUDE_ENTRY = "/worktrees/"
+"""What the project's checkout is taught to ignore, anchored to the repo root.
+
+The leading slash is deliberate: only the directory create_worktree makes at
+the top of the project is ours, and a project carrying its own src/worktrees/
+should go on seeing it.
+"""
+
+_EXCLUDE_COMMENT = "# ia-harness: worktrees of dispatched tasks live here"
+
+
+def _git_common_dir(container: str, project_dir: str) -> str | None:
+    """The repository's shared .git directory, absolute, or None if there is none."""
+    proc = run_docker_exec(
+        container, project_dir, ["git", "rev-parse", "--git-common-dir"], env=_GIT_ENV
+    )
+    path = proc.stdout.strip()
+    if proc.returncode != 0 or not path:
+        return None
+    # Asked from the top of a checkout, git answers relatively: ".git".
+    return path if path.startswith("/") else f"{project_dir}/{path}"
+
+
+def _excludes_worktrees(exclude_text: str) -> bool:
+    """Is the worktrees directory already excluded, in either spelling?"""
+    wanted = {WORKTREES_EXCLUDE_ENTRY, WORKTREES_EXCLUDE_ENTRY.lstrip("/")}
+    return any(line.strip() in wanted for line in exclude_text.splitlines())
+
+
+def ensure_worktrees_ignored(container: str, project_dir: str) -> bool:
+    """Keep a task's worktrees out of the project's own `git status`.
+
+    Every task is checked out under <project>/worktrees/, which lives inside
+    the repository being worked on, so a project that has ever run one reports
+    an untracked `worktrees/` for good: noise for whoever owns the checkout,
+    and one `git add -A` away from committing a worktree as an embedded
+    repository. The entry goes in .git/info/exclude rather than .gitignore
+    because it describes where this harness keeps its scratch checkouts — a
+    fact about this clone, not something the project should carry in its
+    history.
+
+    Idempotent, and best-effort: a directory nobody has cloned into yet
+    (bootstrap-project makes it before the repo exists) simply gets nothing.
+    Returns True when the entry was added.
+    """
+    git_dir = _git_common_dir(container, project_dir)
+    if git_dir is None:
+        return False
+    info_dir = f"{git_dir}/info"
+    existing = run_docker_exec(container, project_dir, ["cat", f"{info_dir}/exclude"])
+    if existing.returncode == 0 and _excludes_worktrees(existing.stdout):
+        return False
+    # git ships info/ with every repository, but a repo can reach us without
+    # it, and then the append below would be the thing that fails.
+    run_docker_exec(container, project_dir, ["mkdir", "-p", info_dir])
+    # The only shell in this module, and it interpolates nothing of the
+    # caller's: both literals are module constants, and the directory arrives
+    # as the workdir, which docker passes as an argv element rather than to sh.
+    appended = run_docker_exec(
+        container,
+        info_dir,
+        ["sh", "-c", f"printf '%s\\n' '{_EXCLUDE_COMMENT}' '{WORKTREES_EXCLUDE_ENTRY}' >> exclude"],
+    )
+    if appended.returncode != 0:
+        logger.warning(
+            "could not exclude %s in %s: %s",
+            WORKTREES_EXCLUDE_ENTRY, info_dir, _output_tail(appended),
+        )
+        return False
+    return True
+
+
 def create_worktree(container: str, projects_root: str, slug: str, task_id: str, role: str) -> str:
     """Create (or re-use) the worktree a role works in for one task.
 
@@ -152,6 +224,9 @@ def create_worktree(container: str, projects_root: str, slug: str, task_id: str,
     _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id, role=role)
 
     project_dir = f"{projects_root}/{slug}"
+    # Before the first worktree exists, so the directory is ignored from the
+    # moment it shows up instead of after someone trips over it.
+    ensure_worktrees_ignored(container, project_dir)
     branch = task_branch(task_id)
     if role in WRITER_ROLES:
         return _add_writer_worktree(container, project_dir, task_id, branch)

@@ -462,6 +462,8 @@ def test_create_worktree_rebuilds_a_detached_checkout_for_reviewers(monkeypatch)
 
     assert path == f"{_PROJECT}/worktrees/task-1/revisor"
     assert [_in_container(cmd) for cmd in calls] == [
+        # ensure_worktrees_ignored, with no repository here to exclude anything in.
+        ["git", "rev-parse", "--git-common-dir"],
         ["rm", "-rf", path],
         ["git", "worktree", "prune"],
         ["git", "worktree", "add", "--detach", path, _BRANCH],
@@ -954,3 +956,172 @@ def test_current_branch_returns_none_on_a_detached_head(monkeypatch) -> None:
     )
 
     assert docker_exec_mod.current_branch(_CONTAINER, _PROJECT) is None
+
+
+def _workdir(cmd):
+    """The -w the call ran in, i.e. where the redirect below lands."""
+    return cmd[cmd.index("-w") + 1]
+
+
+def _exclude_responder(common_dir=".git", exclude=(0, ""), append=(0, "", "")):
+    """A docker exec that answers the exclude file's probes separately.
+
+    `common_dir` is what `git rev-parse` prints (None for "not a repository"),
+    `exclude` is the (returncode, contents) of cat-ing the file.
+    """
+    def respond(args):
+        if args[:2] == ["git", "rev-parse"]:
+            return (1, "", "") if common_dir is None else (0, f"{common_dir}\n", "")
+        if args[0] == "cat":
+            returncode, text = exclude
+            return (returncode, text, "")
+        if args[0] == "sh":
+            return append
+        return (0, "", "")
+    return respond
+
+
+def _appends(calls):
+    """The shell calls that write to the exclude file."""
+    return [cmd for cmd in calls if _in_container(cmd)[0] == "sh"]
+
+
+def test_ensure_worktrees_ignored_excludes_the_directory_in_the_repositorys_own_git_dir(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _exclude_responder()))
+
+    assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is True
+
+    appended = _appends(calls)
+    assert len(appended) == 1
+    assert _workdir(appended[0]) == f"{_PROJECT}/.git/info"
+    # Redirected into the file rather than passed as a path, so the workdir is
+    # the only thing saying which repository this lands in.
+    assert _in_container(appended[0])[:2] == ["sh", "-c"]
+    assert _in_container(appended[0])[2].endswith(">> exclude")
+
+
+def test_ensure_worktrees_ignored_anchors_the_entry_to_the_repository_root() -> None:
+    """A project with its own src/worktrees/ must go on seeing it."""
+    assert docker_exec_mod.WORKTREES_EXCLUDE_ENTRY == "/worktrees/"
+
+
+def test_ensure_worktrees_ignored_writes_the_anchored_entry(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _exclude_responder()))
+
+    docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT)
+
+    script = _in_container(_appends(calls)[0])[2]
+    assert "'/worktrees/'" in script
+    assert script.startswith("printf ")
+
+
+def test_ensure_worktrees_ignored_does_nothing_when_the_entry_is_already_there(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(exclude=(0, "*.log\n/worktrees/\n"))),
+    )
+
+    assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is False
+    assert _appends(calls) == []
+
+
+def test_ensure_worktrees_ignored_accepts_the_entry_someone_wrote_unanchored(monkeypatch) -> None:
+    """`worktrees/` by hand already covers our directory: don't pile on."""
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(exclude=(0, "# stuff\nworktrees/\n"))),
+    )
+
+    assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is False
+    assert _appends(calls) == []
+
+
+def test_ensure_worktrees_ignored_is_not_fooled_by_a_longer_line(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(exclude=(0, "src/worktrees/keep\n"))),
+    )
+
+    assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is True
+
+
+def test_ensure_worktrees_ignored_follows_git_to_an_absolute_git_dir(monkeypatch) -> None:
+    """A separate .git directory is where the exclude file actually lives."""
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(common_dir="/srv/repos/myproj.git")),
+    )
+
+    docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT)
+
+    assert _workdir(_appends(calls)[0]) == "/srv/repos/myproj.git/info"
+
+
+def test_ensure_worktrees_ignored_leaves_a_directory_that_is_not_a_repository_alone(monkeypatch) -> None:
+    """bootstrap-project makes the directory before anyone clones into it."""
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(common_dir=None)),
+    )
+
+    assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is False
+    assert _appends(calls) == []
+    assert not any(_in_container(cmd)[0] == "mkdir" for cmd in calls)
+
+
+def test_ensure_worktrees_ignored_creates_an_info_directory_that_is_missing(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(exclude=(1, ""))),
+    )
+
+    assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is True
+    mkdirs = [_in_container(cmd) for cmd in calls if _in_container(cmd)[0] == "mkdir"]
+    assert mkdirs == [["mkdir", "-p", f"{_PROJECT}/.git/info"]]
+
+
+def test_ensure_worktrees_ignored_reports_a_write_it_could_not_make(monkeypatch, caplog) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(append=(1, "", "Read-only file system\n"))),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert docker_exec_mod.ensure_worktrees_ignored(_CONTAINER, _PROJECT) is False
+
+    assert "Read-only file system" in caplog.text
+
+
+def test_create_worktree_excludes_the_directory_before_it_creates_one(monkeypatch) -> None:
+    """The noise never appears, rather than being cleaned up afterwards."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _exclude_responder()))
+
+    create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", "arquitecto")
+
+    order = [_in_container(cmd) for cmd in calls]
+    excluded = next(i for i, args in enumerate(order) if args[0] == "sh")
+    added = next(i for i, args in enumerate(order) if args[:3] == ["git", "worktree", "add"])
+    assert excluded < added
+
+
+def test_create_worktree_does_not_fail_a_phase_over_the_exclude_file(monkeypatch) -> None:
+    """Hygiene: a repository that won't take the entry still gets its worktree."""
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _exclude_responder(append=(1, "", "denied\n"))),
+    )
+
+    path = create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", "arquitecto")
+
+    assert path == f"{_PROJECT}/worktrees/task-1/work"

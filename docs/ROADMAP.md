@@ -667,6 +667,31 @@ logins.
      logged and the task still ends `done`; from the CLI it prints to
      stderr and exits 1, so a script can tell a refusal from a merge. 20
      new unit tests, 240 in the suite.
+   - **A dispatched project's own `git status` never comes back clean.**
+     Found while verifying the merge, fixed 2026-09-21: the first time
+     `create_worktree` runs, `ensure_worktrees_ignored` appends an
+     anchored `/worktrees/` (with a comment naming the harness) to the
+     project checkout's `.git/info/exclude`. Three choices behind it.
+     `.git/info/exclude` rather than `.gitignore`, because where this
+     harness parks its scratch checkouts is a fact about this clone, not
+     something the project should commit. Anchored with a leading slash,
+     so a project carrying its own `src/worktrees/` goes on seeing it.
+     And hooked into `create_worktree` rather than `bootstrap-project`,
+     which runs before anyone has cloned the repository and would have
+     nothing to write into — the helper is idempotent and best-effort
+     (no repository, no `info/`, a failed write: it logs and returns
+     `False`, and no phase fails over it), so the entry lands the moment
+     the directory it describes does. It also closes the gitlink trap:
+     before it, `git add -A` in a project that had run a task would
+     commit a worktree as an embedded repository. The merge's dirty
+     check keeps `--untracked-files=no` regardless, since an older
+     checkout can reach us without the entry. Verified live on a real
+     repository inside `agent-cuenta1`: `True` then `False` on a second
+     call, both writer and reviewer worktrees created, `git status
+     --porcelain` empty with both present, `git add -A` picking up
+     nothing, `?? src/` still reported for a nested `worktrees/`, and
+     `.git/info/exclude` still owned by 1000:1000 after the append. 12
+     new unit tests, 252 in the suite.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
@@ -752,7 +777,10 @@ starts, not in stage 0.
   leaves the next one querying a stale graph and trusting it. One index
   per worktree, rather than one at the project root, because the
   indexers' default exclude lists have no `worktrees/` entry and would
-  index every role's copy of every file. What's unmeasured is the cost.
+  index every role's copy of every file — though since 2026-09-21 the
+  checkout carries `/worktrees/` in its `.git/info/exclude`, which a
+  gitignore-aware walker honours, so measure rather than assume that a
+  root index still sees them. What's unmeasured is the cost.
   - Run: on a real target repo, build the index in a fresh worktree and
     time it; repeat with the worktree already indexed to time an
     incremental sync; measure the index's disk use and multiply by the
