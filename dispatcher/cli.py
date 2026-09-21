@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 from pathlib import Path
 
 from dispatcher import context_transfer, docker_exec
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import cleanup_container, container_for, run_task_cycle
-from dispatcher.vibe_kanban_client import VibeKanbanClient
+from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
 
 
 def _resolve_description(
@@ -47,6 +48,34 @@ def _resolve_description(
     return text
 
 
+def _seed_kanban_issue_id(
+    args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser
+) -> None:
+    """Record which board issue this task mirrors, when the operator named one.
+
+    Stored in the task file rather than kept for this run only: the id is
+    what every later phase — and every later `run-task` on the same task —
+    needs to move the issue along.
+    """
+    if args.kanban_issue_id is None:
+        return
+    if cfg.vibe_kanban is None:
+        parser.error(
+            "--kanban-issue-id, but config.yaml has no vibe_kanban block: nothing "
+            "would ever read the id. Configure the board, or drop the flag."
+        )
+    try:
+        uuid.UUID(args.kanban_issue_id)
+    except ValueError:
+        # The board shows a short id (VK-7); every MCP tool wants the uuid.
+        # Catching the mix-up here beats a rejected update_issue four phases in.
+        parser.error(
+            f"--kanban-issue-id: {args.kanban_issue_id!r} is not a uuid. Vibe Kanban's "
+            "issue_id is the issue's uuid, not the short id shown on the card."
+        )
+    context_transfer.set_kanban_issue_id(cfg.hive_tasks_dir, args.task_id, args.kanban_issue_id)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ia-harness-dispatcher")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
@@ -66,6 +95,13 @@ def main() -> None:
         "--description-file",
         help="Read the description from this file instead of the command line; "
         "'-' reads stdin. Use it for anything longer than a sentence.",
+    )
+    run_parser.add_argument(
+        "--kanban-issue-id",
+        help="The uuid of the Vibe Kanban issue this task mirrors, so the board "
+        "follows the run. Stored in the task file, so it is only needed once "
+        "per task. Without it (or without a vibe_kanban block in config.yaml) "
+        "the run simply has no board.",
     )
 
     bootstrap_parser = sub.add_parser(
@@ -100,7 +136,10 @@ def main() -> None:
 
     if args.command == "run-task":
         description = _resolve_description(args, cfg, parser)
-        kanban = VibeKanbanClient(cfg.vibe_kanban_mcp_url)
+        _seed_kanban_issue_id(args, cfg, parser)
+        # No vibe_kanban block, no board: the cycle runs exactly as before and
+        # says nothing about a board it was never given.
+        kanban = VibeKanbanClient(cfg.vibe_kanban) if cfg.vibe_kanban else NullKanbanClient()
         run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the

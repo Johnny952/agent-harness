@@ -14,11 +14,11 @@ accounts is a documented non-goal for now (see the design spec).
 ## Architecture
 
 ```
-Vibe Kanban (control UI, loopback-only)
-        │
-        ▼
 Smart Dispatcher  ──reads/writes──  per-account state (disk-persisted)
         │                            IDLE / BUSY / PRE_COOLDOWN / COOLING_DOWN
+        │
+        ├──mirrors status──▶  Vibe Kanban (optional board, stdio MCP;
+        │                       control UI loopback-only)
         │
         ▼ docker exec (claude -p ... --output-format json)
 Agent container (per Claude Pro account)
@@ -29,9 +29,6 @@ Agent container (per Claude Pro account)
 Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
 ```
 
-- **Vibe Kanban** — task backlog / control UI (web UI bound to
-  `127.0.0.1` only, never exposed off-host); its MCP server runs over
-  stdio, not the network.
 - **Smart Dispatcher** (`dispatcher/`) — for one task, runs the role sequence
   `arquitecto → implementador → revisor → auditor`. Before each phase it
   picks an IDLE account, probes `/usage` to keep it under
@@ -54,9 +51,17 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   sidecar (`DOCKER_HOST` pointed at the sidecar, `sysbox-runc` runtime, no
   `--privileged`) so agents can build/run containers without touching the
   host Docker daemon.
+- **Vibe Kanban** — an optional task board, off unless `config.yaml`
+  carries a `vibe_kanban` block. The dispatcher opens one issue per task
+  and moves it as the cycle runs; nothing flows back, and a board call
+  that fails never fails the phase. Its MCP server is spawned as a
+  subprocess and speaks stdio, so nothing dials it over the network; the
+  web UI is bound to `127.0.0.1` only, never exposed off-host, and sits
+  behind a Compose profile.
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
-  (`status`, `owner`, `depends_on`, `heartbeat`) plus a body that accumulates
-  each phase's handoff notes. Used for cold-start role transitions; mid-role
+  (`status`, `owner`, `depends_on`, `heartbeat`, the operator's
+  `description`, and `kanban_issue_id` when there's a board) plus a body
+  that accumulates each phase's handoff notes. Used for cold-start role transitions; mid-role
   quota exhaustion instead resumes the same Claude session directly via
   `--resume`. Stale locks (heartbeat older than `heartbeat_ttl_seconds`) are
   reaped at the start of each task cycle; a live lock held by another owner
@@ -263,20 +268,24 @@ docker compose -f docker/compose/docker-compose.agents.yml up -d
 `docker/compose/docker-compose.yml` reads `DASHBOARD_USERNAME`/
 `DASHBOARD_PASSWORD_HASH` from `docker/compose/.env` automatically if
 `scripts/configure.sh` wrote one; otherwise pass them inline. This step
-brings up four **persistent** control-plane services (`vibe-kanban`,
-`collector`, `dashboard`, `registry-mirror`) plus, from the second file, one
-persistent `agent-<name>`/`dind-<name>` pair per configured account.
+brings up three **persistent** control-plane services (`collector`,
+`dashboard`, `registry-mirror`) plus, from the second file, one persistent
+`agent-<name>`/`dind-<name>` pair per configured account.
 
-The `dispatcher` service is deliberately **not** a persistent service —
-its compose entry exists only as a template (`restart: "no"`, placeholder
-`--task-id`/`--project`). See step 5.
+Two services in those files are deliberately kept out of that default
+set, each behind a Compose profile. Stage-0 verification found both by
+running the two-liner above:
 
-Stage-0 verification found two problems with the two-liner above. One is
-still open: a plain `up -d` will hit the `vibe-kanban` pull failure (the
-image can't be pulled) — see Known gaps below. The other is fixed: that
-same bare `up -d` used to also fire the `dispatcher` service and run a
-task, which is now gated behind `profiles: ["dispatcher"]` in both
-compose files.
+- `dispatcher` (`profiles: ["dispatcher"]`) is a template, not a service
+  (`restart: "no"`, placeholder `--task-id`/`--project`). Ungated, a bare
+  `up -d` fired it and ran a task. See step 5.
+- `vibe-kanban` (`profiles: ["kanban"]`) is the optional board's web UI.
+  Its image (`ghcr.io/bloopai/vibe-kanban:latest`) is denied on an
+  anonymous pull, and Compose pre-pulls every named image before starting
+  any service — so while it sat in the default set, that pull failure
+  took down the `up -d` for all four. Nothing in the harness dials this
+  service; see *The board, if you want one* in step 5. Bring it up with
+  `--profile kanban` once `image:` points at something you can pull.
 
 ### 5. Run a task
 
@@ -364,15 +373,43 @@ refused merge there is logged and the task still ends `done` — the work is
 already committed on its own branch, and `merge-task` is the way back to
 it.
 
-**What "issuing commands from the interface" means today:** Vibe Kanban
-(`http://127.0.0.1:9100`, loopback-only) is a task backlog/MCP store —
-useful for tracking and for driving it via MCP tools from your own Claude
-session (once logged in to its cloud account — see Known gaps) — but it
-is *not* wired to the dispatcher. Creating or updating a
-task in Vibe Kanban does not make anything run. The dispatcher is a
-one-shot CLI, not a daemon watching for new tasks, so `run-task` above
-still has to be invoked manually (or from your own automation/cron) per
-task-id. There is no push-button "run" in the UI yet.
+**The board, if you want one.** A Vibe Kanban board is optional and
+unconfigured by default: with no `vibe_kanban` block in `config.yaml` the
+dispatcher runs exactly as it does above and says nothing about a board.
+Add the block — copy the commented one in `config.example.yaml` — and each
+`run-task` opens an issue for the task, then moves it as the cycle goes
+`in_progress:<role>` → `blocked`/`done`. `--kanban-issue-id <uuid>` points
+a task at an issue that already exists instead; ids are server-assigned
+uuids, so `list_issues` (filtered by `search` or `simple_id`) is how you
+find one. The id lands in the task file's frontmatter as
+`kanban_issue_id`, which is what survives a restart. The board is a
+visibility aid and never dispatch state: every call to it is best-effort,
+and one that fails is logged rather than failing the phase.
+
+Two things to know before uncommenting that block:
+
+- **Its MCP server speaks stdio, not HTTP.** The dispatcher spawns
+  `vibe_kanban.command` as a subprocess; there is no URL to point at. The
+  `vibe-kanban` compose service (`http://127.0.0.1:9100`, loopback-only,
+  `--profile kanban`) is the web UI for you, not something the dispatcher
+  reaches over the network. The shipped dispatcher image has no Node, so
+  a bare `npx vibe-kanban@0.1.44 mcp` will not run inside it: add Node to
+  `docker/dispatcher/Dockerfile`, or point `command` at a wrapper of your
+  own.
+- **`status_map` is a guess to correct, not a default to trust.**
+  `update_issue` only accepts a status name the project already has, and
+  no MCP tool lists a project's names, so the shipped `In Progress` /
+  `In Review` / `Done` are a starting point. An unmapped status is
+  skipped with a warning rather than sent. Creating or reading issues
+  also needs that server signed in to Vibe Kanban's cloud — see Known
+  gaps.
+
+**What "issuing commands from the interface" means today:** nothing flows
+the other way. Creating or updating an issue on the board does not make
+anything run. The dispatcher is a one-shot CLI, not a daemon watching for
+new tasks, so `run-task` above still has to be invoked manually (or from
+your own automation/cron) per task-id. There is no push-button "run" in
+the UI yet.
 
 Additional accounts are added by duplicating an `agent-*`/`dind-*` pair in
 `docker/compose/docker-compose.agents.yml` and the matching entry in
@@ -421,8 +458,9 @@ volumes yourself outside Coolify (e.g. reusing them across a fleet, or you
 want them to outlive a resource deletion), import the split files instead
 of the merged one, as two separate Coolify Compose resources:
 
-1. `docker/compose/docker-compose.yml` (control plane: `vibe-kanban`,
-   `collector`, `dashboard`, `registry-mirror`).
+1. `docker/compose/docker-compose.yml` (control plane: `collector`,
+   `dashboard`, `registry-mirror`, plus `vibe-kanban` behind the `kanban`
+   profile).
 2. `docker/compose/docker-compose.agents.yml` (one `agent-<name>`/
    `dind-<name>` pair per account — scale this file, not individual
    services, when adding accounts).
@@ -465,39 +503,10 @@ prioritized item lists the checks it depends on.
 
 ### Known gaps (fix first)
 
-These sit in the core pipeline rather than on top of it: they most likely
-keep a task from producing a usable result end to end today. The unit
-tests mock Claude Code, Docker, and Vibe Kanban, so none of them catch
-these.
+Nothing in the core pipeline is known-broken any more. What's left is
+what a no-quota check couldn't settle — and the unit tests mock Claude
+Code, Docker, and Vibe Kanban, so none of them settle it either.
 
-- **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
-  Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
-  see below): the server speaks stdio via an `mcp` subcommand, not the
-  assumed SSE transport; there is no `list_tasks`/`create_task`/
-  `update_task` — the real vocabulary is `list_issues`/`create_issue`/
-  `get_issue`/`update_issue`/`delete_issue`, keyed on `issue_id`, not
-  `id`; every schema types its id fields `format: "uuid"`, so IDs look
-  server-assigned, not caller-minted (not yet confirmed live — no issue
-  could be created, see V2.6); and `update_issue.status` is documented as
-  a fixed, per-project set of names, not arbitrary strings, though the
-  live names and the update-rejection text are still unconfirmed. A cloud
-  login at `api.vibekanban.com` appears to gate every project/issue call
-  (`list_organizations` returns 401, and `list_projects` needs an
-  organization ID that can't be obtained without it), so the description
-  round-trip (`get_issue`) couldn't be confirmed live either — re-run once
-  credentials exist. `vibe_kanban_client.py` needs a full rewrite, not a
-  patch. (V2.1–V2.4, V2.5, V2.6)
-- **The Vibe Kanban image can't be pulled.**
-  `ghcr.io/bloopai/vibe-kanban:latest` (`docker-compose.yml:10`) is denied
-  on an anonymous pull — anonymous GHCR pulls work on this host for other
-  images, so this looks like an image-reference defect (private or
-  nonexistent image), not a credentials problem. Step 4's plain `up -d`
-  above will hit this same pull failure, since Compose pre-pulls every
-  named image before starting any of them. Until an image source is
-  picked (build from upstream, `npx vibe-kanban@0.1.44`, or a vetted
-  community image), bring up the other three control-plane services by
-  name instead: `docker compose -f docker/compose/docker-compose.yml
-  up -d collector dashboard registry-mirror`. (V0.2 control plane, V0.8)
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
   along with others not listed here (the `/usage` probe under `-p` — V1.3,
@@ -511,12 +520,21 @@ these.
     outside a declared sandbox. (V1.2)
   - Cross-account `--resume`: the design spec only tested one account.
     (V5.1)
-  - Vibe Kanban's MCP surface: confirmed mismatched live against
-    `vibe_kanban_client.py` (tool names, transport, V2.1–V2.2); ID and
-    status-name behavior is known only from the schemas, not confirmed
-    live (V2.3–V2.4),
-    and the description round-trip (V2.5) still needs a run past the
-    cloud-login gate (V2.6). See the Known-gaps bullet above. (V2.1–V2.6)
+  - Vibe Kanban's responses and status names: `vibe_kanban_client.py`
+    now speaks the surface verified live against `vibe-kanban@0.1.44`
+    (stdio, `create_issue`/`list_issues`/`get_issue`/`update_issue`,
+    keyed on `issue_id` — V2.1–V2.2), but no issue has ever been created
+    or read back: a cloud login at `api.vibekanban.com` gates every
+    project/issue call (`list_organizations` returns 401, and
+    `list_projects` needs an organization ID unobtainable without it), so
+    the description round-trip (V2.5) never ran past it (V2.6). What the
+    schemas say but nothing has confirmed: that ids are server-assigned
+    uuids and that `update_issue.status` takes a fixed, per-project set
+    of names (V2.3–V2.4). The client is built for both — it keeps the
+    server's uuid rather than minting one, and `status_map` exists to be
+    corrected — and its response parser accepts every shape an MCP server
+    may legally answer with, since the reply schemas are published
+    nowhere. Re-run V2.3–V2.6 once credentials exist. (V2.1–V2.6)
 
 ### Prioritized
 
@@ -725,9 +743,8 @@ these.
    - *Declared debt, mirrored to Vibe Kanban.* The `debt/` index above
      stays the source of truth. Agents read it filtered by its "where"
      column, it's versioned with the code, and it doesn't depend on Vibe
-     Kanban, which in this design is a visibility aid whose MCP surface
-     doesn't yet match the dispatcher's client (see Known gaps). The
-     flow:
+     Kanban, which in this design is a visibility aid and is optional in
+     `config.yaml` besides. The flow:
      1. The implementador declares debt in its structured return: whether
         it was introduced or found, what it is, why it stays, the cost of
         leaving it, and what would fix it. Found debt counts only in files
@@ -743,8 +760,8 @@ these.
         When a later spec decides the fix, the entry points to that
         section.
      4. The dispatcher, not an agent, creates one card per accepted entry
-        with `VibeKanbanClient.create_task`, which exists but nothing
-        calls yet. The card is labeled `debt`, sits in the backlog, and is
+        with `VibeKanbanClient.create_issue`, which the dispatcher
+        already calls once per task cycle. The card is labeled `debt`, sits in the backlog, and is
         never dispatched on its own. The entry and the card each record
         the other's ID. Cards created by agents would be duplicated every
         round, and an agent that can create tasks can assign itself work.
@@ -803,8 +820,8 @@ these.
 
    Its two prerequisites are now in place: agents are given the task
    description, and the dispatcher commits each writer phase, so docs a
-   role writes survive it. The debt cards still need Vibe Kanban's MCP to
-   create tasks, which is unverified. Not designed:
+   role writes survive it. The debt cards still need an issue created on
+   a real board, which no run has yet confirmed (V2.6). Not designed:
    the handoff schema, where skill files live (baked into `docker/agent/`
    at build time vs. mounted alongside `.hive`), how a role is told which
    skill applies (for skills that depend on the kind of task rather than
@@ -1150,7 +1167,8 @@ these.
        parallel dispatch (item 9).
      - Epic decomposition: an arquitecto mode that proposes child tasks,
        each with `depends_on` and a profile, for a human to approve.
-       Whether Vibe Kanban's MCP can create tasks is unverified.
+       Whether a board accepts an issue created this way is unverified
+       (V2.6).
      - Bug fixing (reproduce before fixing), infra/DevOps, performance,
        and data migrations (a human gate before anything irreversible):
        profiles or task types, not roles.

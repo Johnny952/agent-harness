@@ -11,10 +11,14 @@
 #
 # Some config.yaml fields aren't really free-form: projects_root,
 # hive_tasks_dir and state_dir must match the volume mounts in
-# docker/compose/docker-compose*.yml, and vibe_kanban_mcp_url/collector_url
-# are fixed by service-name DNS on the internal ia_harness_net network. This
-# wizard defaults those to the values the compose files already assume and
-# only asks about them under --advanced.
+# docker/compose/docker-compose*.yml, and collector_url is fixed by
+# service-name DNS on the internal ia_harness_net network. This wizard
+# defaults those to the values the compose files already assume and only
+# asks about them under --advanced.
+#
+# It never writes a `vibe_kanban` block: the board is optional, the
+# dispatcher runs without one, and wiring it up means picking a command that
+# exists (see config.example.yaml). The generated config points at that.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,7 +28,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEF_PROJECTS_ROOT="/data/projects"
 DEF_HIVE_TASKS_DIR="/data/.hive/tasks"
 DEF_STATE_DIR="/state"
-DEF_VIBE_KANBAN_MCP_URL="http://vibe-kanban:9100/sse"
 DEF_COLLECTOR_URL="http://collector:8787"
 
 # The account pairs docker-compose.agents.yml ships with out of the box.
@@ -212,7 +215,6 @@ HEARTBEAT_INTERVAL_SECONDS=$(prompt_int "Heartbeat interval seconds" 30)
 PROJECTS_ROOT=$DEF_PROJECTS_ROOT
 HIVE_TASKS_DIR=$DEF_HIVE_TASKS_DIR
 STATE_DIR=$DEF_STATE_DIR
-VIBE_KANBAN_MCP_URL=$DEF_VIBE_KANBAN_MCP_URL
 COLLECTOR_URL=$DEF_COLLECTOR_URL
 
 if [ "$ADVANCED" -eq 1 ]; then
@@ -222,7 +224,6 @@ if [ "$ADVANCED" -eq 1 ]; then
     PROJECTS_ROOT=$(prompt_text "projects_root" "$DEF_PROJECTS_ROOT")
     HIVE_TASKS_DIR=$(prompt_text "hive_tasks_dir" "$DEF_HIVE_TASKS_DIR")
     STATE_DIR=$(prompt_text "state_dir" "$DEF_STATE_DIR")
-    VIBE_KANBAN_MCP_URL=$(prompt_text "vibe_kanban_mcp_url" "$DEF_VIBE_KANBAN_MCP_URL")
     COLLECTOR_URL=$(prompt_text "collector_url" "$DEF_COLLECTOR_URL")
 fi
 
@@ -247,8 +248,10 @@ if [ "$write_config" -eq 1 ]; then
         echo "projects_root: $PROJECTS_ROOT"
         echo "hive_tasks_dir: $HIVE_TASKS_DIR"
         echo "state_dir: $STATE_DIR"
-        echo "vibe_kanban_mcp_url: $VIBE_KANBAN_MCP_URL"
         echo "collector_url: $COLLECTOR_URL"
+        echo "# A Vibe Kanban board is optional and left unconfigured here."
+        echo "# To mirror tasks onto one, copy the commented \`vibe_kanban\`"
+        echo "# block from config.example.yaml and make its command runnable."
     } > "$CONFIG_OUT"
     echo "Wrote $CONFIG_OUT"
 fi

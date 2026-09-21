@@ -13,10 +13,12 @@ from dispatcher.context_transfer import (
     list_task_ids,
     LockHeldError,
     read_description,
+    read_kanban_issue_id,
     read_task_file,
     refresh_heartbeat,
     release_stale_lock,
     set_description,
+    set_kanban_issue_id,
     task_file_path,
     TaskFile,
     write_task_file,
@@ -410,4 +412,81 @@ def test_task_file_written_before_descriptions_existed_is_still_readable(tmp_pat
 def test_read_description_of_an_unseeded_task_is_none(tmp_path: Path) -> None:
     assert read_description(str(tmp_path), "task-1") is None
     # Reading must not create the file: list_task_ids feeds the dispatcher.
+    assert list_task_ids(str(tmp_path)) == []
+
+
+_ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
+
+
+def test_kanban_issue_id_roundtrips(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
+
+    assert read_kanban_issue_id(hive_dir, "task-1") == _ISSUE_ID
+
+
+def test_kanban_issue_id_is_written_above_the_description(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    set_description(hive_dir, "task-1", _MULTILINE_DESCRIPTION)
+
+    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
+
+    raw = Path(task_file_path(hive_dir, "task-1")).read_text()
+    # The description is a block scalar running to the end of the frontmatter;
+    # a short bookkeeping key after it would read as part of the prose.
+    assert raw.index("kanban_issue_id:") < raw.index("description:")
+
+
+def test_set_kanban_issue_id_keeps_everything_else(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
+    acquire_lock(hive_dir, "task-1", owner="cuenta1")
+    handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready")
+
+    # Attaching a board to a task that already ran is a legitimate move.
+    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
+
+    task = read_task_file(task_file_path(hive_dir, "task-1"))
+    assert task.kanban_issue_id == _ISSUE_ID
+    assert task.description == "Add a /healthz endpoint."
+    assert task.body.strip() == "arquitecto: plan ready"
+    assert task.status == "review"
+
+
+def test_handoff_keeps_the_kanban_issue_id(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
+
+    handoff(hive_dir, "task-1", new_status="review", body="implementador: done")
+
+    # Every phase re-reads the file to find the issue it has to move along.
+    assert read_kanban_issue_id(hive_dir, "task-1") == _ISSUE_ID
+
+
+def test_task_file_written_before_the_board_existed_is_still_readable(tmp_path: Path) -> None:
+    path = str(tmp_path / "task-1.md")
+    Path(path).write_text(
+        "---\ntask_id: task-1\nstatus: pending\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\ndescription: Add a /healthz endpoint.\n---\n\nold body\n"
+    )
+
+    task = read_task_file(path)
+
+    assert task.kanban_issue_id is None
+    assert task.description == "Add a /healthz endpoint."
+
+
+def test_a_task_with_no_board_writes_no_kanban_key(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
+
+    assert read_kanban_issue_id(hive_dir, "task-1") is None
+    # Absent, not null: a harness without a board leaves no trace of one.
+    assert "kanban_issue_id" not in Path(task_file_path(hive_dir, "task-1")).read_text()
+
+
+def test_read_kanban_issue_id_of_an_unseeded_task_is_none(tmp_path: Path) -> None:
+    assert read_kanban_issue_id(str(tmp_path), "task-1") is None
     assert list_task_ids(str(tmp_path)) == []

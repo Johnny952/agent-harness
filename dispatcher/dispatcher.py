@@ -9,7 +9,7 @@ import threading
 from dispatcher import context_transfer, docker_exec, quota, state_machine
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
-from dispatcher.vibe_kanban_client import VibeKanbanClient
+from dispatcher.vibe_kanban_client import KanbanClient
 
 logger = logging.getLogger(__name__)
 
@@ -351,14 +351,54 @@ def dispatch_phase(
         return DispatchResult(success=True, session_id=result.session_id, result_text=result.result_text, account=account)
 
 
-def _update_task_status(kanban: VibeKanbanClient, task_id: str, status: str) -> None:
+#: A card is a glance, not a log: past this, the ask goes in its description.
+_ISSUE_TITLE_MAX = 120
+
+
+def _issue_title(task_id: str, description: str) -> str:
+    """What the card says on the board.
+
+    The task id leads, so a card and a task file can be lined up by eye; the
+    first line of the ask follows, so the card says something a human
+    recognises without opening it.
+    """
+    lines = [line.strip() for line in description.strip().splitlines() if line.strip()]
+    title = f"{task_id}: {lines[0]}" if lines else task_id
+    return title if len(title) <= _ISSUE_TITLE_MAX else title[: _ISSUE_TITLE_MAX - 1].rstrip() + "…"
+
+
+def _open_kanban_issue(cfg: Config, kanban: KanbanClient, task_id: str, description: str) -> str | None:
+    """Put this task on the board, and remember which card it became.
+
+    The uuid is server-assigned, so it goes back into the task file: a later
+    phase after a restart, or a second `run-task` on the same task, has to
+    move this same card rather than open another one. A board that can't be
+    reached costs one warning and nothing else — the run is not a board
+    operation.
+    """
+    try:
+        issue_id = kanban.create_issue(_issue_title(task_id, description), description)
+    except Exception as exc:
+        logger.warning("kanban: task %s runs without a card: %s", task_id, exc)
+        return None
+    if issue_id is not None:
+        context_transfer.set_kanban_issue_id(cfg.hive_tasks_dir, task_id, issue_id)
+    return issue_id
+
+
+def _update_task_status(kanban: KanbanClient, issue_id: str | None, status: str) -> None:
     # Vibe Kanban is a visibility aid, not the source of truth for dispatch
     # state (that's the task file / account state machine) — an outage or
     # API error there must not abort an otherwise-healthy phase run.
+    if issue_id is None:
+        # No board, or a board this task never got a card on. Silent on
+        # purpose: a harness configured without one would otherwise carry a
+        # warning per phase about something it was never asked to do.
+        return
     try:
-        kanban.update_task_status(task_id, status)
+        kanban.set_status(issue_id, status)
     except Exception as exc:
-        logger.warning("kanban status update failed for task %s (%s): %s", task_id, status, exc)
+        logger.warning("kanban status update failed for issue %s (%s): %s", issue_id, status, exc)
 
 
 def cleanup_container(cfg: Config) -> str | None:
@@ -427,11 +467,18 @@ def run_task_cycle(
     cfg: Config,
     task_id: str,
     slug: str,
-    kanban: VibeKanbanClient,
+    kanban: KanbanClient,
     description: str | None = None,
 ) -> None:
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    # The card this task already mirrors, if any: seeded by `run-task
+    # --kanban-issue-id`, or left behind by an earlier run that opened one.
+    issue_id = (
+        context_transfer.read_kanban_issue_id(cfg.hive_tasks_dir, task_id)
+        if kanban.enabled
+        else None
+    )
 
     if description is not None:
         context_transfer.set_description(cfg.hive_tasks_dir, task_id, description)
@@ -449,8 +496,14 @@ def run_task_cycle(
             task_id,
             task_file,
         )
-        _update_task_status(kanban, task_id, "blocked")
+        _update_task_status(kanban, issue_id, "blocked")
         return
+
+    if kanban.enabled and issue_id is None:
+        # First run of this task against a board nobody pointed at a card:
+        # the harness opens one, which is the only way a task id ever becomes
+        # a uuid — every id in Vibe Kanban's schema is server-assigned.
+        issue_id = _open_kanban_issue(cfg, kanban, task_id, description)
 
     # Set when a phase bounced off another owner's lock: that run's worktrees
     # are in use, so the cleanup below has to keep its hands off them.
@@ -458,7 +511,7 @@ def run_task_cycle(
 
     def run_phase(role: str, round_num: int | None = None, final: bool = False) -> DispatchResult | None:
         nonlocal foreign_lock
-        _update_task_status(kanban, task_id, f"in_progress:{role}")
+        _update_task_status(kanban, issue_id, f"in_progress:{role}")
         effort = (
             cfg.escalated_effort
             if round_num is not None and round_num > cfg.escalate_effort_after_round
@@ -481,11 +534,11 @@ def run_task_cycle(
             # until its own timeout, so the heartbeat TTL, not this run,
             # decides when the task can be taken over.
             logger.warning("task %s is locked by another owner: %s", task_id, exc)
-            _update_task_status(kanban, task_id, "blocked")
+            _update_task_status(kanban, issue_id, "blocked")
             foreign_lock = True
             return None
         if not result.success:
-            _update_task_status(kanban, task_id, "blocked")
+            _update_task_status(kanban, issue_id, "blocked")
             return None
         label = role if round_num is None else f"{role} (round {round_num})"
         context_transfer.handoff(
@@ -511,13 +564,13 @@ def run_task_cycle(
                 break
 
         if not approved:
-            _update_task_status(kanban, task_id, "blocked")
+            _update_task_status(kanban, issue_id, "blocked")
             return
 
         if run_phase("auditor", final=True) is None:
             return
 
-        _update_task_status(kanban, task_id, "done")
+        _update_task_status(kanban, issue_id, "done")
         if cfg.merge_on_done:
             _merge_task_branch(cfg, task_id, slug)
     finally:

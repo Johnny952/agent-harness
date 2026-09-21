@@ -5,7 +5,7 @@
 #
 # Bring up docker-compose.yml first: it creates `ia_harness_net`, which this
 # file joins as an external network so agents and sidecars can resolve
-# `collector`, `registry-mirror` and `vibe-kanban` by service name.
+# `collector` and `registry-mirror` by service name.
 services:
   agent-cuenta1:
     image: ia-harness-agent

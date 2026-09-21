@@ -37,8 +37,10 @@ run alongside stage 1, but they must be done before stage 2 starts.
 - A check that passes removes its assumption from the README's
   *Unverified assumptions* (or from the item that marks it "unverified").
 - Work against a throwaway target repo, never a real project.
-- Record the CLI version and the `vibe-kanban` image digest with each
-  result: the image is pinned only to `:latest`.
+- Record the CLI version with each result, and — for a check that touches
+  the board — what `vibe_kanban.command` resolves to. The board is
+  optional, and the surface below was verified against
+  `npx vibe-kanban@0.1.44`, not against the compose image.
 
 ### Shared setup
 
@@ -111,7 +113,8 @@ every check.
   config.yaml`, but that can't work with the shipped config:
   - `state_dir: /state` and `hive_tasks_dir: /data/.hive/tasks` are
     container paths.
-  - `vibe-kanban` and `collector` only resolve on `ia_harness_net`.
+  - `collector` only resolves on `ia_harness_net`. (The board doesn't
+    count any more: its MCP server is a subprocess, not a host there.)
   - The prompt's `task_file` is built from `hive_tasks_dir`, so it has to
     be the path the agent sees. A host path in the config would break the
     agents.
@@ -196,16 +199,18 @@ login.
   testcontainers with bind mounts would break.
   - Record it, and add it to the README *Known gaps* if it's confirmed.
 
-**V0.8 Vibe Kanban is reachable.**
+**V0.8 The board's web UI comes up.** Only if you want one. The service
+sits behind the `kanban` profile and nothing in the harness dials it: the
+dispatcher reaches a board over stdio instead (V2), so this is a check on
+the UI an operator looks at, not on the dispatcher's path to the board.
 - Run:
+  - `$DC --profile kanban up -d vibe-kanban`
   - `curl -si 127.0.0.1:9100/ | head -1`
-  - `curl -si -N --max-time 3 127.0.0.1:9100/sse | head -5`
   - `$DC logs vibe-kanban | tail`
-- Pass:
-  - The UI answers on 9100.
-  - `/sse` returns `content-type: text/event-stream`.
-- If the image listens on another port, or has no `/sse`, V2 decides the
-  transport.
+- Pass: the UI answers on 9100, and `docker ps` shows the port published
+  on `127.0.0.1` only.
+- `ghcr.io/bloopai/vibe-kanban:latest` is denied on an anonymous pull, so
+  this needs an `image:` you can actually pull first.
 
 **V0.9 Target repo, git, and worktrees.**
 - Run:
@@ -309,24 +314,28 @@ on. An unknown flag there would fail every escalated round.
 
 ### V2 — Vibe Kanban MCP surface (no quota)
 
-`dispatcher/vibe_kanban_client.py` assumes the following, none of it
-checked:
-- SSE transport at `vibe_kanban_mcp_url`.
-- Tools `list_tasks {project}`, `create_task {project, title, description}`
-  (returns `id`), and `update_task {id, status}`.
-- Task IDs equal to `.hive` file names (`T-001`).
-- Free-form status values: `in_progress:<role>`, `blocked`, `done`.
+`dispatcher/vibe_kanban_client.py` now speaks the surface V2.1-V2.2
+verified: stdio over the server's `mcp` subcommand, and the issue
+vocabulary (`list_issues`, `create_issue`, `get_issue`, `update_issue`,
+`delete_issue`) keyed on a server-assigned `issue_id`. What the schemas
+say but no run has confirmed is V2.3-V2.6, and all four sit behind the
+`api.vibekanban.com` cloud login (V2.6) — re-run them once an operator has
+credentials and a reachable project.
 
-Probe the real server from the host venv:
+Probe the real server from the host venv. It is spawned, not dialled;
+there is no URL:
 
 ```bash
 .venv/bin/python - <<'EOF'
 import asyncio
-from mcp import ClientSession
-from mcp.client.sse import sse_client
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 async def main():
-    async with sse_client("http://127.0.0.1:9100/sse") as (r, w):
+    server = StdioServerParameters(
+        command="npx", args=["-y", "vibe-kanban@0.1.44", "mcp"]
+    )
+    async with stdio_client(server) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
             for t in (await s.list_tools()).tools:
@@ -336,34 +345,40 @@ asyncio.run(main())
 EOF
 ```
 
-- **V2.1 Transport.**
-  - Pass: the session initializes over SSE.
-  - If the server's MCP is stdio-only, pick one of:
-    - Run it as a subprocess from the dispatcher image (which has no Node).
-    - Proxy stdio to SSE.
-    - Call Vibe Kanban's HTTP API directly.
-- **V2.2 Tool and argument names.** Compare with the three tools above.
-- **V2.3 IDs.**
-  - Question: does the server take a caller-chosen ID like `T-001`, or
-    assign its own (e.g. a UUID)?
-  - If it assigns its own: map Kanban ID to `.hive` ID. Either `run-task`
-    takes the Kanban ID, or the task file stores it.
-- **V2.4 Status values.**
-  - Question: does `update_task` accept arbitrary strings, or a fixed set?
-  - If a fixed set: map `in_progress:<role>` to a status plus a label or
-    comment.
-- **V2.5 Task description.**
-  - Question: can a task's description be read back (`get_task` or
-    similar)?
-  - This was where stage 1's fix for "agents never see the task" would
-    have got the description. It no longer gates that fix: `run-task`
-    takes `--description`/`--description-file` as of 2026-09-19. Reading
-    it back from Kanban stays worth having, so an operator driving the
-    board doesn't retype the ask on the command line.
-- **V2.6 Task creation.**
-  - Question: does `create_task` exist and return an ID?
+- **V2.1 Transport.** Settled. `/sse` answers `text/html` — no MCP route is
+  served there — and `/mcp` errors; the `mcp` subcommand over stdio
+  initializes. The client spawns one subprocess per call. Whatever runs
+  that command needs Node, which the dispatcher image doesn't have.
+- **V2.2 Tool and argument names.** Settled. No `list_tasks`/`create_task`/
+  `update_task` exists, and no "task" vocabulary at all; the client was
+  rewritten onto the issue tools. Of the 33 tools, it calls four, so the
+  agent-launching ones (`start_workspace`, `create_session`, ...) never
+  come up.
+- **V2.3 IDs.** Schema only: every id is `format: "uuid"`, so the server
+  assigns them and `create_issue` takes no caller-chosen id. The client
+  keeps what comes back, in the task file's `kanban_issue_id`; `run-task
+  --kanban-issue-id` attaches an issue that already exists. Confirm live
+  that a create reply really carries the id, and in which field — the
+  response schemas are published nowhere, so the parser takes several.
+- **V2.4 Status values.** Schema only: `update_issue.status` "must match a
+  project status name", and no tool lists a project's names. `status_map`
+  in `config.yaml` is the guess (`In Progress`/`In Review`/`Done`).
+  Confirm the real names, and record the rejection verbatim: the client
+  raises on an `is_error` reply and the phase logs it rather than failing,
+  so a wrong name is silent apart from that line.
+- **V2.5 Description round-trip.**
+  - Question: can an issue's description be read back (`get_issue`)?
+  - Not run: no issue ever existed to read. `description` is settable on
+    `create_issue`, which implies it comes back, but nothing confirms it.
+  - This no longer gates stage 1's "agents never see the task" fix —
+    `run-task` takes `--description`/`--description-file` as of
+    2026-09-19. Reading it back stays worth having, so an operator driving
+    the board doesn't retype the ask on the command line.
+- **V2.6 Issue creation.** The blocker for the three above: `create_issue`
+  needs a `project_id`, a project sits under an organization, and
+  `list_organizations` returns 401 without a cloud login.
+  - Create one issue in a scratch project and delete it afterwards.
   - This gates item 1's debt cards and item 5's epic decomposition.
-  - Create one task in a scratch project and delete it afterwards.
 
 ### V3 — End to end on one account (task quota)
 
@@ -397,8 +412,10 @@ The first real `run-task`, with costs capped.
   - The task file gains `## arquitecto`, `## implementador (round 1)`, and
     `## revisor (round 1)` sections, with the owner and heartbeat cleared
     between phases.
-  - Vibe Kanban shows `in_progress:<role>` per phase and ends in `done` or
-    `blocked`. Otherwise stderr has a warning per failed update.
+  - With a `vibe_kanban` block configured, the issue moves to the mapped
+    status per phase and ends on the `done` or `blocked` one; otherwise
+    stderr carries a warning per failed update. With no block, the run
+    says nothing about a board at all.
   - The revisor's last line is a `VERDICT:` line, and the outcome matches
     it.
   - `cuenta1.json` goes back to `IDLE`.
@@ -415,8 +432,8 @@ The first real `run-task`, with costs capped.
   - Run: V3 again with `phase_timeout_seconds: 20` and a fresh task ID.
   - Pass:
     - The phase fails with "claude timed out after 20s".
-    - Kanban shows `blocked`, the account is `IDLE`, and the lock is
-      released.
+    - The task file shows `blocked` (and the board's issue too, if one is
+      configured), the account is `IDLE`, and the lock is released.
     - Once the kill grace has passed, `procs agent-cuenta1` shows no
       leftover `claude`, `node`, or shell children. Children that `setsid`
       out of the process group would survive: record them.
@@ -443,20 +460,28 @@ The first real `run-task`, with costs capped.
   - Then, for minimal quota, repeat V1.1: the result is normal and not
     slowed by the hooks.
   - Finish with `$DC start collector`.
-- **V4.4 Vibe Kanban down.**
-  - Run:
+- **V4.4 The board's MCP server misbehaves.** Only worth running with a
+  `vibe_kanban` block configured. Stopping the compose service proves
+  nothing any more — the dispatcher spawns its own server rather than
+  dialling one — so the failures to stage are a command that dies and a
+  command that never speaks.
+  - Run, on the host, with a `command` that exits immediately:
     ```bash
-    $DC stop vibe-kanban
-    $DC run --rm --no-deps --entrypoint python dispatcher -c "
+    .venv/bin/python - <<'EOF'
+    from dispatcher.config import VibeKanbanConfig
     from dispatcher.dispatcher import _update_task_status
     from dispatcher.vibe_kanban_client import VibeKanbanClient
-    _update_task_status(VibeKanbanClient('http://vibe-kanban:9100/sse'), 'T-001', 'blocked')"
-    $DC start vibe-kanban
+
+    client = VibeKanbanClient(VibeKanbanConfig(command=["false"]))
+    _update_task_status(client, "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f", "blocked")
+    EOF
     ```
-  - Pass: a warning, exit 0, and it returns promptly.
-  - Optional: point the client at a socket that accepts and never answers.
-    It's expected to hang, which documents item 3's missing Kanban
-    timeout.
+  - Pass: one `kanban status update failed` warning, exit 0, and it returns
+    promptly.
+  - Then try a command that starts and never answers (`["sleep", "300"]`).
+    It's expected to hang: nothing bounds the MCP handshake, which is item
+    3's missing Kanban timeout — now a subprocess to wait on rather than a
+    socket.
 
 ### V5 — Two accounts (minimal quota)
 
@@ -569,22 +594,23 @@ logins.
      control plane PARTIAL / V0.8 FAIL: `ghcr.io/bloopai/vibe-kanban:latest`
      is private or doesn't exist): build from upstream, run
      `npx vibe-kanban@0.1.44` (confirmed to exist and to expose the MCP
-     surface below), or a vetted community image.
+     surface below), or a vetted community image. Answered 2026-09-21 (see
+     item 2): the dispatcher spawns the npx server and never reads the
+     image, and the service sits behind the `kanban` profile, so an
+     `image:` nobody can pull costs an operator the web UI and nothing
+     else. Which image to run is now their call, not the harness's.
    - Aligning `VibeKanbanClient` with the real MCP surface (mismatched:
      V2.1–V2.2 live, V2.3–V2.4 schema only, V2.6 login wall; V2.5 not yet
-     run): switch to stdio via the `mcp`
-     subcommand, not an SSE client; rewrite tool/arg names to the issue
-     vocabulary (`list_issues`/`create_issue`/`get_issue`/`update_issue`/
-     `delete_issue`, keyed on `issue_id`); store the server-assigned UUID
-     rather than minting an ID (`simple_id` is a candidate human-readable
-     key, unconfirmed live); map `in_progress:<role>`/`blocked`/`done`
-     onto each project's existing fixed status names, carrying `<role>`
-     via a tag or note; pick a transport (subprocess from the dispatcher,
-     a stdio-to-SSE proxy sidecar, or the REST API directly); allowlist
-     tools so the agent-launching ones (`start_workspace`, `create_session`,
-     ...) are never called; and re-run V2.4's live status-name check and
-     V2.5 (description round-trip) once a project is reachable past the
-     `api.vibekanban.com` cloud-login wall (V2.6).
+     run). Fixed 2026-09-21 (see item 2): stdio via the `mcp` subcommand
+     as a spawned subprocess, the issue vocabulary keyed on the
+     server-assigned uuid, and the dispatcher's three statuses mapped onto
+     project status names an operator configures. `<role>` is dropped
+     rather than carried in a tag or a note: nothing on the board is known
+     to take one, and inventing a place for it would be a second guess on
+     top of the status names. The client calls four of the 33 tools, so
+     the agent-launching ones never come up. Still open behind V2.6's
+     cloud-login wall: V2.4's real status names and V2.5's description
+     round-trip.
    - Fixing README step 5's host run (confirmed, V0.3: `state_dir`/
      `hive_tasks_dir` are container paths and `vibe-kanban`/`collector`
      only resolve on `ia_harness_net`): drop it, or document a host-side
@@ -724,6 +750,47 @@ logins.
      prompt can only be measured by a prompted run, which costs quota
      — the 13,535 bytes of name and description have no source left to
      come from. 5 new unit tests, 257 in the suite.
+   - **The board's MCP surface was imagined, and its image can't be
+     pulled.** Both fixed 2026-09-21 as chosen: make the board optional
+     first, then rewrite the client against the surface V2 actually found.
+     `vibe_kanban` is a block in `config.yaml` now (`command`, optional
+     `project_id`, optional `status_map`) and having none is the default:
+     no block, no board, and `NullKanbanClient` answers every call, so the
+     dispatcher's call sites stay unconditional and a boardless run says
+     nothing about one. A leftover `vibe_kanban_mcp_url` is rejected at
+     load with a message saying the server speaks stdio, rather than
+     quietly ignored. The client was rewritten, not patched: it spawns
+     `command` and talks MCP over its stdio — one subprocess per call,
+     since phases are minutes apart — over `list_issues`, `create_issue`,
+     `get_issue` and `update_issue`, keyed on the server-assigned uuid.
+     That uuid has to live somewhere, and it lives in the task file's
+     frontmatter (`kanban_issue_id`) rather than a dispatcher-side map:
+     the task file is what survives a restart, and nothing can derive the
+     uuid from `T-001`. `run-task --kanban-issue-id` attaches an issue
+     that already exists; with a board configured and no id, the first
+     phase opens one. The three dispatcher statuses translate through
+     `status_map` (default `In Progress`/`In Review`/`Done`); `<role>` is
+     dropped, because `update_issue` takes a project status name and
+     offers nowhere else to put it, and an unmapped status is skipped
+     with a warning instead of sent to be rejected. The image question
+     then dissolves: nothing on the dispatcher's path to the board reads
+     it, so the service moved behind a `kanban` profile as the web UI an
+     operator may want, which also unbreaks a plain `up -d` for the other
+     three control-plane services — Compose pre-pulls every named image
+     before starting any of them. What an operator still has to solve is
+     Node: the verified command is `npx vibe-kanban@0.1.44 mcp`, and the
+     dispatcher image has none, so running the dispatcher in its
+     container needs a `command` that works there. The reply parsers are
+     deliberately loose. The request schemas came from the server's own
+     tool list and are exact, but no response schema is published
+     anywhere and none has ever been seen (V2.6), so `structured_content`,
+     JSON inside a text block and bare prose all read; an `is_error`
+     reply raises carrying the server's complaint, so a rejected status
+     name can't pass for a successful update; and a shape the parser
+     can't read is an empty list, not a crash. Still open behind the
+     cloud-login wall: the real status names (V2.4), the description
+     round-trip (V2.5), and which field a create reply carries the id in
+     (V2.3). 56 new unit tests, 313 in the suite.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
@@ -737,7 +804,9 @@ logins.
 ### When to re-run checks later
 
 - `CLAUDE_CODE_VERSION` bumped in `docker/agent/Dockerfile`: V1 and V5.1.
-- `vibe-kanban` image updated: V2.
+- `vibe_kanban.command` changed, or the npx server's version bumped: V2.
+- `vibe-kanban` image updated: V0.8 only. Nothing on the dispatcher's path
+  to the board reads it.
 - Compose or image changes: V0.
 - Changes to `dispatch_phase` or `run_task_cycle`: V3 and V4.
 
@@ -748,11 +817,11 @@ depends on. A gate that fails reshapes the item before any design work.
 
 | Item (README *Prioritized*) | Run first | Notes |
 |---|---|---|
-| 1. Project memory | D1, D5, V2.6 | Debt cards need `create_task` |
+| 1. Project memory | D1, D5, V2.6 | Debt cards need `create_issue` |
 | 2. Token economy | V1.1 fields, D2, D3 | D3 only if the caveman wrap is adopted |
 | 3. Unattended 24/7 operation | V4.2, V4.4, D2 | V4.2 sizes the orphan-phase race; D2 gives machine-readable reset times |
 | 4. Per-role model selection | Item 2's usage records | Data-driven split, not a guess |
-| 5. Task profiles | D4, D5, D6, V2.6 | Epic decomposition needs `create_task` |
+| 5. Task profiles | D4, D5, D6, V2.6 | Epic decomposition needs `create_issue` |
 | 6. Observability and hardening | V0.5, V0.6 | Note: the dispatcher mounts `claude_shared` and `docker.sock` |
 | 7. Code-intelligence tooling | D4 (for `--mcp-config`), D7 | Memory headroom for indexers, as in D6; D7 sizes the per-worktree index |
 | 8. Mid-phase compaction | — | Only if V3 or stage 1 runs show long phases failing |

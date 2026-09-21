@@ -5,8 +5,8 @@
 # and adjust values for your deployment — docker-compose.yml mounts
 # ../../config.yaml into the dispatcher container at /app/config.yaml.
 #
-# Hostnames below use service names (vibe-kanban, collector) rather than
-# 127.0.0.1 because the dispatcher container reaches them over the shared
+# Hostnames below use service names (collector) rather than 127.0.0.1
+# because the dispatcher container reaches them over the shared
 # ia_harness_net bridge network, not the host's loopback interface.
 
 # One entry per Claude Pro account the dispatcher can dispatch work to.
@@ -43,8 +43,31 @@ hive_tasks_dir: /data/.hive/tasks
 # docker-compose.yml.
 state_dir: /state
 
-# Vibe Kanban MCP server URL, reached over ia_harness_net by service name.
-vibe_kanban_mcp_url: http://vibe-kanban:9100/sse
+# Vibe Kanban board. Optional, and commented out on purpose: with no
+# `vibe_kanban` block the dispatcher runs exactly as it does today and says
+# nothing about a board. Uncomment it only once the command below actually
+# runs — the dispatcher spawns it as a subprocess and speaks MCP over stdio
+# (the server serves no SSE endpoint, so there is no URL to point at), and
+# the shipped dispatcher image has no Node, so `npx` is not on its PATH.
+# Either add Node plus `vibe-kanban` to docker/dispatcher/Dockerfile, or
+# point `command` at a wrapper of your own. Creating or reading issues also
+# needs that server to be signed in to Vibe Kanban's cloud.
+#
+# vibe_kanban:
+#   # Argv, not a shell line: the first element is the executable.
+#   command: ["npx", "vibe-kanban@0.1.44", "mcp"]
+#   # The project issues are created under, as a uuid. Optional: leave it out
+#   # and the server infers it from the workspace it runs in.
+#   project_id: 00000000-0000-0000-0000-000000000000
+#   # What the board calls each dispatcher status. `update_issue` only accepts
+#   # a status name the project already has, and no MCP tool lists those, so
+#   # these are the defaults to correct rather than names to trust. The
+#   # dispatcher's `in_progress:<role>` maps through `in_progress`; the role
+#   # does not reach the board.
+#   status_map:
+#     in_progress: In Progress
+#     blocked: In Review
+#     done: Done
 
 # Observability collector URL, reached over ia_harness_net by service name.
 collector_url: http://collector:8787

@@ -10,11 +10,13 @@ from dispatcher.context_transfer import (
     acquire_lock,
     is_lock_expired,
     read_task_file,
+    set_kanban_issue_id,
     task_file_path,
     write_task_file,
 )
 from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import AccountState, get_state, set_state
+from dispatcher.vibe_kanban_client import NullKanbanClient
 
 
 # run_task_cycle refuses to dispatch a task with no description (it would
@@ -23,12 +25,27 @@ from dispatcher.state_machine import AccountState, get_state, set_state
 _DESCRIPTION = "Add a /healthz endpoint that returns 200."
 
 
+#: Vibe Kanban assigns every id itself, so a card's uuid is only ever
+#: something the board answered with — never something the harness picked.
+_ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
+
+
 class _FakeKanban:
-    def __init__(self):
+    """A board that answers, and remembers what the run put on it."""
+
+    enabled = True
+
+    def __init__(self, issue_id=_ISSUE_ID):
+        self.issue_id = issue_id
+        self.created = []
         self.statuses = []
 
-    def update_task_status(self, task_id, status):
-        self.statuses.append((task_id, status))
+    def create_issue(self, title, description=None):
+        self.created.append((title, description))
+        return self.issue_id
+
+    def set_status(self, issue_id, status):
+        self.statuses.append((issue_id, status))
 
 
 def _make_config(tmp_path, **overrides):
@@ -40,7 +57,7 @@ def _make_config(tmp_path, **overrides):
         projects_root=str(tmp_path / "projects"),
         hive_tasks_dir=str(tmp_path / "hive"),
         state_dir=str(tmp_path / "state"),
-        vibe_kanban_mcp_url="http://127.0.0.1:9100/sse",
+        vibe_kanban=None,
         collector_url="http://127.0.0.1:8787",
         default_model="opus",
         max_revision_rounds=3,
@@ -526,7 +543,7 @@ def test_run_task_cycle_reaps_expired_locks_before_dispatching(tmp_path, monkeyp
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     assert len(reap_calls) == 1
-    assert ("task-1", "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
 
 
 def test_run_task_cycle_blocks_without_raising_when_task_locked_by_other_owner(
@@ -559,7 +576,7 @@ def test_run_task_cycle_blocks_without_raising_when_task_locked_by_other_owner(
         dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     assert worktree_calls == []
-    assert ("task-1", "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
     assert "task-1" in caplog.text
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert task.owner == "otro"
@@ -664,7 +681,10 @@ def test_run_task_cycle_blocks_without_dispatching_when_no_description_exists(
         dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
 
     assert calls == []
-    assert ("task-1", "blocked") in kanban.statuses
+    # Nothing reaches the board either: with no ask there is nothing to name a
+    # card after, and a task that never dispatched has nothing to show.
+    assert kanban.created == []
+    assert kanban.statuses == []
     assert "description" in caplog.text
 
 
@@ -686,7 +706,7 @@ def test_run_task_cycle_blocks_when_the_stored_description_is_blank(tmp_path, mo
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
 
     assert calls == []
-    assert ("task-1", "blocked") in kanban.statuses
+    assert kanban.created == []
 
 
 def test_revisor_approved_matches_verdict_line() -> None:
@@ -849,7 +869,7 @@ def test_run_task_cycle_approves_on_first_round(tmp_path, monkeypatch) -> None:
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
     assert all(c["effort"] is None for c in calls)
     assert all(c["model"] == "opus" for c in calls)
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
 
 
 def test_run_task_cycle_completes_when_kanban_status_updates_always_raise(tmp_path, monkeypatch) -> None:
@@ -867,7 +887,12 @@ def test_run_task_cycle_completes_when_kanban_status_updates_always_raise(tmp_pa
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     class _RaisingKanban:
-        def update_task_status(self, task_id, status):
+        enabled = True
+
+        def create_issue(self, title, description=None):
+            return _ISSUE_ID
+
+        def set_status(self, issue_id, status):
             raise RuntimeError("kanban is down")
 
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _RaisingKanban(), description=_DESCRIPTION)
@@ -906,7 +931,7 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
     assert early_rounds and all(c["effort"] is None for c in early_rounds)
     assert round3, "expected round 3 to run"
     assert all(c["effort"] == "high" for c in round3)
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
 
 
 def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypatch) -> None:
@@ -928,8 +953,8 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
 
     assert calls.count("revisor") == 2
     assert "auditor" not in calls
-    assert ("task-1", "blocked") in kanban.statuses
-    assert ("task-1", "done") not in kanban.statuses
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "done") not in kanban.statuses
 
 
 def _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
@@ -967,7 +992,7 @@ def test_run_task_cycle_drops_the_review_worktrees_when_the_task_ends(
     kanban = _FakeKanban()
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", status) in kanban.statuses
+    assert (_ISSUE_ID, status) in kanban.statuses
     assert fake_git.review_cleanups == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
     assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
 
@@ -1008,7 +1033,7 @@ def test_run_task_cycle_leaves_another_owners_worktrees_alone(tmp_path, monkeypa
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
     assert fake_git.review_cleanups == []
-    assert ("task-1", "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
 
 
 def test_run_task_cycle_still_finishes_when_the_cleanup_fails(tmp_path, monkeypatch, caplog) -> None:
@@ -1025,7 +1050,7 @@ def test_run_task_cycle_still_finishes_when_the_cleanup_fails(tmp_path, monkeypa
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
     assert "docker daemon went away" in caplog.text
 
 
@@ -1055,7 +1080,7 @@ def test_run_task_cycle_does_not_merge_by_default(tmp_path, monkeypatch, fake_gi
     kanban = _FakeKanban()
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
     assert fake_git.merges == []
 
 
@@ -1066,7 +1091,7 @@ def test_run_task_cycle_merges_a_done_task_when_asked_to(tmp_path, monkeypatch, 
     kanban = _FakeKanban()
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
     assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
 
 
@@ -1078,7 +1103,7 @@ def test_run_task_cycle_does_not_merge_a_blocked_task(tmp_path, monkeypatch, fak
     kanban = _FakeKanban()
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
     assert fake_git.merges == []
 
 
@@ -1098,7 +1123,7 @@ def test_run_task_cycle_logs_a_refused_merge_and_still_finishes(tmp_path, monkey
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
     assert "has uncommitted changes" in caplog.text
 
 
@@ -1115,7 +1140,7 @@ def test_run_task_cycle_survives_a_merge_that_raises(tmp_path, monkeypatch, capl
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert ("task-1", "done") in kanban.statuses
+    assert (_ISSUE_ID, "done") in kanban.statuses
     assert "docker daemon went away" in caplog.text
 
 
@@ -1253,3 +1278,127 @@ def test_dispatch_phase_hands_the_tree_back_even_when_the_phase_raises(tmp_path,
         dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
 
     assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
+
+
+# --- the board, for a harness that was given one --------------------------
+
+
+def _approve_on_first_round(monkeypatch):
+    """Every phase succeeds and the revisor approves, so the cycle reaches done."""
+
+    def fake_dispatch_phase(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        return dispatcher_mod.DispatchResult(
+            success=True,
+            session_id=None,
+            result_text="VERDICT: APPROVED" if role == "revisor" else "ok",
+            account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+
+def test_run_task_cycle_opens_a_card_for_a_task_that_has_none(tmp_path, monkeypatch) -> None:
+    """Creating the issue is the only way a task id becomes a uuid, and the
+    uuid has to outlive the run: a later phase after a restart must move this
+    same card rather than open a second one."""
+    cfg = _make_config(tmp_path)
+    _approve_on_first_round(monkeypatch)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert kanban.created == [(f"task-1: {_DESCRIPTION}", _DESCRIPTION)]
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.kanban_issue_id == _ISSUE_ID
+    assert (_ISSUE_ID, "done") in kanban.statuses
+
+
+def test_run_task_cycle_reuses_the_card_the_task_already_names(tmp_path, monkeypatch) -> None:
+    seeded = "aaaabbbb-cccc-dddd-eeee-ffff00001111"
+    cfg = _make_config(tmp_path)
+    set_kanban_issue_id(cfg.hive_tasks_dir, "task-1", seeded)
+    _approve_on_first_round(monkeypatch)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    # `run-task --kanban-issue-id`, or an earlier run: either way the board
+    # already has this task on it and a second card would split its history.
+    assert kanban.created == []
+    assert {issue for issue, _ in kanban.statuses} == {seeded}
+
+
+def test_run_task_cycle_blocks_the_card_a_task_with_no_description_names(
+    tmp_path, monkeypatch,
+) -> None:
+    """The unaskable task still owes the board an answer, once it has a card:
+    blocked is what a human has to come and look at."""
+    cfg = _make_config(tmp_path)
+    set_kanban_issue_id(cfg.hive_tasks_dir, "task-1", _ISSUE_ID)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: pytest.fail("dispatched"))
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+
+    assert kanban.created == []
+    assert kanban.statuses == [(_ISSUE_ID, "blocked")]
+
+
+def test_run_task_cycle_runs_the_phases_when_the_board_refuses_a_card(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """A board is a visibility aid, not dispatch state: one that can't be
+    reached costs a warning and the run goes on without a card."""
+    cfg = _make_config(tmp_path)
+    _approve_on_first_round(monkeypatch)
+
+    class _RefusingKanban(_FakeKanban):
+        def create_issue(self, title, description=None):
+            raise RuntimeError("vibe-kanban: not logged in")
+
+    kanban = _RefusingKanban()
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status == "done"
+    # No card, so no status to move — and one warning, not one per phase.
+    assert kanban.statuses == []
+    assert sum("runs without a card" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_run_task_cycle_without_a_board_says_nothing_about_one(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """`vibe_kanban` is optional, so most runs have no board at all. Such a run
+    must not carry a warning per phase about something it was never asked for."""
+    cfg = _make_config(tmp_path)
+    _approve_on_first_round(monkeypatch)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(
+            cfg, "task-1", "myproj", NullKanbanClient(), description=_DESCRIPTION,
+        )
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == "done"
+    assert task.kanban_issue_id is None
+    assert "kanban" not in caplog.text.lower()
+
+
+def test_issue_title_leads_with_the_task_id_and_the_first_line_of_the_ask() -> None:
+    # The id lines the card up with a task file by eye; the ask is what a human
+    # recognises without opening it.
+    title = dispatcher_mod._issue_title("task-1", "\n  Add /healthz.\nThen document it.\n")
+
+    assert title == "task-1: Add /healthz."
+
+
+def test_issue_title_stops_at_a_glance() -> None:
+    title = dispatcher_mod._issue_title("task-1", "W" * 400)
+
+    assert len(title) == dispatcher_mod._ISSUE_TITLE_MAX
+    assert title.endswith("\u2026")
+
+
+def test_issue_title_of_an_ask_with_no_line_is_just_the_task_id() -> None:
+    assert dispatcher_mod._issue_title("task-1", "   ") == "task-1"

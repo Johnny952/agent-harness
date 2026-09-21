@@ -44,7 +44,13 @@
 #     it's up (`docker exec -it agent-cuenta1 claude login` or equivalent) —
 #     inherently a manual, interactive step no compose file can automate.
 services:
+  # Off by default, like in docker-compose.yml: this image is unpullable
+  # anonymously, and Compose pre-pulls every named image before starting any
+  # service. Deploy it with `--profile kanban` once `image:` points at
+  # something you can pull. The dispatcher never dials it — Vibe Kanban's MCP
+  # server speaks stdio, so this is the web UI only.
   vibe-kanban:
+    profiles: ["kanban"]
     image: ghcr.io/bloopai/vibe-kanban:latest
     restart: unless-stopped
     ports:
@@ -116,7 +122,8 @@ services:
       - claude_shared:/root/.claude
       - ../../config.yaml:/app/config.yaml:ro
     depends_on:
-      - vibe-kanban
+      # Not vibe-kanban: nothing dials it, and a profiled service would drag
+      # its unpullable image back into every deploy.
       - collector
     networks:
       - ia_harness_net

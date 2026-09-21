@@ -11,6 +11,39 @@ class AccountConfig:
     container: str
 
 
+#: What the dispatcher's own status strings become on the board. The left side
+#: is this harness's vocabulary (`_update_task_status` sends "blocked", "done"
+#: and "in_progress:<role>", of which only the prefix is mapped); the right
+#: side has to match a status *name* on the Vibe Kanban project, which is
+#: per-project and which no MCP tool lists — so these are defaults for the
+#: names Vibe Kanban ships with, and an operator whose project renamed them
+#: says so in `vibe_kanban.status_map`. "blocked" maps to review because the
+#: dispatcher blocks a task exactly when a human has to look at it.
+DEFAULT_KANBAN_STATUS_MAP = {
+    "in_progress": "In Progress",
+    "blocked": "In Review",
+    "done": "Done",
+}
+
+
+@dataclasses.dataclass
+class VibeKanbanConfig:
+    """How to reach a Vibe Kanban board, when there is one.
+
+    `command` is an argv the dispatcher spawns and talks MCP to over stdio —
+    Vibe Kanban's server has no SSE endpoint, so there is no URL to point at.
+    `project_id` is the uuid of the project new issues land in; it is optional
+    because the server can infer it when it runs inside a workspace already
+    linked to a remote project.
+    """
+
+    command: list[str]
+    project_id: str | None = None
+    status_map: dict[str, str] = dataclasses.field(
+        default_factory=lambda: dict(DEFAULT_KANBAN_STATUS_MAP)
+    )
+
+
 @dataclasses.dataclass
 class Config:
     accounts: list[AccountConfig]
@@ -20,7 +53,7 @@ class Config:
     projects_root: str
     hive_tasks_dir: str
     state_dir: str
-    vibe_kanban_mcp_url: str
+    vibe_kanban: VibeKanbanConfig | None
     collector_url: str
     default_model: str
     max_revision_rounds: int
@@ -28,6 +61,53 @@ class Config:
     escalated_effort: str
     phase_timeout_seconds: int
     merge_on_done: bool
+
+
+def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
+    """Read the optional `vibe_kanban` block, or None when there is none.
+
+    The board is a visibility aid, not a dependency: a harness with no
+    `vibe_kanban` block runs tasks exactly as before and the dispatcher never
+    mentions a board it was not given.
+    """
+    if "vibe_kanban_mcp_url" in raw:
+        # This key promised an SSE endpoint that Vibe Kanban's MCP server
+        # never served. Failing loudly beats ignoring it, which would leave an
+        # operator believing their board is wired up when nothing reaches it.
+        raise ValueError(
+            "vibe_kanban_mcp_url is gone: Vibe Kanban's MCP server speaks stdio, "
+            "not SSE. Replace it with a vibe_kanban block, or drop it to run "
+            "without a board."
+        )
+    block = raw.get("vibe_kanban")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError("vibe_kanban must be a mapping")
+    command = block.get("command")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        raise ValueError("vibe_kanban.command must be a non-empty list of strings")
+    project_id = block.get("project_id")
+    if project_id is not None and not isinstance(project_id, str):
+        raise ValueError("vibe_kanban.project_id must be a string")
+    status_map = dict(DEFAULT_KANBAN_STATUS_MAP)
+    overrides = block.get("status_map") or {}
+    if not isinstance(overrides, dict):
+        raise ValueError("vibe_kanban.status_map must be a mapping")
+    for key, value in overrides.items():
+        if key not in DEFAULT_KANBAN_STATUS_MAP:
+            raise ValueError(
+                f"vibe_kanban.status_map has no status {key!r}; known statuses are "
+                + ", ".join(sorted(DEFAULT_KANBAN_STATUS_MAP))
+            )
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"vibe_kanban.status_map[{key!r}] must be a non-empty string")
+        status_map[key] = value
+    return VibeKanbanConfig(command=command, project_id=project_id, status_map=status_map)
 
 
 def load_config(path: str) -> Config:
@@ -49,7 +129,7 @@ def load_config(path: str) -> Config:
         projects_root=raw["projects_root"],
         hive_tasks_dir=raw["hive_tasks_dir"],
         state_dir=raw["state_dir"],
-        vibe_kanban_mcp_url=raw["vibe_kanban_mcp_url"],
+        vibe_kanban=_load_vibe_kanban(raw),
         collector_url=raw["collector_url"],
         default_model=raw.get("default_model", "opus"),
         max_revision_rounds=raw.get("max_revision_rounds", 3),

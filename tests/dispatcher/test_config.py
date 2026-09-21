@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dispatcher.config import load_config
+from dispatcher.config import DEFAULT_KANBAN_STATUS_MAP, load_config
 
 CONFIG_YAML = """
 accounts:
@@ -16,7 +16,6 @@ heartbeat_interval_seconds: 30
 projects_root: /data/projects
 hive_tasks_dir: /data/.hive/tasks
 state_dir: /data/dispatcher_state
-vibe_kanban_mcp_url: http://127.0.0.1:9100/sse
 collector_url: http://127.0.0.1:8787
 """
 
@@ -32,7 +31,7 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.quota_threshold_pct == 90
     assert cfg.heartbeat_ttl_seconds == 120
     assert cfg.projects_root == "/data/projects"
-    assert cfg.vibe_kanban_mcp_url == "http://127.0.0.1:9100/sse"
+    assert cfg.vibe_kanban is None
     assert cfg.default_model == "opus"
     assert cfg.max_revision_rounds == 3
     assert cfg.escalate_effort_after_round == 2
@@ -64,4 +63,76 @@ def test_load_config_rejects_invalid_phase_timeout_seconds(tmp_path: Path, bad_v
     config_path.write_text(CONFIG_YAML + f"\nphase_timeout_seconds: {bad_value}\n")
 
     with pytest.raises(ValueError, match="phase_timeout_seconds must be a positive integer"):
+        load_config(str(config_path))
+
+
+KANBAN_YAML = """
+vibe_kanban:
+  command: ["npx", "vibe-kanban@0.1.44", "mcp"]
+  project_id: 0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f
+"""
+
+
+def test_load_config_reads_the_vibe_kanban_block(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + KANBAN_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.vibe_kanban is not None
+    assert cfg.vibe_kanban.command == ["npx", "vibe-kanban@0.1.44", "mcp"]
+    assert cfg.vibe_kanban.project_id == "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
+    assert cfg.vibe_kanban.status_map == DEFAULT_KANBAN_STATUS_MAP
+
+
+def test_load_config_leaves_project_id_unset(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + '\nvibe_kanban:\n  command: ["vibe-kanban", "mcp"]\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.vibe_kanban is not None
+    assert cfg.vibe_kanban.project_id is None
+
+
+def test_load_config_overrides_one_status_name(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + KANBAN_YAML + '  status_map:\n    done: Shipped\n')
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.vibe_kanban is not None
+    # A project that renamed one column keeps the defaults for the rest.
+    assert cfg.vibe_kanban.status_map["done"] == "Shipped"
+    assert cfg.vibe_kanban.status_map["blocked"] == DEFAULT_KANBAN_STATUS_MAP["blocked"]
+
+
+def test_load_config_rejects_the_dead_sse_url(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nvibe_kanban_mcp_url: http://vibe-kanban:9100/sse\n")
+
+    with pytest.raises(ValueError, match="speaks stdio"):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize(
+    ("block", "message"),
+    [
+        ("vibe_kanban: http://vibe-kanban:9100\n", "must be a mapping"),
+        ("vibe_kanban:\n  project_id: abc\n", "command must be a non-empty list"),
+        ("vibe_kanban:\n  command: []\n", "command must be a non-empty list"),
+        ('vibe_kanban:\n  command: "npx vibe-kanban mcp"\n', "command must be a non-empty list"),
+        ('vibe_kanban:\n  command: ["npx", 44]\n', "command must be a non-empty list"),
+        ('vibe_kanban:\n  command: ["vk"]\n  project_id: 44\n', "project_id must be a string"),
+        ('vibe_kanban:\n  command: ["vk"]\n  status_map:\n    doing: Doing\n', "no status 'doing'"),
+        ('vibe_kanban:\n  command: ["vk"]\n  status_map:\n    done: 44\n', "must be a non-empty string"),
+    ],
+)
+def test_load_config_rejects_a_malformed_vibe_kanban_block(
+    tmp_path: Path, block: str, message: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\n" + block)
+
+    with pytest.raises(ValueError, match=message):
         load_config(str(config_path))

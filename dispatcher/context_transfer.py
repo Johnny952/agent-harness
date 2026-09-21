@@ -57,6 +57,11 @@ class TaskFile:
     # apart from what previous roles said about it. Last field (and last in
     # the frontmatter) so existing TaskFile(...) constructions still work.
     description: str | None = None
+    # The uuid of the Vibe Kanban issue this task shows up as, when there is
+    # a board at all. It lives here rather than in a dispatcher-side map
+    # because the task file is what survives a restart, and because the id is
+    # server-assigned: the harness can't derive it from the task id.
+    kanban_issue_id: str | None = None
 
 
 def task_file_path(hive_dir: str, task_id: str) -> str:
@@ -83,6 +88,7 @@ def read_task_file(path: str) -> TaskFile:
         # .get, not [...]: task files written before descriptions existed
         # have no such key and must stay readable.
         description=fm.get("description"),
+        kanban_issue_id=fm.get("kanban_issue_id"),
     )
 
 
@@ -103,6 +109,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         "depends_on": task.depends_on,
         "heartbeat": task.heartbeat,
     }
+    if task.kanban_issue_id is not None:
+        fm["kanban_issue_id"] = task.kanban_issue_id
     if task.description is not None:
         # Last key so the (multi-line) description sits next to the body,
         # with the short bookkeeping fields readable above it.
@@ -148,6 +156,22 @@ def set_description(hive_dir: str, task_id: str, description: str) -> None:
 def read_description(hive_dir: str, task_id: str) -> str | None:
     """The stored description, or None when the task file doesn't exist yet."""
     return _read_or_new(hive_dir, task_id)[1].description
+
+
+def set_kanban_issue_id(hive_dir: str, task_id: str, issue_id: str) -> None:
+    """Point this task at a Vibe Kanban issue, creating the task file if needed.
+
+    Like set_description, everything else on an existing file is preserved:
+    attaching a board to a task that already ran only adds the id.
+    """
+    path, task = _read_or_new(hive_dir, task_id)
+    task.kanban_issue_id = issue_id
+    write_task_file(path, task)
+
+
+def read_kanban_issue_id(hive_dir: str, task_id: str) -> str | None:
+    """The issue this task mirrors, or None when it mirrors none."""
+    return _read_or_new(hive_dir, task_id)[1].kanban_issue_id
 
 
 def acquire_lock(hive_dir: str, task_id: str, owner: str, ttl_seconds: int | None = None) -> TaskFile:
