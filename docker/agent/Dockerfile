@@ -57,6 +57,18 @@ ENV DISABLE_AUTOUPDATER=1
 COPY hooks/emit_event.py /usr/local/lib/ia-harness/emit_event.py
 COPY hooks/install_settings.py /usr/local/lib/ia-harness/install_settings.py
 
+# The vendored role skills (see skills/README.md). Baked into the image, not
+# installed into the shared /root/.claude, so the set a role gets moves only
+# when the image moves — claude_shared tracks no version, and a skill
+# installed there would drift inside running containers exactly the way the
+# CLI auto-updater above does. The dispatcher delivers them per call, one
+# --plugin-dir per skill, from dispatcher/role_skills.py; SKILLS_ROOT there
+# is this destination path, and a test asserts the two still agree. The whole
+# directory is copied, loose NOTICE.md and README.md included: the three
+# upstreams are MIT, which requires their notices to travel with the copies,
+# and --plugin-dir ignores files that are not plugins.
+COPY skills /opt/ia-harness/skills
+
 COPY docker/agent/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

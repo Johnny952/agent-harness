@@ -4,6 +4,7 @@ import time
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
+from dispatcher import role_skills
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -132,7 +133,7 @@ def fake_git(monkeypatch):
 def test_dispatch_phase_success(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             return ClaudeResult(
                 session_id=None,
@@ -162,7 +163,7 @@ def test_dispatch_phase_passes_configured_timeout_to_phase_exec(tmp_path, monkey
     cfg = _make_config(tmp_path, phase_timeout_seconds=999)
     captured = {}
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             return ClaudeResult(
                 session_id=None,
@@ -186,11 +187,47 @@ def test_dispatch_phase_passes_configured_timeout_to_phase_exec(tmp_path, monkey
     assert captured["timeout_seconds"] == 999
 
 
+def test_dispatch_phase_delivers_the_role_skills_to_the_phase_call(tmp_path, monkeypatch) -> None:
+    """The set is chosen here, from the role, so that every dispatch path gets
+    the same one. The usage probe is a separate call and must stay bare: the
+    skills are always-on cost, and the probe reads a number."""
+    cfg = _make_config(tmp_path)
+    captured = {}
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            captured["probe"] = kwargs
+            return ClaudeResult(
+                session_id=None,
+                result_text=(
+                    "Current session: 10% used · resets later\n"
+                    "Current week (all models): 10% used · resets later"
+                ),
+                raw={},
+            )
+        captured["phase"] = kwargs
+        return ClaudeResult(session_id="sess-1", result_text="phase done", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert captured["phase"]["plugin_dirs"] == role_skills.plugin_dirs("revisor")
+    assert captured["phase"]["append_system_prompt"] == role_skills.system_prompt("revisor")
+    assert "blocking-review" in captured["phase"]["append_system_prompt"]
+    assert not captured["probe"].get("plugin_dirs")
+    assert not captured["probe"].get("append_system_prompt")
+
+
 def test_check_quota_ok_probe_uses_fixed_usage_probe_timeout(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path, phase_timeout_seconds=999)
     captured = {}
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         captured["timeout_seconds"] = timeout_seconds
         return ClaudeResult(
             session_id=None,
@@ -212,7 +249,7 @@ def test_check_quota_ok_probe_uses_fixed_usage_probe_timeout(tmp_path, monkeypat
 def test_dispatch_phase_all_accounts_over_quota(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         return ClaudeResult(
             session_id=None,
             result_text=(
@@ -233,7 +270,7 @@ def test_dispatch_phase_all_accounts_over_quota(tmp_path, monkeypatch) -> None:
 def test_check_quota_ok_returns_true_and_warns_when_usage_probe_format_drifts(tmp_path, monkeypatch, caplog) -> None:
     cfg = _make_config(tmp_path)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         return ClaudeResult(session_id=None, result_text="not the /usage format we expect at all", raw={})
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
@@ -304,7 +341,7 @@ def test_dispatch_phase_takes_over_lock_with_no_heartbeat_via_ttl_pass_through(t
         ),
     )
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             return ClaudeResult(
                 session_id=None,
@@ -333,7 +370,7 @@ def test_dispatch_phase_takes_over_lock_with_no_heartbeat_via_ttl_pass_through(t
 def test_dispatch_phase_exception_during_busy_window_leaves_account_idle(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         return ClaudeResult(
             session_id=None,
             result_text=(
@@ -359,7 +396,7 @@ def test_dispatch_phase_recovers_account_from_cooling_down_via_recheck(tmp_path,
     cfg = _make_config(tmp_path)
     set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             return ClaudeResult(
                 session_id=None,
@@ -388,7 +425,7 @@ def test_recheck_cooling_accounts_recovers_to_idle_when_usage_probe_raises(tmp_p
     cfg = _make_config(tmp_path)
     set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         raise ValueError("bad /usage format")
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
@@ -403,7 +440,7 @@ def test_dispatch_phase_does_not_loop_forever_when_cooling_probe_raises_and_phas
     cfg = _make_config(tmp_path)
     set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             raise ValueError("bad /usage format")
         return ClaudeResult(session_id=None, result_text="rate limit reached", raw={"is_error": True})
@@ -439,7 +476,7 @@ def test_dispatch_phase_picks_untried_recovered_account_after_recheck(tmp_path, 
     set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
     set_state(cfg.state_dir, "cuenta3", AccountState.COOLING_DOWN)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             if container == "agent-cuenta2":
                 return ClaudeResult(
@@ -478,7 +515,7 @@ def test_dispatch_phase_picks_untried_recovered_account_after_recheck(tmp_path, 
 def test_dispatch_phase_returns_failure_when_exec_crashes_with_empty_raw(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             return ClaudeResult(
                 session_id=None,
@@ -552,7 +589,7 @@ def test_run_task_cycle_blocks_without_raising_when_task_locked_by_other_owner(
     cfg = _make_config(tmp_path)
     acquire_lock(cfg.hive_tasks_dir, "task-1", owner="otro")
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         return ClaudeResult(
             session_id=None,
             result_text=(
@@ -1017,7 +1054,7 @@ def test_run_task_cycle_leaves_another_owners_worktrees_alone(tmp_path, monkeypa
     cfg = _make_config(tmp_path)
     acquire_lock(cfg.hive_tasks_dir, "task-1", owner="otro")
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         return ClaudeResult(
             session_id=None,
             result_text=(
@@ -1159,7 +1196,7 @@ def test_run_task_cycle_hands_the_tree_back_after_merging(tmp_path, monkeypatch,
 def _phase_exec(result):
     """A fake exec_claude that clears the usage probe and then returns `result`."""
 
-    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
         if "usage" in prompt.lower():
             return ClaudeResult(
                 session_id=None,

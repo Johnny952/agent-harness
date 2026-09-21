@@ -140,6 +140,73 @@ def test_exec_claude_omits_model_and_effort_when_not_given(monkeypatch) -> None:
     assert "-e" not in captured["cmd"]
 
 
+def test_exec_claude_passes_one_plugin_dir_flag_per_skill(monkeypatch) -> None:
+    """Role skills are delivered per call, so the set must survive verbatim:
+    N directories mean N `--plugin-dir` flags, in order. The CLI takes one
+    path per flag — a comma-joined list or a parent directory would silently
+    deliver the wrong set."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude(
+        "agent-cuenta1", "/wd", "do it",
+        plugin_dirs=["/opt/ia-harness/skills/a", "/opt/ia-harness/skills/b"],
+    )
+
+    cmd = captured["cmd"]
+    pairs = [(cmd[i], cmd[i + 1]) for i, part in enumerate(cmd) if part == "--plugin-dir"]
+    assert pairs == [
+        ("--plugin-dir", "/opt/ia-harness/skills/a"),
+        ("--plugin-dir", "/opt/ia-harness/skills/b"),
+    ]
+
+
+def test_exec_claude_puts_plugin_dirs_before_the_prompt(monkeypatch) -> None:
+    """Everything after `-p` is the prompt's argument or the flags the CLI
+    reads with it; a `--plugin-dir` that landed past it would be parsed as
+    something else or ignored."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude(
+        "agent-cuenta1", "/wd", "do it",
+        plugin_dirs=["/opt/ia-harness/skills/a"],
+        append_system_prompt="method skills: a",
+    )
+
+    cmd = captured["cmd"]
+    assert cmd.index("--plugin-dir") < cmd.index("-p")
+    assert cmd.index("--append-system-prompt") < cmd.index("-p")
+    assert cmd[cmd.index("--append-system-prompt") + 1] == "method skills: a"
+
+
+def test_exec_claude_omits_skill_flags_when_not_given(monkeypatch) -> None:
+    """A role with no skills must produce the command it produced before this
+    existed — not an empty flag, which the CLI would read as a path."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", plugin_dirs=[], append_system_prompt=None)
+
+    assert "--plugin-dir" not in captured["cmd"]
+    assert "--append-system-prompt" not in captured["cmd"]
+
+
 def test_exec_claude_with_timeout_seconds_prefixes_in_container_timeout(monkeypatch) -> None:
     captured = {}
 

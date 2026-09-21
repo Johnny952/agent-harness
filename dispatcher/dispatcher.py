@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 
-from dispatcher import context_transfer, docker_exec, quota, state_machine
+from dispatcher import context_transfer, docker_exec, quota, role_skills, state_machine
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import KanbanClient
@@ -314,6 +314,11 @@ def dispatch_phase(
                     container, workdir, prompt,
                     resume_session_id=resume_session_id, model=model, effort=effort,
                     timeout_seconds=cfg.phase_timeout_seconds,
+                    # Chosen from the role here rather than passed in by the
+                    # caller: the role is what decides the set, and a phase
+                    # dispatched by any other path should get the same one.
+                    plugin_dirs=role_skills.plugin_dirs(role),
+                    append_system_prompt=role_skills.system_prompt(role),
                 )
             if _should_commit(role, result):
                 docker_exec.commit_worktree(

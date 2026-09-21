@@ -4,6 +4,7 @@ import dataclasses
 import json
 import logging
 import subprocess
+from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ def exec_claude(
     model: str | None = None,
     effort: str | None = None,
     timeout_seconds: int | None = None,
+    plugin_dirs: Sequence[str] | None = None,
+    append_system_prompt: str | None = None,
 ) -> ClaudeResult:
     if timeout_seconds is not None and timeout_seconds <= 0:
         # coreutils `timeout 0` disables the in-container timeout entirely, so
@@ -57,6 +60,16 @@ def exec_claude(
         command += ["--model", model]
     if effort:
         command += ["--effort", effort]
+    # Session-scoped skill delivery: one directory per plugin, repeatable.
+    # Nothing is installed in the container by this, so two roles running in
+    # the same agent never see each other's set. A directory that is not
+    # there is not fatal — the CLI prints `Path not found` and runs the
+    # phase anyway — so an image built before the skills were baked in
+    # degrades to no skills instead of failing every dispatch.
+    for plugin_dir in plugin_dirs or ():
+        command += ["--plugin-dir", plugin_dir]
+    if append_system_prompt:
+        command += ["--append-system-prompt", append_system_prompt]
     command += ["-p", prompt, "--output-format", "json"]
     if timeout_seconds is not None:
         # Killing the host `docker exec` client does not kill the process inside
