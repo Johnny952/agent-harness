@@ -1,0 +1,7 @@
+{
+  "name": "test-driven-development",
+  "description": "Use when writing or changing any code that can be tested, before the implementation exists",
+  "version": "1.0.0",
+  "author": { "name": "ia-harness" },
+  "license": "MIT"
+}

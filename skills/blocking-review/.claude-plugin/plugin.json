@@ -1,0 +1,7 @@
+{
+  "name": "blocking-review",
+  "description": "Use when reviewing a diff for defects that must block the handoff",
+  "version": "1.0.0",
+  "author": { "name": "ia-harness" },
+  "license": "MIT"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "systematic-debugging",
+  "description": "Use when something is broken, failing, or behaving unexpectedly, before proposing a fix",
+  "version": "1.0.0",
+  "author": { "name": "ia-harness" },
+  "license": "MIT"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "minimal-scope",
+  "description": "Use before adding code, a file, or a dependency, to find the smallest thing that works",
+  "version": "1.0.0",
+  "author": { "name": "ia-harness" },
+  "license": "MIT"
+}
