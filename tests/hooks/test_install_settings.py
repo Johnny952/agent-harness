@@ -108,3 +108,65 @@ def test_install_through_dangling_symlink_creates_target(tmp_path: Path) -> None
     hooks = json.loads(target.read_text())["hooks"]
     commands = [h["command"] for group in hooks["PreToolUse"] for h in group["hooks"]]
     assert commands == [install_settings.HOOK_COMMAND]
+
+
+def test_install_turns_off_claude_ai_sync(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+
+    install_settings.install(str(settings_path))
+
+    settings = json.loads(settings_path.read_text())
+    # The literal false is the only value Claude Code honours here.
+    assert settings["syncClaudeAiSkills"] is False
+    assert settings["syncClaudeAiPlugins"] is False
+
+
+def test_install_keeps_an_operator_set_sync_value(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"syncClaudeAiSkills": True}))
+
+    install_settings.install(str(settings_path))
+
+    settings = json.loads(settings_path.read_text())
+    # settings.json is where the opt-in lives: an operator who wants their
+    # claude.ai skills in the containers says so here, and the entrypoint
+    # re-running on every restart does not argue with them.
+    assert settings["syncClaudeAiSkills"] is True
+    assert settings["syncClaudeAiPlugins"] is False
+    assert settings["hooks"]["PreToolUse"]
+
+
+def test_install_leaves_settings_alone_when_sync_is_already_off(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+
+    install_settings.install(str(settings_path))
+    first = settings_path.read_text()
+    install_settings.install(str(settings_path))
+
+    assert settings_path.read_text() == first
+
+
+def test_main_warns_when_the_sync_is_left_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"syncClaudeAiSkills": True}))
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(settings_path))
+
+    install_settings.main()
+
+    err = capsys.readouterr().err
+    assert "syncClaudeAiSkills" in err
+    assert "syncClaudeAiPlugins" not in err
+
+
+def test_main_is_quiet_when_the_sync_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setenv("CLAUDE_SETTINGS_PATH", str(settings_path))
+
+    install_settings.main()
+
+    err = capsys.readouterr().err
+    assert "syncClaudeAi" not in err

@@ -48,10 +48,12 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   `.claude.json` never leave that account's volume. Names every account
   shares (session history, skills/agents/commands/plugins, `settings.json`)
   live in the `claude_shared` volume at `/root/.claude` and are symlinked
-  into each account's config home by the image entrypoint. Each pairs with
-  its own `docker:dind` sidecar (`DOCKER_HOST` pointed at the
-  sidecar, `sysbox-runc` runtime, no `--privileged`) so agents can build/run
-  containers without touching the host Docker daemon.
+  into each account's config home by the image entrypoint; that
+  `settings.json` also turns the claude.ai skill and plugin sync off, so no
+  role pays for skills nobody chose. Each pairs with its own `docker:dind`
+  sidecar (`DOCKER_HOST` pointed at the sidecar, `sysbox-runc` runtime, no
+  `--privileged`) so agents can build/run containers without touching the
+  host Docker daemon.
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
   (`status`, `owner`, `depends_on`, `heartbeat`) plus a body that accumulates
   each phase's handoff notes. Used for cold-start role transitions; mid-role
@@ -181,6 +183,22 @@ exception: the CLI hardcodes the path of `.device-keys.json` to
 `~/.claude/`, i.e. `claude_shared`, whatever `CLAUDE_CONFIG_DIR` says, so if
 that file is ever created, every account shares it. Login, `/status` and a
 recreate didn't create it in the 2026-09-19 V0.4 re-run.
+
+That shared `settings.json` also carries `syncClaudeAiSkills: false` and
+`syncClaudeAiPlugins: false`, written by `hooks/install_settings.py` on
+every container start. Without them Claude Code downloads the signed-in
+account's claude.ai skills into `~/.claude/skills/synced/`, which is shared
+here, so every role's system prompt carries *both* accounts' lists on every
+turn — 20 skills and 13,535 bytes of name and description when this was
+measured, none of them chosen for a coding role. These two keys are the
+only switch that works: `CLAUDE_CODE_SYNC_SKILLS` is an enable gate rather
+than a kill switch, and the keys are read from user or managed settings
+only, never from a project's `.claude/settings.json`. Turning the sync off
+also moves what was already downloaded from `skills/synced` to
+`skills/.trash`, where `cleanupPeriodDays` deletes it. To opt back in, set
+either key to `true` in `/root/.claude/settings.json`: the merge is
+additive, so a value already in the file is never rewritten, and the
+entrypoint prints a warning on each start while the sync is on.
 
 > **Upgrading from the shared-login layout:** before this change a login
 > landed in `claude_shared` (`/root/.claude/.credentials.json`, and
@@ -447,10 +465,10 @@ prioritized item lists the checks it depends on.
 
 ### Known gaps (fix first)
 
-These sit in the core pipeline rather than on top of it: most likely keep
-a task from producing a usable result end to end today, and the rest tax
-every phase that runs. The unit tests mock Claude Code, Docker, and Vibe
-Kanban, so none of them catch these.
+These sit in the core pipeline rather than on top of it: they most likely
+keep a task from producing a usable result end to end today. The unit
+tests mock Claude Code, Docker, and Vibe Kanban, so none of them catch
+these.
 
 - **Vibe Kanban's MCP surface doesn't match `vibe_kanban_client.py`.**
   Verified against `vibe-kanban@0.1.44` (the compose image is unobtainable,
@@ -480,24 +498,6 @@ Kanban, so none of them catch these.
   community image), bring up the other three control-plane services by
   name instead: `docker compose -f docker/compose/docker-compose.yml
   up -d collector dashboard registry-mirror`. (V0.2 control plane, V0.8)
-- **Every phase pays for skills nobody chose.** The CLI syncs each
-  account's claude.ai skills into `~/.claude/skills/synced/<uuid>/`, and
-  the entrypoint symlinks `skills` in from `claude_shared`, which both
-  agents mount — so each container also carries the *other* account's
-  synced set. Measured in `agent-cuenta1` on 2026-09-19: two UUID-named
-  sets, 20 skills, 13,535 bytes of name and description (~3,400 tokens)
-  in the system prompt of every turn of every phase, for `docs`, `docx`,
-  `pdf`, `pptx`, `xlsx`, `morning`, `import-memory`, `skill-creator`,
-  `chrome-browser`, `computer-use`, `deep-research` and the rest — none
-  of which a coding role would ever invoke. It is exactly what item 5
-  rules out ("a pack isn't installed by default"), arriving by sync
-  instead of by install, and it leaks one account's skill list into the
-  other's container. Candidate fixes, none verified: a CLI setting or env
-  var that turns skill sync off; dropping `skills` from the entrypoint's
-  shared allowlist so each account's sync stays in its own
-  `claude_creds_<account>` (per-call delivery in items 1 and 5 leaves the
-  shared `skills/` with no other user); or pruning `synced/` at container
-  start, which the next sync undoes.
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
   along with others not listed here (the `/usage` probe under `-p` — V1.3,

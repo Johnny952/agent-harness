@@ -692,6 +692,38 @@ logins.
      nothing, `?? src/` still reported for a nested `worktrees/`, and
      `.git/info/exclude` still owned by 1000:1000 after the append. 12
      new unit tests, 252 in the suite.
+   - **Every phase pays for skills nobody chose.** Fixed 2026-09-21:
+     `hooks/install_settings.py` now writes `syncClaudeAiSkills: false`
+     and `syncClaudeAiPlugins: false` alongside the hooks, so the
+     entrypoint turns the claude.ai sync off on every container start.
+     That layer is the whole point: the shared `settings.json` lives in
+     `claude_shared` and is symlinked into both accounts' config homes,
+     so it counts as *user* settings for both — the two keys are read
+     from user or managed settings only, never from a project's
+     `.claude/settings.json`, and only the literal `false` counts. The
+     README's other candidates were checked and dropped.
+     `CLAUDE_CODE_SYNC_SKILLS` is an enable gate, not a kill switch.
+     Pruning `skills/synced/` at start is undone by the next sync.
+     Dropping `skills` from the entrypoint's shared allowlist only stops
+     each account from seeing the other's set; each container would
+     still pay for its own. The merge is additive (`setdefault`), so
+     `settings.json` doubles as the opt-in — an operator who wants
+     their skills in the containers sets either key to `true` and the
+     entrypoint stops arguing, printing a warning per key on each start
+     while the sync is on. What the setting does to what was already
+     downloaded took reading the compiled CLI: the prune that logs
+     `skills_sync_pruned_for_closed_gate` renames `skills/synced` to
+     `skills/.trash`, where `cleanupPeriodDays` deletes it, and both of
+     its call sites are gated on `skillsSyncVetoed()` — one of them on
+     the MCP-server path, so `claude mcp serve` triggers it locally
+     without spending quota, which is how this was verified. Live in
+     both agents: `skills/synced` down from 8.5M to 20K with zero
+     `SKILL.md` left, 20 of them in `skills/.trash`, and
+     `agent-cuenta2` reading the same two keys off the shared file.
+     Still open: the actual token saving in the system
+     prompt can only be measured by a prompted run, which costs quota
+     — the 13,535 bytes of name and description have no source left to
+     come from. 5 new unit tests, 257 in the suite.
 3. Acceptance:
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
