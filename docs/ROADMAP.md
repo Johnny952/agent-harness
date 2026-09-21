@@ -416,8 +416,11 @@ The first real `run-task`, with costs capped.
     status per phase and ends on the `done` or `blocked` one; otherwise
     stderr carries a warning per failed update. With no block, the run
     says nothing about a board at all.
-  - The revisor's last line is a `VERDICT:` line, and the outcome matches
-    it.
+  - The revisor's `## revisor` section opens with `**Status:** … ·
+    **Verdict:** APPROVED` (or `CHANGES_REQUESTED`) — the field the
+    dispatcher read — and the outcome matches it. A revisor that answered in
+    prose instead falls back to its last `VERDICT:` line; note which path the
+    run took.
   - `cuenta1.json` goes back to `IDLE`.
   - Collector events for the run's session IDs are there.
 - **Expected failure to record:** "roles don't see each other's code".

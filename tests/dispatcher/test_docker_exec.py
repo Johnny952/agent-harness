@@ -207,6 +207,67 @@ def test_exec_claude_omits_skill_flags_when_not_given(monkeypatch) -> None:
     assert "--append-system-prompt" not in captured["cmd"]
 
 
+def test_exec_claude_passes_the_json_schema_before_the_prompt(monkeypatch) -> None:
+    """The schema is what makes the return structured, and it is read as a
+    flag: past `-p` it would be part of the prompt's argument list. It travels
+    as one compact JSON argv element — pretty-printing it would spend argv on
+    whitespace for no reader."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    schema = {"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}
+    exec_claude("agent-cuenta1", "/wd", "do it", json_schema=schema)
+
+    cmd = captured["cmd"]
+    assert cmd.index("--json-schema") < cmd.index("-p")
+    serialized = cmd[cmd.index("--json-schema") + 1]
+    assert json.loads(serialized) == schema
+    assert ", " not in serialized
+
+
+def test_exec_claude_omits_json_schema_when_not_given(monkeypatch) -> None:
+    """A role with no schema keeps the free-text call it had before: an empty
+    or `null` argument is rejected by the CLI as invalid JSON and would fail
+    every phase of that role."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", json_schema=None)
+
+    assert "--json-schema" not in captured["cmd"]
+
+
+def test_exec_claude_keeps_the_structured_output_on_raw(monkeypatch) -> None:
+    """The validated return arrives as a field of the `--output-format json`
+    envelope, beside `result` rather than inside it, and `raw` is what carries
+    it to the caller."""
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        payload = {
+            "session_id": "s-1",
+            "result": "Structured output provided successfully",
+            "structured_output": {"status": "complete", "verdict": "APPROVED"},
+        }
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    result = exec_claude("agent-cuenta1", "/wd", "do it", json_schema={"type": "object"})
+
+    assert result.raw["structured_output"] == {"status": "complete", "verdict": "APPROVED"}
+    assert result.session_id == "s-1"
+
+
 def test_exec_claude_with_timeout_seconds_prefixes_in_container_timeout(monkeypatch) -> None:
     captured = {}
 

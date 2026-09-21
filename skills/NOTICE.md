@@ -20,7 +20,7 @@ upstream authors'.
 | `verification-before-completion` | superpowers 6.3.0, `skills/verification-before-completion` | https://github.com/obra/superpowers | Verbatim |
 | `writing-plans` | superpowers 6.3.0, `skills/writing-plans` | https://github.com/obra/superpowers | Pruned: worktree and plan-path conventions replaced with this harness's, the execution-handoff section rewritten |
 | `receiving-code-review` | superpowers 6.3.0, `skills/receiving-code-review` | https://github.com/obra/superpowers | Pruned: reviewer sources remapped onto the revisor and auditor roles, clarification requests rewritten as handoff statements, the GitHub thread-reply section dropped |
-| `blocking-review` | thermos, `skills/thermo-nuclear-review` | https://github.com/cursor/plugins/tree/main/thermos | Rewritten: the PR-comment workflow replaced with this harness's finding format and the dispatcher's `VERDICT:` contract |
+| `blocking-review` | thermos, `skills/thermo-nuclear-review` | https://github.com/cursor/plugins/tree/main/thermos | Rewritten: the PR-comment workflow replaced with this harness's finding format and the dispatcher's verdict contract (the `verdict` field, with the `VERDICT:` last line as the fallback) |
 | `code-quality-review` | thermos, `skills/thermo-nuclear-code-quality-review` | https://github.com/cursor/plugins/tree/main/thermos | Rewritten: the approval bar reframed as non-blocking findings, since the auditor runs after approval and gates nothing |
 | `minimal-scope` | ponytail | https://github.com/DietrichGebert/ponytail | Rewritten: the intensity modes, session persistence and slash-command surface dropped; the "no test frameworks" rule replaced with an explicit deferral to `test-driven-development` |
 

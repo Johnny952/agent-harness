@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 
-from dispatcher import context_transfer, docker_exec, quota, role_skills, state_machine
+from dispatcher import context_transfer, docker_exec, handoff, quota, role_skills, state_machine
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import KanbanClient
@@ -25,6 +25,9 @@ class DispatchResult:
     session_id: str | None
     result_text: str
     account: str
+    #: The phase's structured return, when it produced one. None means the
+    #: role answered in prose and `result_text` is all there is.
+    handoff: dict | None = None
 
 
 class _HeartbeatLoop:
@@ -150,13 +153,19 @@ def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
 _VERDICT_RE = re.compile(r"VERDICT:\s*APPROVED", re.IGNORECASE)
 
 
-def revisor_approved(result_text: str) -> bool:
-    # No structured verdict field exists in the task handoff or Kanban clients
-    # (design spec caveat) — the revisor is instructed (see _role_prompt) to end
-    # its response with a literal "VERDICT: APPROVED"/"VERDICT: CHANGES_REQUESTED"
-    # line, and this fails closed (treated as not-approved) on anything else,
-    # so a malformed or missing verdict still burns a revision round instead of
-    # silently passing.
+def revisor_approved(result_text: str, payload: dict | None = None) -> bool:
+    # The verdict is a field of the revisor's structured return, and that is
+    # what is read when there is one — with a schema in play the `result` text
+    # can be a CLI placeholder ("Structured output provided successfully")
+    # with no verdict line anywhere in it.
+    #
+    # The line below it is the fallback for a phase that answered in prose
+    # (an image whose CLI has no --json-schema, a role dispatched without a
+    # schema). Either way this fails closed: a malformed or missing verdict
+    # burns a revision round instead of silently passing.
+    verdict = handoff.verdict_of(payload)
+    if verdict is not None:
+        return verdict == handoff.APPROVED
     #
     # Only the last non-empty line counts — a bare `MULTILINE` search matched
     # any line ending in "VERDICT: APPROVED", including a quoted one above a
@@ -177,31 +186,18 @@ def revisor_approved(result_text: str) -> bool:
     return bool(_VERDICT_RE.fullmatch(lines[-1]))
 
 
-def _truncate_for_handoff(text: str, head: int = 500, tail: int = 1500) -> str:
-    # Interim measure until the structured handoff (README Future work:
-    # "Structured handoff") replaces free-text phase output with a bounded,
-    # per-role schema. The tail is kept, not just the head, because a
-    # revisor's verdict line always closes its response — a head-only cut
-    # (the old `result.result_text[:2000]`) drops that verdict on any long
-    # response.
-    if len(text) <= head + tail:
-        return text
-    omitted = len(text) - head - tail
-    return f"{text[:head]}\n\n[… {omitted} chars omitted …]\n\n{text[-tail:]}"
-
-
 def _role_prompt(
     role: str,
     task_id: str,
     task_file: str,
     description: str,
+    scratch_dir: str,
     round_num: int | None = None,
 ) -> str:
-    # The description is embedded whole, never run through
-    # _truncate_for_handoff: a cut phase summary loses detail, but a cut
-    # ask misinforms — the role would confidently build the wrong thing.
-    # It also stays in the task file, so this is belt and braces: the role
-    # has the ask even if it never opens the file.
+    # The description is embedded whole, never clamped: a cut phase summary
+    # loses detail, but a cut ask misinforms — the role would confidently
+    # build the wrong thing. It also stays in the task file, so this is belt
+    # and braces: the role has the ask even if it never opens the file.
     prompt = (
         f"Role: {role}. Task: {task_id}.\n\n"
         f"Task description:\n{description}\n\n"
@@ -209,12 +205,35 @@ def _role_prompt(
     )
     if round_num is not None:
         prompt += f" This is revision round {round_num}."
-    if role == "revisor":
+    schema = handoff.schema_for(role)
+    if schema is not None:
+        # Says out loud what the schema can only imply: the handoff is the
+        # summary, the detail lives in files, and the two have different
+        # lifetimes. Without this the role writes its findings into the
+        # return, blows the budget, and costs a round to say it again.
         prompt += (
-            " End your response with a line reading exactly 'VERDICT: APPROVED' if the "
-            "implementation is ready to proceed to the next phase, or exactly "
-            "'VERDICT: CHANGES_REQUESTED' if it needs another revision round."
+            f"\n\nReturn the structured handoff your schema describes, in "
+            f"{handoff.budget_for(role)} bytes or less. Every later phase reads it, so it carries "
+            "the summary and not the detail: anything longer than a line goes in a file that you "
+            "cite under `paths`, by path plus heading or symbol name, never by line number. "
+            f"Detail worth keeping (an ADR, a learning, docs/implementations/{task_id}.md) goes on "
+            "the task branch; working notes for this task alone (review findings, test logs, a "
+            f"scratch plan) go in {scratch_dir}/, which is outside the repo and is not read once "
+            "the task is done."
         )
+    if role == "revisor":
+        if schema is not None:
+            prompt += (
+                " Set `verdict` to APPROVED only if the implementation is ready to proceed to the "
+                "next phase, and to CHANGES_REQUESTED if it needs another revision round. That "
+                "field is what the dispatcher reads to decide."
+            )
+        else:
+            prompt += (
+                " End your response with a line reading exactly 'VERDICT: APPROVED' if the "
+                "implementation is ready to proceed to the next phase, or exactly "
+                "'VERDICT: CHANGES_REQUESTED' if it needs another revision round."
+            )
     return prompt
 
 
@@ -261,6 +280,63 @@ def _commit_message(
         f"Account: {account}\n"
         f"Session: {session_id or 'unknown'}\n"
     )
+
+
+def _shrink_over_budget(
+    cfg: Config,
+    container: str,
+    workdir: str,
+    role: str,
+    result: docker_exec.ClaudeResult,
+    model: str | None,
+    effort: str | None,
+) -> docker_exec.ClaudeResult:
+    """One `--resume` asking for a shorter handoff, when one blew its budget.
+
+    Exactly one: a second would cost as much as the phase it is trimming, and
+    a role that ignored the budget twice is not going to find the third ask
+    more convincing. The retry is taken as it comes, over budget or not — the
+    point is to keep the task file readable, not to win an argument.
+
+    This runs inside the heartbeat loop by construction (its caller holds it),
+    because the task lock's TTL is only kept alive there: a retry outside it
+    is a window for another dispatcher to take the task mid-call.
+    """
+    if not _exec_succeeded(result) or is_rate_limit_error(result):
+        return result
+    overage = handoff.over_budget(role, result)
+    if not overage:
+        return result
+
+    size = handoff.measure(result)
+    budget = handoff.budget_for(role)
+    # Logged on every overage, including the ones that cannot be retried: the
+    # budgets are guesses until there is data, and this line is the data.
+    logger.warning(
+        "%s handoff was %d bytes, %d over its %d-byte budget", role, size, overage, budget
+    )
+    if not result.session_id:
+        # Nothing to resume into. The clamp in `handoff.body` still keeps the
+        # task file bounded, so this is a worse handoff, not a failed phase.
+        return result
+
+    retry = docker_exec.exec_claude(
+        container, workdir, handoff.shrink_prompt(role, size, budget),
+        resume_session_id=result.session_id, model=model, effort=effort,
+        timeout_seconds=cfg.phase_timeout_seconds,
+        # No skills on the retry: the session already read them, and this call
+        # rewords a return rather than doing any of the role's work. The
+        # schema does travel — without it the shorter answer comes back as
+        # prose and the parse falls through to the clamp.
+        json_schema=handoff.schema_for(role),
+    )
+    if not _exec_succeeded(retry) or is_rate_limit_error(retry):
+        # The first return is over budget but complete; a failed or
+        # rate-limited retry is nothing. Keep the first, and let the phase
+        # succeed on it — failing over the account here would throw away work
+        # that is already done over a formatting problem.
+        return result
+    return retry
 
 
 def dispatch_phase(
@@ -319,7 +395,9 @@ def dispatch_phase(
                     # dispatched by any other path should get the same one.
                     plugin_dirs=role_skills.plugin_dirs(role),
                     append_system_prompt=role_skills.system_prompt(role),
+                    json_schema=handoff.schema_for(role),
                 )
+                result = _shrink_over_budget(cfg, container, workdir, role, result, model, effort)
             if _should_commit(role, result):
                 docker_exec.commit_worktree(
                     container, workdir,
@@ -350,10 +428,16 @@ def dispatch_phase(
         if not _exec_succeeded(result):
             state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
             context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
-            return DispatchResult(success=False, session_id=result.session_id, result_text=result.result_text, account=account)
+            return DispatchResult(
+                success=False, session_id=result.session_id, result_text=result.result_text,
+                account=account, handoff=handoff.parse(result),
+            )
 
         state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
-        return DispatchResult(success=True, session_id=result.session_id, result_text=result.result_text, account=account)
+        return DispatchResult(
+            success=True, session_id=result.session_id, result_text=result.result_text,
+            account=account, handoff=handoff.parse(result),
+        )
 
 
 #: A card is a glance, not a log: past this, the ask goes in its description.
@@ -477,6 +561,9 @@ def run_task_cycle(
 ) -> None:
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    # Made by the dispatcher, not by the roles: a phase told to write its
+    # detail somewhere should find the somewhere already there.
+    scratch_dir = context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id)
     # The card this task already mirrors, if any: seeded by `run-task
     # --kanban-issue-id`, or left behind by an earlier run that opened one.
     issue_id = (
@@ -525,7 +612,7 @@ def run_task_cycle(
         try:
             result = dispatch_phase(
                 cfg, task_id, slug, role,
-                prompt=_role_prompt(role, task_id, task_file, description, round_num=round_num),
+                prompt=_role_prompt(role, task_id, task_file, description, scratch_dir, round_num=round_num),
                 model=cfg.default_model,
                 effort=effort,
                 round_num=round_num,
@@ -549,7 +636,7 @@ def run_task_cycle(
         context_transfer.handoff(
             cfg.hive_tasks_dir, task_id,
             new_status="done" if final else "pending",
-            body=f"## {label}\n\n{_truncate_for_handoff(result.result_text)}",
+            body=handoff.body(label, result.result_text, result.handoff),
         )
         return result
 
@@ -564,7 +651,7 @@ def run_task_cycle(
             revisor_result = run_phase("revisor", round_num=round_num)
             if revisor_result is None:
                 return
-            if revisor_approved(revisor_result.result_text):
+            if revisor_approved(revisor_result.result_text, revisor_result.handoff):
                 approved = True
                 break
 

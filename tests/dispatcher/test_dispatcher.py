@@ -1,16 +1,19 @@
 import datetime as dt
+import os
 import time
 
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import role_skills
+from dispatcher import handoff, role_skills
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
     acquire_lock,
     is_lock_expired,
+    list_task_ids,
     read_task_file,
+    scratch_dir,
     set_kanban_issue_id,
     task_file_path,
     write_task_file,
@@ -221,6 +224,224 @@ def test_dispatch_phase_delivers_the_role_skills_to_the_phase_call(tmp_path, mon
     assert "blocking-review" in captured["phase"]["append_system_prompt"]
     assert not captured["probe"].get("plugin_dirs")
     assert not captured["probe"].get("append_system_prompt")
+
+
+_USAGE_TEXT = (
+    "Current session: 10% used · resets later\n"
+    "Current week (all models): 10% used · resets later"
+)
+
+#: Over the revisor's 3072-byte budget by a wide margin, and over it in the
+#: payload rather than in the prose — the prose is what the CLI replaces with
+#: a placeholder once a schema is in play.
+_FAT_HANDOFF = {"status": "complete", "verdict": "APPROVED", "risks": ["r" * 4000]}
+_LEAN_HANDOFF = {"status": "complete", "verdict": "APPROVED", "risks": ["see docs/adr/0007.md#risks"]}
+
+
+def _phase_recorder(monkeypatch, phase_results):
+    """Answers the usage probe, then hands out `phase_results` in order.
+
+    Returns the list of kwargs each phase call was made with, so a test can
+    tell the first call from the retry by its `resume_session_id`.
+    """
+    calls = []
+    pending = list(phase_results)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        calls.append(dict(prompt=prompt, resume_session_id=resume_session_id, **kwargs))
+        return pending.pop(0)
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+    return calls
+
+
+def test_dispatch_phase_asks_the_phase_for_the_roles_handoff_schema(tmp_path, monkeypatch) -> None:
+    """The schema is chosen here, from the role, for the same reason the
+    skills are. The usage probe stays bare: it reads a number, and a schema
+    is charged on the call that carries it."""
+    cfg = _make_config(tmp_path)
+    probe = {}
+    calls = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            probe.update(kwargs)
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        calls.append(kwargs)
+        return ClaudeResult(session_id="sess-1", result_text="ok", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[0]["json_schema"] == handoff.schema_for("revisor")
+    assert "verdict" in calls[0]["json_schema"]["properties"]
+    assert probe.get("json_schema") is None
+
+
+def test_dispatch_phase_returns_the_parsed_handoff(tmp_path, monkeypatch) -> None:
+    """`result_text` is the CLI's placeholder once a schema validated; the
+    payload is the phase's actual answer, so it travels on the result."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(
+            session_id="sess-1",
+            result_text="Structured output provided successfully",
+            raw={"is_error": False, "structured_output": _LEAN_HANDOFF},
+        ),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.success is True
+    assert result.handoff == _LEAN_HANDOFF
+
+
+def test_dispatch_phase_handoff_is_none_when_the_phase_answered_in_prose(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="I had a look and it is fine", raw={"is_error": False}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.handoff is None
+    assert result.result_text == "I had a look and it is fine"
+
+
+def test_dispatch_phase_asks_once_for_a_shorter_handoff_when_over_budget(tmp_path, monkeypatch) -> None:
+    """The retry resumes the same session — it is a rewrite of an answer that
+    session already has — and carries the schema but not the skills: the
+    session read those on the first call, and this one does no role work."""
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 2, "over budget should cost exactly one resume, never a loop"
+    retry = calls[1]
+    assert retry["resume_session_id"] == "sess-1"
+    assert retry["json_schema"] == handoff.schema_for("revisor")
+    assert not retry.get("plugin_dirs")
+    assert not retry.get("append_system_prompt")
+    assert "3072" in retry["prompt"]
+    assert result.handoff == _LEAN_HANDOFF
+
+
+def test_dispatch_phase_takes_the_retry_even_if_it_is_still_over_budget(tmp_path, monkeypatch) -> None:
+    """Shorter is the win; exactly-in-budget is not worth a third call."""
+    cfg = _make_config(tmp_path)
+    still_fat = {"status": "complete", "verdict": "APPROVED", "risks": ["r" * 3500]}
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": still_fat}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 2
+    assert result.handoff == still_fat
+
+
+def test_dispatch_phase_keeps_the_long_handoff_when_the_retry_fails(tmp_path, monkeypatch) -> None:
+    """A phase that did its work and answered at length has not failed. The
+    retry is a formatting errand: losing it costs readability, and failing the
+    phase over it would throw the work away and fail the account over."""
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id=None, result_text="boom", raw={}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 2
+    assert result.success is True
+    assert result.handoff == _FAT_HANDOFF
+
+
+def test_dispatch_phase_keeps_the_long_handoff_when_the_retry_is_rate_limited(tmp_path, monkeypatch) -> None:
+    """Same reasoning, and one more: a rate-limited retry must not be read as
+    the phase itself hitting the limit, or the account would cool down over a
+    call that was only reformatting."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="Claude AI usage limit reached", raw={"is_error": True}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.success is True
+    assert result.handoff == _FAT_HANDOFF
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+
+
+def test_dispatch_phase_does_not_retry_without_a_session_to_resume(tmp_path, monkeypatch) -> None:
+    """`--resume` needs a session id. Without one there is nothing to ask, and
+    the clamp in the handoff body still bounds what reaches the task file."""
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=None, result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 1
+    assert result.handoff == _FAT_HANDOFF
+
+
+def test_dispatch_phase_does_not_retry_a_handoff_within_budget(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 1
+
+
+def test_dispatch_phase_does_not_retry_a_failed_phase(tmp_path, monkeypatch) -> None:
+    """A crash has no handoff to shorten, and the phase is about to fail over
+    to another account — spending a call on its wording first would delay
+    that for nothing."""
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="x" * 9000, raw={}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 1
+    assert result.success is False
+
+
+def test_dispatch_phase_logs_an_overage_it_cannot_retry(tmp_path, monkeypatch, caplog) -> None:
+    """The budgets are guesses until there is data. This line is the data, so
+    it is written even on the path where nothing can be done about it."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=None, result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+    ])
+
+    with caplog.at_level("WARNING"):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert any("over its 3072-byte budget" in r.getMessage() for r in caplog.records)
 
 
 def test_check_quota_ok_probe_uses_fixed_usage_probe_timeout(tmp_path, monkeypatch) -> None:
@@ -664,7 +885,7 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
     # The revisor's verdict instruction has to stay the last thing it reads,
     # or a description ending in prose could bury it.
     revisor_prompt = next(prompt for role, prompt in captured if role == "revisor")
-    assert revisor_prompt.rstrip().endswith("if it needs another revision round.")
+    assert revisor_prompt.rstrip().endswith("That field is what the dispatcher reads to decide.")
 
 
 def test_run_task_cycle_seeds_the_description_into_the_task_file(tmp_path, monkeypatch) -> None:
@@ -797,6 +1018,35 @@ def test_revisor_approved_false_with_trailing_period() -> None:
     assert dispatcher_mod.revisor_approved("looks good\nVERDICT: APPROVED.") is False
 
 
+def test_revisor_approved_reads_the_verdict_field() -> None:
+    """The field is the contract now. With a schema in play the CLI can leave
+    `result` holding "Structured output provided successfully", which no regex
+    over the text can turn into a verdict."""
+    assert dispatcher_mod.revisor_approved(
+        "Structured output provided successfully", {"verdict": "APPROVED"}
+    ) is True
+    assert dispatcher_mod.revisor_approved(
+        "Structured output provided successfully", {"verdict": "CHANGES_REQUESTED"}
+    ) is False
+
+
+def test_revisor_approved_lets_the_field_overrule_the_text() -> None:
+    """Both present and disagreeing means the model wrote a verdict line into
+    a field-carrying return. The field is the one it was asked for and the one
+    the schema validated."""
+    assert dispatcher_mod.revisor_approved("VERDICT: APPROVED", {"verdict": "CHANGES_REQUESTED"}) is False
+    assert dispatcher_mod.revisor_approved("VERDICT: CHANGES_REQUESTED", {"verdict": "APPROVED"}) is True
+
+
+def test_revisor_approved_falls_back_to_the_text_when_the_payload_has_no_verdict() -> None:
+    """A payload without a verdict is not a rejection: it is a revisor that
+    answered in prose, or through a path with no schema. Read the text, and
+    let that path keep failing closed."""
+    assert dispatcher_mod.revisor_approved("VERDICT: APPROVED", None) is True
+    assert dispatcher_mod.revisor_approved("VERDICT: APPROVED", {"status": "complete"}) is True
+    assert dispatcher_mod.revisor_approved("looks fine to me", {"status": "complete"}) is False
+
+
 def test_is_rate_limit_error_true_on_429_status_with_unrelated_text() -> None:
     result = ClaudeResult(session_id=None, result_text="something went wrong", raw={"is_error": True, "api_error_status": 429})
     assert dispatcher_mod.is_rate_limit_error(result) is True
@@ -831,34 +1081,10 @@ def test_is_rate_limit_error_false_when_not_an_error_even_with_429() -> None:
     assert dispatcher_mod.is_rate_limit_error(result) is False
 
 
-def test_truncate_for_handoff_passthrough_when_short() -> None:
-    text = "short result"
-    assert dispatcher_mod._truncate_for_handoff(text, head=500, tail=1500) == text
-
-
-def test_truncate_for_handoff_keeps_head_and_tail_with_accurate_count() -> None:
-    text = "H" * 500 + "M" * 1000 + "T" * 1500
-    truncated = dispatcher_mod._truncate_for_handoff(text, head=500, tail=1500)
-    assert truncated.startswith("H" * 500)
-    assert truncated.endswith("T" * 1500)
-    assert "[… 1000 chars omitted …]" in truncated
-
-
-def test_truncate_for_handoff_unchanged_at_exact_head_plus_tail_boundary() -> None:
-    text = "x" * 2000
-    assert dispatcher_mod._truncate_for_handoff(text, head=500, tail=1500) == text
-
-
-def test_truncate_for_handoff_truncates_one_char_past_boundary() -> None:
-    text = "H" * 500 + "x" + "T" * 1500
-    truncated = dispatcher_mod._truncate_for_handoff(text, head=500, tail=1500)
-    assert truncated != text
-    assert truncated.startswith("H" * 500)
-    assert truncated.endswith("T" * 1500)
-    assert "[… 1 chars omitted …]" in truncated
-
-
 def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monkeypatch) -> None:
+    """A phase that answers in prose instead of the schema still gets clamped
+    before it lands in the task file, tail included: that is where a prose
+    revisor's verdict line is."""
     cfg = _make_config(tmp_path)
     long_body = "H" * 600 + "M" * 5000 + "T" * 1600
 
@@ -879,6 +1105,127 @@ def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monke
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert "T" * 1500 in task.body
     assert "M" * 5000 not in task.body
+
+
+def test_run_task_cycle_writes_the_rendered_handoff_into_the_task_file(tmp_path, monkeypatch) -> None:
+    """What the next phase reads is the payload's sections, not the CLI's
+    placeholder — the placeholder is the whole reason the payload exists."""
+    cfg = _make_config(tmp_path)
+    payload = {
+        "status": "complete",
+        "changed": ["dispatcher/handoff.py"],
+        "subagents": [{"id": "ag_42", "doing": "running the suite"}],
+        "paths": [{"path": "docs/implementations/task-1.md#schema", "holds": "the field list"}],
+    }
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        if role == "arquitecto":
+            return dispatcher_mod.DispatchResult(
+                success=True, session_id=None, result_text="Structured output provided successfully",
+                account="cuenta1", handoff=payload,
+            )
+        if role == "revisor":
+            return dispatcher_mod.DispatchResult(
+                success=True, session_id=None, result_text="", account="cuenta1",
+                handoff={"status": "complete", "verdict": "APPROVED"},
+            )
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert "- dispatcher/handoff.py" in task.body
+    assert "`ag_42` — running the suite" in task.body
+    assert "`docs/implementations/task-1.md#schema` — the field list" in task.body
+    assert "Structured output provided successfully" not in task.body
+
+
+def test_run_task_cycle_approves_on_a_verdict_field(tmp_path, monkeypatch) -> None:
+    """End to end: a revisor whose text says nothing still gates the cycle,
+    and the auditor runs after it."""
+    cfg = _make_config(tmp_path)
+    roles = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        roles.append(role)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="Structured output provided successfully",
+            account="cuenta1",
+            handoff={"status": "complete", "verdict": "APPROVED"} if role == "revisor" else {"status": "complete"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
+    assert (_ISSUE_ID, "done") in kanban.statuses
+
+
+def test_run_task_cycle_rejects_on_a_verdict_field(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    roles = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        roles.append(role)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="Structured output provided successfully",
+            account="cuenta1",
+            handoff={"status": "complete", "verdict": "CHANGES_REQUESTED"} if role == "revisor" else {"status": "complete"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert "auditor" not in roles
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+
+
+def test_run_task_cycle_gives_every_role_the_scratch_dir(tmp_path, monkeypatch) -> None:
+    """The budget only works if there is somewhere to put what does not fit.
+    The directory is created before the first phase, because a role told to
+    write into a path that does not exist will spend a tool call on mkdir or
+    quietly inline the detail instead."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    captured = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        captured.append((role, prompt))
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    scratch = scratch_dir(cfg.hive_tasks_dir, "task-1")
+    assert os.path.isdir(scratch)
+    for role, prompt in captured:
+        assert scratch in prompt, f"{role}'s prompt does not say where detail goes"
+
+
+def test_run_task_cycle_scratch_dir_is_not_mistaken_for_a_task(tmp_path, monkeypatch) -> None:
+    """It sits beside `<task-id>.md` in the same directory the dispatcher
+    lists tasks from; `list_task_ids` counts `.md` files, so a directory named
+    after the task is invisible to it. This is the test that keeps it so."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert list_task_ids(cfg.hive_tasks_dir) == ["task-1"]
 
 
 def _dispatch_call_kwargs(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):

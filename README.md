@@ -61,7 +61,15 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
   (`status`, `owner`, `depends_on`, `heartbeat`, the operator's
   `description`, and `kanban_issue_id` when there's a board) plus a body
-  that accumulates each phase's handoff notes. Used for cold-start role transitions; mid-role
+  that accumulates each phase's handoff. A phase returns that handoff as a
+  schema (`--json-schema`, per role: what changed, what was verified, what's
+  pending, risks, live subagent IDs, proposed learnings and debt, and paths to
+  the detail — plus the revisor's `verdict`), within a per-role byte budget
+  the dispatcher enforces with one `--resume`; a phase that answers in prose
+  anyway lands clamped to its first 500 and last 1,500 characters. Detail
+  belongs in files, cited by path and a stable anchor: durable docs on the
+  task branch, per-round scratch under `.hive/tasks/<task-id>/`. Used for
+  cold-start role transitions; mid-role
   quota exhaustion instead resumes the same Claude session directly via
   `--resume`. Stale locks (heartbeat older than `heartbeat_ttl_seconds`) are
   reaped at the start of each task cycle; a live lock held by another owner

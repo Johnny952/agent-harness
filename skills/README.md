@@ -56,10 +56,12 @@ always travel together. `minimal-scope` defers outright to
 `test-driven-development` when both are delivered: minimal scope shrinks the
 solution, never the test.
 
-`blocking-review` encodes the dispatcher's real verdict contract — the last
-non-empty line, `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`, failing
-closed on anything malformed. If `revisor_approved()` in
-`dispatcher/dispatcher.py` ever changes, that section changes with it.
+`blocking-review` encodes the dispatcher's real verdict contract — the
+`verdict` field of the revisor's structured return, with the last non-empty
+line `VERDICT: APPROVED` / `VERDICT: CHANGES_REQUESTED` as the fallback for a
+revisor that got no schema, failing closed on anything malformed. If
+`revisor_approved()` in `dispatcher/dispatcher.py` ever changes, that section
+changes with it.
 
 ## Validating a change
 

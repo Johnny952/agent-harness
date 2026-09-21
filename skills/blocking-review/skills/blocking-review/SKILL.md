@@ -84,17 +84,24 @@ Prefer a small number of high-conviction findings over a long list.
 
 ## The verdict
 
-Your response MUST end with exactly one of these as its last line, nothing
-after it:
+You are asked for a structured return with a `verdict` field. Set it to
+exactly one of:
 
 ```
-VERDICT: APPROVED
-VERDICT: CHANGES_REQUESTED
+APPROVED
+CHANGES_REQUESTED
 ```
 
-The dispatcher reads that last line and nothing else to decide whether the
-task moves on. Anything malformed, absent, or followed by a trailing remark
-fails closed — it counts as changes requested and burns a revision round.
+That field is what the dispatcher reads to decide whether the task moves on.
+It does not read your prose for it: once a structured return is in play, the
+text alongside it can be replaced by a placeholder, so a verdict written only
+in the prose is a verdict nobody sees.
+
+If you were given no schema to fill — no `verdict` field to set — then end
+your response with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED` as its
+last line, nothing after it. That is the fallback path, and it fails closed:
+anything malformed, absent, or followed by a trailing remark counts as changes
+requested and burns a revision round.
 
 Approve when the blocking findings are zero. Worth-knowing findings can be
 reported *and* approved in the same response — say so explicitly, so the

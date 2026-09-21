@@ -47,6 +47,7 @@ def exec_claude(
     timeout_seconds: int | None = None,
     plugin_dirs: Sequence[str] | None = None,
     append_system_prompt: str | None = None,
+    json_schema: dict | None = None,
 ) -> ClaudeResult:
     if timeout_seconds is not None and timeout_seconds <= 0:
         # coreutils `timeout 0` disables the in-container timeout entirely, so
@@ -70,6 +71,12 @@ def exec_claude(
         command += ["--plugin-dir", plugin_dir]
     if append_system_prompt:
         command += ["--append-system-prompt", append_system_prompt]
+    # Structured return. The CLI validates the model's answer against this and
+    # puts it on the result envelope as `structured_output`; the `result` text
+    # may then be a placeholder, so callers read the payload, not the prose.
+    # Compact separators because this travels as one argv element.
+    if json_schema is not None:
+        command += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
     command += ["-p", prompt, "--output-format", "json"]
     if timeout_seconds is not None:
         # Killing the host `docker exec` client does not kill the process inside

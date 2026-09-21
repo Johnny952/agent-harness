@@ -68,6 +68,27 @@ def task_file_path(hive_dir: str, task_id: str) -> str:
     return os.path.join(hive_dir, f"{task_id}.md")
 
 
+def scratch_dir(hive_dir: str, task_id: str) -> str:
+    """Where a phase puts detail that only this task's later rounds need.
+
+    Per-round working notes — review findings, test logs, a scratch plan —
+    are too long to hand off and too short-lived for the repo, so they go
+    here and the handoff cites the path. It sits beside the task file rather
+    than inside the project: a reviewing role's checkout is rebuilt every
+    round, so anything written there is gone by the next one.
+
+    Safe as a sibling of `<task_id>.md` because `list_task_ids` only counts
+    `.md` files, and `.hive/` is gitignored.
+    """
+    return os.path.join(hive_dir, task_id)
+
+
+def ensure_scratch_dir(hive_dir: str, task_id: str) -> str:
+    path = scratch_dir(hive_dir, task_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def list_task_ids(hive_dir: str) -> list[str]:
     if not os.path.isdir(hive_dir):
         return []
