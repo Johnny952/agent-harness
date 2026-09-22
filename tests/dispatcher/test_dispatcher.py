@@ -5,7 +5,7 @@ import time
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import handoff, role_skills
+from dispatcher import handoff, project_docs, role_skills
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -69,6 +69,9 @@ def _make_config(tmp_path, **overrides):
         escalated_effort="high",
         phase_timeout_seconds=7200,
         merge_on_done=False,
+        mapping_enabled=False,
+        mapping_model="sonnet",
+        mapping_max_turns=40,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -844,7 +847,7 @@ def test_run_task_cycle_prompt_references_task_file(tmp_path, monkeypatch) -> No
     cfg = _make_config(tmp_path)
     captured_prompts = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         captured_prompts.append(prompt)
         return dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account="")
 
@@ -867,7 +870,7 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     captured = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         captured.append((role, prompt))
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -895,7 +898,7 @@ def test_run_task_cycle_seeds_the_description_into_the_task_file(tmp_path, monke
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     prompts = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         prompts.append(prompt)
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -1088,7 +1091,7 @@ def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monke
     cfg = _make_config(tmp_path)
     long_body = "H" * 600 + "M" * 5000 + "T" * 1600
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         if role == "arquitecto":
             return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text=long_body, account="cuenta1")
         if role == "revisor":
@@ -1118,7 +1121,7 @@ def test_run_task_cycle_writes_the_rendered_handoff_into_the_task_file(tmp_path,
         "paths": [{"path": "docs/implementations/task-1.md#schema", "holds": "the field list"}],
     }
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         if role == "arquitecto":
             return dispatcher_mod.DispatchResult(
                 success=True, session_id=None, result_text="Structured output provided successfully",
@@ -1148,7 +1151,7 @@ def test_run_task_cycle_approves_on_a_verdict_field(tmp_path, monkeypatch) -> No
     cfg = _make_config(tmp_path)
     roles = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         roles.append(role)
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="Structured output provided successfully",
@@ -1169,7 +1172,7 @@ def test_run_task_cycle_rejects_on_a_verdict_field(tmp_path, monkeypatch) -> Non
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     roles = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         roles.append(role)
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="Structured output provided successfully",
@@ -1194,7 +1197,7 @@ def test_run_task_cycle_gives_every_role_the_scratch_dir(tmp_path, monkeypatch) 
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     captured = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         captured.append((role, prompt))
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
@@ -1216,7 +1219,7 @@ def test_run_task_cycle_scratch_dir_is_not_mistaken_for_a_task(tmp_path, monkeyp
     after the task is invisible to it. This is the test that keeps it so."""
     cfg = _make_config(tmp_path, max_revision_rounds=1)
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         return dispatcher_mod.DispatchResult(
             success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
         )
@@ -1228,7 +1231,7 @@ def test_run_task_cycle_scratch_dir_is_not_mistaken_for_a_task(tmp_path, monkeyp
     assert list_task_ids(cfg.hive_tasks_dir) == ["task-1"]
 
 
-def _dispatch_call_kwargs(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+def _dispatch_call_kwargs(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
     return dict(role=role, prompt=prompt, model=model, effort=effort, round_num=round_num)
 
 
@@ -1236,7 +1239,7 @@ def test_run_task_cycle_approves_on_first_round(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         calls.append(_dispatch_call_kwargs(cfg_arg, task_id, slug, role, prompt, resume_session_id, model, effort, round_num))
         if role == "revisor":
             return dispatcher_mod.DispatchResult(
@@ -1260,7 +1263,7 @@ def test_run_task_cycle_completes_when_kanban_status_updates_always_raise(tmp_pa
     cfg = _make_config(tmp_path)
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         calls.append(role)
         if role == "revisor":
             return dispatcher_mod.DispatchResult(
@@ -1290,7 +1293,7 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
     cfg = _make_config(tmp_path, max_revision_rounds=3, escalate_effort_after_round=2, escalated_effort="high")
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         calls.append(_dispatch_call_kwargs(cfg_arg, task_id, slug, role, prompt, resume_session_id, model, effort, round_num))
         if role == "revisor" and "round 3" in prompt:
             return dispatcher_mod.DispatchResult(
@@ -1322,7 +1325,7 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
     cfg = _make_config(tmp_path, max_revision_rounds=2)
     calls = []
 
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         calls.append(role)
         if role == "revisor":
             return dispatcher_mod.DispatchResult(
@@ -1341,7 +1344,7 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
     assert (_ISSUE_ID, "done") not in kanban.statuses
 
 
-def _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+def _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
     """Every phase works and the revisor approves on the first round."""
     return dispatcher_mod.DispatchResult(
         success=True,
@@ -1351,7 +1354,7 @@ def _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_sessi
     )
 
 
-def _rejecting_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+def _rejecting_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
     """Every phase works but the revisor never approves: the task ends blocked."""
     return dispatcher_mod.DispatchResult(
         success=True,
@@ -1670,7 +1673,7 @@ def test_dispatch_phase_hands_the_tree_back_even_when_the_phase_raises(tmp_path,
 def _approve_on_first_round(monkeypatch):
     """Every phase succeeds and the revisor approves, so the cycle reaches done."""
 
-    def fake_dispatch_phase(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None):
+    def fake_dispatch_phase(cfg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
         return dispatcher_mod.DispatchResult(
             success=True,
             session_id=None,
@@ -1786,3 +1789,243 @@ def test_issue_title_stops_at_a_glance() -> None:
 
 def test_issue_title_of_an_ask_with_no_line_is_just_the_task_id() -> None:
     assert dispatcher_mod._issue_title("task-1", "   ") == "task-1"
+
+
+# --- the mapping phase, for a project nobody has written down yet ---------
+
+
+def _recording_dispatch_phase(calls, failing=()):
+    """Records every phase's role, model and turn budget, and approves once."""
+
+    def fake_dispatch_phase(
+        cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None,
+        effort=None, round_num=None, max_turns=None, **kwargs,
+    ):
+        calls.append(dict(role=role, model=model, max_turns=max_turns, prompt=prompt))
+        return dispatcher_mod.DispatchResult(
+            success=role not in failing,
+            session_id=None,
+            result_text="VERDICT: APPROVED" if role == "revisor" else "ok",
+            account="cuenta1",
+        )
+
+    return fake_dispatch_phase
+
+
+def _fake_index(monkeypatch, exists):
+    """Answers the one `docker exec test -e` that decides whether to map."""
+    asked = []
+
+    def fake_path_exists(container, path):
+        asked.append((container, path))
+        return exists
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "path_exists", fake_path_exists)
+    return asked
+
+
+def test_run_task_cycle_does_not_map_unless_the_operator_asked(tmp_path, monkeypatch) -> None:
+    """Mapping is a whole phase of quota spent shipping no code, so it is
+    opt-in: a harness that never turned it on does not even pay the exec that
+    would find out whether this project has docs."""
+    cfg = _make_config(tmp_path)
+    asked = _fake_index(monkeypatch, exists=False)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert asked == []
+    assert calls[0]["role"] == "arquitecto"
+
+
+def test_run_task_cycle_maps_a_project_that_has_no_index_first(tmp_path, monkeypatch) -> None:
+    """Before the arquitecto, because what the mapper writes is what the
+    arquitecto is told to read."""
+    cfg = _make_config(
+        tmp_path, mapping_enabled=True, mapping_model="haiku", mapping_max_turns=12,
+    )
+    asked = _fake_index(monkeypatch, exists=False)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    # Asked of the project's own checkout, not of a task worktree: the
+    # checkout is the state a later task will inherit.
+    assert asked == [("agent-cuenta1", f"{cfg.projects_root}/myproj/{project_docs.INDEX}")]
+    assert calls[0]["role"] == project_docs.MAPPER_ROLE
+    assert calls[0]["model"] == "haiku"
+    assert calls[0]["max_turns"] == 12
+    # The cheap model and the turn budget are the mapper's alone: the phases
+    # that do the task run as they always did.
+    assert calls[1]["role"] == "arquitecto"
+    assert calls[1]["model"] == cfg.default_model
+    assert calls[1]["max_turns"] is None
+
+
+def test_run_task_cycle_does_not_remap_a_project_that_has_an_index(tmp_path, monkeypatch) -> None:
+    """The map is written once and extended by the roles that follow it."""
+    cfg = _make_config(tmp_path, mapping_enabled=True)
+    _fake_index(monkeypatch, exists=True)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert project_docs.MAPPER_ROLE not in [call["role"] for call in calls]
+    assert calls[0]["role"] == "arquitecto"
+
+
+def test_run_task_cycle_cannot_map_without_a_container_to_ask(tmp_path, monkeypatch) -> None:
+    """Enabled but unanswerable: with no account there is nothing to run
+    `test -e` in, and a task must not be held up by that."""
+    cfg = _make_config(tmp_path, mapping_enabled=True, accounts=[])
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert calls[0]["role"] == "arquitecto"
+
+
+def test_run_task_cycle_runs_the_task_anyway_when_the_map_fails(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """The map is a convenience for the phases that follow, never a gate on
+    the card: an unmapped project is exactly the state the task started in."""
+    cfg = _make_config(tmp_path, mapping_enabled=True, max_revision_rounds=1)
+    _fake_index(monkeypatch, exists=False)
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _recording_dispatch_phase(calls, failing=(project_docs.MAPPER_ROLE,)),
+    )
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(
+            cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION,
+        )
+
+    assert calls[1]["role"] == "arquitecto"
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == "done"
+    # Whatever it managed still hands off — a partial map is worth having, and
+    # the next phase has to know it is partial.
+    assert project_docs.MAPPER_ROLE in task.body
+    assert any("optional phase" in r.getMessage() for r in caplog.records)
+
+
+def test_run_task_cycle_stops_when_the_map_bounces_off_another_owners_lock(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """A lock held elsewhere is not the mapper's own failure to shrug off:
+    the whole task belongs to another run, arquitecto included."""
+    cfg = _make_config(tmp_path, mapping_enabled=True)
+    _fake_index(monkeypatch, exists=False)
+    calls = []
+
+    def locked(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        calls.append(role)
+        raise LockHeldError("task-1", "cuenta2")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", locked)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert calls == [project_docs.MAPPER_ROLE]
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    # And the other run's worktrees are left where they are.
+    assert fake_git.review_cleanups == []
+
+
+#: What the CLI answers when `--max-turns` runs out, verified on 2.1.273.
+_SPENT_BUDGET = ClaudeResult(
+    session_id="sess-1",
+    result_text="Reached maximum number of turns (12)",
+    raw={"is_error": True, "subtype": "error_max_turns"},
+)
+
+
+def test_a_writer_that_ran_out_of_turns_still_commits() -> None:
+    """The CLI reports a spent budget as an error, but nothing went wrong: the
+    docs written up to that turn are real, and the writing roles share one
+    worktree, so leaving them uncommitted smuggles them into the next role's
+    commit under the next role's name."""
+    assert dispatcher_mod._should_commit(project_docs.MAPPER_ROLE, _SPENT_BUDGET) is True
+
+
+def test_a_reviewer_that_ran_out_of_turns_commits_nothing() -> None:
+    """Reviewing roles never commit, whatever ended them."""
+    assert dispatcher_mod._should_commit("revisor", _SPENT_BUDGET) is False
+
+
+def test_a_rate_limited_phase_does_not_commit_even_at_the_turn_budget() -> None:
+    """Failover resumes this phase on another account in the same worktree, so
+    committing here would put the same work in history twice."""
+    result = ClaudeResult(
+        session_id="sess-1",
+        result_text="429 rate limit exceeded",
+        raw={"is_error": True, "subtype": "error_max_turns", "api_error_status": 429},
+    )
+
+    assert dispatcher_mod._should_commit("implementador", result) is False
+
+
+def test_dispatch_phase_commits_the_map_a_spent_budget_left_behind(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """End to end: the phase still reports failure — the run was cut off — and
+    the files it wrote are still committed under its own name."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", _phase_exec(_SPENT_BUDGET))
+    _fake_worktree(monkeypatch)
+
+    result = dispatcher_mod.dispatch_phase(
+        cfg, "task-1", "myproj", project_docs.MAPPER_ROLE, "map it",
+    )
+
+    assert result.success is False
+    assert len(fake_git.commits) == 1
+    assert fake_git.commits[0]["author_name"] == f"{project_docs.MAPPER_ROLE} (cuenta1)"
+
+
+def test_the_mapper_is_told_the_task_is_context_not_its_job() -> None:
+    """It runs ahead of the first phase, so there is no handoff to read — and
+    the task it is shown is there to say which parts of the project matter
+    first, not to be done."""
+    prompt = dispatcher_mod._role_prompt(
+        project_docs.MAPPER_ROLE,
+        "task-1",
+        "/data/.hive/tasks/task-1.md",
+        _DESCRIPTION,
+        "/data/.hive/scratch/task-1",
+        max_turns=12,
+    )
+
+    assert _DESCRIPTION in prompt
+    assert "You are not doing that task" in prompt
+    assert "/data/.hive/tasks/task-1.md" not in prompt
+    assert project_docs.INDEX in prompt
+    assert "12 turns and no more" in prompt
+
+
+def test_run_task_cycle_hands_every_role_its_duty_to_the_project_docs(
+    tmp_path, monkeypatch,
+) -> None:
+    """The duties are about *this* project's docs, so they ride in the
+    dispatcher's prompt rather than in a vendored skill — a skill is method
+    and travels between projects."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    by_role = {call["role"]: call["prompt"] for call in calls}
+    assert project_docs.DECISIONS in by_role["arquitecto"]
+    assert project_docs.implementation_doc("task-1") in by_role["implementador"]
+    assert project_docs.LEARNINGS_INDEX in by_role["auditor"]
+    for role, prompt in by_role.items():
+        assert "never by line number" in prompt, f"{role} may cite a line number"

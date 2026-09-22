@@ -45,6 +45,7 @@ def exec_claude(
     model: str | None = None,
     effort: str | None = None,
     timeout_seconds: int | None = None,
+    max_turns: int | None = None,
     plugin_dirs: Sequence[str] | None = None,
     append_system_prompt: str | None = None,
     json_schema: dict | None = None,
@@ -61,6 +62,17 @@ def exec_claude(
         command += ["--model", model]
     if effort:
         command += ["--effort", effort]
+    # A ceiling on agent turns, for a phase that is bounded by how much it may
+    # spend rather than by what it must finish. Hitting it is not a crash: the
+    # CLI returns its normal JSON with `is_error` and `subtype:
+    # "error_max_turns"`, and the work done up to there is on disk. The flag
+    # is hidden from `--help` but registered in the CLI (2.1.273); if a future
+    # version drops it, the exec fails as an unknown option and only the
+    # phases that opt into a budget are affected.
+    if max_turns is not None:
+        if max_turns <= 0:
+            raise ValueError("max_turns must be positive")
+        command += ["--max-turns", str(max_turns)]
     # Session-scoped skill delivery: one directory per plugin, repeatable.
     # Nothing is installed in the container by this, so two roles running in
     # the same agent never see each other's set. A directory that is not
@@ -122,7 +134,10 @@ def exec_claude(
 # whatever the image happens to have.
 _GIT_ENV = {"LC_ALL": "C"}
 
-WRITER_ROLES = frozenset({"arquitecto", "implementador"})
+# "cartografo" is spelled out rather than imported from project_docs, which
+# imports this module: the mapping phase writes the project's docs, so it
+# needs the same shared checkout the other writers get.
+WRITER_ROLES = frozenset({"cartografo", "arquitecto", "implementador"})
 """Roles that change the tree, and so share one worktree on the task branch.
 
 Everyone else reviews what they produced and gets a throwaway detached
@@ -541,6 +556,17 @@ def _nothing_to_commit(stdout: str, stderr: str) -> bool:
     """git reports a clean tree on *stdout* with exit 1, not on stderr."""
     combined = f"{stdout}\n{stderr}"
     return "nothing to commit" in combined or "nothing added to commit" in combined
+
+
+def path_exists(container: str, path: str) -> bool:
+    """Whether `path` is there, asked of the container rather than the host.
+
+    The repo is not mounted into the agents, so a project file only exists
+    from the dispatcher's point of view through `docker exec`. Costs no quota:
+    no model runs.
+    """
+    proc = run_docker_exec(container, "/", ["test", "-e", path])
+    return proc.returncode == 0
 
 
 def read_owner(container: str, path: str) -> str | None:

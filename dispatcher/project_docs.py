@@ -1,0 +1,204 @@
+# dispatcher/project_docs.py
+"""The docs a project keeps for the agents that work on it.
+
+A project used to arrive with whatever its humans had written, and every task
+re-read the source to find out what the project was. The alternative is not a
+hand-written `CLAUDE.md` per project — nobody keeps one current — but docs the
+roles write as a side effect of doing the work, committed with the code so a
+re-clone still has them.
+
+This module owns three things about those docs: where they live, what each
+role owes them, and how the dispatcher reads the little of it that has to be
+machine-readable. The layout below is the whole contract — a path that is not
+a constant here is a path no role was told to write.
+
+The docs outrank the skills and any `CLAUDE.md` about this project: the skills
+describe method, the docs describe *this* codebase. Where they disagree about
+the project's own domain, the project wins.
+"""
+from __future__ import annotations
+
+import logging
+
+import yaml
+
+from dispatcher import docker_exec
+
+logger = logging.getLogger(__name__)
+
+#: The index, and what its absence means: a project nobody has mapped yet.
+INDEX = "docs/README.md"
+#: Numbered ADRs, appended to and struck through, never rewritten.
+DECISIONS = "docs/decisions.md"
+ARCHITECTURE = "docs/architecture.md"
+BUSINESS = "docs/business.md"
+LEARNINGS_DIR = "docs/learnings"
+LEARNINGS_INDEX = f"{LEARNINGS_DIR}/README.md"
+DEBT_DIR = "docs/debt"
+DEBT_INDEX = f"{DEBT_DIR}/README.md"
+IMPLEMENTATIONS_DIR = "docs/implementations"
+
+#: The role of the mapping phase: it writes the index a project arrives
+#: without, and never touches the code.
+MAPPER_ROLE = "cartografo"
+
+
+def implementation_doc(task_id: str) -> str:
+    """Where one task records how it was built."""
+    return f"{IMPLEMENTATIONS_DIR}/{task_id}.md"
+
+
+def index_path(project_dir: str) -> str:
+    return f"{project_dir}/{INDEX}"
+
+
+def has_index(container: str, project_dir: str) -> bool:
+    """Whether this project has been mapped.
+
+    Asked of the project's own checkout rather than of a task branch: the
+    checkout is the merged state, which is what a *later* task will see. A map
+    that only exists on an unmerged task branch reads as missing here, and the
+    next task maps again — the cost of `merge_on_done: false`, and one more
+    reason the mapping phase is opt-in.
+    """
+    return docker_exec.path_exists(container, index_path(project_dir))
+
+
+_FRONTMATTER_DELIM = "---"
+
+
+def _frontmatter(text: str) -> dict:
+    if not text.lstrip().startswith(_FRONTMATTER_DELIM):
+        return {}
+    try:
+        _, fm_text, _ = text.split(_FRONTMATTER_DELIM, 2)
+        loaded = yaml.safe_load(fm_text)
+    except (ValueError, yaml.YAMLError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+#: The keys the index's frontmatter is asked for. Everything else in these
+#: docs is prose for a model to read; these two are for the dispatcher, which
+#: has to run them with no model in the loop at all.
+COMMAND_KEYS = ("build", "test")
+
+
+def read_commands(container: str, project_dir: str) -> dict[str, str]:
+    """The project's own build and test commands, as the index records them.
+
+    They live in YAML frontmatter at the top of the index, because the gate
+    that runs the tests runs through `docker exec` without `claude`: a command
+    a model has to find in prose is a command the gate cannot run.
+    """
+    proc = docker_exec.run_docker_exec(container, project_dir, ["cat", INDEX])
+    if proc.returncode != 0:
+        return {}
+    fm = _frontmatter(proc.stdout)
+    commands = {}
+    for key in COMMAND_KEYS:
+        value = fm.get(key)
+        if isinstance(value, str) and value.strip():
+            commands[key] = value.strip()
+    return commands
+
+
+# Every fragment below rides on one call of one role, so they are written
+# tight: what to write, where, and the one rule that keeps it usable. They are
+# instructions about *this project's* docs, which is why they are here and not
+# in a vendored skill — a skill describes method and travels between projects.
+
+_ANCHORS = (
+    "Cite what you point at by path plus a stable anchor — an ADR number, an entry id, a "
+    "heading, a symbol name — never by line number: lines move with the next commit and the "
+    "pointer silently starts lying."
+)
+
+_ARQUITECTO = (
+    "This project's docs are in `docs/`, and about this project they outrank your skills and "
+    f"any CLAUDE.md. Start at `{INDEX}` and follow it: the learnings and debt indexes carry a "
+    "trigger per row saying when the entry applies and where it bites, so read the index whole "
+    "and open only the entries whose trigger matches this task. When the task decides something "
+    f"a later task could undo without knowing it was a decision, append an ADR to `{DECISIONS}`: "
+    "the next number, the context, the decision, its consequences, and a status. Never rewrite "
+    "an ADR that is already there — to replace one, strike its heading through and point at the "
+    "number that supersedes it."
+)
+
+_IMPLEMENTADOR = (
+    "Record how you built it in `{implementation_doc}` — what you did, why this way, and what "
+    "you ruled out — and update any doc whose contract you changed. Work you deliberately did "
+    "not do goes in the `debt` field of your handoff, one line each; anything true of this "
+    "project that the next task would want to know goes in `learnings`. Both are proposals, not "
+    "files: the auditor is the only phase that writes the indexes."
+)
+
+_REVISOR = (
+    "A contract that changed with no doc changed with it is a finding: a public signature, an "
+    "API route, a migration, a config or env key, a CLI flag. So is a doc that has gone stale — "
+    "an ADR or a learning the code no longer matches costs more than no doc at all, because the "
+    "next phase will believe it."
+)
+
+_AUDITOR = (
+    "You are the only phase that writes the indexes, which is what keeps two phases from editing "
+    "them at once. Take the learnings and debt the earlier phases proposed in this task's "
+    f"handoffs and file them: a learning becomes a file under `{LEARNINGS_DIR}/` and a row in "
+    f"`{LEARNINGS_INDEX}`, a debt card a file under `{DEBT_DIR}/` and a row in `{DEBT_INDEX}`. "
+    "Every row carries its trigger — \"when it applies\" for a learning, \"where\" for a debt — "
+    "written as a condition the next agent can check against its own task, not as a topic. Where "
+    "a spec already decides how a debt gets fixed, point the card at that section instead of "
+    f"copying it. Keep `{INDEX}` pointing at what now exists. A business rule you inferred from "
+    f"the code rather than read somewhere goes in `{BUSINESS}` marked unconfirmed, for a human to "
+    "confirm or kill. Friction with your own skills is not a project doc: say it in `risks`."
+)
+
+_MAPPER = (
+    "This project has no docs index, so nothing about it has been written down for the agents "
+    "that come after you. Map it. Do not change its code, do not rewrite the docs it already "
+    "has, and do not fix anything you find.\n\n"
+    "{budget}Work outside-in — build files, entry points, directory names, tests — and write:\n"
+    f"- `{INDEX}`, the index. It opens with YAML frontmatter holding `build:` and `test:`, each "
+    "one command exactly as it is run from the project root, because later phases run those "
+    "without a model in the loop; omit a key you could not establish rather than guessing one. "
+    "Then: what this project is, its stack, its modules and what each is for, and a table of the "
+    "docs that already exist with, per row, when an agent should open it. Point at those docs, "
+    "do not summarise them.\n"
+    f"- `{ARCHITECTURE}`: the shape. Modules, how they talk, what crosses a process or network "
+    "boundary, and the contracts visible from outside — routes, CLI flags, env keys, schemas.\n"
+    f"- `{BUSINESS}`: what the software is for and the rules it enforces, each marked confirmed "
+    "(you read it in a doc or a comment) or unconfirmed (you inferred it from the code). "
+    "Unconfirmed is not a failure — it is the list a human is being asked to confirm.\n\n"
+    "Thin and true beats complete and late: if the budget runs out mid-map, stop where you are. "
+    "What you wrote is committed, and the next task extends it."
+)
+
+
+def _budget_line(max_turns: int | None) -> str:
+    if not max_turns:
+        return ""
+    return (
+        f"You have {max_turns} turns and no more; the run is cut off there. Spend them on "
+        "breadth, not depth: a reader who knows where to look beats one paragraph that is "
+        "exhaustive.\n\n"
+    )
+
+
+def duties(role: str, task_id: str, max_turns: int | None = None) -> str:
+    """What this role owes the project's docs, as a prompt fragment.
+
+    Empty for a role with no docs duty, the same way an unknown role gets no
+    skills: a new role added elsewhere degrades to saying nothing rather than
+    to an error in the middle of a dispatch.
+    """
+    if role == MAPPER_ROLE:
+        return f"{_MAPPER.format(budget=_budget_line(max_turns))}\n\n{_ANCHORS}"
+    body = {
+        "arquitecto": _ARQUITECTO,
+        "implementador": _IMPLEMENTADOR.format(implementation_doc=implementation_doc(task_id)),
+        "revisor": _REVISOR,
+        "auditor": _AUDITOR,
+    }.get(role)
+    if body is None:
+        return ""
+    return f"{body}\n\n{_ANCHORS}"

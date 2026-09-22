@@ -57,6 +57,45 @@ def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
     assert cfg.phase_timeout_seconds == 3600
 
 
+def test_mapping_is_off_until_it_is_asked_for(tmp_path: Path) -> None:
+    """Mapping a project spends quota on a phase that ships no code, so it is
+    opt-in per harness — never something a first run discovers by being
+    billed for it."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.mapping_enabled is False
+    assert cfg.mapping_model == "sonnet"
+    assert cfg.mapping_max_turns == 40
+
+
+def test_load_config_reads_the_mapping_block(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML + "\nmapping_enabled: true\nmapping_model: haiku\nmapping_max_turns: 12\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.mapping_enabled is True
+    assert cfg.mapping_model == "haiku"
+    assert cfg.mapping_max_turns == 12
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "many", "true"])
+def test_load_config_rejects_an_invalid_mapping_turn_budget(tmp_path: Path, bad_value: str) -> None:
+    """Caught at load rather than at dispatch: the budget is the only thing
+    bounding what this phase spends, and a run-task is a bad place to find out
+    it was a string."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nmapping_max_turns: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="mapping_max_turns must be a positive integer"):
+        load_config(str(config_path))
+
+
 @pytest.mark.parametrize("bad_value", ["0", "-5", "2h", "true"])
 def test_load_config_rejects_invalid_phase_timeout_seconds(tmp_path: Path, bad_value: str) -> None:
     config_path = tmp_path / "config.yaml"

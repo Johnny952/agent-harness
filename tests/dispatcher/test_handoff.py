@@ -5,7 +5,7 @@ import pytest
 from dispatcher import handoff
 from dispatcher.docker_exec import ClaudeResult
 
-ROLES = ("arquitecto", "implementador", "revisor", "auditor")
+ROLES = ("cartografo", "arquitecto", "implementador", "revisor", "auditor")
 
 
 def _result(text="", raw=None):
@@ -81,6 +81,15 @@ def test_reviewing_roles_get_a_smaller_budget_than_writing_ones() -> None:
 
 def test_unknown_role_still_gets_a_budget() -> None:
     assert handoff.budget_for("becario") > 0
+
+
+def test_the_mapper_gets_as_little_room_as_any_role() -> None:
+    """The mapping phase's output is the docs it wrote, in the project's tree.
+    Its handoff only has to say where it got to, so a long one is budget spent
+    summarising files the next phase can open for itself."""
+    mapper = handoff.budget_for("cartografo")
+    assert mapper == min(handoff.budget_for(role) for role in ROLES)
+    assert mapper < handoff.budget_for("arquitecto")
 
 
 # --- parsing ----------------------------------------------------------------

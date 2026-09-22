@@ -113,3 +113,24 @@ phase_timeout_seconds: 7200
 # itself back on a conflict, and the task branch always survives.
 # Optional; defaults to false.
 merge_on_done: false
+
+# A project with no docs index (docs/README.md) gets one mapping phase before
+# the arquitecto: a read-only role that walks the checkout and writes the
+# index, docs/architecture.md and docs/business.md, so later tasks read the
+# project instead of rediscovering it. Off by default, because it is a phase
+# that spends quota and ships no code — with this false a project is only ever
+# documented by the roles that do the work. The phase is never fatal: if it
+# fails, the task runs anyway with whatever docs exist.
+# Optional; defaults to false.
+mapping_enabled: false
+
+# Model for that phase, separate from default_model: the mapper reads and
+# summarises rather than designs, so it is the one phase worth running cheap.
+# Optional; defaults to sonnet.
+mapping_model: sonnet
+
+# Hard turn budget for that phase, passed as `claude --max-turns`. The run is
+# cut off there, and whatever the mapper wrote up to that point is committed —
+# a thin index beats an unbounded bill. Must be a positive integer.
+# Optional; defaults to 40.
+mapping_max_turns: 40

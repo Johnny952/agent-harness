@@ -124,6 +124,91 @@ def test_exec_claude_passes_effort_flag(monkeypatch) -> None:
     assert not any("CLAUDE_CODE_EFFORT_LEVEL" in part for part in cmd)
 
 
+def test_exec_claude_passes_a_turn_budget(monkeypatch) -> None:
+    """`--max-turns` is hidden from `--help` but registered in the CLI, and it
+    is the only ceiling a bounded phase has: without it the mapping phase
+    spends whatever it likes."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "map it", max_turns=40)
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--max-turns") + 1] == "40"
+
+
+def test_exec_claude_omits_the_turn_budget_when_not_given(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it")
+
+    assert "--max-turns" not in captured["cmd"]
+
+
+@pytest.mark.parametrize("max_turns", [0, -1])
+def test_exec_claude_rejects_a_turn_budget_that_buys_nothing(monkeypatch, max_turns: int) -> None:
+    """Caught here rather than in the container: `--max-turns 0` is a phase
+    that cannot do anything, which is a config mistake, not a cheap run."""
+    def fake_run(cmd, capture_output, text, timeout=None):
+        raise AssertionError("should not reach docker")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="max_turns must be positive"):
+        exec_claude("agent-cuenta1", "/wd", "do it", max_turns=max_turns)
+
+
+def test_exec_claude_reports_a_spent_turn_budget_as_the_cli_does(monkeypatch) -> None:
+    """Hitting the ceiling is not a crash: the CLI returns its normal JSON
+    with `subtype: error_max_turns`, and the work done up to there is on disk.
+    The raw envelope has to survive so the caller can tell the two apart."""
+    payload = {
+        "session_id": "sess-9",
+        "result": "Reached maximum number of turns (40)",
+        "is_error": True,
+        "subtype": "error_max_turns",
+    }
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    result = exec_claude("agent-cuenta1", "/wd", "map it", max_turns=40)
+
+    assert result.session_id == "sess-9"
+    assert result.raw["subtype"] == "error_max_turns"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"), [(0, True), (1, False)], ids=["there", "missing"],
+)
+def test_path_exists_asks_the_container(monkeypatch, returncode: int, expected: bool) -> None:
+    """The repo is not mounted into the agents, so a project file only exists
+    from the dispatcher's side through `docker exec`."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    assert docker_exec_mod.path_exists("agent-cuenta1", "/data/projects/foo/docs/README.md") is expected
+    assert captured["cmd"][-3:] == ["test", "-e", "/data/projects/foo/docs/README.md"]
+
+
 def test_exec_claude_omits_model_and_effort_when_not_given(monkeypatch) -> None:
     captured = {}
 

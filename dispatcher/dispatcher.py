@@ -6,7 +6,15 @@ import logging
 import re
 import threading
 
-from dispatcher import context_transfer, docker_exec, handoff, quota, role_skills, state_machine
+from dispatcher import (
+    context_transfer,
+    docker_exec,
+    handoff,
+    project_docs,
+    quota,
+    role_skills,
+    state_machine,
+)
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import KanbanClient
@@ -193,18 +201,36 @@ def _role_prompt(
     description: str,
     scratch_dir: str,
     round_num: int | None = None,
+    max_turns: int | None = None,
 ) -> str:
-    # The description is embedded whole, never clamped: a cut phase summary
-    # loses detail, but a cut ask misinforms — the role would confidently
-    # build the wrong thing. It also stays in the task file, so this is belt
-    # and braces: the role has the ask even if it never opens the file.
-    prompt = (
-        f"Role: {role}. Task: {task_id}.\n\n"
-        f"Task description:\n{description}\n\n"
-        f"Read {task_file} for context handed off from the previous phase before starting."
-    )
-    if round_num is not None:
-        prompt += f" This is revision round {round_num}."
+    if role == project_docs.MAPPER_ROLE:
+        # The mapper runs before the first phase, so there is no handoff to
+        # read and the task is context, not its job: it is told what is coming
+        # so it maps the parts of the project that task will touch first.
+        prompt = (
+            f"Role: {role}. Task: {task_id}.\n\n"
+            f"The task about to run on this project is:\n{description}\n\n"
+            "You are not doing that task. You run once, ahead of it, because this project has "
+            "no docs for the agents that work on it."
+        )
+    else:
+        # The description is embedded whole, never clamped: a cut phase summary
+        # loses detail, but a cut ask misinforms — the role would confidently
+        # build the wrong thing. It also stays in the task file, so this is belt
+        # and braces: the role has the ask even if it never opens the file.
+        prompt = (
+            f"Role: {role}. Task: {task_id}.\n\n"
+            f"Task description:\n{description}\n\n"
+            f"Read {task_file} for context handed off from the previous phase before starting."
+        )
+        if round_num is not None:
+            prompt += f" This is revision round {round_num}."
+    # What this role owes the project's own docs. Here rather than in a
+    # vendored skill because a skill is method and travels between projects,
+    # while this is about the docs of the project in front of it.
+    duties = project_docs.duties(role, task_id, max_turns=max_turns)
+    if duties:
+        prompt += f"\n\n{duties}"
     schema = handoff.schema_for(role)
     if schema is not None:
         # Says out loud what the schema can only imply: the handoff is the
@@ -254,12 +280,27 @@ def _should_commit(role: str, result: docker_exec.ClaudeResult) -> bool:
     completion: a rate-limited or failed exec is retried in the same worktree
     (resuming the same session), so committing its half-done state would put
     the same work in history twice.
+
+    A phase that spent its turn budget is the exception. The CLI reports it as
+    an error, but nothing went wrong — the work up to that turn is real, and
+    the writers share one worktree, so leaving it uncommitted would smuggle it
+    into the next role's commit under the next role's name.
     """
-    return (
-        role in docker_exec.WRITER_ROLES
-        and _exec_succeeded(result)
-        and not is_rate_limit_error(result)
-    )
+    if role not in docker_exec.WRITER_ROLES:
+        return False
+    if is_rate_limit_error(result):
+        return False
+    return _exec_succeeded(result) or _hit_turn_budget(result)
+
+
+def _hit_turn_budget(result: docker_exec.ClaudeResult) -> bool:
+    """Whether the phase stopped because it ran out of turns.
+
+    The CLI's own subtype, verified on 2.1.273: `error_max_turns`, alongside
+    `is_error: true` and a result text reading "Reached maximum number of
+    turns (N)".
+    """
+    return result.raw.get("subtype") == "error_max_turns"
 
 
 def _commit_message(
@@ -349,6 +390,7 @@ def dispatch_phase(
     model: str | None = None,
     effort: str | None = None,
     round_num: int | None = None,
+    max_turns: int | None = None,
 ) -> DispatchResult:
     tried: set[str] = set()
     while True:
@@ -390,6 +432,7 @@ def dispatch_phase(
                     container, workdir, prompt,
                     resume_session_id=resume_session_id, model=model, effort=effort,
                     timeout_seconds=cfg.phase_timeout_seconds,
+                    max_turns=max_turns,
                     # Chosen from the role here rather than passed in by the
                     # caller: the role is what decides the set, and a phase
                     # dispatched by any other path should get the same one.
@@ -552,6 +595,25 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> None:
         logger.info("task %s: %s", task_id, outcome.detail)
 
 
+def _needs_mapping(cfg: Config, slug: str) -> bool:
+    """Whether this run should map the project before working on it.
+
+    Three ways to answer no, in order of what they cost: the operator did not
+    ask for it, there is no container to ask, or the project already has an
+    index. Only the last needs a `docker exec`, and it runs no model.
+    """
+    if not cfg.mapping_enabled:
+        return False
+    container = cleanup_container(cfg)
+    if container is None:
+        return False
+    project_dir = f"{cfg.projects_root}/{slug}"
+    if project_docs.has_index(container, project_dir):
+        return False
+    logger.info("project %s has no %s: mapping it first", slug, project_docs.INDEX)
+    return True
+
+
 def run_task_cycle(
     cfg: Config,
     task_id: str,
@@ -601,7 +663,14 @@ def run_task_cycle(
     # are in use, so the cleanup below has to keep its hands off them.
     foreign_lock = False
 
-    def run_phase(role: str, round_num: int | None = None, final: bool = False) -> DispatchResult | None:
+    def run_phase(
+        role: str,
+        round_num: int | None = None,
+        final: bool = False,
+        fatal: bool = True,
+        model: str | None = None,
+        max_turns: int | None = None,
+    ) -> DispatchResult | None:
         nonlocal foreign_lock
         _update_task_status(kanban, issue_id, f"in_progress:{role}")
         effort = (
@@ -612,10 +681,14 @@ def run_task_cycle(
         try:
             result = dispatch_phase(
                 cfg, task_id, slug, role,
-                prompt=_role_prompt(role, task_id, task_file, description, scratch_dir, round_num=round_num),
-                model=cfg.default_model,
+                prompt=_role_prompt(
+                    role, task_id, task_file, description, scratch_dir,
+                    round_num=round_num, max_turns=max_turns,
+                ),
+                model=model or cfg.default_model,
                 effort=effort,
                 round_num=round_num,
+                max_turns=max_turns,
             )
         except context_transfer.LockHeldError as exc:
             # A re-run within the TTL after a Ctrl+C, or a second dispatcher
@@ -630,8 +703,16 @@ def run_task_cycle(
             foreign_lock = True
             return None
         if not result.success:
-            _update_task_status(kanban, issue_id, "blocked")
-            return None
+            if fatal:
+                _update_task_status(kanban, issue_id, "blocked")
+                return None
+            # A phase the task does not depend on. It still hands off what it
+            # managed — a partial map is worth having, and the next phase
+            # should know it is partial — but it does not block the card.
+            logger.warning(
+                "optional phase %s did not finish for task %s: %s",
+                role, task_id, result.result_text,
+            )
         label = role if round_num is None else f"{role} (round {round_num})"
         context_transfer.handoff(
             cfg.hive_tasks_dir, task_id,
@@ -641,6 +722,20 @@ def run_task_cycle(
         return result
 
     try:
+        if _needs_mapping(cfg, slug):
+            # Before the arquitecto, because what it writes is what the
+            # arquitecto reads. Optional in both directions: the operator has
+            # to turn it on, and if it fails the task runs anyway on a project
+            # that stays unmapped.
+            run_phase(
+                project_docs.MAPPER_ROLE,
+                fatal=False,
+                model=cfg.mapping_model,
+                max_turns=cfg.mapping_max_turns,
+            )
+            if foreign_lock:
+                return
+
         if run_phase("arquitecto") is None:
             return
 

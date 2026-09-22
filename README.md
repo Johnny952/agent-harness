@@ -85,6 +85,37 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   whatever a failed phase left uncommitted. The exception is a task this
   run never owned: if it bounced off another dispatcher's lock, that other
   run is still working in those worktrees, so they are left alone.
+- **Project docs** (`dispatcher/project_docs.py`) — what a target repo knows
+  about itself, written by the roles as a side effect of the work and
+  committed with its code, so a re-clone still has it. The layout is the
+  contract: `docs/README.md` is the index, `docs/decisions.md` the numbered
+  ADRs (appended to and struck through, never rewritten), `docs/architecture.md`
+  and `docs/business.md` the map and the domain, `docs/learnings/` and
+  `docs/debt/` one file per entry behind an index whose every row carries a
+  trigger — the condition that says when to open it — and
+  `docs/implementations/<task-id>.md` how one task was built. Each role is
+  handed its duty in the prompt: the arquitecto records ADRs, the
+  implementador writes that implementation doc and proposes learnings and
+  debt in its handoff, the revisor treats a contract change with no doc
+  change as a finding, and the auditor is the only phase that writes the
+  indexes, so two phases never edit one. A business rule inferred from the
+  code rather than read somewhere is filed unconfirmed, for a human to
+  confirm or kill. About this project the docs outrank the role skills, which
+  describe method and travel between projects. The index opens with YAML
+  frontmatter carrying `build:` and `test:`, because later gates run those
+  through `docker exec` with no model in the loop. A project with no index
+  gets one mapping phase (`cartografo`) ahead of the arquitecto, on
+  `mapping_model` and under `claude --max-turns mapping_max_turns`: it reads,
+  writes those three docs, and touches no code. It is off unless
+  `mapping_enabled` is set, since it spends quota and ships nothing, and it
+  is never fatal — a failed map runs the task anyway. What it wrote when the
+  budget cut it off is committed regardless, because the writer roles share
+  one worktree and uncommitted docs would otherwise ride into the
+  arquitecto's commit under the arquitecto's name. Two caveats: the index is
+  looked for in the project's checkout, so under `merge_on_done: false` a map
+  living only on an unmerged task branch reads as missing and the next task
+  maps again; and `--max-turns` works but is absent from `claude --help`
+  (2.1.273), so a CLI bump could drop it.
 - **Observability** (`observability/`) — Claude Code hooks
   (`hooks/emit_event.py`, registered by `hooks/install_settings.py` on
   container start) POST events to a collector (`observability/collector`,
@@ -380,6 +411,24 @@ the merge is the one thing a run writes into the branch you work from. A
 refused merge there is logged and the task still ends `done` — the work is
 already committed on its own branch, and `merge-task` is the way back to
 it.
+
+**The map, if the project has none.** A target repo the agents have never
+seen has nothing written down for them, and every task rediscovers it from
+the source. Set `mapping_enabled: true` and a `run-task` on a project with
+no `docs/README.md` runs one extra phase ahead of the arquitecto: a
+read-only `cartografo` that writes that index — `build:` and `test:` in its
+frontmatter, then the stack, the modules, and a table of the docs that
+already exist — plus `docs/architecture.md` and `docs/business.md`, and
+changes no code. It runs on `mapping_model` (sonnet by default, not
+`default_model`) under `mapping_max_turns` turns, and is cut off there;
+whatever it wrote by then is committed, and the next task extends it. It is
+off by default because it spends quota on a phase that ships nothing —
+with it off the docs still grow, one task at a time, from the roles that do
+the work. The phase is never fatal: if it fails the task runs anyway, with
+a warning and whatever docs exist. The check is made against the project's
+checkout, so with `merge_on_done: false` a map still sitting on an unmerged
+task branch reads as missing and the next task maps again. Merge the first
+task, or expect a second map.
 
 **The board, if you want one.** A Vibe Kanban board is optional and
 unconfigured by default: with no `vibe_kanban` block in `config.yaml` the

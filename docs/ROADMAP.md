@@ -390,6 +390,10 @@ The first real `run-task`, with costs capped.
   - `escalate_effort_after_round: 0`, so round 1 already passes
     `--effort high`.
   - `phase_timeout_seconds: 1800`.
+  - `mapping_enabled` left at its default `false`, so this check sizes
+    the four working roles and nothing else. The mapping phase is a
+    separate run, against a project with no `docs/README.md`, and it is
+    the one phase billed for writing no code.
 - **Task.** Passed on the command line now that `--description` exists;
   no hand-seeded task file. If V2.3 showed Kanban assigns its own IDs,
   create the card there too and record both IDs.
@@ -421,6 +425,13 @@ The first real `run-task`, with costs capped.
     dispatcher read — and the outcome matches it. A revisor that answered in
     prose instead falls back to its last `VERDICT:` line; note which path the
     run took.
+  - The project's `docs/` gains what the duties in each role's prompt
+    ask for: an ADR appended to `docs/decisions.md` if the task decided
+    anything, `docs/implementations/T-001.md` from the implementador,
+    and indexes written by the auditor alone, each row carrying its
+    trigger. Record every phase that wrote none — until item 1's gates
+    land these duties are prompt text, so this measures whether the
+    model obeys them, not whether the dispatcher enforces them.
   - `cuenta1.json` goes back to `IDLE`.
   - Collector events for the run's session IDs are there.
 - **Expected failure to record:** "roles don't see each other's code".
@@ -812,6 +823,15 @@ logins.
   to the board reads it.
 - Compose or image changes: V0.
 - Changes to `dispatch_phase` or `run_task_cycle`: V3 and V4.
+- `mapping_enabled` turned on for the first time: V3 again, against a
+  project with no `docs/README.md`. The mapper is the only phase that
+  ignores `default_model`, and the only one with a turn budget, so its
+  cost and its cut-off are the two things no earlier check measured.
+- `CLAUDE_CODE_VERSION` bumped, if `mapping_enabled` is on: check that
+  `claude --max-turns 1` is still accepted before trusting V1. The flag
+  works on 2.1.273 but is absent from `--help`, so a bump could drop it
+  without a changelog line, and the mapping phase would then run
+  unbounded.
 
 ## Stage 2 — Prioritized future work
 

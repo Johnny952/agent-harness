@@ -61,6 +61,9 @@ class Config:
     escalated_effort: str
     phase_timeout_seconds: int
     merge_on_done: bool
+    mapping_enabled: bool
+    mapping_model: str
+    mapping_max_turns: int
 
 
 def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
@@ -121,6 +124,9 @@ def load_config(path: str) -> Config:
     # instead. bool is an int subclass in Python, so it needs its own check.
     if isinstance(phase_timeout_seconds, bool) or not isinstance(phase_timeout_seconds, int) or phase_timeout_seconds <= 0:
         raise ValueError("phase_timeout_seconds must be a positive integer")
+    mapping_max_turns = raw.get("mapping_max_turns", 40)
+    if isinstance(mapping_max_turns, bool) or not isinstance(mapping_max_turns, int) or mapping_max_turns <= 0:
+        raise ValueError("mapping_max_turns must be a positive integer")
     return Config(
         accounts=accounts,
         quota_threshold_pct=raw.get("quota_threshold_pct", 90),
@@ -140,4 +146,14 @@ def load_config(path: str) -> Config:
         # human works from, so it waits to be asked for. `dispatch merge-task`
         # does the same merge by hand whenever this stays false.
         merge_on_done=bool(raw.get("merge_on_done", False)),
+        # Also off by default, and for the same kind of reason: mapping an
+        # unmapped project spends quota on a phase the operator did not ask
+        # for. Turned on, it runs once per project — before the arquitecto,
+        # only when the project has no docs index — and never blocks the task
+        # if it fails.
+        mapping_enabled=bool(raw.get("mapping_enabled", False)),
+        # Cheaper than the roles that decide things: reading a tree and
+        # writing down what is there does not need the expensive model.
+        mapping_model=raw.get("mapping_model", "sonnet"),
+        mapping_max_turns=mapping_max_turns,
     )

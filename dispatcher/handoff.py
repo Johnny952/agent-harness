@@ -106,6 +106,7 @@ _VERDICT_PROPERTY = {
 #: means no `--json-schema` flag and the free-text fallback below — the same
 #: way an unknown role gets no skills rather than an error.
 _ROLE_EXTRAS: dict[str, dict] = {
+    "cartografo": {},
     "arquitecto": {},
     "implementador": {},
     "revisor": _VERDICT_PROPERTY,
@@ -118,6 +119,10 @@ _ROLE_EXTRAS: dict[str, dict] = {
 #: get less because their detail belongs in files under the task's scratch
 #: directory, not in a body every later phase rereads.
 _BUDGET_BYTES: dict[str, int] = {
+    # The mapper's output is the docs it wrote, not its handoff: what the next
+    # phase needs from it is a pointer to the index and how far it got, so it
+    # gets no more room than the tightest reviewing role.
+    "cartografo": 2048,
     "arquitecto": 4096,
     "implementador": 4096,
     "revisor": 3072,
