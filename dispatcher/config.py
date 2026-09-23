@@ -64,6 +64,8 @@ class Config:
     mapping_enabled: bool
     mapping_model: str
     mapping_max_turns: int
+    gates_enabled: bool
+    gates_test_timeout_seconds: int
 
 
 def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
@@ -127,6 +129,13 @@ def load_config(path: str) -> Config:
     mapping_max_turns = raw.get("mapping_max_turns", 40)
     if isinstance(mapping_max_turns, bool) or not isinstance(mapping_max_turns, int) or mapping_max_turns <= 0:
         raise ValueError("mapping_max_turns must be a positive integer")
+    gates_test_timeout_seconds = raw.get("gates_test_timeout_seconds", 900)
+    if (
+        isinstance(gates_test_timeout_seconds, bool)
+        or not isinstance(gates_test_timeout_seconds, int)
+        or gates_test_timeout_seconds <= 0
+    ):
+        raise ValueError("gates_test_timeout_seconds must be a positive integer")
     return Config(
         accounts=accounts,
         quota_threshold_pct=raw.get("quota_threshold_pct", 90),
@@ -156,4 +165,15 @@ def load_config(path: str) -> Config:
         # writing down what is there does not need the expensive model.
         mapping_model=raw.get("mapping_model", "sonnet"),
         mapping_max_turns=mapping_max_turns,
+        # On by default, unlike the two above: the gates run through
+        # `docker exec` with no model in the loop, so they spend no quota, and
+        # what they catch — a change with no test, a suite that is already
+        # failing — costs a revisor call plus another implementador round when
+        # it reaches review instead. They net quota back.
+        gates_enabled=bool(raw.get("gates_enabled", True)),
+        # The phase timeout is hours long because a phase is a model working;
+        # a test suite that has not finished in fifteen minutes is telling the
+        # gate something else, and the gate says so and lets review proceed
+        # rather than holding the task open for the rest of the afternoon.
+        gates_test_timeout_seconds=gates_test_timeout_seconds,
     )

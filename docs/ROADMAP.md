@@ -394,6 +394,11 @@ The first real `run-task`, with costs capped.
     the four working roles and nothing else. The mapping phase is a
     separate run, against a project with no `docs/README.md`, and it is
     the one phase billed for writing no code.
+  - `gates_enabled` left at its default `true`. The gates cost no quota,
+    so there is nothing to cap here, but with `max_revision_rounds: 1` a
+    red suite ends the task `blocked` without the revisor ever being
+    called — which is the point, and is what to expect if the
+    implementador leaves the scratch project failing.
 - **Task.** Passed on the command line now that `--description` exists;
   no hand-seeded task file. If V2.3 showed Kanban assigns its own IDs,
   create the card there too and record both IDs.
@@ -429,9 +434,23 @@ The first real `run-task`, with costs capped.
     ask for: an ADR appended to `docs/decisions.md` if the task decided
     anything, `docs/implementations/T-001.md` from the implementador,
     and indexes written by the auditor alone, each row carrying its
-    trigger. Record every phase that wrote none — until item 1's gates
-    land these duties are prompt text, so this measures whether the
-    model obeys them, not whether the dispatcher enforces them.
+    trigger. Record every phase that wrote none. The gates enforce the
+    narrow end of this — a contract file moved with no `.md` beside it,
+    a pointer under `docs/` that lands nowhere — and the rest stays
+    prompt text, so for the ADRs, the implementation doc and the
+    indexes this still measures whether the model obeys, not whether
+    the dispatcher enforces.
+  - The gates ran between the implementador and the revisor. The scratch
+    project has no `docs/README.md`, so the test gate is skipped and says
+    so in the log (``gates: no `test:` in docs/README.md``);
+    `sum.test.js` should satisfy the tests-in-diff gate; and with no
+    `docs/` there are no contracts and no pointers to break. So the
+    expected result is a task file with **no** dispatcher-gates section
+    under the implementador's handoff, and exactly one `claude` call for
+    that role. Record it if either comes out otherwise: a gate section
+    names which gate fired, and a second implementador call is the one
+    `--resume` an `ask` buys. The test gate itself is only exercised
+    against a mapped project — see the re-run list below.
   - `cuenta1.json` goes back to `IDLE`.
   - Collector events for the run's session IDs are there.
 - **Expected failure to record:** "roles don't see each other's code".
@@ -823,6 +842,17 @@ logins.
   to the board reads it.
 - Compose or image changes: V0.
 - Changes to `dispatch_phase` or `run_task_cycle`: V3 and V4.
+- The `test:` command in a project's `docs/README.md` changed, or a
+  project gained an index for the first time: V3 again against that
+  project. That command is the only gate that runs project code, it runs
+  it in the writers' worktree, and nothing between the frontmatter and
+  `sh -c` validates it — an entry that needs a dependency the worktree
+  has not got is reported as "could not run" and everything keeps going,
+  which is the safe failure but also a silent one.
+- Changes to `dispatcher/gates.py`: V3, and read the gate section (or its
+  absence) in the task file. The unit tests fake `docker exec`, so what
+  they cannot cover is whether `git merge-base`, `ls -d` and `grep -r`
+  behave the same inside the agent image as they do in the fakes.
 - `mapping_enabled` turned on for the first time: V3 again, against a
   project with no `docs/README.md`. The mapper is the only phase that
   ignores `default_model`, and the only one with a turn budget, so its
@@ -840,7 +870,7 @@ depends on. A gate that fails reshapes the item before any design work.
 
 | Item (README *Prioritized*) | Run first | Notes |
 |---|---|---|
-| 1. Project memory | D1, D5, V2.6 | Debt cards need `create_issue` |
+| 1. Project memory | D1, D5, V2.6 | Debt cards need `create_issue`; D5 sharpens the test gate rather than blocking it |
 | 2. Token economy | V1.1 fields, D2, D3 | D3 only if the caveman wrap is adopted |
 | 3. Unattended 24/7 operation | V4.2, V4.4, D2 | V4.2 sizes the orphan-phase race; D2 gives machine-readable reset times |
 | 4. Per-role model selection | Item 2's usage records | Data-driven split, not a guess |
@@ -889,6 +919,11 @@ starts, not in stage 0.
     `.data/projects`.
   - Decision: install per worktree, share a cache, or use a warm
     `node_modules` template.
+  - No longer blocks item 1's test gate: a command that cannot start
+    (exit 127, "cannot find module", "command not found") is reported as
+    a note rather than a red suite, since no implementador can install
+    dependencies from inside its own session. Until this gate is run and
+    decided, that gate is simply inert on JS projects.
 - **D6 — Browser verification within limits** (item 5, no quota).
   - Run: a dev server plus headless Chromium (e.g. Playwright) in the agent
     container. Separately, the Playwright image in the dind sidecar

@@ -116,6 +116,22 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   living only on an unmerged task branch reads as missing and the next task
   maps again; and `--max-turns` works but is absent from `claude --help`
   (2.1.273), so a CLI bump could drop it.
+- **Dispatcher gates** (`dispatcher/gates.py`) — what the dispatcher checks
+  for itself between the implementador and the revisor: code that changed
+  with no test beside it, the project's own `test:` command, a contract that
+  moved with no documentation, and a pointer in `docs/` that lands nowhere.
+  All four run through `docker exec` with no `claude` in the loop, so they
+  spend no quota and sit out of reach of the phase they judge — and they
+  check the claim that the tests pass instead of believing it. Three levels:
+  `BLOCKING` (the suite is red) skips the revisor and sends the round around
+  again with the log's path, saving a review call; `ASK` (code changed, no
+  test did) buys exactly one `--resume` into the session that just ended,
+  asking for a test or a one-line reason the revisor then judges; `NOTE`
+  (everything else) rides along under the handoff. They are on unless
+  `gates_enabled: false`, unlike the other optional phases, because they net
+  quota back rather than spending it; `gates_test_timeout_seconds` bounds
+  the suite. Each gate errs toward saying nothing: a false finding costs a
+  real round and teaches the roles to argue with a shell script.
 - **Observability** (`observability/`) — Claude Code hooks
   (`hooks/emit_event.py`, registered by `hooks/install_settings.py` on
   container start) POST events to a collector (`observability/collector`,
@@ -429,6 +445,48 @@ a warning and whatever docs exist. The check is made against the project's
 checkout, so with `merge_on_done: false` a map still sitting on an unmerged
 task branch reads as missing and the next task maps again. Merge the first
 task, or expect a second map.
+
+**The gates, before anyone pays for a review.** Between the implementador
+and the revisor the dispatcher checks the worktree itself, through
+`docker exec`, with no model in the loop:
+
+- **Tests in the diff.** Code changed against the branch's fork point and
+  nothing that looks like a test did. Untracked files count, since a brand
+  new test is exactly the file a plain diff would miss.
+- **Tests run.** The `test:` command from the project's `docs/README.md`
+  frontmatter, run in the worktree under `gates_test_timeout_seconds` (900
+  by default). A project with no index has no command and gets no gate.
+- **Contracts without docs.** An OpenAPI or GraphQL file, a `.proto`, a
+  migration, `.env.example` or `schema.prisma` moved and no `.md` did.
+- **Broken pointers.** Every backticked path and link target under `docs/`
+  is resolved from the repo root and from beside the file citing it; one
+  that lands nowhere either way is reported.
+
+What a finding is worth depends on what it costs to answer. A red suite is
+**blocking**: the revisor is never called, the round goes around again, and
+the next implementador is handed the log, written to
+`.hive/tasks/<task-id>/gates-round-N.log` — a path both the dispatcher and
+the agents mount at the same name. If every round ends that way the task
+ends `blocked`, as any exhausted revision loop does. Code with no test is an
+**ask**: one `--resume` into the session that just finished, requesting a
+test or a one-line reason under `risks`, and the gates re-run on whatever
+comes back. Everything else is a **note** appended under the phase's handoff
+in the task file, for the revisor and the auditor to weigh.
+
+Set `gates_enabled: false` to turn all of it off. It defaults to `true`,
+unlike `mapping_enabled` and `merge_on_done`: the gates spend no quota and
+what they catch would otherwise cost a revisor call plus another round. The
+implementador is the only role gated, only when its phase actually finished,
+and a gate that crashes lets the review proceed ungated rather than failing
+the task — the finding it would have made is worth less than the phase
+already paid for.
+
+Two things they deliberately do not do. A worktree with no `node_modules`
+makes the test command fail to *start*, and that is reported as a note, not
+as a red suite, because no implementador can fix it from inside its session
+— installing dependencies per worktree is still open. And the contract gate
+only knows what a filename shows: a public export or a CLI flag is just as
+much a contract, and those stay where they were, in the revisor's duties.
 
 **The board, if you want one.** A Vibe Kanban board is optional and
 unconfigured by default: with no `vibe_kanban` block in `config.yaml` the

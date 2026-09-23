@@ -26,17 +26,20 @@ from dispatcher import docker_exec
 
 logger = logging.getLogger(__name__)
 
+#: Everything below is under here, and the gates scan it whole: one name so
+#: that a project that moves its docs moves them in one place.
+DOCS_DIR = "docs"
 #: The index, and what its absence means: a project nobody has mapped yet.
-INDEX = "docs/README.md"
+INDEX = f"{DOCS_DIR}/README.md"
 #: Numbered ADRs, appended to and struck through, never rewritten.
-DECISIONS = "docs/decisions.md"
-ARCHITECTURE = "docs/architecture.md"
-BUSINESS = "docs/business.md"
-LEARNINGS_DIR = "docs/learnings"
+DECISIONS = f"{DOCS_DIR}/decisions.md"
+ARCHITECTURE = f"{DOCS_DIR}/architecture.md"
+BUSINESS = f"{DOCS_DIR}/business.md"
+LEARNINGS_DIR = f"{DOCS_DIR}/learnings"
 LEARNINGS_INDEX = f"{LEARNINGS_DIR}/README.md"
-DEBT_DIR = "docs/debt"
+DEBT_DIR = f"{DOCS_DIR}/debt"
 DEBT_INDEX = f"{DEBT_DIR}/README.md"
-IMPLEMENTATIONS_DIR = "docs/implementations"
+IMPLEMENTATIONS_DIR = f"{DOCS_DIR}/implementations"
 
 #: The role of the mapping phase: it writes the index a project arrives
 #: without, and never touches the code.

@@ -96,6 +96,44 @@ def test_load_config_rejects_an_invalid_mapping_turn_budget(tmp_path: Path, bad_
         load_config(str(config_path))
 
 
+def test_the_gates_are_on_until_they_are_turned_off(tmp_path: Path) -> None:
+    """The other two optional phases are opt-in because they spend quota. The
+    gates spend none — they are `docker exec` with no model in the loop — and
+    what they catch costs a revisor call plus another round when it reaches
+    review instead, so the default that saves money is on."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.gates_enabled is True
+    assert cfg.gates_test_timeout_seconds == 900
+
+
+def test_load_config_reads_the_gate_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML + "\ngates_enabled: false\ngates_test_timeout_seconds: 120\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.gates_enabled is False
+    assert cfg.gates_test_timeout_seconds == 120
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "15m", "true"])
+def test_load_config_rejects_an_invalid_test_timeout(tmp_path: Path, bad_value: str) -> None:
+    """The timeout is what keeps a hung suite from holding the task's lock for
+    the rest of the afternoon, so a bad one is caught before anything is
+    claimed."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\ngates_test_timeout_seconds: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="gates_test_timeout_seconds must be a positive integer"):
+        load_config(str(config_path))
+
+
 @pytest.mark.parametrize("bad_value", ["0", "-5", "2h", "true"])
 def test_load_config_rejects_invalid_phase_timeout_seconds(tmp_path: Path, bad_value: str) -> None:
     config_path = tmp_path / "config.yaml"

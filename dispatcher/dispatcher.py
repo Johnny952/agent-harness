@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import re
 import threading
 
 from dispatcher import (
     context_transfer,
     docker_exec,
+    gates,
     handoff,
     project_docs,
     quota,
@@ -36,6 +38,9 @@ class DispatchResult:
     #: The phase's structured return, when it produced one. None means the
     #: role answered in prose and `result_text` is all there is.
     handoff: dict | None = None
+    #: What the dispatcher checked itself about this phase's worktree. None
+    #: for a phase that is not gated, or a gate run that did not finish.
+    gates: gates.Report | None = None
 
 
 class _HeartbeatLoop:
@@ -380,6 +385,98 @@ def _shrink_over_budget(
     return retry
 
 
+def _gate_report(
+    cfg: Config,
+    container: str,
+    workdir: str,
+    project_dir: str,
+    task_id: str,
+    round_num: int | None,
+) -> gates.Report | None:
+    """The gates, with a log path for the one that needs one.
+
+    The log goes to the task's scratch directory rather than into the
+    worktree: the dispatcher and the agents mount it at the same path, so a
+    finding can name the file and the next round can open it, and a reviewing
+    checkout that gets rebuilt every round cannot take it away.
+
+    Anything that goes wrong in here is swallowed. A gate is a saving, not a
+    dependency — a check that breaks should cost a review call, not a task.
+    """
+    try:
+        log_path = os.path.join(
+            context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id),
+            f"gates-round-{round_num or 1}.log",
+        )
+        return gates.run(
+            container, workdir, project_dir,
+            test_timeout_seconds=cfg.gates_test_timeout_seconds,
+            test_log_path=log_path,
+        )
+    except Exception:
+        logger.exception("the gates did not finish; this phase goes to review ungated")
+        return None
+
+
+def _run_gates(
+    cfg: Config,
+    container: str,
+    workdir: str,
+    project_dir: str,
+    task_id: str,
+    role: str,
+    result: docker_exec.ClaudeResult,
+    model: str | None,
+    effort: str | None,
+    round_num: int | None,
+) -> tuple[docker_exec.ClaudeResult, gates.Report | None]:
+    """The deterministic checks, and the one `--resume` they are worth.
+
+    Only the implementador: the gates judge code against tests and docs, and
+    the reading roles have neither to answer for. Only a phase that finished,
+    too — gating a rate-limited return means grading an empty worktree.
+
+    The one retry is the whole quota argument. It costs a single turn in a
+    session that is already warm, and what it replaces is a revisor call that
+    would have found the same thing plus the implementador round that answers
+    it. The gates then run again on whatever the retry left behind, because a
+    phase saying it fixed the tests is exactly the claim these checks exist to
+    stop taking on faith.
+
+    Like `_shrink_over_budget`, this runs inside the heartbeat loop by
+    construction: its caller holds it, and a retry outside it is a window for
+    another dispatcher to take the task mid-call.
+    """
+    if not cfg.gates_enabled or role != "implementador":
+        return result, None
+    if not _exec_succeeded(result) or is_rate_limit_error(result):
+        return result, None
+
+    report = _gate_report(cfg, container, workdir, project_dir, task_id, round_num)
+    if report is None or not report.needs_answer or not result.session_id:
+        return result, report
+
+    logger.info(
+        "task %s: the gates are asking %s to answer %d finding(s)",
+        task_id, role, len(report.findings),
+    )
+    retry = docker_exec.exec_claude(
+        container, workdir, report.resume_prompt(),
+        resume_session_id=result.session_id, model=model, effort=effort,
+        timeout_seconds=cfg.phase_timeout_seconds,
+        # No skills on the retry, for the same reason the shrink retry gets
+        # none: the session has already read them. The schema does travel —
+        # the retry's return is the one that lands in the task file.
+        json_schema=handoff.schema_for(role),
+    )
+    if not _exec_succeeded(retry) or is_rate_limit_error(retry):
+        # The first return stands: a phase that finished with findings against
+        # it is worse than one that answered them and better than nothing, and
+        # the report reaches the revisor either way.
+        return result, report
+    return retry, _gate_report(cfg, container, workdir, project_dir, task_id, round_num)
+
+
 def dispatch_phase(
     cfg: Config,
     task_id: str,
@@ -440,6 +537,13 @@ def dispatch_phase(
                     append_system_prompt=role_skills.system_prompt(role),
                     json_schema=handoff.schema_for(role),
                 )
+                # Before the shrink, not after: the gate retry writes a new
+                # handoff, and the byte budget has to be enforced on the return
+                # that actually lands in the task file.
+                result, gate_report = _run_gates(
+                    cfg, container, workdir, project_dir, task_id, role,
+                    result, model, effort, round_num,
+                )
                 result = _shrink_over_budget(cfg, container, workdir, role, result, model, effort)
             if _should_commit(role, result):
                 docker_exec.commit_worktree(
@@ -473,13 +577,13 @@ def dispatch_phase(
             context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
             return DispatchResult(
                 success=False, session_id=result.session_id, result_text=result.result_text,
-                account=account, handoff=handoff.parse(result),
+                account=account, handoff=handoff.parse(result), gates=gate_report,
             )
 
         state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
         return DispatchResult(
             success=True, session_id=result.session_id, result_text=result.result_text,
-            account=account, handoff=handoff.parse(result),
+            account=account, handoff=handoff.parse(result), gates=gate_report,
         )
 
 
@@ -714,10 +818,17 @@ def run_task_cycle(
                 role, task_id, result.result_text,
             )
         label = role if round_num is None else f"{role} (round {round_num})"
+        body = handoff.body(label, result.result_text, result.handoff)
+        # Under the phase's own return, not instead of it: the role says what
+        # it did and the dispatcher says what it found, and the next phase to
+        # read this file can tell the two apart.
+        gate_section = result.gates.render() if result.gates is not None else ""
+        if gate_section:
+            body = f"{body}\n\n{gate_section}"
         context_transfer.handoff(
             cfg.hive_tasks_dir, task_id,
             new_status="done" if final else "pending",
-            body=handoff.body(label, result.result_text, result.handoff),
+            body=body,
         )
         return result
 
@@ -741,8 +852,19 @@ def run_task_cycle(
 
         approved = False
         for round_num in range(1, cfg.max_revision_rounds + 1):
-            if run_phase("implementador", round_num=round_num) is None:
+            implemented = run_phase("implementador", round_num=round_num)
+            if implemented is None:
                 return
+            if implemented.gates is not None and implemented.gates.blocking:
+                # The gates already asked for this in-session and checked the
+                # answer. Paying a revisor to read a branch whose tests fail
+                # buys a finding the dispatcher has in hand, so the round goes
+                # back around instead — the findings are in the task file, and
+                # the next implementador round opens on them.
+                logger.warning(
+                    "task %s: the gates blocked round %d before review", task_id, round_num,
+                )
+                continue
             revisor_result = run_phase("revisor", round_num=round_num)
             if revisor_result is None:
                 return

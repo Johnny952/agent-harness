@@ -5,7 +5,7 @@ import time
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import handoff, project_docs, role_skills
+from dispatcher import gates, handoff, project_docs, role_skills
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -72,6 +72,12 @@ def _make_config(tmp_path, **overrides):
         mapping_enabled=False,
         mapping_model="sonnet",
         mapping_max_turns=40,
+        # Off here although it ships on: the gates reach into the worktree
+        # through a real `docker exec`, which every other fake in this file
+        # exists to avoid. The tests that want them turn them on and fake
+        # `gates.run` with them.
+        gates_enabled=False,
+        gates_test_timeout_seconds=900,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -445,6 +451,241 @@ def test_dispatch_phase_logs_an_overage_it_cannot_retry(tmp_path, monkeypatch, c
         dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
 
     assert any("over its 3072-byte budget" in r.getMessage() for r in caplog.records)
+
+
+def _gate_recorder(monkeypatch, reports):
+    """Hands out `reports` in order and records how the gates were called.
+
+    The gates read a real worktree through `docker exec`, and
+    `tests/dispatcher/test_gates.py` is where that part is tested. What
+    `dispatch_phase` owns is narrower — who gets gated, when, and what a
+    finding is worth — so here the report is a given and only that is left
+    visible.
+    """
+    calls = []
+    pending = list(reports)
+
+    def fake_run(container, workdir, project_dir, *, test_timeout_seconds, test_log_path=None):
+        calls.append(
+            dict(
+                container=container,
+                workdir=workdir,
+                project_dir=project_dir,
+                test_timeout_seconds=test_timeout_seconds,
+                test_log_path=test_log_path,
+            )
+        )
+        return pending.pop(0) if pending else gates.Report()
+
+    monkeypatch.setattr(dispatcher_mod.gates, "run", fake_run)
+    return calls
+
+
+def _one_finding(level, detail="the test suite is red"):
+    return gates.Report([gates.Finding(gate=gates.TESTS_RUN, detail=detail, level=level)])
+
+
+def test_dispatch_phase_asks_the_implementador_to_answer_the_gates(tmp_path, monkeypatch) -> None:
+    """One resume, in the session that just did the work, carrying the
+    findings and the role's schema but no skills — that session read those
+    already. Then the gates run again: a phase saying it fixed the suite is
+    exactly the claim they exist to stop taking on faith."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [_one_finding(gates.ASK), gates.Report()])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert len(calls) == 2, "findings should cost exactly one resume, never a loop"
+    retry = calls[1]
+    assert retry["resume_session_id"] == "sess-1"
+    assert retry["json_schema"] == handoff.schema_for("implementador")
+    assert not retry.get("plugin_dirs")
+    assert not retry.get("append_system_prompt")
+    assert "the test suite is red" in retry["prompt"]
+    assert len(gate_calls) == 2, "the answer has to be checked, not believed"
+    assert result.gates.findings == [], "the report that travels is the second one"
+
+
+def test_dispatch_phase_does_not_resume_when_the_gates_find_nothing(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [gates.Report()])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert len(calls) == 1
+    assert len(gate_calls) == 1
+    assert result.gates is not None and result.gates.render() == ""
+
+
+def test_dispatch_phase_does_not_spend_a_resume_on_a_note(tmp_path, monkeypatch) -> None:
+    """A NOTE is for the revisor to weigh, not for the implementador to
+    answer — it rides along under the handoff and costs nothing."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [_one_finding(gates.NOTE, "an OpenAPI file changed and no doc did")])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert len(calls) == 1
+    assert len(gate_calls) == 1
+    assert result.gates.findings[0].level == gates.NOTE
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "revisor", "auditor"])
+def test_dispatch_phase_leaves_the_reading_roles_ungated(tmp_path, monkeypatch, role) -> None:
+    """The gates judge code against tests and docs. The roles that write
+    neither have nothing to answer for, and a `docker exec` sweep of a
+    worktree they only read is time spent for no finding."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="had a look", raw={"is_error": False}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [_one_finding(gates.BLOCKING)])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", role, "do the thing")
+
+    assert gate_calls == []
+    assert result.gates is None
+
+
+def test_dispatch_phase_does_not_gate_a_phase_that_did_not_finish(tmp_path, monkeypatch) -> None:
+    """Gating a crashed phase means grading a worktree nobody wrote in, and
+    the phase is about to fail over to another account anyway."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="boom", raw={}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [gates.Report()])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert result.success is False
+    assert gate_calls == []
+
+
+def test_dispatch_phase_does_not_run_the_gates_when_they_are_turned_off(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, gates_enabled=False)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [_one_finding(gates.BLOCKING)])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert gate_calls == []
+    assert result.gates is None
+
+
+def test_dispatch_phase_goes_to_review_ungated_when_a_gate_breaks(tmp_path, monkeypatch, caplog) -> None:
+    """A check is a saving, not a dependency. One that throws — no container,
+    a git that answers something new — should cost a review call, not the
+    task, so the phase returns as if there were no gates at all."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+    ])
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("no such container: agent-cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod.gates, "run", explode)
+
+    with caplog.at_level("ERROR"):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert result.success is True
+    assert result.gates is None
+    assert len(calls) == 1
+    assert any("ungated" in r.getMessage() for r in caplog.records)
+
+
+def test_dispatch_phase_keeps_the_first_return_when_the_gate_retry_fails(tmp_path, monkeypatch) -> None:
+    """A phase that finished with findings against it beats one that answered
+    them and crashed, and the report reaches the revisor either way. Nothing
+    was written after the failure, so there is nothing to re-check."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+        ClaudeResult(session_id="sess-1", result_text="boom", raw={}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [_one_finding(gates.BLOCKING)])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert result.success is True
+    assert result.result_text == "built it"
+    assert len(gate_calls) == 1
+    assert result.gates.blocking is True
+
+
+def test_dispatch_phase_does_not_resume_a_gated_phase_without_a_session(tmp_path, monkeypatch) -> None:
+    """`--resume` needs a session id. Without one the findings still travel —
+    the revisor reads them — but no call is spent trying to ask about them."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=None, result_text="built it", raw={"is_error": False}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [_one_finding(gates.ASK)])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert len(calls) == 1
+    assert len(gate_calls) == 1
+    assert result.gates.needs_answer is True
+
+
+def test_the_shrink_is_measured_against_what_the_gate_retry_wrote(tmp_path, monkeypatch) -> None:
+    """The gate retry replaces the handoff, so the byte budget has to be
+    enforced on what it wrote — the return that actually lands in the task
+    file — and not on the one it replaced. That is why the gates run first."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    fat = {"status": "complete", "changed": ["dispatcher/gates.py"], "risks": ["r" * 5000]}
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": fat}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+    _gate_recorder(monkeypatch, [_one_finding(gates.ASK), gates.Report()])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert len(calls) == 3
+    assert "4096" in calls[2]["prompt"], "the third call is the shrink, not another gate retry"
+    assert result.handoff == _LEAN_HANDOFF
+
+
+def test_the_gates_write_their_test_log_into_the_tasks_scratch_dir(tmp_path, monkeypatch) -> None:
+    """The dispatcher and the agents mount `.hive` at the same path, so a
+    finding that names this file names something the next round can open —
+    and a reviewing worktree that gets rebuilt every round cannot take it
+    away. The round is in the name because round two's failure is not round
+    one's."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+    ])
+    gate_calls = _gate_recorder(monkeypatch, [gates.Report()])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build it", round_num=2)
+
+    call = gate_calls[0]
+    assert call["container"] == "agent-cuenta1"
+    assert call["workdir"] == f"{cfg.projects_root}/myproj/worktrees/task-1"
+    assert call["project_dir"] == f"{cfg.projects_root}/myproj"
+    assert call["test_timeout_seconds"] == cfg.gates_test_timeout_seconds
+    assert call["test_log_path"] == os.path.join(
+        scratch_dir(cfg.hive_tasks_dir, "task-1"), "gates-round-2.log"
+    )
+    assert os.path.isdir(scratch_dir(cfg.hive_tasks_dir, "task-1")), "the gate has to be able to write it"
 
 
 def test_check_quota_ok_probe_uses_fixed_usage_probe_timeout(tmp_path, monkeypatch) -> None:
@@ -1143,6 +1384,80 @@ def test_run_task_cycle_writes_the_rendered_handoff_into_the_task_file(tmp_path,
     assert "`ag_42` — running the suite" in task.body
     assert "`docs/implementations/task-1.md#schema` — the field list" in task.body
     assert "Structured output provided successfully" not in task.body
+
+
+def test_run_task_cycle_skips_the_revisor_when_the_gates_blocked(tmp_path, monkeypatch) -> None:
+    """Paying a revisor to read a branch whose tests fail buys a finding the
+    dispatcher already has in hand. The round goes back around instead, and
+    the next implementador opens on the findings in the task file."""
+    cfg = _make_config(tmp_path, max_revision_rounds=2)
+    roles = []
+    blocked = _one_finding(gates.BLOCKING, "`npm test` failed; the log is at /data/.hive/tasks/task-1/gates-round-1.log")
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        roles.append((role, round_num))
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+            gates=blocked if role == "implementador" and round_num == 1 else None,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert roles == [
+        ("arquitecto", None),
+        ("implementador", 1),
+        ("implementador", 2),
+        ("revisor", 2),
+        ("auditor", None),
+    ]
+
+
+def test_run_task_cycle_writes_the_gate_findings_under_the_handoff(tmp_path, monkeypatch) -> None:
+    """Under the phase's own return, not instead of it: the role says what it
+    did and the dispatcher says what it found, and the next phase to read the
+    file can tell which is which."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    found = _one_finding(gates.NOTE, "dispatcher/gates.py changed and no test did")
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+            handoff={"status": "complete", "changed": ["dispatcher/gates.py"]} if role == "implementador" else None,
+            gates=found if role == "implementador" else None,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert "**Dispatcher gates**" in task.body
+    assert "dispatcher/gates.py changed and no test did" in task.body
+    assert task.body.index("- dispatcher/gates.py") < task.body.index("**Dispatcher gates**")
+
+
+def test_run_task_cycle_blocks_the_card_when_every_round_was_gated(tmp_path, monkeypatch) -> None:
+    """A suite that stays red is not an approval by exhaustion: the rounds run
+    out, the revisor was never asked, and the card goes to a human."""
+    cfg = _make_config(tmp_path, max_revision_rounds=2)
+    roles = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        roles.append(role)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
+            gates=_one_finding(gates.BLOCKING) if role == "implementador" else None,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert roles == ["arquitecto", "implementador", "implementador"]
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
 
 
 def test_run_task_cycle_approves_on_a_verdict_field(tmp_path, monkeypatch) -> None:

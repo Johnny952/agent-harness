@@ -134,3 +134,21 @@ mapping_model: sonnet
 # a thin index beats an unbounded bill. Must be a positive integer.
 # Optional; defaults to 40.
 mapping_max_turns: 40
+
+# The dispatcher's own checks on the implementador's worktree, run between it
+# and the revisor: a change with no test, the project's test command failing,
+# a contract touched with no doc, a docs pointer whose target is gone. They
+# run through `docker exec` with no model in the loop, so they spend no quota,
+# and they are the one thing here that is on by default — a finding they catch
+# costs a revisor call and another round when it reaches review instead.
+# Failing tests send the round back without paying for a review; the rest ride
+# along under the handoff for the revisor to judge.
+# Optional; defaults to true.
+gates_enabled: true
+
+# Wall-clock timeout for the test command that gate runs, in seconds. Far
+# shorter than phase_timeout_seconds, because that one bounds a model working
+# and this one bounds a suite: a suite still running after this is reported as
+# such and the task goes to review anyway, rather than holding the lock open.
+# Must be a positive integer. Optional; defaults to 900 (15 minutes).
+gates_test_timeout_seconds: 900
