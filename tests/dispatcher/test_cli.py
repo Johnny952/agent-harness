@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 import dispatcher.cli as cli_mod
+from dispatcher import learnings
 from dispatcher.context_transfer import read_kanban_issue_id, set_description
+from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
 from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
 
 CONFIG_YAML = """
@@ -242,3 +244,203 @@ def test_cli_run_task_rejects_an_issue_id_with_no_board_configured(
     assert captured == {}
     # Silently storing an id nothing reads would look like a wired-up board.
     assert "vibe_kanban" in capsys.readouterr().err
+
+
+# --- `dispatch learnings`, the human half of the inbox ---------------------
+
+
+def _learning(tmp_path: Path, name: str, **meta) -> Path:
+    """One inbox entry, in the shape the phases are told to write."""
+    fields = dict(
+        project="myproj",
+        task="task-8",
+        phase="implementador",
+        scope=learnings.SCOPE_PROJECT,
+        status=learnings.UNCONFIRMED,
+        when="the suite talks to a database",
+    )
+    fields.update(meta)
+    root = Path(learnings.ensure_dirs(str(tmp_path / "hive")))
+    path = root / learnings.INBOX_NAME / name
+    path.write_text(
+        "---\n"
+        + "".join(f"{key}: {value}\n" for key, value in fields.items())
+        + "---\n\n"
+        "## Symptom\n\n```\nECONNREFUSED 127.0.0.1:5432\n```\n\n"
+        "## Why\n\nThe fixture assumed a server that nothing starts.\n\n"
+        "## Rule\n\nStart postgres before the suite, not with it.\n\n"
+        "## Evidence\n\n`pytest -q tests/db` in the writers' worktree.\n"
+    )
+    return path
+
+
+def _run_command(monkeypatch, config_path: Path, *argv: str) -> None:
+    monkeypatch.setattr(sys, "argv", [
+        "ia-harness-dispatcher", "--config", str(config_path), *argv,
+    ])
+    cli_mod.main()
+
+
+def test_cli_learnings_says_where_the_empty_inbox_is(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """An operator who runs this before any task has is told where the files
+    would be, not handed a blank screen."""
+    config_path = _write_config(tmp_path)
+
+    _run_command(monkeypatch, config_path, "learnings")
+
+    out = capsys.readouterr().out
+    assert "no learnings in" in out
+    assert learnings.root_dir(str(tmp_path / "hive")) in out
+
+
+def test_cli_learnings_prints_the_table_the_phases_are_shown(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Same renderer as the prompt fragment: what a human rules on has to be
+    what the agents read, or the ruling is about something else."""
+    config_path = _write_config(tmp_path)
+    _learning(tmp_path, "task-8-db.md")
+
+    _run_command(monkeypatch, config_path, "learnings")
+
+    out = capsys.readouterr().out
+    assert "Start postgres before the suite" in out
+    assert "the suite talks to a database" in out
+    assert learnings.UNCONFIRMED in out
+    # And the pointer to the files, because the table is one line per entry.
+    assert learnings.root_dir(str(tmp_path / "hive")) in out
+
+
+def test_cli_learnings_filters_to_what_one_project_would_be_shown(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Another project's unreviewed entry is one phase's word about code this
+    project does not have."""
+    config_path = _write_config(tmp_path)
+    _learning(tmp_path, "task-8-db.md", project="otherproj")
+
+    _run_command(monkeypatch, config_path, "learnings", "--project", "myproj")
+
+    assert "no learnings in" in capsys.readouterr().out
+
+
+def test_cli_learnings_promotes_one_entry_into_the_shared_store(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The only door into the cross-project store, and deliberately a human
+    one: it is one phase's word applied to every project at once."""
+    config_path = _write_config(tmp_path)
+    path = _learning(tmp_path, "task-8-db.md", scope=learnings.SCOPE_HARNESS)
+
+    _run_command(monkeypatch, config_path, "learnings", "--promote", "task-8-db.md")
+
+    assert not path.exists()
+    assert (Path(learnings.harness_dir(str(tmp_path / "hive"))) / "task-8-db.md").exists()
+    assert "every project" in capsys.readouterr().out
+
+
+def test_cli_learnings_fails_loudly_on_a_ref_that_is_not_there(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """A typo in a ref must not read as "promoted": the operator would move on
+    believing every project now has the trap."""
+    config_path = _write_config(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "learnings", "--promote", "typo.md")
+
+    assert excinfo.value.code == 1
+    assert "no such inbox entry" in capsys.readouterr().err
+
+
+def test_cli_learnings_confirms_an_entry_without_a_second_task(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """A human who has hit the trap themselves is the other half of the
+    confirmation rule — waiting for a second task to burn quota on it is not
+    the only way an entry becomes trustworthy."""
+    config_path = _write_config(tmp_path)
+    path = _learning(tmp_path, "task-8-db.md")
+
+    _run_command(monkeypatch, config_path, "learnings", "--confirm", "task-8-db.md")
+
+    assert f"status: {learnings.CONFIRMED}" in path.read_text()
+    assert learnings.CONFIRMED in capsys.readouterr().out
+
+
+def test_cli_learnings_drops_a_trap_that_was_wrong(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    path = _learning(tmp_path, "task-8-db.md")
+
+    _run_command(monkeypatch, config_path, "learnings", "--drop", "task-8-db.md")
+
+    assert not path.exists()
+    assert "deleted inbox/task-8-db.md" in capsys.readouterr().out
+
+
+def _fake_merge(monkeypatch, outcome) -> None:
+    """A merge-task whose docker half is all fake: container, owner, merge."""
+    monkeypatch.setattr(cli_mod, "cleanup_container", lambda cfg: "agent-cuenta1")
+    monkeypatch.setattr(cli_mod.docker_exec, "read_owner", lambda container, path: "1000:1000")
+    monkeypatch.setattr(cli_mod.docker_exec, "restore_owner", lambda container, path, owner: None)
+    monkeypatch.setattr(
+        cli_mod.docker_exec,
+        "merge_task_branch",
+        lambda container, projects_root, slug, task_id: outcome,
+    )
+
+
+def test_cli_merge_task_drops_the_entries_the_merged_branch_filed(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The manual merge has to do what the automatic one does: the docs are in
+    the repo now, so the inbox copy would charge every later prompt twice."""
+    config_path = _write_config(tmp_path)
+    path = _learning(tmp_path, "task-8-db.md", carried_by="task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    assert not path.exists()
+    assert "dropped 1 filed inbox" in capsys.readouterr().out
+
+
+def test_cli_merge_task_keeps_the_entries_another_task_is_carrying(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Only what *this* branch filed goes: a run in flight elsewhere still
+    needs the rows it is about to write into its own project's docs."""
+    config_path = _write_config(tmp_path)
+    mine = _learning(tmp_path, "task-1-db.md", carried_by="task-1")
+    theirs = _learning(tmp_path, "task-2-db.md", carried_by="task-2")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    assert not mine.exists()
+    assert theirs.exists()
+
+
+def test_cli_merge_task_that_was_refused_leaves_the_inbox_alone(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Nothing landed, so the docs are still only on the task branch."""
+    config_path = _write_config(tmp_path)
+    path = _learning(tmp_path, "task-8-db.md", carried_by="task-1")
+    _fake_merge(monkeypatch, MergeOutcome(REFUSED, "main", "has uncommitted changes"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+        )
+
+    assert excinfo.value.code == 1
+    assert path.exists()

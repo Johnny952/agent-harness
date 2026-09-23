@@ -116,6 +116,26 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   living only on an unmerged task branch reads as missing and the next task
   maps again; and `--max-turns` works but is absent from `claude --help`
   (2.1.273), so a CLI bump could drop it.
+- **Shared learnings** (`dispatcher/learnings.py`) — the traps a project's
+  docs cannot hold yet, because the task that hit one may never merge. It is
+  an inbox at `.hive/learnings/inbox/`, outside every worktree and mounted in
+  both agent containers, so any phase can write to it at any time: one
+  Markdown file per entry, frontmatter (`project`, `task`, `phase`, `scope`,
+  `status`) plus a `## Symptom` block holding the error **verbatim**, so the
+  next phase finds it by grepping for the message in front of it. Every
+  role's prompt carries the table and is told to grep before debugging; the
+  auditor alone files entries into the project's `docs/learnings/`, and the
+  dispatcher moves them with no model in the loop — it stamps the entries a
+  task is carrying before the auditor runs, deletes them once that branch
+  actually merges, and, when the cycle ends any other way, releases them
+  unconfirmed for the next task rather than losing them with the phase that
+  found them. An entry is a claim until a second, distinct task hits the same
+  wall or a human says so (`dispatch learnings --confirm`): one phase's
+  wrong guess repeated to every later phase is worse than no note at all.
+  Two scopes — a project's own trap, and one about this harness, which is the
+  only kind that reaches `.hive/learnings/harness/` and only through a human
+  running `dispatch learnings --promote`. The line it draws: a trap is "don't
+  step on this"; half-finished code is debt, not a learning.
 - **Dispatcher gates** (`dispatcher/gates.py`) — what the dispatcher checks
   for itself between the implementador and the revisor: code that changed
   with no test beside it, the project's own `test:` command, a contract that
@@ -487,6 +507,65 @@ as a red suite, because no implementador can fix it from inside its session
 — installing dependencies per worktree is still open. And the contract gate
 only knows what a filename shows: a public export or a CLI flag is just as
 much a contract, and those stay where they were, in the revisor's duties.
+
+**What one task learned, before the next one pays for it.** A project's
+`docs/learnings/` only helps once the branch that wrote it merges, and the
+task most worth learning from is the one that ended `blocked`. So there is
+an inbox outside every worktree, at `.hive/learnings/inbox/`, mounted in
+both agent containers at the same path the dispatcher uses. Any phase can
+write to it at any moment — the prompt asks for it *when the trap is
+understood*, not at the end, because a phase that times out takes with it
+everything it had not written to a file. One Markdown file per entry, named
+`<task-id>-<slug>.md`, never edited in place: two tasks write here at once,
+and one file per entry is what keeps them apart.
+
+Every role is handed the same table — `# | Learning | When it applies |
+Status` — and the same instruction: before spending a turn debugging, grep
+that directory for the exact error text in front of you. That is why an
+entry quotes its `## Symptom` verbatim. A project sees everything a human
+has reviewed plus everything it found itself; another project's unreviewed
+note stays out of its prompts.
+
+The dispatcher moves the entries with no model in the loop. It opens the
+directories before the first phase; stamps the entries this task is carrying
+just before the auditor runs, so the auditor knows which rows are its to
+file into `docs/learnings/` on the task branch; deletes them once that
+branch actually merges, automatically or via `merge-task`, because the docs
+now hold them; and, when a cycle ends any other way — blocked, refused
+merge, crash — clears the stamp and leaves them in the inbox, marked with
+the task that dropped them, for whoever hits the same wall next. A run that
+bounced off another dispatcher's lock touches nothing: those entries belong
+to a run still working.
+
+Entries start `unconfirmed` and are promoted by evidence, not by assertion:
+when a second, *distinct* task files an entry whose symptom flattens to the
+same fingerprint, both go `confirmed`. That is the whole guard against
+poisoning — one phase's wrong guess, repeated to every later phase, is worse
+than no note at all — and it is why the prompt says an unconfirmed entry is
+a lead, not an answer.
+
+The calls a script should not make are yours:
+
+```bash
+python -m dispatcher.cli --config config.yaml learnings
+python -m dispatcher.cli --config config.yaml learnings --project my-project
+python -m dispatcher.cli --config config.yaml learnings --confirm inbox/T-001-pg.md
+python -m dispatcher.cli --config config.yaml learnings --promote inbox/T-001-pg.md
+python -m dispatcher.cli --config config.yaml learnings --drop inbox/T-001-pg.md
+```
+
+With no flag it prints every entry the harness holds, in the same table the
+phases are shown, so what you rule on is what they read. `--confirm` is the
+other half of the confirmation rule, for a trap you have hit yourself
+(`--unconfirm` takes it back); `--drop` deletes one that was wrong.
+`--promote` moves an entry into `.hive/learnings/harness/`, the cross-project
+store, which every project's phases then read: that is one phase's word
+applied to every project at once, so there is deliberately no automatic path
+in. Scope is the dividing line the roles are given — `project` is this
+repo's own code, config or tests; `harness` is what every project shares,
+the container, the CLI, the worktree, the tooling. And the closing rule, in
+every role's prompt: a trap is "don't step on this"; work you chose not to
+finish is debt, and that goes in the handoff instead.
 
 **The board, if you want one.** A Vibe Kanban board is optional and
 unconfigured by default: with no `vibe_kanban` block in `config.yaml` the

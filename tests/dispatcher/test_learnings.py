@@ -1,0 +1,345 @@
+from pathlib import Path
+
+import yaml
+
+from dispatcher import learnings
+
+_SYMPTOM = "ECONNREFUSED 127.0.0.1:5432 (pid 4711)"
+
+
+def _entry(
+    hive: Path,
+    name: str,
+    *,
+    where: str = learnings.INBOX_NAME,
+    symptom: str = _SYMPTOM,
+    rule: str = "Start postgres before the suite, not with it.",
+    **meta,
+) -> Path:
+    """One entry file, in the shape the phases' prompt tells them to write.
+
+    Written as text rather than through the module so the tests read the same
+    files an agent produces, frontmatter and headings included.
+    """
+    frontmatter = {
+        "project": "myproj",
+        "task": "task-1",
+        "phase": "implementador",
+        "scope": learnings.SCOPE_PROJECT,
+        "status": learnings.UNCONFIRMED,
+        "when": "the suite talks to a database",
+    }
+    frontmatter.update(meta)
+    path = Path(learnings.ensure_dirs(str(hive))) / where / name
+    path.write_text(
+        "---\n"
+        + yaml.safe_dump(frontmatter, sort_keys=False)
+        + "---\n\n"
+        f"## Symptom\n\n```\n{symptom}\n```\n\n"
+        "## Why\n\nThe fixture assumed a server that nothing starts.\n\n"
+        f"## Rule\n\n{rule}\n\n"
+        "## Evidence\n\n`pytest -q tests/db` in the writers' worktree.\n"
+    )
+    return path
+
+
+def _meta(path: Path) -> dict:
+    return yaml.safe_load(path.read_text().split("---")[1])
+
+
+def _row(ref: str, **meta) -> learnings.Entry:
+    return learnings.Entry(path="", ref=ref, meta=meta, body="")
+
+
+def test_the_learnings_root_sits_beside_the_task_files() -> None:
+    """Derived from hive_tasks_dir instead of configured, so the path a prompt
+    quotes is the same path on the dispatcher and in both containers. A
+    trailing slash is what a hand-written config.yaml most often has."""
+    assert learnings.root_dir("/data/.hive/tasks") == "/data/.hive/learnings"
+    assert learnings.root_dir("/data/.hive/tasks/") == "/data/.hive/learnings"
+    assert learnings.inbox_dir("/data/.hive/tasks") == "/data/.hive/learnings/inbox"
+    assert learnings.harness_dir("/data/.hive/tasks") == "/data/.hive/learnings/harness"
+
+
+def test_ensure_dirs_makes_both_halves_before_a_phase_needs_them(tmp_path: Path) -> None:
+    """A phase about to run out of turns will not spend one on mkdir -p."""
+    hive = tmp_path / "hive"
+
+    root = learnings.ensure_dirs(str(hive))
+
+    assert Path(root).name == learnings.ROOT_NAME
+    assert Path(learnings.inbox_dir(str(hive))).is_dir()
+    assert Path(learnings.harness_dir(str(hive))).is_dir()
+    learnings.ensure_dirs(str(hive))  # again: a second task must not blow up
+
+
+def test_an_entry_carries_its_rule_and_its_trigger_into_the_table(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _entry(hive, "task-1-db.md")
+
+    (entry,) = learnings.read_inbox(str(hive))
+
+    assert entry.ref == "inbox/task-1-db.md"
+    assert entry.project == "myproj"
+    assert entry.task == "task-1"
+    assert entry.scope == learnings.SCOPE_PROJECT
+    assert entry.status == learnings.UNCONFIRMED
+    assert entry.when == "the suite talks to a database"
+    assert entry.rule == "Start postgres before the suite, not with it."
+    assert entry.reviewed is False
+
+
+def test_a_file_without_frontmatter_is_left_where_it_is(tmp_path: Path) -> None:
+    """A phase that wrote a note in its own shape still wrote it on purpose,
+    and the grep the agents are told to run finds it. What the dispatcher
+    must not do is rewrite or delete it."""
+    hive = tmp_path / "hive"
+    stray = Path(learnings.ensure_dirs(str(hive))) / learnings.INBOX_NAME / "note.md"
+    stray.write_text("no frontmatter, just prose\n")
+
+    assert learnings.read_inbox(str(hive)) == []
+    assert stray.read_text() == "no frontmatter, just prose\n"
+
+
+def test_the_fingerprint_ignores_what_changes_between_two_runs(tmp_path: Path) -> None:
+    """Pids, timings and addresses differ every run; if they counted, no two
+    tasks would ever be seen to have hit the same wall."""
+    hive = tmp_path / "hive"
+    _entry(hive, "a.md", symptom=_SYMPTOM)
+    _entry(hive, "b.md", symptom="ECONNREFUSED 127.0.0.1:5432 (pid 90210)")
+    _entry(hive, "c.md", symptom="ENOSPC: no space left on device")
+
+    first, second, third = learnings.read_inbox(str(hive))
+
+    assert first.fingerprint == second.fingerprint
+    assert third.fingerprint != first.fingerprint
+
+
+def test_reconcile_confirms_an_entry_a_second_task_also_hit(tmp_path: Path) -> None:
+    """The poisoning guard, and the reason it needs no model: two distinct
+    tasks reporting the same error is checkable arithmetic."""
+    hive = tmp_path / "hive"
+    mine = _entry(hive, "task-1-db.md", task="task-1")
+    theirs = _entry(hive, "task-2-db.md", task="task-2", symptom="ECONNREFUSED 127.0.0.1:5432 (pid 8)")
+    alone = _entry(hive, "task-3-disk.md", task="task-3", symptom="ENOSPC: no space left on device")
+
+    confirmed = learnings.reconcile(str(hive))
+
+    assert sorted(confirmed) == ["inbox/task-1-db.md", "inbox/task-2-db.md"]
+    assert _meta(mine)["status"] == learnings.CONFIRMED
+    assert _meta(theirs)["status"] == learnings.CONFIRMED
+    assert _meta(alone)["status"] == learnings.UNCONFIRMED
+    assert learnings.reconcile(str(hive)) == []  # nothing new to say on a second pass
+
+
+def test_reconcile_does_not_let_one_task_corroborate_itself(tmp_path: Path) -> None:
+    """Two files are two files; the guard is about two independent sightings.
+    A promoted entry keeps its original task id, so its own copy cannot back
+    it either."""
+    hive = tmp_path / "hive"
+    twice = _entry(hive, "task-1-db.md", task="task-1")
+    again = _entry(hive, "task-1-db-again.md", task="task-1")
+    _entry(hive, "shared.md", where=learnings.HARNESS_NAME, task="task-1", scope=learnings.SCOPE_HARNESS)
+
+    assert learnings.reconcile(str(hive)) == []
+    assert _meta(twice)["status"] == learnings.UNCONFIRMED
+    assert _meta(again)["status"] == learnings.UNCONFIRMED
+
+
+def test_carry_stamps_the_entries_this_task_is_about_to_file(tmp_path: Path) -> None:
+    """The auditor files into one project's docs, so it is handed this
+    project's project-scoped entries and nothing else: another project's are
+    not its business and a harness-scoped one does not belong in any single
+    project's docs."""
+    hive = tmp_path / "hive"
+    ours = _entry(hive, "ours.md", project="myproj")
+    shared = _entry(hive, "shared.md", project="myproj", scope=learnings.SCOPE_HARNESS)
+    other = _entry(hive, "other.md", project="otherproj")
+    reviewed = _entry(hive, "reviewed.md", where=learnings.HARNESS_NAME, scope=learnings.SCOPE_HARNESS)
+
+    carried = learnings.carry(str(hive), "myproj", "task-9")
+
+    assert carried == ["inbox/ours.md"]
+    assert _meta(ours)["carried_by"] == "task-9"
+    assert "carried_by" not in _meta(shared)
+    assert "carried_by" not in _meta(other)
+    assert "carried_by" not in _meta(reviewed)
+    assert learnings.carry(str(hive), "myproj", "task-9") == []
+
+
+def test_carry_takes_over_an_entry_whose_carrier_died(tmp_path: Path) -> None:
+    """The dead task is not around to release its claim, so the stamp is
+    overwritten rather than respected — otherwise the first task to crash
+    holding an entry would strand it forever."""
+    hive = tmp_path / "hive"
+    stranded = _entry(hive, "stranded.md", carried_by="task-8")
+
+    assert learnings.carry(str(hive), "myproj", "task-9") == ["inbox/stranded.md"]
+    assert _meta(stranded)["carried_by"] == "task-9"
+
+
+def test_drop_promoted_deletes_only_what_the_merged_branch_filed(tmp_path: Path) -> None:
+    """Once the branch lands, the entry is in the project's docs; keeping the
+    inbox copy would charge every later phase for a row the repo already has.
+    Everyone else's entries are untouched, because their branch has not
+    landed."""
+    hive = tmp_path / "hive"
+    written = _entry(hive, "written.md", task="task-9")
+    carried = _entry(hive, "carried.md", task="task-1", carried_by="task-9")
+    shared = _entry(hive, "shared.md", task="task-9", scope=learnings.SCOPE_HARNESS)
+    someone_else = _entry(hive, "theirs.md", task="task-2")
+
+    dropped = learnings.drop_promoted(str(hive), "task-9")
+
+    assert sorted(dropped) == ["inbox/carried.md", "inbox/written.md"]
+    assert not written.exists()
+    assert not carried.exists()
+    assert shared.exists()
+    assert someone_else.exists()
+
+
+def test_mark_orphaned_releases_the_carrier_and_leaves_a_breadcrumb(tmp_path: Path) -> None:
+    """A task that ended blocked filed nothing, so the entries stay — but they
+    stop claiming a carrier that is gone, and the next task can see the entry
+    has been waiting through more than one of them."""
+    hive = tmp_path / "hive"
+    entry = _entry(hive, "carried.md", task="task-1", carried_by="task-9",
+                   orphaned_from=["t1", "t2", "t3", "t4", "t5"])
+
+    assert learnings.mark_orphaned(str(hive), "task-9") == ["inbox/carried.md"]
+
+    meta = _meta(entry)
+    assert "carried_by" not in meta
+    assert meta["orphaned_from"] == ["t2", "t3", "t4", "t5", "task-9"]
+
+
+def test_mark_orphaned_takes_back_a_confirmation_only_this_task_vouched_for(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    entry = _entry(hive, "mine.md", task="task-9", status=learnings.CONFIRMED)
+
+    assert learnings.mark_orphaned(str(hive), "task-9") == ["inbox/mine.md"]
+    assert _meta(entry)["status"] == learnings.UNCONFIRMED
+
+
+def test_mark_orphaned_keeps_a_confirmation_another_task_backed(tmp_path: Path) -> None:
+    """That second sighting did not die with this task, so the confirmation
+    it earned is not this task's to take back."""
+    hive = tmp_path / "hive"
+    mine = _entry(hive, "mine.md", task="task-9", status=learnings.CONFIRMED)
+    _entry(hive, "theirs.md", task="task-2", status=learnings.CONFIRMED)
+
+    learnings.mark_orphaned(str(hive), "task-9")
+
+    assert _meta(mine)["status"] == learnings.CONFIRMED
+
+
+def test_promote_is_the_only_door_into_the_shared_store(tmp_path: Path) -> None:
+    """No role and no dispatcher path calls this: it is one phase's word about
+    every project at once."""
+    hive = tmp_path / "hive"
+    original = _entry(hive, "worktree.md", scope=learnings.SCOPE_HARNESS, carried_by="task-9")
+
+    entry = learnings.promote(str(hive), "worktree")
+
+    assert entry is not None
+    assert entry.ref == "harness/worktree.md"
+    assert entry.reviewed is True
+    assert entry.status == learnings.CONFIRMED
+    assert entry.scope == learnings.SCOPE_HARNESS
+    assert entry.carried_by == ""
+    assert entry.rule == "Start postgres before the suite, not with it."
+    assert not original.exists()
+    assert learnings.promote(str(hive), "worktree") is None  # already through review
+
+
+def test_a_human_rules_on_an_entry_by_the_ref_the_table_shows(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    path = _entry(hive, "db.md")
+
+    assert learnings.resolve(str(hive), "db") is not None
+    assert learnings.resolve(str(hive), "inbox/db.md") is not None
+    assert learnings.resolve(str(hive), "nope") is None
+
+    assert learnings.set_status(str(hive), "db", learnings.CONFIRMED) is not None
+    assert _meta(path)["status"] == learnings.CONFIRMED
+    assert learnings.set_status(str(hive), "nope", learnings.CONFIRMED) is None
+
+    assert learnings.delete(str(hive), "inbox/db.md") == "inbox/db.md"
+    assert not path.exists()
+    assert learnings.delete(str(hive), "db") is None
+
+
+def test_another_projects_unreviewed_entry_is_held_back(tmp_path: Path) -> None:
+    """The whole difference the human review makes: before it, an entry is one
+    project's claim about its own code."""
+    rows = [
+        _row("inbox/ours.md", project="myproj"),
+        _row("inbox/theirs.md", project="otherproj"),
+        _row("harness/reviewed.md", project="otherproj"),
+    ]
+
+    assert [entry.ref for entry in learnings.applicable(rows, "myproj")] == [
+        "inbox/ours.md",
+        "harness/reviewed.md",
+    ]
+
+
+def test_the_table_puts_confirmed_rows_first_and_stops_at_the_cap() -> None:
+    """A prompt that grows with the inbox taxes every phase of every task, so
+    the table is capped — and what survives the cut is what a second task has
+    already backed."""
+    rows = [_row(f"inbox/{index:02d}.md", status=learnings.UNCONFIRMED) for index in range(learnings.MAX_ROWS)]
+    rows.append(_row("inbox/zz.md", status=learnings.CONFIRMED))
+
+    text = learnings.table(rows)
+
+    assert text.splitlines()[0] == "| # | Learning | When it applies | Status |"
+    assert text.splitlines()[2].startswith("| `inbox/zz.md` |")
+    assert "`inbox/39.md`" not in text
+    assert "1 more are in the directory but not in this table" in text
+
+
+def test_a_pipe_in_the_text_does_not_break_the_row() -> None:
+    """The rule is quoted from a shell command often enough that this is not
+    hypothetical."""
+    row = _row("inbox/a.md", when="grep -a foo | head")
+
+    assert "grep -a foo \\| head" in learnings.table([row])
+
+
+def test_duties_says_nothing_to_a_role_that_never_touches_the_code(tmp_path: Path) -> None:
+    """A role added elsewhere degrades to silence rather than to an error in
+    the middle of a dispatch."""
+    assert learnings.duties("recepcionista", "task-1", "myproj", str(tmp_path / "hive")) == ""
+
+
+def test_every_working_role_is_told_to_grep_before_it_debugs(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    learnings.ensure_dirs(str(hive))
+
+    text = learnings.duties("implementador", "task-9", "myproj", str(hive))
+
+    assert learnings.root_dir(str(hive)) in text
+    assert "grep" in text
+    assert f"{learnings.inbox_dir(str(hive))}/task-9-<short-slug>.md" in text
+    assert "task: task-9" in text
+    assert "phase: implementador" in text
+    assert "project: myproj" in text
+    assert "status: unconfirmed" in text
+    # No entries yet: the format and the grep still ship, the empty table does not.
+    assert "| # | Learning |" not in text
+
+
+def test_only_the_auditor_is_told_which_entries_it_owns(tmp_path: Path) -> None:
+    """Every role reads the table; one role files it. Telling the others they
+    own entries would have four phases writing the same docs."""
+    hive = tmp_path / "hive"
+    _entry(hive, "db.md")
+
+    auditor = learnings.duties("auditor", "task-9", "myproj", str(hive))
+    implementador = learnings.duties("implementador", "task-9", "myproj", str(hive))
+
+    assert "| `inbox/db.md` |" in auditor
+    assert "| `inbox/db.md` |" in implementador
+    assert "carried_by: task-9" in auditor
+    assert "carried_by" not in implementador

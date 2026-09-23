@@ -399,6 +399,12 @@ The first real `run-task`, with costs capped.
     red suite ends the task `blocked` without the revisor ever being
     called — which is the point, and is what to expect if the
     implementador leaves the scratch project failing.
+  - The learnings inbox needs no key and costs no quota: its directories
+    hang off `.hive/`, beside `tasks/`, and the dispatcher opens them
+    itself at the start of the cycle. A fresh `.data/` therefore starts
+    this check with an empty store, which is the case worth measuring
+    first — every role is told to grep the traps before debugging, and an
+    empty grep should cost a phase one command, not a detour.
 - **Task.** Passed on the command line now that `--description` exists;
   no hand-seeded task file. If V2.3 showed Kanban assigns its own IDs,
   create the card there too and record both IDs.
@@ -451,6 +457,17 @@ The first real `run-task`, with costs capped.
     names which gate fired, and a second implementador call is the one
     `--resume` an `ask` buys. The test gate itself is only exercised
     against a mapped project — see the re-run list below.
+  - `.hive/learnings/inbox/` and `.hive/learnings/harness/` exist before
+    the first phase runs, opened by the dispatcher and by no model.
+    Record which phases wrote an entry, if any: this task is small enough
+    that none may, and "nobody filed anything" is the expected result
+    rather than a failure. If one did, it is a single Markdown file named
+    `T-001-<slug>.md` carrying the error verbatim in its `## Symptom`
+    block, and the auditor should have copied what it says into
+    `docs/learnings/` on the task branch. Under the default
+    `merge_on_done: false` nothing then deletes it — the inbox is only
+    emptied by a merge — so after the run the file is still there, stamped
+    `carried_by: T-001`.
   - `cuenta1.json` goes back to `IDLE`.
   - Collector events for the run's session IDs are there.
 - **Expected failure to record:** "roles don't see each other's code".
@@ -470,6 +487,10 @@ The first real `run-task`, with costs capped.
     - Once the kill grace has passed, `procs agent-cuenta1` shows no
       leftover `claude`, `node`, or shell children. Children that `setsid`
       out of the process group would survive: record them.
+    - Any inbox entry the killed phase had filed is still on disk, with
+      its `carried_by` stamp replaced by `orphaned_from: <task-id>`: a
+      task that dies does not take what it learned down with it, and the
+      next task is handed the entry as a claim nobody has reproduced.
 - **V4.2 Ctrl+C** (minimal quota). Start a run and press Ctrl+C during the
   arquitecto.
   - Expected, by design: `cuenta1.json` stays `BUSY`, and `procs` shows
@@ -853,6 +874,11 @@ logins.
   absence) in the task file. The unit tests fake `docker exec`, so what
   they cannot cover is whether `git merge-base`, `ls -d` and `grep -r`
   behave the same inside the agent image as they do in the fakes.
+- Changes to `dispatcher/learnings.py`: V3, and V4.1 for the release
+  path. The unit tests drive the store directly, so what they cannot show
+  is whether a phase handed the table actually greps it before debugging;
+  and `mark_orphaned` only runs on a cycle that ends without merging,
+  which V4.1 is the cheapest way to produce.
 - `mapping_enabled` turned on for the first time: V3 again, against a
   project with no `docs/README.md`. The mapper is the only phase that
   ignores `default_model`, and the only one with a turn budget, so its

@@ -12,6 +12,7 @@ from dispatcher import (
     docker_exec,
     gates,
     handoff,
+    learnings,
     project_docs,
     quota,
     role_skills,
@@ -202,9 +203,11 @@ def revisor_approved(result_text: str, payload: dict | None = None) -> bool:
 def _role_prompt(
     role: str,
     task_id: str,
+    slug: str,
     task_file: str,
     description: str,
     scratch_dir: str,
+    hive_dir: str,
     round_num: int | None = None,
     max_turns: int | None = None,
 ) -> str:
@@ -236,6 +239,12 @@ def _role_prompt(
     duties = project_docs.duties(role, task_id, max_turns=max_turns)
     if duties:
         prompt += f"\n\n{duties}"
+    # Read fresh on every phase, not once per task: an entry the implementador
+    # wrote in round 2 is in the revisor's table in the same round, which is
+    # the earliest anyone can be warned off a trap.
+    traps = learnings.duties(role, task_id, slug, hive_dir)
+    if traps:
+        prompt += f"\n\n{traps}"
     schema = handoff.schema_for(role)
     if schema is not None:
         # Says out loud what the schema can only imply: the handoff is the
@@ -672,7 +681,7 @@ def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
         logger.info("task %s: removed review worktrees %s", task_id, ", ".join(removed))
 
 
-def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> None:
+def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     """Offer a finished task's branch to the branch the project sits on.
 
     Best-effort in the same sense as the cleanup above: the task is already
@@ -680,23 +689,27 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> None:
     did not happen is a `dispatch merge-task` away. So a refusal is logged
     and the cycle ends normally rather than turning a finished task into a
     crashed one.
+
+    Returns whether the branch landed, because what the task wrote on it —
+    its docs, its learnings — is only readable to the next task once it has.
     """
     container = cleanup_container(cfg)
     if container is None:
-        return
+        return False
     project_dir = f"{cfg.projects_root}/{slug}"
     owner = docker_exec.read_owner(container, project_dir)
     try:
         outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
     except Exception as exc:
         logger.warning("could not merge task %s: %s", task_id, exc)
-        return
+        return False
     finally:
         docker_exec.restore_owner(container, project_dir, owner)
     if outcome.refused:
         logger.warning("task %s: not merged: %s", task_id, outcome.detail)
-    else:
-        logger.info("task %s: %s", task_id, outcome.detail)
+        return False
+    logger.info("task %s: %s", task_id, outcome.detail)
+    return True
 
 
 def _needs_mapping(cfg: Config, slug: str) -> bool:
@@ -730,6 +743,13 @@ def run_task_cycle(
     # Made by the dispatcher, not by the roles: a phase told to write its
     # detail somewhere should find the somewhere already there.
     scratch_dir = context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id)
+    # Same reason, one directory over: the phases are told to write a trap
+    # into the inbox the moment they hit it, so the inbox has to exist before
+    # the first of them runs. The reconcile is the confirmation pass — it
+    # runs no model, it only notices that a second task has now reported an
+    # error some earlier task reported alone.
+    learnings.ensure_dirs(cfg.hive_tasks_dir)
+    learnings.reconcile(cfg.hive_tasks_dir)
     # The card this task already mirrors, if any: seeded by `run-task
     # --kanban-issue-id`, or left behind by an earlier run that opened one.
     issue_id = (
@@ -766,6 +786,10 @@ def run_task_cycle(
     # Set when a phase bounced off another owner's lock: that run's worktrees
     # are in use, so the cleanup below has to keep its hands off them.
     foreign_lock = False
+    # Set once the auditor has filed what this task learned. Every other way
+    # out of the cycle — blocked, bounced, crashed — leaves entries nobody
+    # filed, and those have to go back to being unowned.
+    completed = False
 
     def run_phase(
         role: str,
@@ -786,7 +810,7 @@ def run_task_cycle(
             result = dispatch_phase(
                 cfg, task_id, slug, role,
                 prompt=_role_prompt(
-                    role, task_id, task_file, description, scratch_dir,
+                    role, task_id, slug, task_file, description, scratch_dir, cfg.hive_tasks_dir,
                     round_num=round_num, max_turns=max_turns,
                 ),
                 model=model or cfg.default_model,
@@ -876,12 +900,21 @@ def run_task_cycle(
             _update_task_status(kanban, issue_id, "blocked")
             return
 
+        # Stamped before the phase that files them, so the auditor's prompt
+        # can name the entries it owns and a later run can tell an entry that
+        # was handed to a task from one nobody has picked up yet.
+        learnings.carry(cfg.hive_tasks_dir, slug, task_id)
         if run_phase("auditor", final=True) is None:
             return
+        completed = True
 
         _update_task_status(kanban, issue_id, "done")
-        if cfg.merge_on_done:
-            _merge_task_branch(cfg, task_id, slug)
+        if cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug):
+            # Only now: the entries are in the project's docs on the branch
+            # that just landed, so the inbox copy would charge every later
+            # phase for a row the repo already has. A branch that did not
+            # merge keeps them here, where the next task still sees them.
+            learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
     finally:
         # Every way out of here is terminal for this run — done, blocked, or a
         # crash — and the reviewing checkouts are rebuilt on demand, so they can
@@ -889,3 +922,9 @@ def run_task_cycle(
         # never owned: another dispatcher is still working in those worktrees.
         if not foreign_lock:
             _drop_review_worktrees(cfg, task_id, slug)
+            if not completed:
+                # The entries stay — this task is the reason nobody has
+                # filed them yet — but they stop claiming a carrier that is
+                # gone, and a status this task alone vouched for goes back
+                # to being one phase's word.
+                learnings.mark_orphaned(cfg.hive_tasks_dir, task_id)

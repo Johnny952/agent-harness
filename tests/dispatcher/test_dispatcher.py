@@ -5,7 +5,7 @@ import time
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import gates, handoff, project_docs, role_skills
+from dispatcher import gates, handoff, learnings, project_docs, role_skills
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -2313,9 +2313,11 @@ def test_the_mapper_is_told_the_task_is_context_not_its_job() -> None:
     prompt = dispatcher_mod._role_prompt(
         project_docs.MAPPER_ROLE,
         "task-1",
+        "myproj",
         "/data/.hive/tasks/task-1.md",
         _DESCRIPTION,
         "/data/.hive/scratch/task-1",
+        "/data/.hive/tasks",
         max_turns=12,
     )
 
@@ -2344,3 +2346,200 @@ def test_run_task_cycle_hands_every_role_its_duty_to_the_project_docs(
     assert project_docs.LEARNINGS_INDEX in by_role["auditor"]
     for role, prompt in by_role.items():
         assert "never by line number" in prompt, f"{role} may cite a line number"
+
+
+# --- the shared learnings inbox, as the cycle moves it along ---------------
+
+
+#: Verbatim, because that is the whole point of the entry: a later phase
+#: finds this row by grepping for the message in front of it.
+_SYMPTOM = "ECONNREFUSED 127.0.0.1:5432"
+
+
+def _learning(cfg, name, **meta):
+    """One inbox entry, written as text in the shape the phases are told to use.
+
+    Not built through the module: what the cycle has to cope with is a file
+    some agent wrote, so the tests write one the same way.
+    """
+    fields = dict(
+        project="myproj",
+        task="task-8",
+        phase="implementador",
+        scope=learnings.SCOPE_PROJECT,
+        status=learnings.UNCONFIRMED,
+        when="the suite talks to a database",
+    )
+    fields.update(meta)
+    symptom = fields.pop("symptom", _SYMPTOM)
+    root = learnings.ensure_dirs(cfg.hive_tasks_dir)
+    path = os.path.join(root, learnings.INBOX_NAME, name)
+    with open(path, "w") as handle:
+        handle.write(
+            "---\n"
+            + "".join(f"{key}: {value}\n" for key, value in fields.items())
+            + "---\n\n"
+            f"## Symptom\n\n```\n{symptom}\n```\n\n"
+            "## Why\n\nThe fixture assumed a server that nothing starts.\n\n"
+            "## Rule\n\nStart postgres before the suite, not with it.\n\n"
+            "## Evidence\n\n`pytest -q tests/db` in the writers' worktree.\n"
+        )
+    return path
+
+
+def _inbox(cfg):
+    return {entry.ref: entry for entry in learnings.read_inbox(cfg.hive_tasks_dir)}
+
+
+def test_run_task_cycle_opens_the_inbox_before_the_first_phase(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """A phase is told to file a trap the moment it hits one, which can be its
+    first minute — so the directory cannot be made by whoever writes first."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert os.path.isdir(learnings.inbox_dir(cfg.hive_tasks_dir))
+    assert os.path.isdir(learnings.harness_dir(cfg.hive_tasks_dir))
+
+
+def test_run_task_cycle_confirms_a_trap_a_second_task_also_reported(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The confirmation pass runs no model: two tasks independently hitting
+    the same error is the evidence, and the dispatcher can see it by itself."""
+    cfg = _make_config(tmp_path)
+    _learning(cfg, "task-8-db.md", task="task-8")
+    _learning(cfg, "task-9-db.md", task="task-9")
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    statuses = {ref: entry.status for ref, entry in _inbox(cfg).items()}
+    assert statuses == {
+        "inbox/task-8-db.md": learnings.CONFIRMED,
+        "inbox/task-9-db.md": learnings.CONFIRMED,
+    }
+
+
+def test_run_task_cycle_hands_every_role_the_inbox_and_the_auditor_its_own_rows(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """Every role reads the inbox before debugging; only the auditor is told
+    which entries it is the one to file, because only it writes the docs."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    _learning(cfg, "task-8-db.md")
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    by_role = {call["role"]: call["prompt"] for call in calls}
+    for role, prompt in by_role.items():
+        assert learnings.root_dir(cfg.hive_tasks_dir) in prompt, f"{role} is not told where"
+        assert _SYMPTOM.split()[0] in prompt or "grep" in prompt, f"{role} is not told to grep"
+    assert "carried_by: task-1" in by_role["auditor"]
+    assert "carried_by: task-1" not in by_role["implementador"]
+
+
+def test_the_entries_are_stamped_before_the_auditor_files_them(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The auditor's prompt names the entries it owns, so the stamp has to be
+    on disk before that prompt is built — not after the phase returns."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    _learning(cfg, "task-8-db.md")
+    stamped = {}
+
+    def recording(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        stamped[role] = {ref: entry.carried_by for ref, entry in _inbox(cfg).items()}
+        return dispatcher_mod.DispatchResult(
+            success=True,
+            session_id=None,
+            result_text="VERDICT: APPROVED" if role == "revisor" else "ok",
+            account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", recording)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert stamped["implementador"] == {"inbox/task-8-db.md": ""}
+    assert stamped["auditor"] == {"inbox/task-8-db.md": "task-1"}
+
+
+def test_a_blocked_task_lets_go_of_the_entries_it_never_filed(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """Nobody filed them, so they have to go back to being unowned: a stamp
+    left behind by a dead run would keep the next task from picking them up."""
+    cfg = _make_config(tmp_path)
+    _learning(cfg, "task-8-db.md", carried_by="task-1")
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    entry = _inbox(cfg)["inbox/task-8-db.md"]
+    assert entry.carried_by == ""
+    # And the breadcrumb, so a human reading the file can see it was dropped
+    # rather than never picked up.
+    assert entry.meta["orphaned_from"] == ["task-1"]
+
+
+def test_a_merged_task_drops_the_entries_it_filed(tmp_path, monkeypatch, fake_git) -> None:
+    """They are in the project's docs on the branch that just landed, so the
+    inbox copy would charge every later prompt for a row the repo has."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    path = _learning(cfg, "task-8-db.md")
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert not os.path.exists(path)
+
+
+def test_a_refused_merge_keeps_the_entries_where_the_next_task_sees_them(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The docs are on a branch nothing has landed, so dropping the inbox copy
+    would hide the trap from every task until that branch finally merges."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    path = _learning(cfg, "task-8-db.md")
+
+    def refusing_merge(container, projects_root, slug, task_id):
+        return dispatcher_mod.docker_exec.MergeOutcome(
+            dispatcher_mod.docker_exec.REFUSED, "main", "has uncommitted changes"
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", refusing_merge)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert os.path.exists(path)
+    # Still stamped: the task did file them, and the stamp is what stops the
+    # next run from filing the same rows a second time before the merge.
+    assert _inbox(cfg)["inbox/task-8-db.md"].carried_by == "task-1"
+
+
+def test_a_run_that_bounced_off_another_owners_lock_leaves_its_entries_alone(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """Same reason the worktrees are left alone: the run that holds the lock
+    is still alive, and those entries are the ones it is about to file."""
+    cfg = _make_config(tmp_path)
+    _learning(cfg, "task-8-db.md", carried_by="task-1")
+
+    def locked(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        raise LockHeldError("task-1", "cuenta2")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", locked)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert _inbox(cfg)["inbox/task-8-db.md"].carried_by == "task-1"

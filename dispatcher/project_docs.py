@@ -146,7 +146,8 @@ _REVISOR = (
 _AUDITOR = (
     "You are the only phase that writes the indexes, which is what keeps two phases from editing "
     "them at once. Take the learnings and debt the earlier phases proposed in this task's "
-    f"handoffs and file them: a learning becomes a file under `{LEARNINGS_DIR}/` and a row in "
+    "handoffs — plus any entry this task carries in the shared learnings inbox named below — "
+    f"and file them: a learning becomes a file under `{LEARNINGS_DIR}/` and a row in "
     f"`{LEARNINGS_INDEX}`, a debt card a file under `{DEBT_DIR}/` and a row in `{DEBT_INDEX}`. "
     "Every row carries its trigger — \"when it applies\" for a learning, \"where\" for a debt — "
     "written as a condition the next agent can check against its own task, not as a topic. Where "

@@ -15,7 +15,7 @@ upstream authors'.
 
 | Skill | Upstream | Source | Change |
 |---|---|---|---|
-| `systematic-debugging` | superpowers 6.3.0, `skills/systematic-debugging` | https://github.com/obra/superpowers | Pruned: cross-skill references hedged, the "ask your human partner" escalation rewritten as a `blocked` handoff, one example reference file dropped |
+| `systematic-debugging` | superpowers 6.3.0, `skills/systematic-debugging` | https://github.com/obra/superpowers | Pruned: cross-skill references hedged, the "ask your human partner" escalation rewritten as a `blocked` handoff, one example reference file dropped. Added: Phase 1 starts by grepping this harness's learnings for the verbatim error |
 | `test-driven-development` | superpowers 6.3.0, `skills/test-driven-development` | https://github.com/obra/superpowers | Pruned: exceptions must be declared in the handoff rather than approved by a human |
 | `verification-before-completion` | superpowers 6.3.0, `skills/verification-before-completion` | https://github.com/obra/superpowers | Verbatim |
 | `writing-plans` | superpowers 6.3.0, `skills/writing-plans` | https://github.com/obra/superpowers | Pruned: worktree and plan-path conventions replaced with this harness's, the execution-handoff section rewritten |

@@ -54,6 +54,12 @@ You MUST complete each phase before proceeding to the next.
    - They often contain the exact solution
    - Read stack traces completely
    - Note line numbers, file paths, error codes
+   - Then search that error text, verbatim, in this project's learnings index
+     and in the shared learnings directory your prompt names, before you spend
+     a turn investigating it. Entries quote their errors word for word so that
+     a grep for the message finds them: someone may already have paid for this
+     one. An entry marked unconfirmed was reported once and never reproduced —
+     treat it as a lead to check, not as the answer.
 
 2. **Reproduce Consistently**
    - Can you trigger it reliably?

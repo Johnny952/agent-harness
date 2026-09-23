@@ -5,7 +5,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from dispatcher import context_transfer, docker_exec
+from dispatcher import context_transfer, docker_exec, learnings
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import cleanup_container, container_for, run_task_cycle
 from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
@@ -76,6 +76,55 @@ def _seed_kanban_issue_id(
     context_transfer.set_kanban_issue_id(cfg.hive_tasks_dir, args.task_id, args.kanban_issue_id)
 
 
+def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
+    """The human half of the learnings inbox.
+
+    Everything here is a judgement the dispatcher deliberately does not make:
+    whether a trap is real before a second task has hit it, and whether one
+    project's trap is every project's. The listing is the same table the
+    phases are handed, so what a human rules on is what the agents read.
+    """
+    hive = cfg.hive_tasks_dir
+    if args.promote:
+        entry = learnings.promote(hive, args.promote)
+        if entry is None:
+            print(
+                f"{args.promote}: no such inbox entry (already promoted ones cannot be "
+                "promoted again)",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        print(f"promoted to {entry.ref}: every project's phases now read it")
+        return
+    for flag, status in (("confirm", learnings.CONFIRMED), ("unconfirm", learnings.UNCONFIRMED)):
+        ref = getattr(args, flag)
+        if not ref:
+            continue
+        entry = learnings.set_status(hive, ref, status)
+        if entry is None:
+            print(f"{ref}: no such entry", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"{entry.ref}: {status}")
+        return
+    if args.drop:
+        ref = learnings.delete(hive, args.drop)
+        if ref is None:
+            print(f"{args.drop}: no such entry", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"deleted {ref}")
+        return
+
+    entries = learnings.read_all(hive)
+    if args.project:
+        entries = learnings.applicable(entries, args.project)
+    if not entries:
+        print(f"no learnings in {learnings.root_dir(hive)}")
+        return
+    print(learnings.table(entries))
+    print()
+    print(f"the entries themselves are in {learnings.root_dir(hive)}/, one file per row")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ia-harness-dispatcher")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
@@ -131,6 +180,38 @@ def main() -> None:
     merge_parser.add_argument("--task-id", required=True)
     merge_parser.add_argument("--project", required=True, help="Project slug")
 
+    learnings_parser = sub.add_parser(
+        "learnings",
+        help="Read and rule on the traps the phases filed. With no flag it prints "
+        "every entry the harness holds: the inbox any task can write to, and the "
+        "cross-project store, which only this command writes. An entry is "
+        "confirmed on its own once a second task hits the same wall; the flags "
+        "are for the calls only a human can make.",
+    )
+    learnings_parser.add_argument(
+        "--project",
+        help="Show only the entries this project's phases would be shown: "
+        "everything reviewed, plus everything this project found itself.",
+    )
+    learnings_group = learnings_parser.add_mutually_exclusive_group()
+    learnings_group.add_argument(
+        "--promote",
+        metavar="REF",
+        help="Move one inbox entry into the cross-project store, as a trap that "
+        "holds for every project this harness runs. This is the only way in, and "
+        "there is no automated path: it is one phase's word about every project "
+        "at once, so read the entry first.",
+    )
+    learnings_group.add_argument(
+        "--confirm", metavar="REF", help="Mark one entry confirmed without waiting for a second task."
+    )
+    learnings_group.add_argument(
+        "--unconfirm", metavar="REF", help="Take a confirmation back: the entry stays, as a claim."
+    )
+    learnings_group.add_argument(
+        "--drop", metavar="REF", help="Delete one entry. For a trap that was wrong, or one that no longer bites."
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -182,6 +263,15 @@ def main() -> None:
             print(outcome.detail, file=sys.stderr)
             raise SystemExit(1)
         print(outcome.detail)
+        # The same thing the automatic merge does, for the same reason: what
+        # the task learned is in the project's docs now, on the branch that
+        # just landed, so the inbox copy has stopped earning its place in
+        # every later prompt.
+        dropped = learnings.drop_promoted(cfg.hive_tasks_dir, args.task_id)
+        if dropped:
+            print(f"dropped {len(dropped)} filed inbox entr(y/ies): {', '.join(dropped)}")
+    elif args.command == "learnings":
+        _run_learnings(args, cfg)
 
 
 if __name__ == "__main__":
