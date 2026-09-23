@@ -49,6 +49,9 @@ def exec_claude(
     plugin_dirs: Sequence[str] | None = None,
     append_system_prompt: str | None = None,
     json_schema: dict | None = None,
+    permission_mode: str | None = None,
+    add_dirs: Sequence[str] | None = None,
+    allowed_tools: Sequence[str] | None = None,
 ) -> ClaudeResult:
     if timeout_seconds is not None and timeout_seconds <= 0:
         # coreutils `timeout 0` disables the in-container timeout entirely, so
@@ -62,6 +65,14 @@ def exec_claude(
         command += ["--model", model]
     if effort:
         command += ["--effort", effort]
+    # Who is allowed to answer a permission prompt. Under `-p` the CLI
+    # defaults `--permission-prompts` to "host", and there is no SDK host
+    # here and no --permission-prompt-tool, so with no mode every tool call
+    # that would prompt is denied — inside the phase's own worktree
+    # included. Every flag on this command belongs to one `claude` process,
+    # so a --resume retry has to carry it again; it inherits nothing.
+    if permission_mode:
+        command += ["--permission-mode", permission_mode]
     # A ceiling on agent turns, for a phase that is bounded by how much it may
     # spend rather than by what it must finish. Hitting it is not a crash: the
     # CLI returns its normal JSON with `is_error` and `subtype:
@@ -89,6 +100,22 @@ def exec_claude(
     # Compact separators because this travels as one argv element.
     if json_schema is not None:
         command += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
+    # Directories the file tools may touch besides the working directory.
+    # Declared `--add-dir <directories...>`, so one flag carries them all and
+    # the variadic stops at the next dash-prefixed token — which is why this
+    # sits ahead of the `-p` block and not after it.
+    if add_dirs:
+        command += ["--add-dir", *add_dirs]
+    # Tool patterns allowed outright, on top of whatever the permission mode
+    # already grants. `acceptEdits` covers the file tools and the CLI's own
+    # read-only Bash set, but not running a program: every `node --test` in
+    # the T-002 run was refused, so a phase cannot prove its own work. This
+    # is how the harness hands that back — narrowly, and from outside, since
+    # a phase writing its own .claude/settings.local.json is refused too.
+    # Variadic like --add-dir, so it sits ahead of the `-p` block for the
+    # same reason: the list stops at the next dash-prefixed token.
+    if allowed_tools:
+        command += ["--allowed-tools", *allowed_tools]
     command += ["-p", prompt, "--output-format", "json"]
     if timeout_seconds is not None:
         # Killing the host `docker exec` client does not kill the process inside

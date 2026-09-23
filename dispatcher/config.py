@@ -44,6 +44,15 @@ class VibeKanbanConfig:
     )
 
 
+#: The permission modes the CLI accepts (`claude --help`, 2.1.280). Checked at
+#: load time for the same reason the integer caps are: a typo is otherwise
+#: only caught by the CLI itself, which exits on an unknown choice after the
+#: quota probe, the lock and the worktree have already been claimed.
+PERMISSION_MODES = frozenset(
+    {"acceptEdits", "auto", "bypassPermissions", "dontAsk", "manual", "plan"}
+)
+
+
 @dataclasses.dataclass
 class Config:
     accounts: list[AccountConfig]
@@ -56,6 +65,8 @@ class Config:
     vibe_kanban: VibeKanbanConfig | None
     collector_url: str
     default_model: str
+    permission_mode: str | None
+    allowed_tools: list[str]
     max_revision_rounds: int
     escalate_effort_after_round: int
     escalated_effort: str
@@ -115,6 +126,69 @@ def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
     return VibeKanbanConfig(command=command, project_id=project_id, status_map=status_map)
 
 
+def _load_permission_mode(raw: dict) -> str | None:
+    """Which permission mode every phase command carries.
+
+    With no mode the CLI runs `-p` under `--permission-prompts host` with no
+    host to ask, so everything that would prompt is denied instead — Write and
+    Edit inside the phase's own worktree included. Measured end to end on
+    2026-09-23: 43 of 62 tool calls denied, not one file written, all three
+    phases blocked.
+
+    `acceptEdits` is the default because it is the most permissive mode this
+    harness can actually use. `bypassPermissions` is refused at startup when
+    the CLI runs as root, which the agent image does; `dontAsk` is precisely
+    the denial above; and `auto`, the one listed mode that would also cover
+    Bash, is a server-side classifier the CLI can report as unavailable, so it
+    is not something to depend on before it has been measured on these
+    accounts. Move this to `auto` once it has been.
+
+    `permission_mode: null` drops the flag again, which is how the unflagged
+    behaviour above stays measurable.
+    """
+    mode = raw.get("permission_mode", "acceptEdits")
+    if mode is None:
+        return None
+    if not isinstance(mode, str) or mode not in PERMISSION_MODES:
+        raise ValueError(
+            f"permission_mode must be null or one of: {', '.join(sorted(PERMISSION_MODES))}"
+        )
+    return mode
+
+
+def _load_allowed_tools(raw: dict) -> list[str]:
+    """Tool patterns every phase is allowed outright, on top of the mode.
+
+    The mode and this list are two independent grants, measured separately on
+    2026-09-23: `acceptEdits` covers the file tools and the CLI's own
+    read-only Bash set, but not running a program, and a phase asked to run
+    `node --test` was refused six times across three phases — so the task's
+    own acceptance criterion was unreachable and nothing in the loop ever
+    executed the code. The same prompt with `Bash(node --test*)` allowed ran
+    it in two turns. An allowlist with no mode alongside it ran it too, which
+    is why this is a separate setting rather than a property of the mode.
+
+    It has to come from here rather than from the phase, because a phase
+    cannot grant itself the permission: writing its own
+    `.claude/settings.local.json` is refused even under `acceptEdits`, and a
+    CLI flag is not on disk for it to reach at all. Narrow entries are the
+    point — prefer `Bash(npm test*)` over `Bash(npm*)`, and note that the
+    trailing `*` still lets arguments through.
+
+    Empty by default, which sends no flag: what a project's phases may run is
+    a decision about that project, and guessing it would be worse than asking.
+    """
+    tools = raw.get("allowed_tools", [])
+    if tools is None:
+        return []
+    if isinstance(tools, str) or not isinstance(tools, list):
+        raise ValueError("allowed_tools must be a list of tool patterns")
+    for tool in tools:
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError("allowed_tools entries must be non-empty strings")
+    return [tool.strip() for tool in tools]
+
+
 def load_config(path: str) -> Config:
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -147,6 +221,8 @@ def load_config(path: str) -> Config:
         vibe_kanban=_load_vibe_kanban(raw),
         collector_url=raw["collector_url"],
         default_model=raw.get("default_model", "opus"),
+        permission_mode=_load_permission_mode(raw),
+        allowed_tools=_load_allowed_tools(raw),
         max_revision_rounds=raw.get("max_revision_rounds", 3),
         escalate_effort_after_round=raw.get("escalate_effort_after_round", 2),
         escalated_effort=raw.get("escalated_effort", "high"),

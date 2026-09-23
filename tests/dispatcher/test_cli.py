@@ -1,4 +1,5 @@
 import io
+import logging
 import sys
 from pathlib import Path
 
@@ -510,3 +511,78 @@ def test_cli_merge_task_without_a_board_says_nothing_about_debt_cards(
     out = capsys.readouterr().out
     assert "merged agent/task/task-1 into main" in out
     assert "debt" not in out
+
+
+def _basic_config_recorder(monkeypatch) -> dict:
+    """`logging.basicConfig` is a no-op once the root logger has a handler,
+    and pytest gives it one, so what the dispatcher asked for cannot be read
+    back off the root logger here. The ask itself is what these tests are
+    about, so it is recorded instead."""
+    captured: dict = {}
+    monkeypatch.setattr(cli_mod.logging, "basicConfig", lambda **kwargs: captured.update(kwargs))
+    return captured
+
+
+def test_the_cli_gives_the_dispatcher_log_somewhere_to_go(tmp_path: Path, monkeypatch) -> None:
+    """Without this nothing configured logging at all: the root logger sat at
+    WARNING with no handler, so every `logger.info` in a run was dropped and a
+    full end-to-end run left five lines of log. INFO by default, and to stderr
+    because the subcommands print their results to stdout."""
+    monkeypatch.delenv(cli_mod._LOG_LEVEL_ENV, raising=False)
+    captured = _basic_config_recorder(monkeypatch)
+    _capture_cycle(monkeypatch)
+
+    _run(monkeypatch, _write_config(tmp_path), "--description", "do the thing")
+
+    assert captured["level"] == logging.INFO
+    assert captured["stream"] is sys.stderr
+    assert "%(asctime)s" in captured["format"]
+    assert "%(name)s" in captured["format"]
+
+
+def test_logging_is_up_before_the_arguments_are_parsed(tmp_path: Path, monkeypatch) -> None:
+    """An invocation argparse rejects exits through logging's last-resort
+    handler otherwise — no timestamp, no logger name — which is the format a
+    run is read in when something went wrong with how it was called."""
+    captured = _basic_config_recorder(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["ia-harness-dispatcher", "--nonsense"])
+
+    with pytest.raises(SystemExit):
+        cli_mod.main()
+
+    assert captured["level"] == logging.INFO
+
+
+@pytest.mark.parametrize("wanted,expected", [("DEBUG", logging.DEBUG), ("debug", logging.DEBUG), ("ERROR", logging.ERROR)])
+def test_the_environment_can_make_a_run_louder_or_quieter(
+    tmp_path: Path, monkeypatch, wanted, expected,
+) -> None:
+    """Through the environment rather than the config file, because the config
+    is mounted into every container and a noisy run is a property of the run,
+    not of the deployment. Case-insensitive: it is typed by hand."""
+    monkeypatch.setenv(cli_mod._LOG_LEVEL_ENV, wanted)
+    captured = _basic_config_recorder(monkeypatch)
+    _capture_cycle(monkeypatch)
+
+    _run(monkeypatch, _write_config(tmp_path), "--description", "do the thing")
+
+    assert captured["level"] == expected
+
+
+def test_an_unusable_log_level_falls_back_instead_of_killing_the_run(
+    tmp_path: Path, monkeypatch, caplog,
+) -> None:
+    """A typo in an environment variable should not cost a task. The fallback
+    is announced, and it is announced after logging is up rather than raised
+    from inside the call that sets logging up — otherwise the complaint would
+    go wherever the unconfigured logger sends it."""
+    monkeypatch.setenv(cli_mod._LOG_LEVEL_ENV, "verbose")
+    captured = _basic_config_recorder(monkeypatch)
+    cycle = _capture_cycle(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        _run(monkeypatch, _write_config(tmp_path), "--description", "do the thing")
+
+    assert captured["level"] == logging.INFO
+    assert cycle["task_id"] == "task-1"
+    assert any("verbose" in r.getMessage() for r in caplog.records)

@@ -76,6 +76,49 @@ collector_url: http://collector:8787
 # (arquitecto/implementador/revisor/auditor). Optional; defaults to opus.
 default_model: opus
 
+# Permission mode passed as `claude --permission-mode <mode>` on every call
+# that runs a role's own work. Without it the CLI runs `-p` with nobody able
+# to answer a permission prompt and denies instead of asking, so a phase
+# cannot write files — not even inside its own worktree.
+#   acceptEdits      auto-accepts file edits, and allows the CLI's own
+#                    read-only Bash set (ls, cat, grep, git status/log/diff)
+#                    plus the file-creating ones like `mkdir -p`. What it
+#                    refuses is running a program, `git add`/`git commit`,
+#                    and any path outside the working directory and the
+#                    add-dirs — see allowed_tools below for the first of those
+#   auto             a model classifier decides; also covers Bash, but the
+#                    server can report it unavailable
+#   plan / manual / dontAsk / bypassPermissions  the CLI's other choices;
+#                    bypassPermissions is refused outright when the CLI runs
+#                    as root, which the agent image does
+# Optional; defaults to acceptEdits. Set it to null to send no flag at all.
+permission_mode: acceptEdits
+
+# Tool patterns passed as `claude --allowed-tools <patterns...>` on every call
+# that runs a role's own work, on top of whatever permission_mode grants. The
+# two are independent: measured on 2026-09-23, an allowlist with no mode at
+# all still ran the command, and acceptEdits without one still refused it.
+#
+# This is what lets a phase prove its own work. In the first end-to-end run
+# the implementador and the revisor each tried `node --test` and were denied
+# every time, so the task's own acceptance criterion was unreachable and the
+# revisor correctly blocked it: the code had never executed. A phase cannot
+# fix that for itself — writing its own .claude/settings.local.json is
+# refused too, and a CLI flag is not on disk for it to reach — so the grant
+# has to come from here, which is also what keeps it honest.
+#
+# Entries look like `Bash(<command prefix>*)`. Keep them narrow: the trailing
+# `*` already lets arguments through, so `Bash(npm test*)` is a test runner
+# while `Bash(npm*)` is `npm install <anything>`. Patterns containing a space
+# survive intact.
+#
+# Optional; defaults to empty, which sends no flag. What a project's phases
+# may run is a decision about that project, so nothing is assumed — but note
+# that leaving it empty means the test gate is the only thing that ever runs
+# the code.
+allowed_tools:
+  - Bash(node --test*)
+
 # Cap on implementador/revisor rounds per task: after arquitecto hands off,
 # implementador and revisor alternate until the revisor's response ends with
 # a literal "VERDICT: APPROVED" line, or this many rounds have run without

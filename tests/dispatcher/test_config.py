@@ -33,6 +33,7 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.projects_root == "/data/projects"
     assert cfg.vibe_kanban is None
     assert cfg.default_model == "opus"
+    assert cfg.permission_mode == "acceptEdits"
     assert cfg.max_revision_rounds == 3
     assert cfg.escalate_effort_after_round == 2
     assert cfg.escalated_effort == "high"
@@ -55,6 +56,99 @@ def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
     assert cfg.escalate_effort_after_round == 1
     assert cfg.escalated_effort == "max"
     assert cfg.phase_timeout_seconds == 3600
+
+
+def test_the_permission_mode_defaults_to_the_one_this_harness_can_use(tmp_path: Path) -> None:
+    """Not left to the CLI's own default, which is the measured failure: with
+    no mode a phase's every prompting tool call is denied, its own worktree
+    included. `acceptEdits` is as permissive as this harness can go —
+    `bypassPermissions` is refused outright when the CLI runs as root, which
+    the agent image does."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    assert load_config(str(config_path)).permission_mode == "acceptEdits"
+
+
+def test_load_config_honours_a_permission_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\npermission_mode: plan\n")
+
+    assert load_config(str(config_path)).permission_mode == "plan"
+
+
+def test_an_explicit_null_permission_mode_sends_no_flag(tmp_path: Path) -> None:
+    """The way back to the unflagged call, kept deliberately: the denial it
+    produces is the baseline every measurement of this is compared against,
+    and a default nobody can turn off is a default nobody can check."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\npermission_mode: null\n")
+
+    assert load_config(str(config_path)).permission_mode is None
+
+
+@pytest.mark.parametrize("bad_value", ["acceptedits", "yolo", "44", "true"])
+def test_load_config_rejects_an_unknown_permission_mode(tmp_path: Path, bad_value: str) -> None:
+    """Caught here rather than by the CLI, which exits on an unknown choice
+    only after the quota probe has run and the lock and the worktree have
+    been claimed — so a typo costs a task's setup before it says anything."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\npermission_mode: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="permission_mode must be null or one of"):
+        load_config(str(config_path))
+
+
+def test_allowed_tools_is_empty_until_the_project_names_something(tmp_path: Path) -> None:
+    """Unlike the permission mode, this has no safe generic default: what a
+    phase may run is a fact about the project, and a guess that happened to
+    match would be a grant nobody decided on."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    assert load_config(str(config_path)).allowed_tools == []
+
+
+def test_load_config_honours_allowed_tools(tmp_path: Path) -> None:
+    """A pattern with a space in it survives YAML and reaches the flag whole —
+    the shape measured to let a phase run `node --test` at all."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML + '\nallowed_tools:\n  - "Bash(node --test*)"\n  - "Bash(npm test*)"\n'
+    )
+
+    assert load_config(str(config_path)).allowed_tools == [
+        "Bash(node --test*)", "Bash(npm test*)",
+    ]
+
+
+def test_an_explicit_null_allowed_tools_is_the_same_as_none(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nallowed_tools: null\n")
+
+    assert load_config(str(config_path)).allowed_tools == []
+
+
+def test_load_config_rejects_allowed_tools_written_as_one_string(tmp_path: Path) -> None:
+    """The flag calls itself "comma or space-separated", so a single string
+    looks plausible and would load — as a list of its characters everywhere
+    this is iterated. Refusing it names the mistake instead."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + '\nallowed_tools: "Bash(node --test*)"\n')
+
+    with pytest.raises(ValueError, match="allowed_tools must be a list"):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize("bad_entry", ['""', '"   "', "44", "null"])
+def test_load_config_rejects_an_empty_allowed_tools_entry(tmp_path: Path, bad_entry: str) -> None:
+    """An empty pattern reaches the CLI as a bare argument after the variadic
+    flag, where it is not ignored — it is read as the next thing in the list."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nallowed_tools:\n  - {bad_entry}\n")
+
+    with pytest.raises(ValueError, match="allowed_tools entries must be non-empty strings"):
+        load_config(str(config_path))
 
 
 def test_mapping_is_off_until_it_is_asked_for(tmp_path: Path) -> None:

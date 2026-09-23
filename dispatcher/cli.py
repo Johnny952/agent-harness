@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -140,7 +142,47 @@ def _kanban(cfg: Config) -> NullKanbanClient | VibeKanbanClient:
     return VibeKanbanClient(cfg.vibe_kanban) if cfg.vibe_kanban else NullKanbanClient()
 
 
+#: Read once, at startup, so a run can be made louder or quieter without
+#: touching the config file the containers share.
+_LOG_LEVEL_ENV = "DISPATCH_LOG_LEVEL"
+
+
+def _configure_logging() -> str | None:
+    """Give the dispatcher's own log somewhere to go.
+
+    Nothing configured logging before this, so the root logger sat at WARNING
+    with no handler: every `logger.info` in a run was dropped, and the few
+    warnings that survived went through logging's last-resort handler with no
+    timestamp and no logger name. A full end-to-end run produced five lines of
+    log, which is not enough to tell what a task did.
+
+    stderr, not stdout: the subcommands print their results to stdout and a
+    caller may be reading them.
+
+    Returns the unusable level name when the environment asked for one, for
+    the caller to report once logging is actually up.
+    """
+    wanted = os.environ.get(_LOG_LEVEL_ENV)
+    level = logging.getLevelName((wanted or "INFO").upper())
+    bad = None
+    if not isinstance(level, int):
+        bad, level = wanted, logging.INFO
+    logging.basicConfig(
+        level=level,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    return bad
+
+
 def main() -> None:
+    # Before the parser, so that even an unparseable invocation logs the way
+    # a real run does.
+    bad_level = _configure_logging()
+    if bad_level:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a log level; using INFO", _LOG_LEVEL_ENV, bad_level
+        )
     parser = argparse.ArgumentParser(prog="ia-harness-dispatcher")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)

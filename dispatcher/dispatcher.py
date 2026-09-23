@@ -32,6 +32,39 @@ logger = logging.getLogger(__name__)
 _USAGE_PROBE_TIMEOUT_SECONDS = 120
 
 
+def _phase_permission_flags(cfg: Config) -> dict:
+    """What every call that runs a role's own work has to carry.
+
+    Three flags. The first two are the two halves of one measured failure
+    (2026-09-23, 43 of 62 tool calls denied and no file written):
+
+    `permission_mode`, because under `-p` with no mode and no SDK host there
+    is nobody to answer a permission prompt, so the CLI denies instead of
+    asking — Write and Edit inside the phase's own worktree included.
+
+    `add_dirs`, because the file tools refuse every path outside the working
+    directory, and the role prompt sends the phase to three places outside it:
+    the task file holding the previous phase's handoff, the learnings index,
+    and the inbox it is asked to file a trap in. All three are under the hive
+    root, so the hive root is what gets opened — not the project tree, since
+    reaching another phase's worktree is exactly what the worktrees prevent.
+
+    `allowed_tools`, because the mode above stops short of running a program.
+    The same run refused every `node --test` a phase attempted, so no phase
+    could prove its own work, and a phase cannot lift that for itself: its
+    own `.claude/settings.local.json` is refused too. It is empty unless the
+    project's config names patterns, so this adds no flag by default.
+
+    The /usage probes do not get these: a probe runs a built-in command, uses
+    no tools and touches no files.
+    """
+    return {
+        "permission_mode": cfg.permission_mode,
+        "add_dirs": [context_transfer.hive_root(cfg.hive_tasks_dir)],
+        "allowed_tools": cfg.allowed_tools,
+    }
+
+
 @dataclasses.dataclass
 class DispatchResult:
     success: bool
@@ -419,6 +452,9 @@ def _shrink_over_budget(
         # schema does travel — without it the shorter answer comes back as
         # prose and the parse falls through to the clamp.
         json_schema=handoff.schema_for(role),
+        # A resume is a new `claude` process and inherits no flags, so the
+        # permissions have to be restated here too.
+        **_phase_permission_flags(cfg),
     )
     if not _exec_succeeded(retry) or is_rate_limit_error(retry):
         # The first return is over budget but complete; a failed or
@@ -512,6 +548,9 @@ def _run_gates(
         # none: the session has already read them. The schema does travel —
         # the retry's return is the one that lands in the task file.
         json_schema=handoff.schema_for(role),
+        # Restated for the same reason as the shrink retry's: new process,
+        # no inherited flags.
+        **_phase_permission_flags(cfg),
     )
     if not _exec_succeeded(retry) or is_rate_limit_error(retry):
         # The first return stands: a phase that finished with findings against
@@ -589,6 +628,7 @@ def dispatch_phase(
                     plugin_dirs=role_skills.plugin_dirs(role),
                     append_system_prompt=role_skills.system_prompt(role),
                     json_schema=handoff.schema_for(role),
+                    **_phase_permission_flags(cfg),
                 )
                 # Before the shrink, not after: the gate retry writes a new
                 # handoff, and the byte budget has to be enforced on the return
@@ -1021,7 +1061,13 @@ def run_task_cycle(
             return
 
         approved = False
+        # Counted separately from `round_num`: `max_revision_rounds: 0` makes
+        # the range empty and leaves the loop variable unbound, and the one
+        # place that reads this is the branch that runs when the loop did not
+        # approve — including when it never ran.
+        rounds_run = 0
         for round_num in range(1, cfg.max_revision_rounds + 1):
+            rounds_run = round_num
             implemented = run_phase("implementador", round_num=round_num)
             if implemented is None:
                 return
@@ -1064,6 +1110,15 @@ def run_task_cycle(
                 )
 
         if not approved:
+            # Said out loud because otherwise nothing says it: the board move
+            # below is a no-op when the task has no kanban issue, the task
+            # file's `status:` is only written by a handoff, and the run exits
+            # 0 either way — so a task that used up every round looked exactly
+            # like one that was never dispatched.
+            logger.warning(
+                "task %s: blocked after %d of %d revision round(s) without an approval",
+                task_id, rounds_run, cfg.max_revision_rounds,
+            )
             _update_task_status(kanban, issue_id, "blocked")
             return
 

@@ -37,6 +37,8 @@ from pathlib import Path
 
 import yaml
 
+from dispatcher import context_transfer
+
 logger = logging.getLogger(__name__)
 
 #: Beside the task files rather than in any repo: the dispatcher container
@@ -74,7 +76,7 @@ def root_dir(hive_dir: str) -> str:
     `/data/.hive/learnings`, on the dispatcher and in both agent containers.
     A second config key is a second thing that can disagree.
     """
-    return os.path.join(os.path.dirname(os.path.normpath(hive_dir)), ROOT_NAME)
+    return os.path.join(context_transfer.hive_root(hive_dir), ROOT_NAME)
 
 
 def inbox_dir(hive_dir: str) -> str:

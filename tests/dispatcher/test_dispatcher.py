@@ -65,6 +65,8 @@ def _make_config(tmp_path, **overrides):
         vibe_kanban=None,
         collector_url="http://127.0.0.1:8787",
         default_model="opus",
+        permission_mode="acceptEdits",
+        allowed_tools=[],
         max_revision_rounds=3,
         escalate_effort_after_round=2,
         escalated_effort="high",
@@ -322,6 +324,113 @@ def test_dispatch_phase_asks_the_phase_for_the_roles_handoff_schema(tmp_path, mo
     assert probe.get("json_schema") is None
 
 
+def test_dispatch_phase_lets_the_phase_write_and_read_where_it_was_sent(tmp_path, monkeypatch) -> None:
+    """The two halves of one measured failure (43 of 62 tool calls denied, not
+    one file written): with no permission mode there is nobody to answer a
+    prompt so the CLI denies, and with no extra directory the file tools
+    refuse the task file and the learnings the role prompt sends the phase to.
+    The probe gets neither — it runs a built-in, uses no tools and touches no
+    files."""
+    cfg = _make_config(tmp_path)
+    probe = {}
+    calls = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            probe.update(kwargs)
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        calls.append(kwargs)
+        return ClaudeResult(session_id="sess-1", result_text="ok", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[0]["permission_mode"] == "acceptEdits"
+    assert calls[0]["add_dirs"] == [str(tmp_path)]
+    assert probe.get("permission_mode") is None
+    assert not probe.get("add_dirs")
+
+
+def test_the_opened_directory_is_the_hive_root_and_not_the_tasks_dir(tmp_path, monkeypatch) -> None:
+    """`hive_tasks_dir` points at the tasks folder, but a role is also told to
+    read the learnings index and to file a trap in its inbox — siblings of it.
+    Opening their shared parent covers all three, and stops there: reaching
+    another phase's worktree is what the worktrees exist to prevent."""
+    cfg = _make_config(tmp_path, hive_tasks_dir=str(tmp_path / "hive" / "tasks"))
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="ok", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[0]["add_dirs"] == [str(tmp_path / "hive")]
+    assert calls[0]["add_dirs"] != [cfg.hive_tasks_dir]
+    assert learnings.root_dir(cfg.hive_tasks_dir).startswith(calls[0]["add_dirs"][0])
+
+
+def test_a_null_permission_mode_reaches_the_phase_as_no_mode(tmp_path, monkeypatch) -> None:
+    """The config key is what makes the unflagged call reproducible, so it has
+    to survive the trip: a default the dispatcher re-applies on the way past
+    would be a default nobody can measure against."""
+    cfg = _make_config(tmp_path, permission_mode=None)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="ok", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[0]["permission_mode"] is None
+
+
+def test_dispatch_phase_hands_the_phase_the_commands_it_may_run(tmp_path, monkeypatch) -> None:
+    """The third of the measured denials, and the one the mode does not cover:
+    `acceptEdits` allows the file tools but refuses to run a program, so every
+    `node --test` a phase attempted was denied and no phase could prove its
+    own work. The phase cannot lift this itself — writing its own
+    `.claude/settings.local.json` is refused too — so it arrives as a flag.
+    The probe gets nothing: it runs a built-in and uses no tools."""
+    cfg = _make_config(tmp_path, allowed_tools=["Bash(node --test*)"])
+    probe = {}
+    calls = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            probe.update(kwargs)
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        calls.append(kwargs)
+        return ClaudeResult(session_id="sess-1", result_text="ok", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[0]["allowed_tools"] == ["Bash(node --test*)"]
+    assert not probe.get("allowed_tools")
+
+
+def test_a_harness_that_named_no_commands_grants_none(tmp_path, monkeypatch) -> None:
+    """The default has to reach the phase as an empty list rather than as some
+    convenience set the dispatcher fills in: a grant nobody wrote down is a
+    grant nobody can audit, and this one lets a phase run programs."""
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="ok", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[0]["allowed_tools"] == []
+
+
 def test_dispatch_phase_returns_the_parsed_handoff(tmp_path, monkeypatch) -> None:
     """`result_text` is the CLI's placeholder once a schema validated; the
     payload is the phase's actual answer, so it travels on the result."""
@@ -372,6 +481,24 @@ def test_dispatch_phase_asks_once_for_a_shorter_handoff_when_over_budget(tmp_pat
     assert not retry.get("append_system_prompt")
     assert "3072" in retry["prompt"]
     assert result.handoff == _LEAN_HANDOFF
+
+
+def test_the_shrink_retry_restates_the_permission_flags(tmp_path, monkeypatch) -> None:
+    """A `--resume` is a new `claude` process and inherits no flags from the
+    one it resumes. The retry rewrites the handoff, which is a write — so
+    without them restated it would be denied for exactly the same reason the
+    first call would have been."""
+    cfg = _make_config(tmp_path)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[1]["resume_session_id"] == "sess-1"
+    assert calls[1]["permission_mode"] == "acceptEdits"
+    assert calls[1]["add_dirs"] == [str(tmp_path)]
 
 
 def test_dispatch_phase_takes_the_retry_even_if_it_is_still_over_budget(tmp_path, monkeypatch) -> None:
@@ -649,6 +776,25 @@ def test_dispatch_phase_keeps_the_first_return_when_the_gate_retry_fails(tmp_pat
     assert result.result_text == "built it"
     assert len(gate_calls) == 1
     assert result.gates.blocking is True
+
+
+def test_the_gate_retry_restates_the_permission_flags(tmp_path, monkeypatch) -> None:
+    """Restated for the same reason as the shrink retry's, and with more at
+    stake: this call exists to fix the code the gates found fault with, so a
+    denied Edit turns the one call that saves a review round into a wasted
+    one."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+        ClaudeResult(session_id="sess-1", result_text="fixed it", raw={"is_error": False}),
+    ])
+    _gate_recorder(monkeypatch, [_one_finding(gates.BLOCKING), gates.Report()])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert calls[1]["resume_session_id"] == "sess-1"
+    assert calls[1]["permission_mode"] == "acceptEdits"
+    assert calls[1]["add_dirs"] == [str(tmp_path)]
 
 
 def test_dispatch_phase_does_not_resume_a_gated_phase_without_a_session(tmp_path, monkeypatch) -> None:
@@ -1834,6 +1980,37 @@ def _rejecting_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_sessi
         result_text="VERDICT: CHANGES_REQUESTED" if role == "revisor" else "ok",
         account="cuenta1",
     )
+
+
+def test_run_task_cycle_says_why_a_task_came_out_blocked(tmp_path, monkeypatch, fake_git, caplog) -> None:
+    """Blocked is the status that needs a human, and it was the one that left
+    no trace: with no issue id there is no board to write to, so the run ended
+    at exit 0 with the task still `pending` and nothing anywhere saying a
+    revisor had refused it three times. This line is that trace."""
+    cfg = _make_config(tmp_path, max_revision_rounds=2)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+
+    with caplog.at_level("WARNING"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert any(
+        "task-1" in r.getMessage() and "blocked after 2 of 2" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_the_blocked_line_counts_rounds_that_ran_not_rounds_allowed(tmp_path, monkeypatch, fake_git, caplog) -> None:
+    """`max_revision_rounds: 0` blocks without dispatching anybody, and the
+    two readings — nobody was asked, versus the cap was spent — call for
+    different fixes. The count is of rounds that actually ran, so the line
+    tells them apart."""
+    cfg = _make_config(tmp_path, max_revision_rounds=0)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+
+    with caplog.at_level("WARNING"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert any("blocked after 0 of 0" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize(

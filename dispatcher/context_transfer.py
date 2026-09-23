@@ -69,6 +69,19 @@ class TaskFile:
     resolved_debt: list[str] = dataclasses.field(default_factory=list)
 
 
+def hive_root(hive_dir: str) -> str:
+    """The directory the task files and the learnings share.
+
+    Derived, not configured, for the reason `learnings.root_dir` gives: both
+    sides of the mount have to agree, and a second config key is a second
+    thing that can disagree. The dispatcher hands this to a phase as an extra
+    allowed directory — a role is told to read its task file and to file a
+    learnings entry, and both sit outside the worktree, where the file tools
+    refuse them.
+    """
+    return os.path.dirname(os.path.normpath(hive_dir))
+
+
 def task_file_path(hive_dir: str, task_id: str) -> str:
     return os.path.join(hive_dir, f"{task_id}.md")
 

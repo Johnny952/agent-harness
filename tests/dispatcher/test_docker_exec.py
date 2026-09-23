@@ -332,6 +332,189 @@ def test_exec_claude_omits_json_schema_when_not_given(monkeypatch) -> None:
     assert "--json-schema" not in captured["cmd"]
 
 
+def test_exec_claude_passes_the_permission_mode_before_the_prompt(monkeypatch) -> None:
+    """The flag that decides whether a phase can write anything at all. With
+    no mode the CLI runs `-p` under `--permission-prompts host` with no host
+    to ask, and denies instead of asking — the phase's own worktree included.
+    Read as a flag, so past `-p` it would join the prompt's argument list."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", permission_mode="acceptEdits")
+
+    cmd = captured["cmd"]
+    assert cmd.index("--permission-mode") < cmd.index("-p")
+    assert cmd[cmd.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_exec_claude_omits_the_permission_mode_when_not_given(monkeypatch) -> None:
+    """`permission_mode: null` has to reach the CLI as no flag rather than an
+    empty one, because that unflagged call is the measured baseline the config
+    key exists to keep reproducible."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", permission_mode=None)
+
+    assert "--permission-mode" not in captured["cmd"]
+
+
+def test_exec_claude_passes_every_add_dir_under_one_flag(monkeypatch) -> None:
+    """`--add-dir <directories...>` is variadic: one flag collects every path
+    that follows it until the next dash-prefixed token. Repeating the flag
+    would work too, but one flag is what the CLI documents, and a
+    comma-joined list would be read as a single directory whose name contains
+    a comma."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", add_dirs=["/data/.hive", "/data/shared"])
+
+    cmd = captured["cmd"]
+    assert cmd.count("--add-dir") == 1
+    start = cmd.index("--add-dir")
+    assert cmd[start + 1:start + 3] == ["/data/.hive", "/data/shared"]
+
+
+def test_exec_claude_puts_add_dirs_before_the_prompt(monkeypatch) -> None:
+    """Placed ahead of `-p` for both reasons at once: a flag past `-p` is not
+    read as a flag, and a variadic that started there would swallow the
+    prompt's own arguments until the next dash."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", add_dirs=["/data/.hive"])
+
+    cmd = captured["cmd"]
+    assert cmd.index("--add-dir") < cmd.index("-p")
+    assert cmd[cmd.index("--add-dir") + 1] == "/data/.hive"
+
+
+@pytest.mark.parametrize("add_dirs", [None, []])
+def test_exec_claude_omits_add_dir_when_there_is_nothing_to_add(monkeypatch, add_dirs) -> None:
+    """A bare `--add-dir` with nothing after it would take the next token as a
+    directory — which is `-p`'s prompt or a flag the CLI then never sees."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", add_dirs=add_dirs)
+
+    assert "--add-dir" not in captured["cmd"]
+
+
+def test_exec_claude_passes_every_allowed_tool_under_one_flag(monkeypatch) -> None:
+    """`--allowed-tools <tools...>` is variadic like `--add-dir`, and a
+    pattern that contains a space stays one argv element: the flag documents
+    itself as "comma or space-separated", but the splitting happens inside a
+    single argument, so `Bash(node --test*)` handed over whole is not torn in
+    two. Measured against a live CLI on 2026-09-23 — that pattern, this
+    shape, and node ran."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude(
+        "agent-cuenta1", "/wd", "do it",
+        allowed_tools=["Bash(node --test*)", "Bash(npm test*)"],
+    )
+
+    cmd = captured["cmd"]
+    assert cmd.count("--allowed-tools") == 1
+    start = cmd.index("--allowed-tools")
+    assert cmd[start + 1:start + 3] == ["Bash(node --test*)", "Bash(npm test*)"]
+
+
+def test_exec_claude_puts_allowed_tools_before_the_prompt(monkeypatch) -> None:
+    """Same reason as `--add-dir`: a variadic that started past `-p` would eat
+    the prompt instead of being read as a flag at all."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", allowed_tools=["Bash(node --test*)"])
+
+    cmd = captured["cmd"]
+    assert cmd.index("--allowed-tools") < cmd.index("-p")
+    assert cmd[cmd.index("--allowed-tools") + 1] == "Bash(node --test*)"
+
+
+@pytest.mark.parametrize("allowed_tools", [None, []])
+def test_exec_claude_omits_allowed_tools_when_there_is_nothing_to_allow(
+    monkeypatch, allowed_tools,
+) -> None:
+    """Empty is the default, and a bare `--allowed-tools` would take the next
+    token as a pattern — silently widening or breaking the command instead of
+    sending no flag."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude("agent-cuenta1", "/wd", "do it", allowed_tools=allowed_tools)
+
+    assert "--allowed-tools" not in captured["cmd"]
+
+
+def test_exec_claude_keeps_allowed_tools_and_add_dirs_apart(monkeypatch) -> None:
+    """Two variadics in a row: each one has to stop at the other's flag rather
+    than absorbing it, which is what makes the order they are emitted in safe."""
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+
+    exec_claude(
+        "agent-cuenta1", "/wd", "do it",
+        add_dirs=["/data/.hive"],
+        allowed_tools=["Bash(node --test*)"],
+    )
+
+    cmd = captured["cmd"]
+    start = cmd.index("--add-dir")
+    assert cmd[start + 1] == "/data/.hive"
+    assert cmd[start + 2] == "--allowed-tools"
+    assert cmd[cmd.index("--allowed-tools") + 2] == "-p"
+
+
 def test_exec_claude_keeps_the_structured_output_on_raw(monkeypatch) -> None:
     """The validated return arrives as a field of the `--output-format json`
     envelope, beside `result` rather than inside it, and `raw` is what carries
