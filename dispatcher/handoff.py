@@ -67,7 +67,11 @@ _PROPERTIES: dict[str, dict] = {
             "required": ["id", "doing"],
             "additionalProperties": False,
         },
-        "description": "Subagents you started, so a later phase can revive one instead of respawning it.",
+        "description": (
+            "Subagents you started, as a record of who was on what. Leave it empty: the "
+            "dispatcher fills the ids in from disk, because the Agent tool tells you not "
+            "to repeat them."
+        ),
     },
     "learnings": {
         "type": "array",

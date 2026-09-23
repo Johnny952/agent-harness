@@ -5,7 +5,7 @@ import time
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills
+from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills, subagents
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -269,6 +269,29 @@ def _phase_recorder(monkeypatch, phase_results):
         lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
     )
     return calls
+
+#: A real session and a real subagent, from the D1 run written up in
+#: docs/ROADMAP.md. The session ids have to be uuid-shaped: everywhere else in
+#: this file `sess-1` is enough, but the harvest refuses anything that is not
+#: a session id, so a test using `sess-1` would prove nothing.
+_SESSION_UUID = "85e10326-e62c-48de-be2f-9a7c92741789"
+_OTHER_SESSION_UUID = "23ea98a7-6dc7-4ed6-abb9-9e73c3dfc6b4"
+_THIRD_SESSION_UUID = "7c3f1e42-5d6a-4b8c-9e01-2f3a4b5c6d7e"
+_SUBAGENT = subagents.Subagent(
+    id="a0af9044f9cb2c8db", description="slow count", agent_type="general-purpose"
+)
+
+
+def _fake_subagents(monkeypatch, agents=(_SUBAGENT,)):
+    """Disk, with `agents` on it. Returns what each lookup asked for."""
+    asked = []
+
+    def fake_of_session(container, session_id):
+        asked.append((container, session_id))
+        return list(agents) if session_id else []
+
+    monkeypatch.setattr(dispatcher_mod.subagents, "of_session", fake_of_session)
+    return asked
 
 
 def test_dispatch_phase_asks_the_phase_for_the_roles_handoff_schema(tmp_path, monkeypatch) -> None:
@@ -663,6 +686,138 @@ def test_the_shrink_is_measured_against_what_the_gate_retry_wrote(tmp_path, monk
     assert len(calls) == 3
     assert str(budget) in calls[2]["prompt"], "the third call is the shrink, not another gate retry"
     assert result.handoff == _LEAN_HANDOFF
+
+
+def test_a_fresh_phase_is_not_told_to_revive_anything(tmp_path, monkeypatch) -> None:
+    """A new session has no subagents of its own to revive, and SendMessage
+    cannot reach another session's — so the note would be bytes paid for on
+    every first call in exchange for nothing."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="built it", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert calls[0]["prompt"] == "build the thing"
+
+
+def test_a_resumed_phase_is_told_what_it_left_running(tmp_path, monkeypatch) -> None:
+    """The one call in a phase's life that can revive rather than respawn.
+    The ids are looked up in the container the phase actually landed in, and
+    not asked of the role: the Agent tool tells it not to repeat them."""
+    cfg = _make_config(tmp_path)
+    asked = _fake_subagents(monkeypatch)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="carried on", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(
+        cfg, "task-1", "myproj", "implementador", "carry on",
+        resume_session_id=_SESSION_UUID,
+    )
+
+    prompt = calls[0]["prompt"]
+    assert prompt.startswith("carry on\n\n"), "the note is appended, never a replacement"
+    assert "SendMessage" in prompt
+    assert _SUBAGENT.id in prompt
+    assert _SUBAGENT.description in prompt, "which agent is which is what makes the id usable"
+    assert ("agent-cuenta1", _SESSION_UUID) in asked
+
+
+def test_a_phase_that_fails_over_twice_carries_one_note_about_where_it_landed(tmp_path, monkeypatch) -> None:
+    """Each attempt builds its prompt from the untouched original. Appending
+    in place would stack a note per failover, each about an account's session
+    the new one cannot address anyway."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+            AccountConfig(name="cuenta3", container="agent-cuenta3"),
+        ],
+    )
+    _fake_subagents(monkeypatch)
+    calls = []
+    limited = {"agent-cuenta1": _SESSION_UUID, "agent-cuenta2": _OTHER_SESSION_UUID}
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        calls.append(dict(container=container, prompt=prompt, resume_session_id=resume_session_id))
+        if container in limited:
+            return ClaudeResult(session_id=limited[container], result_text="usage limit reached", raw={"is_error": True})
+        return ClaudeResult(session_id=_THIRD_SESSION_UUID, result_text="done it", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert result.success is True
+    assert [call["container"] for call in calls] == ["agent-cuenta1", "agent-cuenta2", "agent-cuenta3"]
+    assert calls[0]["prompt"] == "build the thing", "nothing to resume yet"
+    assert calls[2]["resume_session_id"] == _OTHER_SESSION_UUID
+    assert calls[2]["prompt"].count("SendMessage") == 1
+    assert calls[2]["prompt"].startswith("build the thing\n\n")
+
+
+def test_the_gate_retry_is_told_who_it_can_hand_the_fix_to(tmp_path, monkeypatch) -> None:
+    """A phase that has to answer the gates is exactly the case the note is
+    for: the subagent that wrote the code the gates are red about is still
+    addressable, and briefing a fresh one costs the same work twice."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _fake_subagents(monkeypatch)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+    _gate_recorder(monkeypatch, [_one_finding(gates.ASK), gates.Report()])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    retry = calls[1]["prompt"]
+    assert "the test suite is red" in retry
+    assert _SUBAGENT.id in retry
+
+
+def test_the_shrink_retry_is_not_told_about_subagents(tmp_path, monkeypatch) -> None:
+    """It resumes a session too, but it asks for the same answer in fewer
+    bytes. There is no work there to hand to a subagent, so the note would be
+    a cost — in the one call whose whole point is to be smaller."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[1]["resume_session_id"] == _SESSION_UUID, "it is a resume all the same"
+    assert "SendMessage" not in calls[1]["prompt"]
+    assert _SUBAGENT.id not in calls[1]["prompt"]
+
+
+def test_the_handoff_gets_the_subagent_ids_from_disk(tmp_path, monkeypatch) -> None:
+    """The phase cannot fill this field — it is told not to surface agent ids
+    — so the dispatcher fills it, and what the phase did say is replaced
+    rather than merged: disk is the only source that can be trusted here."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch)
+    invented = dict(_LEAN_HANDOFF, subagents=[{"id": "made-up", "doing": "who knows"}])
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": invented}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.handoff["subagents"] == [{"id": _SUBAGENT.id, "doing": "slow count"}]
+    assert result.handoff["verdict"] == _LEAN_HANDOFF["verdict"], "the rest of the return is untouched"
 
 
 def test_the_gates_write_their_test_log_into_the_tasks_scratch_dir(tmp_path, monkeypatch) -> None:

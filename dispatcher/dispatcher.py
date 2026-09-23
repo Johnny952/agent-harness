@@ -18,6 +18,7 @@ from dispatcher import (
     quota,
     role_skills,
     state_machine,
+    subagents,
 )
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
@@ -344,6 +345,33 @@ def _commit_message(
     )
 
 
+def _with_revive_note(container: str, prompt: str, session_id: str | None) -> str:
+    """The prompt, plus what this session already has running, if anything.
+
+    Only ever called on a `--resume`. A phase that picks a session back up is
+    the one place a subagent can be revived rather than started again — the
+    CLI names the ones that outlived the session, and this says what to do
+    with them. A fresh session has none of its own and gets nothing appended,
+    which is why this is not in the role's system prompt: that text is paid
+    for on every call.
+
+    The shrink retry is deliberately left out. It resumes a session too, but
+    it asks for the same return in fewer bytes; there is no work there to hand
+    back to a subagent, so the note would be a cost with no use.
+    """
+    note = subagents.revive_note(subagents.of_session(container, session_id))
+    return f"{prompt}\n\n{note}" if note else prompt
+
+
+def _phase_handoff(container: str, result: docker_exec.ClaudeResult) -> dict | None:
+    """The phase's structured return, with the subagent ids filled in.
+
+    The ids come from disk rather than from the return itself because the
+    Agent tool tells the role not to repeat them; see `dispatcher/subagents.py`.
+    """
+    return subagents.backfill(handoff.parse(result), subagents.of_session(container, result.session_id))
+
+
 def _shrink_over_budget(
     cfg: Config,
     container: str,
@@ -477,7 +505,7 @@ def _run_gates(
         task_id, role, len(report.findings),
     )
     retry = docker_exec.exec_claude(
-        container, workdir, report.resume_prompt(),
+        container, workdir, _with_revive_note(container, report.resume_prompt(), result.session_id),
         resume_session_id=result.session_id, model=model, effort=effort,
         timeout_seconds=cfg.phase_timeout_seconds,
         # No skills on the retry, for the same reason the shrink retry gets
@@ -541,8 +569,17 @@ def dispatch_phase(
             lock_acquired = True
             workdir = docker_exec.create_worktree(container, cfg.projects_root, slug, task_id, role)
             with _HeartbeatLoop(cfg.hive_tasks_dir, task_id, cfg.heartbeat_interval_seconds):
+                # `prompt` itself is never rewritten: the note is recomputed
+                # from whichever session this attempt resumes, so a phase that
+                # fails over twice gets one note about the session it is
+                # actually picking up, not two stacked from earlier accounts.
+                phase_prompt = (
+                    _with_revive_note(container, prompt, resume_session_id)
+                    if resume_session_id
+                    else prompt
+                )
                 result = docker_exec.exec_claude(
-                    container, workdir, prompt,
+                    container, workdir, phase_prompt,
                     resume_session_id=resume_session_id, model=model, effort=effort,
                     timeout_seconds=cfg.phase_timeout_seconds,
                     max_turns=max_turns,
@@ -593,13 +630,13 @@ def dispatch_phase(
             context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
             return DispatchResult(
                 success=False, session_id=result.session_id, result_text=result.result_text,
-                account=account, handoff=handoff.parse(result), gates=gate_report,
+                account=account, handoff=_phase_handoff(container, result), gates=gate_report,
             )
 
         state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
         return DispatchResult(
             success=True, session_id=result.session_id, result_text=result.result_text,
-            account=account, handoff=handoff.parse(result), gates=gate_report,
+            account=account, handoff=_phase_handoff(container, result), gates=gate_report,
         )
 
 

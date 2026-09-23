@@ -36,9 +36,13 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   Account state is a small JSON file per account (`state_dir`), written
   atomically. Rate-limit responses move an account to `COOLING_DOWN` and
   retry on another account, resuming the same Claude session via
-  `--resume <session_id>` once one is available again. Each phase runs
-  under an in-container `timeout` (`phase_timeout_seconds`, 2 hours by
-  default) and counts as failed when it expires.
+  `--resume <session_id>` once one is available again. Any prompt that
+  resumes a session carries a note listing the subagents that session
+  started, read off disk from the CLI's own state, so the phase revives
+  them instead of spawning replacements it would have to brief again.
+  Each phase runs under an in-container `timeout`
+  (`phase_timeout_seconds`, 2 hours by default) and counts as failed
+  when it expires.
 - **Agent containers** — one per Claude Pro account, each with its own Claude
   Code config home (`CLAUDE_CONFIG_DIR=/root/.claude-account`, backed by that
   account's own `claude_creds_<account>` volume), so `.credentials.json` and
@@ -63,17 +67,17 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   `description`, and `kanban_issue_id` when there's a board) plus a body
   that accumulates each phase's handoff. A phase returns that handoff as a
   schema (`--json-schema`, per role: what changed, what was verified, what's
-  pending, risks, live subagent IDs, proposed learnings and debt, and paths to
-  the detail — plus the revisor's `verdict`), within a per-role byte budget
-  the dispatcher enforces with one `--resume`; a phase that answers in prose
-  anyway lands clamped to its first 500 and last 1,500 characters. Detail
-  belongs in files, cited by path and a stable anchor: durable docs on the
-  task branch, per-round scratch under `.hive/tasks/<task-id>/`. Used for
-  cold-start role transitions; mid-role
-  quota exhaustion instead resumes the same Claude session directly via
-  `--resume`. Stale locks (heartbeat older than `heartbeat_ttl_seconds`) are
-  reaped at the start of each task cycle; a live lock held by another owner
-  is refused, and the task goes `blocked`. A task has one branch,
+  pending, risks, the subagents it started, proposed learnings and debt, and
+  paths to the detail — plus the revisor's `verdict`), within a per-role byte
+  budget the dispatcher enforces with one `--resume`; a phase that answers
+  in prose anyway lands clamped to its first 500 and last 1,500 characters.
+  Detail belongs in files, cited by path and a stable anchor: durable docs
+  on the task branch, per-round scratch under `.hive/tasks/<task-id>/`.
+  Used for cold-start role transitions; mid-role quota exhaustion instead
+  resumes the same Claude session directly via `--resume`. Stale locks
+  (heartbeat older than `heartbeat_ttl_seconds`) are reaped at the start of
+  each task cycle; a live lock held by another owner is refused, and the
+  task goes `blocked`. A task has one branch,
   `agent/task/<task-id>`: the roles that write to it (arquitecto,
   implementador) share one worktree checked out on it, and the dispatcher
   commits what each of those phases left before the next role runs. The
@@ -508,6 +512,35 @@ as a red suite, because no implementador can fix it from inside its session
 only knows what a filename shows: a public export or a CLI flag is just as
 much a contract, and those stay where they were, in the revisor's duties.
 
+**Picking a subagent back up, instead of starting one over.** A phase that
+delegated work to a subagent and then lost its session — to a rate limit, to
+a gate asking for a test — used to hand the next attempt nothing but a
+briefing: the replacement re-derived context the original still held, at full
+quota cost. It does not have to. The subagent outlives its parent, and the
+CLI announces it on the resume by itself (`task_notification`, `status:
+stopped`), so the dispatcher appends a note to any prompt that resumes a
+session, listing what that session started and telling the role to revive it
+with `SendMessage` addressed to its raw agent ID before spawning anything
+new. A revived subagent still holds its original instructions and every turn
+it completed; only the turn the kill interrupted is lost, so a single-turn
+subagent redoes its work but still knows what the work was — which beats a
+respawn that also has to be briefed again.
+
+The IDs come off disk rather than out of the model: the Agent tool tells it
+never to repeat an agent ID, and phases run under `--output-format json`,
+with no event stream to read one from — but the CLI leaves one
+`agent-<id>.meta.json` per subagent beside the session transcript, and the ID
+is the filename. That read is a single `docker exec`, swallowed like a gate:
+an ID the dispatcher could not read costs a respawn, which is what happened
+before any of this existed, and must never cost a phase. The note rides on
+the prompt rather than in the role skills, which are charged on every call,
+and is left off the one resume that merely asks a phase to shorten an
+oversized return — there is no work to hand back there. The same list fills
+the handoff's `subagents` field, over whatever the phase put in it. Failing
+over to the other account keeps all of it: the per-agent transcript lives in
+`claude_shared`, so the account picking the session up reads the same file
+(D1 in [`docs/ROADMAP.md`](docs/ROADMAP.md)).
+
 **What one task learned, before the next one pays for it.** A project's
 `docs/learnings/` only helps once the branch that wrote it merges, and the
 task most worth learning from is the one that ended `blocked`. So there is
@@ -778,7 +811,11 @@ Code, Docker, and Vibe Kanban, so none of them settle it either.
     runs as root, where Claude Code may refuse to bypass permissions
     outside a declared sandbox. (V1.2)
   - Cross-account `--resume`: the design spec only tested one account.
-    (V5.1)
+    D1 has since resumed one real session on the other account and got
+    the context back (`docs/ROADMAP.md`, Deferred gates), so the
+    mechanism works; what V5.1 still has to record is whether the
+    resumed session answers under the same ID or a new one, which is
+    what the dispatcher stores for the next failover. (V5.1)
   - Vibe Kanban's responses and status names: `vibe_kanban_client.py`
     now speaks the surface verified live against `vibe-kanban@0.1.44`
     (stdio, `create_issue`/`list_issues`/`get_issue`/`update_issue`,
@@ -868,19 +905,21 @@ Code, Docker, and Vibe Kanban, so none of them settle it either.
        [`docs/ROADMAP.md`](docs/ROADMAP.md)). Unmeasured here: whether an
        always-on ladder also suppresses work the task did ask for, which
        would land on the revisor.
-   - *Revive before respawn.* Every role skill gets this rule: to resume
-     work delegated to a subagent, first try to revive that subagent by its
-     ID (Claude Code's `SendMessage` to the agent ID continues it with its
-     context intact), and only spawn a fresh one, briefed from the handoff,
-     if the revive fails. A fresh spawn starts cold and re-derives context
-     the original already had, which costs quota. Another multi-agent
-     setup on the same CLI found that a subagent killed by a rate limit
-     revives only by its raw agent ID (not by name, and `ListAgents`
-     doesn't list it), and only while its parent session is alive.
-     Unverified: whether `claude -p --resume` of the parent, possibly on
-     another account, makes its subagents addressable again. If it
-     doesn't, the dispatcher can resume the role's previous session for
-     the next revision round instead of starting that role cold.
+   - *Revive before respawn.* A phase that resumes a session is told this
+     rule: to resume work delegated to a subagent, first revive that
+     subagent by its ID (Claude Code's `SendMessage` to the agent ID
+     continues it with its context intact), and only spawn a fresh one,
+     briefed from the handoff, if the revive fails. A fresh spawn starts
+     cold and re-derives context the original already had, which costs
+     quota. Another multi-agent setup on the same CLI found that a
+     subagent killed by a rate limit revives only by its raw agent ID
+     (not by name, and `ListAgents` doesn't list it), and only while its
+     parent session is alive. D1 (`docs/ROADMAP.md`) answered what that
+     left open: a `--resume` of the parent does make its subagents
+     addressable again, on the other account too, so the fallback of
+     resuming the role's previous session is not needed. Shipped on the
+     prompt of a resume rather than in every role skill, which is
+     charged on every call — see "Picking a subagent back up" above.
    - *Per-project docs.* Replaces a hand-written per-project `CLAUDE.md`.
      Projects checked out under `.data/projects/<slug>` (see "Create
      volumes" above) are arbitrary target repos; their docs live in the
