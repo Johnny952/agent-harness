@@ -786,36 +786,64 @@ them are ordered by priority, highest first.
 
 Stage-0 no-quota checks against the real stack ran on 2026-09-16; each
 Known-gaps bullet below cites the result rows that confirmed it. Stage-0
-covered stack plumbing and the Vibe Kanban MCP surface; CLI contracts
-beyond the flag listing (V1.1–V1.3), a first end-to-end task, failure
-paths, and cross-account failover needed quota and remain unverified — see
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results log and what's
-still pending. Their results decide how the known gaps get fixed, and each
-prioritized item lists the checks it depends on.
+covered stack plumbing and the Vibe Kanban MCP surface; the checks that
+needed quota came later, on 2026-09-23 — a first end-to-end task (V3),
+with headless permissions and the `/usage` probe answered for free inside
+that same run (V1.2, V1.3), plus cross-account resume (V5.1) and a real
+rate-limit result (V5.4). What V3 found is the first bullet below. Still
+unverified: V1.1, the failure paths, and the cross-account half of
+failover — see [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results
+log and what's still pending. Their results decide how the known gaps
+get fixed, and each prioritized item lists the checks it depends on.
 
 ### Known gaps (fix first)
 
-Nothing in the core pipeline is known-broken any more. What's left is
-what a no-quota check couldn't settle — and the unit tests mock Claude
-Code, Docker, and Vibe Kanban, so none of them settle it either.
+The first end-to-end run found one thing in the core pipeline that is
+broken, and it is the bullet below. The rest is what a no-quota check
+couldn't settle — and the unit tests mock Claude Code, Docker, and Vibe
+Kanban, so none of them settle it either.
+
+- **A phase can't write, and can't read its handoff.** Measured end to
+  end on 2026-09-23 (V3): 43 of 62 tool calls were denied and not one
+  file was written, inside the phase's own worktree or out of it. Two
+  independent causes, and a fix needs both halves.
+  - `build_claude_command` (`dispatcher/docker_exec.py`) passes no
+    `--permission-mode`, no `--allowedTools` and no
+    `--dangerously-skip-permissions`, and `hooks/install_settings.py`
+    sets no `permissions`. Under `-p` the CLI's `--permission-prompts`
+    defaults to `host`; with no SDK host and no `--permission-prompt-tool`
+    there is nobody to answer, so anything that would prompt is denied
+    automatically — Write, Edit and Bash alike.
+  - `_role_prompt` hands the role the *path* of its handoff,
+    `/data/.hive/tasks/<task-id>.md`, which lies outside the phase's
+    working directory and so is unreachable by the file tools even where
+    the OS says it's readable; `.hive/learnings/` is out of reach the
+    same way. No phase in that run ever received the previous phase's
+    handoff. The only context that travelled is the task description,
+    which the dispatcher embeds whole in every prompt.
+
+  Candidate fix: a permission mode plus `--add-dir /data/.hive` on every
+  phase command, or passing the handoff body in the prompt instead of its
+  path. Until then a dispatched task can plan and review but not
+  implement, and each phase starts from the description alone. (V3, V1.2)
 
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
-  along with others not listed here (the `/usage` probe under `-p` — V1.3,
-  not yet run; dind isolation, the registry mirror and bind mounts — V0.7,
-  not yet run, blocked by V0.1 (no `sysbox-runc` on the verification
-  host)):
-  - Headless permissions: `exec_claude` passes no `--permission-mode` and
-    `hooks/install_settings.py` sets no `permissions`, so tools that need
-    approval (Edit, Bash) may be denied under `-p`. The agent image also
-    runs as root, where Claude Code may refuse to bypass permissions
-    outside a declared sandbox. (V1.2)
+  along with others not listed here (dind isolation, the registry mirror
+  and bind mounts — V0.7, not yet run, blocked by V0.1 (no `sysbox-runc`
+  on the verification host)):
   - Cross-account `--resume`: the design spec only tested one account.
     D1 has since resumed one real session on the other account and got
     the context back (`docs/ROADMAP.md`, Deferred gates), so the
-    mechanism works; what V5.1 still has to record is whether the
-    resumed session answers under the same ID or a new one, which is
-    what the dispatcher stores for the next failover. (V5.1)
+    mechanism works, and V5.1 has answered what the dispatcher stores
+    for the next failover: a resume answers under the same session ID,
+    never a new one, so the ID recorded when a phase first runs stays
+    valid for every later resume of it. That ID was read on a
+    same-account resume, though — cuenta1 is out of monthly spend and
+    can't open a session at all, so nothing cross-account can run until
+    that resets. The precondition is verified regardless: the transcript
+    cuenta2 wrote is visible from `agent-cuenta1` at the same path, size
+    and mode. (V5.1)
   - Vibe Kanban's responses and status names: `vibe_kanban_client.py`
     now speaks the surface verified live against `vibe-kanban@0.1.44`
     (stdio, `create_issue`/`list_issues`/`get_issue`/`update_issue`,
@@ -971,6 +999,11 @@ Code, Docker, and Vibe Kanban, so none of them settle it either.
        inline only below a byte threshold measured with `wc -c` (a few KB),
        since anything inline is reread on every later turn; above it, pass
        the path and the section to read.
+     - A pointer is only worth its bytes if the reader may open it. V3
+       measured the opposite: every `/data/.hive` path handed to a phase
+       was refused by the file tools, so the pointers cost context and
+       returned nothing. Whatever this scheme points at has to sit in the
+       worktree or in a directory the phase command declares.
    - *Structured handoff.* The YAML frontmatter
      (`status`/`owner`/`depends_on`/`heartbeat`) is already structured, but
      the body is prose that `run_task_cycle` truncates and accumulates, so
@@ -1145,8 +1178,11 @@ Code, Docker, and Vibe Kanban, so none of them settle it either.
      mixed. Item 4's model split depends on this.
    - *Stop probing quota.* `check_quota_ok` runs a whole `claude -p
      "/usage"` before every dispatch, `_recheck_cooling_accounts` runs one
-     per cooling account, and both parse free text. The CLI (checked in
-     2.1.273) defines a `rate_limit_event` stream message whose
+     per cooling account, and both parse free text. It costs less than it
+     looks: V1.3 measured `/usage` under `-p` as a *local* command — no
+     assistant turn, no result record, no cost — so the case for
+     replacing it is the free-text parsing, not the spend. The CLI
+     (checked in 2.1.273) defines a `rate_limit_event` stream message whose
      `rate_limit_info` carries `status`, `utilization`, `resetsAt`,
      `rateLimitType`, and `surpassedThreshold`. If
      `--output-format stream-json --verbose` emits it for a Pro account
@@ -1295,9 +1331,15 @@ Code, Docker, and Vibe Kanban, so none of them settle it either.
      passes no `read_timeout_seconds` to `ClientSession`/`call_tool`, so a
      server that accepts the connection and never answers stalls a
      best-effort status update indefinitely.
-   - Logging setup: `dispatcher/cli.py` configures no handler, so the
-     dispatcher's warnings (a failed Kanban update, a lock held by another
-     owner, an unparseable `/usage`) reach stderr only through logging's
+   - Logging setup: nothing under `dispatcher/` or `docker/` configures
+     logging at all, so the root logger sits at WARNING and all 12
+     `logger.info` calls are dropped — the gates' account of what they
+     skipped and why among them. V3's entire run log was five lines, and
+     a task that ends blocked says so nowhere: `_update_task_status` only
+     writes to the Kanban card, which with no board returns silently,
+     while the frontmatter still reads `status: pending` and the process
+     exits 0. What does reach stderr (a failed Kanban update, a lock held
+     by another owner, an unparseable `/usage`) arrives through logging's
      last-resort handler, without timestamps or context.
    - A short "continue where you left off" prompt when resuming after a
      rate limit, instead of re-sending the full role prompt.
@@ -1305,21 +1347,25 @@ Code, Docker, and Vibe Kanban, so none of them settle it either.
    opus for all four roles spends the quota fastest. Today `default_model`
    (`config.example.yaml`) applies the same model to every role, and
    effort only escalates once the implementador/revisor loop crosses
-   `escalate_effort_after_round`. Two refinements were discussed but not
-   implemented: (1) a per-role model override, e.g. opus for arquitecto
-   and auditor (planning/judgment roles) and sonnet for implementador
-   (execution), possibly also for early revisor rounds, instead of one
-   `default_model` for all four; (2) escalating effort (or switching
-   model) on signals other than round count, e.g. the revisor repeating
-   the same `VERDICT: CHANGES_REQUESTED` complaint, or a role's result
-   text coming back suspiciously short. Make the split data-driven first,
-   from item 2's per-phase usage records, which show which roles actually
-   consume the quota. Not designed: a config schema for per-role model
-   overrides (`default_model` becoming a fallback vs. a
-   `models: {arquitecto: opus, ...}` map), and how "the
-   same complaint" or "suspiciously short" would be detected from
-   freeform `result_text` without over-engineering a heuristic that never
-   fires as intended.
+   `escalate_effort_after_round`. V3 measured that escalation as buying
+   nothing today: the arquitecto runs with `round_num=None` and so gets
+   no `--effort` flag at all, while `high` — the escalated value — is
+   already the CLI's own default for opus, so all three phases in that
+   run reported the same effort whether or not the flag was passed. Two
+   refinements were discussed but not implemented: (1) a per-role model
+   override, e.g. opus for arquitecto and auditor (planning/judgment
+   roles) and sonnet for implementador (execution), possibly also for
+   early revisor rounds, instead of one `default_model` for all four;
+   (2) escalating effort (or switching model) on signals other than round
+   count, e.g. the revisor repeating the same `CHANGES_REQUESTED`
+   complaint, or a role's result text coming back suspiciously short.
+   Make the split data-driven first, from item 2's per-phase usage
+   records, which show which roles actually consume the quota. Not
+   designed: a config schema for per-role model overrides
+   (`default_model` becoming a fallback vs. a
+   `models: {arquitecto: opus, ...}` map), and how "the same complaint"
+   or "suspiciously short" would be detected from freeform `result_text`
+   without over-engineering a heuristic that never fires as intended.
 5. **Task profiles: skill packs per kind of task, not new roles.** Role
    skills (item 1) say how a role works, not what the task is about. A
    frontend task gains from design and browser-verification skills that a
