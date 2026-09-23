@@ -605,6 +605,71 @@ new tasks, so `run-task` above still has to be invoked manually (or from
 your own automation/cron) per task-id. There is no push-button "run" in
 the UI yet.
 
+**The work a task chose not to do.** That is the other half of the closing
+rule above: a trap is "don't step on this", debt is work left undone, and
+debt that lives only in a handoff is read by the next phase of that task and
+by nobody else. So it takes a fixed route through the cycle and comes out as
+a row in `docs/debt/README.md` — versioned with the code, so a re-clone still
+has it, and read like the learnings index: every row carries a `where`, the
+condition a later task checks against its own work to know whether the entry
+bites it.
+
+The implementador declares, one entry per piece of work, with six fields:
+`origin` (`introduced` if this task created the debt, `found` if it was
+already there), `what` it is, `where` it bites, `why` it stays, the `cost` of
+leaving it, and the `fix` that would resolve it. Found debt counts only in
+files this task touched and only if the index does not already carry it — the
+rest of the project's backlog is not this task's to re-declare. And declaring
+is never a way out of blocking: whatever would block the task, like a
+decision it was never given or a schema change, still blocks it.
+
+The revisor rules on each declaration, and the ruling decides where the round
+goes. `accepted` moves on. `rejected` is a finding like any other — the task
+goes round again and it counts against `max_revision_rounds` — which is why a
+round that comes back APPROVED over a rejected declaration is not an
+approval, and is logged as the contradiction it is. `blocks` is for a block
+wearing a debt costume, and ends the task `blocked` with no further round,
+because another round cannot supply a decision the task was never given.
+Anything the revisor did not rule on is accepted: a missed ruling costs one
+duplicate card, a dropped declaration costs the entry itself.
+
+Then the dispatcher files them — the dispatcher and not an agent, because an
+agent that can create cards can assign itself work, and an agent re-run for a
+second review round would create the same card twice. Each accepted
+declaration gets an id, `<task-id>-D<n>`, and one card, opened with
+`create_issue` *before* the auditor runs, so the row the auditor writes can
+already point at it. The card carries the whole declaration rather than a
+summary — a human triaging the board should not have to clone the repo to
+know what they are approving — plus the id of the entry, which stays the
+source of truth. `create_issue` takes no label argument, so the `debt` label
+rides in the title as a `[debt] ` prefix, where a board filter can still find
+it. A declaration that flattens to the same fingerprint as a row already in
+the index gets no id and no card; the index is read from the worktree this
+task is being built in, so a re-run that already filed its entries sees them.
+The auditor then writes the rows and the entry files under `docs/debt/`,
+still the only phase that writes an index.
+
+A card in the backlog is a record, not work: moving it out of the backlog is
+how a human approves the work, and nothing dispatches it on its own. The way
+back in is `resolved_debt` — an implementador that resolved an entry the
+index already carries names its id there, and the dispatcher stores it in the
+task file rather than leaving it in the handoff, because the merge that
+closes the card can happen days later. Both the automatic merge and
+`merge-task` read it, and say what they closed.
+
+The two halves of "resolved" deliberately land in different places. The
+auditor marks the row resolved where it stands, on the task branch, with the
+task that resolved it and never by deleting it — a fix that gets reverted
+should still have its row — because it is the only writer of the indexes and
+the mark belongs in the commit that made it true. The dispatcher closes the
+card, and only after the merge: a branch that never lands leaves the board
+exactly as it was.
+
+A project with no `vibe_kanban` block loses only the cards. Every other step
+runs identically, the entries are filed the same way, and a merge says
+nothing about a board it was never given — the index is the source of truth,
+and the board is the aid.
+
 Additional accounts are added by duplicating an `agent-*`/`dind-*` pair in
 `docker/compose/docker-compose.agents.yml` and the matching entry in
 `config.yaml`'s `accounts` list — no dispatcher code changes required.

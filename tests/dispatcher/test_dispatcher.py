@@ -5,13 +5,14 @@ import time
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import gates, handoff, learnings, project_docs, role_skills
+from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
     acquire_lock,
     is_lock_expired,
     list_task_ids,
+    read_resolved_debt,
     read_task_file,
     scratch_dir,
     set_kanban_issue_id,
@@ -648,7 +649,8 @@ def test_the_shrink_is_measured_against_what_the_gate_retry_wrote(tmp_path, monk
     enforced on what it wrote — the return that actually lands in the task
     file — and not on the one it replaced. That is why the gates run first."""
     cfg = _make_config(tmp_path, gates_enabled=True)
-    fat = {"status": "complete", "changed": ["dispatcher/gates.py"], "risks": ["r" * 5000]}
+    budget = handoff.budget_for("implementador")
+    fat = {"status": "complete", "changed": ["dispatcher/gates.py"], "risks": ["r" * (budget + 1000)]}
     calls = _phase_recorder(monkeypatch, [
         ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
         ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": fat}),
@@ -659,7 +661,7 @@ def test_the_shrink_is_measured_against_what_the_gate_retry_wrote(tmp_path, monk
     result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
 
     assert len(calls) == 3
-    assert "4096" in calls[2]["prompt"], "the third call is the shrink, not another gate retry"
+    assert str(budget) in calls[2]["prompt"], "the third call is the shrink, not another gate retry"
     assert result.handoff == _LEAN_HANDOFF
 
 
@@ -2543,3 +2545,428 @@ def test_a_run_that_bounced_off_another_owners_lock_leaves_its_entries_alone(
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
 
     assert _inbox(cfg)["inbox/task-8-db.md"].carried_by == "task-1"
+
+
+# Debt the task declared, ruled on by the review, mirrored onto the board.
+# The index is the source of truth and the board is the viewing aid, so every
+# test below has to hold on both halves: what the auditor is told to file, and
+# what a human looking at the backlog ends up seeing.
+
+_DEBT = {
+    "origin": debt.FOUND,
+    "what": "The retry loop has no test.",
+    "where": "a task that changes the backoff in docker_exec",
+    "why": "the fixture needs a fake clock this task does not have",
+    "cost": "a regression in the backoff lands silently",
+    "fix": "a fake clock in conftest, then one case per branch",
+}
+
+_MIGRATION = {
+    "origin": debt.INTRODUCED,
+    "what": "The migration has no down step.",
+    "where": "a task that has to roll back a deploy of this schema",
+    "why": "reversing the backfill needs a decision nobody has made",
+    "cost": "a bad deploy is rolled forward or not at all",
+    "fix": "write the down step once the backfill policy is decided",
+}
+
+
+class _DebtBoard(_FakeKanban):
+    """A board that answers with a different id per card.
+
+    The task's own card is opened first and keeps `_ISSUE_ID`, so a run can
+    still be checked on the status it set; every debt card after it gets an id
+    of its own, which is what the auditor is handed and what a merge closes.
+    """
+
+    def create_issue(self, title, description=None):
+        self.created.append((title, description))
+        return self.issue_id if len(self.created) == 1 else f"card-{len(self.created) - 1}"
+
+    @property
+    def debt_cards(self):
+        return self.created[1:]
+
+
+class _FakeDebtIndex:
+    """`docs/debt/README.md` as the dispatcher finds it, and who asked for it."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self.reads = []
+
+    def read_index(self, container, workdir):
+        self.reads.append((container, workdir))
+        return self.text
+
+
+@pytest.fixture
+def debt_index(monkeypatch):
+    """The index, faked: `cleanup_container` names a real container, so
+    without this every test that files debt shells out to a real docker."""
+    fake = _FakeDebtIndex()
+    monkeypatch.setattr(dispatcher_mod.debt, "read_index", fake.read_index)
+    return fake
+
+
+def _debt_dispatch_phase(
+    calls, board=None, declared=(), rulings=(), resolved=(), verdict="APPROVED",
+):
+    """Every phase succeeds; the implementador declares and the revisor rules."""
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        calls.append(
+            dict(
+                role=role,
+                prompt=prompt,
+                cards=len(board.created) if board is not None else 0,
+            )
+        )
+        payload = {"status": "complete"}
+        if role == "implementador":
+            payload["debt"] = [dict(item) for item in declared]
+            payload["resolved_debt"] = list(resolved)
+        if role == "revisor":
+            payload["verdict"] = verdict
+            payload["debt_rulings"] = [dict(item) for item in rulings]
+        return dispatcher_mod.DispatchResult(
+            success=True,
+            session_id=None,
+            result_text="",
+            account="cuenta1",
+            handoff=payload,
+        )
+
+    return fake_dispatch_phase
+
+
+def _roles(calls):
+    return [call["role"] for call in calls]
+
+
+def _by_role(calls):
+    return {call["role"]: call["prompt"] for call in calls}
+
+
+def test_the_debt_the_review_accepted_becomes_one_card_each_on_the_board(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """One card per accepted declaration, opened by the dispatcher: an agent
+    that can create tasks can assign itself work, and a re-run of the phase
+    would open the same card twice."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase(
+            calls,
+            board=kanban,
+            declared=(_DEBT, _MIGRATION),
+            rulings=({"debt": "The retry loop has no test", "ruling": debt.ACCEPTED},),
+        ),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    titles = [title for title, _ in kanban.debt_cards]
+    assert titles == [
+        "[debt] The retry loop has no test.",
+        "[debt] The migration has no down step.",
+    ]
+    # The card carries the declaration whole — a human triaging the backlog
+    # should not have to clone the repo to know what they are approving — and
+    # names the entry that stays the source of truth.
+    first = kanban.debt_cards[0][1]
+    assert "**Fix:** a fake clock in conftest, then one case per branch" in first
+    assert "`task-1-D1`" in first and project_docs.DEBT_INDEX in first
+    assert "`task-1-D2`" in kanban.debt_cards[1][1]
+    assert (_ISSUE_ID, "done") in kanban.statuses
+
+
+def test_a_debt_card_opens_before_the_auditor_writes_the_row_that_points_at_it(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """That order is the whole trick: the card exists first, so the auditor
+    can write a row that already points at it and stay the only writer."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase(calls, board=kanban, declared=(_DEBT,)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    seen = {call["role"]: call["cards"] for call in calls}
+    # One card through the whole review: the task's own.
+    assert seen["implementador"] == 1 and seen["revisor"] == 1
+    assert seen["auditor"] == 2
+
+
+def test_only_the_auditor_is_handed_the_entry_and_card_ids(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """The ids are assigned before the phase runs, and handed to the one role
+    that writes the index — every other role is told to propose, not file."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase(calls, board=kanban, declared=(_DEBT,)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    by_role = _by_role(calls)
+    assert "`task-1-D1`" in by_role["auditor"]
+    assert "`card-1`" in by_role["auditor"]
+    assert " | ".join(debt.COLUMNS) in by_role["auditor"]
+    assert "`task-1-D1`" not in by_role["implementador"]
+    assert "`task-1-D1`" not in by_role["revisor"]
+
+
+def test_a_task_that_declared_no_debt_says_nothing_about_debt_to_the_auditor(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """A filing note with no entries under it reads as an instruction to find
+    something to file, and the auditor files only what it is handed."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _debt_dispatch_phase(calls, board=kanban))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert kanban.debt_cards == []
+    assert "already has its ids" not in _by_role(calls)["auditor"]
+    # And nothing was read: there is no declaration to compare against.
+    assert debt_index.reads == []
+
+
+def test_debt_the_revisor_rejected_sends_an_approving_round_back_around(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """A rejected declaration is work the revisor says this task should have
+    done, which is a finding — and a finding outranks the verdict field."""
+    cfg = _make_config(tmp_path, max_revision_rounds=2)
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase(
+            calls,
+            board=kanban,
+            declared=(_DEBT,),
+            rulings=({"debt": "The retry loop has no test", "ruling": debt.REJECTED},),
+            verdict="APPROVED",
+        ),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    # Both rounds spent, no auditor, and nothing filed or carded.
+    assert _roles(calls).count("implementador") == 2
+    assert "auditor" not in _roles(calls)
+    assert kanban.debt_cards == []
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+
+
+def test_debt_the_revisor_read_as_a_block_ends_the_task_with_no_card(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """Another round cannot supply a decision the task was never given, so it
+    ends here rather than burning the rest of the rounds to say so again."""
+    cfg = _make_config(tmp_path, max_revision_rounds=3)
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase(
+            calls,
+            board=kanban,
+            declared=(_MIGRATION,),
+            rulings=({"debt": "The migration has no down step", "ruling": debt.BLOCKS},),
+        ),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert _roles(calls).count("implementador") == 1
+    assert "auditor" not in _roles(calls)
+    assert kanban.debt_cards == []
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+
+
+def test_debt_the_index_already_carries_gets_no_second_card(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """A board that fills with the same entry once per task is a board nobody
+    reads, and the index is what knows the entry is already there."""
+    cfg = _make_config(tmp_path)
+    debt_index.text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-4-D1` | The retry loop has no test | backoff changes | a fake clock "
+        "| `card-9` |\n"
+    )
+    kanban = _DebtBoard()
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase(calls, board=kanban, declared=(_DEBT, _MIGRATION)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert [title for title, _ in kanban.debt_cards] == ["[debt] The migration has no down step."]
+    # And the entry that did get filed is the first this task files, not the
+    # second: the numbering counts what was filed, not what was declared.
+    assert "`task-1-D1`" in _by_role(calls)["auditor"]
+
+
+def test_the_index_is_read_from_the_branch_the_task_is_being_built_on(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """A re-run of a task that already filed entries has them on its own
+    branch and nowhere else; reading the checkout would card them twice."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], declared=(_DEBT,)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert debt_index.reads == [
+        ("agent-cuenta1", f"{cfg.projects_root}/myproj/worktrees/task-1/work"),
+    ]
+
+
+def test_a_project_with_no_board_files_its_debt_anyway(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """`vibe_kanban` is optional, and the index is the source of truth — so a
+    project without a board loses the cards and nothing else."""
+    cfg = _make_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase(calls, declared=(_DEBT,)),
+    )
+
+    dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", NullKanbanClient(), description=_DESCRIPTION,
+    )
+
+    note = _by_role(calls)["auditor"]
+    assert "`task-1-D1`" in note
+    assert "no card (this project has no board)" in note
+
+
+def test_the_entries_a_task_resolved_outlive_the_handoff_that_named_them(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """The merge that closes these cards can be days later, in `merge-task`,
+    long after this handoff is prose in a file nobody parses."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod,
+        "dispatch_phase",
+        _debt_dispatch_phase([], resolved=("`task-4-D1`", "task-4-D1", "task-6-D2")),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _DebtBoard(), description=_DESCRIPTION)
+
+    assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-4-D1", "task-6-D2"]
+
+
+def test_a_merged_task_closes_the_cards_of_the_debt_it_resolved(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """Only after the merge: the row is marked resolved on the branch, so a
+    branch that never lands leaves the board exactly as it was."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    debt_index.text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-4-D1` | The retry loop has no test | backoff changes | a fake clock "
+        "| `card-9` |\n"
+    )
+    kanban = _DebtBoard()
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], resolved=("task-4-D1",)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("card-9", "done") in kanban.statuses
+    # Read from the merged checkout this time, not the branch: the card id was
+    # written by whichever task filed the entry, which is not this one.
+    assert debt_index.reads == [("agent-cuenta1", f"{cfg.projects_root}/myproj")]
+
+
+def test_a_refused_merge_leaves_the_resolved_cards_open(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """Nothing landed, so the debt is not resolved anywhere a later clone can
+    see — closing the card would be the board lying about the repo."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    debt_index.text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-4-D1` | The retry loop has no test | backoff | a fake clock | `card-9` |\n"
+    )
+
+    def refusing_merge(container, projects_root, slug, task_id):
+        return dispatcher_mod.docker_exec.MergeOutcome(
+            dispatcher_mod.docker_exec.REFUSED, "main", "has uncommitted changes"
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", refusing_merge)
+    kanban = _DebtBoard()
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], resolved=("task-4-D1",)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert ("card-9", "done") not in kanban.statuses
+    assert debt_index.reads == []
+
+
+def test_close_resolved_debt_leaves_a_resolved_entry_with_no_card_alone(
+    tmp_path, monkeypatch, debt_index,
+) -> None:
+    """Either the id is wrong or the row never got a card. Both are for a
+    human to look at, and neither is worth failing a merge that succeeded."""
+    cfg = _make_config(tmp_path)
+    dispatcher_mod.context_transfer.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
+    debt_index.text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-4-D1` | The retry loop has no test | backoff | a fake clock | - |\n"
+    )
+    kanban = _DebtBoard()
+
+    assert dispatcher_mod.close_resolved_debt(cfg, kanban, "task-1", "myproj") == []
+    assert kanban.statuses == []
+
+
+def test_close_resolved_debt_does_not_read_the_index_for_a_project_with_no_board(
+    tmp_path, monkeypatch, debt_index,
+) -> None:
+    """There is nothing to close, and the read costs a `docker exec` per merge
+    on every project that never configured a board."""
+    cfg = _make_config(tmp_path)
+    dispatcher_mod.context_transfer.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
+
+    assert dispatcher_mod.close_resolved_debt(cfg, NullKanbanClient(), "task-1", "myproj") == []
+    assert debt_index.reads == []

@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 import dispatcher.cli as cli_mod
+import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import learnings
-from dispatcher.context_transfer import read_kanban_issue_id, set_description
+from dispatcher.context_transfer import read_kanban_issue_id, set_description, set_resolved_debt
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
 from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
 
@@ -444,3 +445,68 @@ def test_cli_merge_task_that_was_refused_leaves_the_inbox_alone(
 
     assert excinfo.value.code == 1
     assert path.exists()
+
+
+_DEBT_INDEX = (
+    "| id | what | where | fix | card |\n"
+    "|---|---|---|---|---|\n"
+    "| `task-4-D1` | The retry loop has no test | backoff changes | a fake clock | `card-9` |\n"
+)
+
+
+class _CountingBoard:
+    """A board that only remembers what was asked of it."""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.statuses: list[tuple[str, str]] = []
+
+    def set_status(self, issue_id: str, status: str) -> None:
+        self.statuses.append((issue_id, status))
+
+
+def _fake_debt(monkeypatch, board=None, index: str = _DEBT_INDEX) -> None:
+    """The debt half of a merge, faked where `close_resolved_debt` reads it."""
+    monkeypatch.setattr(dispatcher_mod, "cleanup_container", lambda cfg: "agent-cuenta1")
+    monkeypatch.setattr(dispatcher_mod.debt, "read_index", lambda container, workdir: index)
+    if board is not None:
+        monkeypatch.setattr(cli_mod, "_kanban", lambda cfg: board)
+
+
+def test_cli_merge_task_closes_the_cards_of_the_debt_the_branch_resolved(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The card outlives the run that opened it, so closing it is the merge's
+    job, not the cycle's: the entry can be resolved days later by another task
+    in another process, which is exactly when this command gets run by hand."""
+    config_path = _write_config(tmp_path, board=True)
+    set_resolved_debt(str(tmp_path / "hive"), "task-1", ["task-4-D1"])
+    board = _CountingBoard()
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    _fake_debt(monkeypatch, board)
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    assert board.statuses == [("card-9", "done")]
+    assert "closed the card of 1 resolved debt entr(y/ies): task-4-D1" in capsys.readouterr().out
+
+
+def test_cli_merge_task_without_a_board_says_nothing_about_debt_cards(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """`vibe_kanban` is optional and the index is the source of truth, so a
+    project with no board merges exactly as before and reads as before."""
+    config_path = _write_config(tmp_path)
+    set_resolved_debt(str(tmp_path / "hive"), "task-1", ["task-4-D1"])
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    out = capsys.readouterr().out
+    assert "merged agent/task/task-1 into main" in out
+    assert "debt" not in out

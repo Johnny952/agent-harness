@@ -68,8 +68,14 @@ def test_unknown_role_gets_no_schema() -> None:
 def test_schema_stays_small_enough_to_send_on_every_call(role) -> None:
     """The schema rides along on every call the role makes, descriptions
     included, so it is charged like an always-on skill. This is the guard on
-    growing it by half a page of prose per field."""
-    assert len(json.dumps(handoff.schema_for(role), separators=(",", ":")).encode()) < 3072
+    growing it by half a page of prose per field.
+
+    The cap was 3072 until the debt flow landed: `debt` is six fields, each
+    needing a line saying what belongs in it, and the revisor carries a ruling
+    per declaration on top. That is the shape of the feature, not prose, so
+    the number moved once — with ~450 bytes of headroom left on the widest
+    role, which is still less than one more field's worth."""
+    assert len(json.dumps(handoff.schema_for(role), separators=(",", ":")).encode()) < 4096
 
 
 # --- budgets ----------------------------------------------------------------

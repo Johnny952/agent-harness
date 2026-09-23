@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 
-from dispatcher import docker_exec
+from dispatcher import debt, docker_exec
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,42 @@ _PROPERTIES: dict[str, dict] = {
     },
     "debt": {
         "type": "array",
-        "items": {"type": "string"},
-        "description": "Proposed debt: work you deliberately did not do, one line each.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "enum": list(debt.ORIGINS),
+                    "description": (
+                        f"{debt.INTRODUCED} if this task created it; {debt.FOUND} if it was "
+                        "already there, in a file this task touched and not already in the "
+                        "debt index."
+                    ),
+                },
+                "what": {"type": "string", "description": "The work that was not done."},
+                "where": {
+                    "type": "string",
+                    "description": (
+                        "Where it bites, as a condition a later task can check against its "
+                        "own work — not a topic."
+                    ),
+                },
+                "why": {"type": "string", "description": "Why it stays: what made leaving it right here."},
+                "cost": {"type": "string", "description": "What leaving it costs, and to whom."},
+                "fix": {
+                    "type": "string",
+                    "description": (
+                        "What would resolve it, or the doc section that already decides how."
+                    ),
+                },
+            },
+            "required": ["origin", "what", "where", "why", "cost", "fix"],
+            "additionalProperties": False,
+        },
+        "description": (
+            "Proposed debt: work you deliberately did not do. Never a substitute for "
+            "blocking — what would block the task still blocks it."
+        ),
     },
     "paths": {
         "type": "array",
@@ -102,14 +136,63 @@ _VERDICT_PROPERTY = {
     },
 }
 
+#: The revisor's other ruling. Debt is proposed by the phase that created it
+#: and filed by a phase that did not see it happen, so the ruling in between is
+#: the only place anyone asks whether leaving the work undone was a choice or
+#: an excuse.
+_DEBT_RULINGS_PROPERTY = {
+    "debt_rulings": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "debt": {
+                    "type": "string",
+                    "description": "The declaration you are ruling on, as its `what` states it.",
+                },
+                "ruling": {
+                    "type": "string",
+                    "enum": list(debt.RULINGS),
+                    "description": (
+                        f"{debt.ACCEPTED}: it gets filed and put on the board. "
+                        f"{debt.REJECTED}: it is a finding, fix it this round. "
+                        f"{debt.BLOCKS}: it is not debt, it is a block wearing a debt costume."
+                    ),
+                },
+                "why": {"type": "string", "description": "The reason for the ruling, in one line."},
+            },
+            "required": ["debt", "ruling", "why"],
+            "additionalProperties": False,
+        },
+        "description": (
+            "One ruling per declaration in the implementation handoff. Empty when it "
+            "declared none."
+        ),
+    },
+}
+
+#: The other half of the debt flow, and the implementador's own: the entries
+#: this task made go away. It is a claim by the phase that did the work, the
+#: same way the verdict is a claim by the phase that reviewed it.
+_RESOLVED_DEBT_PROPERTY = {
+    "resolved_debt": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Ids of debt entries this task resolved, as the debt index writes them "
+            "(T-001-D1). Empty when it resolved none."
+        ),
+    },
+}
+
 #: The roles that hand off at all. A role outside this gets no schema, which
 #: means no `--json-schema` flag and the free-text fallback below — the same
 #: way an unknown role gets no skills rather than an error.
 _ROLE_EXTRAS: dict[str, dict] = {
     "cartografo": {},
     "arquitecto": {},
-    "implementador": {},
-    "revisor": _VERDICT_PROPERTY,
+    "implementador": _RESOLVED_DEBT_PROPERTY,
+    "revisor": {**_VERDICT_PROPERTY, **_DEBT_RULINGS_PROPERTY},
     "auditor": {},
 }
 
@@ -124,7 +207,10 @@ _BUDGET_BYTES: dict[str, int] = {
     # gets no more room than the tightest reviewing role.
     "cartografo": 2048,
     "arquitecto": 4096,
-    "implementador": 4096,
+    # The one role that pays for two structured lists on top of the common
+    # fields: a debt declaration is six fields, and several of them fit in a
+    # round. shrink_prompt is still the backstop when they do not.
+    "implementador": 5120,
     "revisor": 3072,
     "auditor": 2048,
 }
@@ -263,8 +349,54 @@ _SECTIONS = (
     ("pending", "Pending"),
     ("risks", "Risks"),
     ("learnings", "Proposed learnings"),
-    ("debt", "Proposed debt"),
+    ("resolved_debt", "Resolved debt"),
 )
+
+
+def _debt(payload: dict) -> list[str]:
+    """Each declaration on one line, since the handoff is read as prose.
+
+    The fields are kept separate in the schema because the dispatcher and the
+    auditor read them separately; here they collapse, because the phase
+    reading this wants to know what was left undone, not to parse it.
+    """
+    rendered = []
+    for item in payload.get("debt") or []:
+        if not isinstance(item, dict):
+            continue
+        what = str(item.get("what", "")).strip()
+        if not what:
+            continue
+        origin = str(item.get("origin", "")).strip()
+        head = f"{what} ({origin})" if origin else what
+        tail = " · ".join(
+            f"{label}: {value}"
+            for label, value in (
+                ("where", str(item.get("where", "")).strip()),
+                ("why", str(item.get("why", "")).strip()),
+                ("cost", str(item.get("cost", "")).strip()),
+                ("fix", str(item.get("fix", "")).strip()),
+            )
+            if value
+        )
+        rendered.append(f"{head} — {tail}" if tail else head)
+    return rendered
+
+
+def _rulings(payload: dict) -> list[str]:
+    """The revisor's call on each declaration, so the auditor files the right ones."""
+    rendered = []
+    for item in payload.get("debt_rulings") or []:
+        if not isinstance(item, dict):
+            continue
+        subject = str(item.get("debt", "")).strip()
+        if not subject:
+            continue
+        ruling = str(item.get("ruling", "")).strip() or "?"
+        why = str(item.get("why", "")).strip()
+        line = f"**{ruling}** — {subject}"
+        rendered.append(f"{line} ({why})" if why else line)
+    return rendered
 
 
 def render(payload: dict) -> str:
@@ -284,6 +416,13 @@ def render(payload: dict) -> str:
 
     for key, title in _SECTIONS:
         items = _lines(payload, key)
+        if items:
+            parts.append("\n".join([f"**{title}**", *(f"- {item}" for item in items)]))
+
+    for key, title, items in (
+        ("debt", "Proposed debt", _debt(payload)),
+        ("debt_rulings", "Debt rulings", _rulings(payload)),
+    ):
         if items:
             parts.append("\n".join([f"**{title}**", *(f"- {item}" for item in items)]))
 

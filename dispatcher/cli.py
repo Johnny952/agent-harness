@@ -7,7 +7,12 @@ from pathlib import Path
 
 from dispatcher import context_transfer, docker_exec, learnings
 from dispatcher.config import Config, load_config
-from dispatcher.dispatcher import cleanup_container, container_for, run_task_cycle
+from dispatcher.dispatcher import (
+    cleanup_container,
+    close_resolved_debt,
+    container_for,
+    run_task_cycle,
+)
 from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
 
 
@@ -125,6 +130,16 @@ def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
     print(f"the entries themselves are in {learnings.root_dir(hive)}/, one file per row")
 
 
+def _kanban(cfg: Config) -> NullKanbanClient | VibeKanbanClient:
+    """The board this config talks to, or the one that does nothing.
+
+    Every subcommand that can move a card builds it the same way, so that a
+    project with no `vibe_kanban` block runs the identical code path and says
+    nothing about a board it was never given.
+    """
+    return VibeKanbanClient(cfg.vibe_kanban) if cfg.vibe_kanban else NullKanbanClient()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ia-harness-dispatcher")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
@@ -220,7 +235,7 @@ def main() -> None:
         _seed_kanban_issue_id(args, cfg, parser)
         # No vibe_kanban block, no board: the cycle runs exactly as before and
         # says nothing about a board it was never given.
-        kanban = VibeKanbanClient(cfg.vibe_kanban) if cfg.vibe_kanban else NullKanbanClient()
+        kanban = _kanban(cfg)
         run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
@@ -270,6 +285,14 @@ def main() -> None:
         dropped = learnings.drop_promoted(cfg.hive_tasks_dir, args.task_id)
         if dropped:
             print(f"dropped {len(dropped)} filed inbox entr(y/ies): {', '.join(dropped)}")
+        # And the other half of the same "the branch landed": the debt this
+        # task says it resolved is resolved in the docs now, so its cards have
+        # stopped being work anybody should pick up.
+        closed = close_resolved_debt(cfg, _kanban(cfg), args.task_id, args.project)
+        if closed:
+            # Named by entry, not by card: the entry id is the one a human can
+            # look the work up by, on the board and in the index both.
+            print(f"closed the card of {len(closed)} resolved debt entr(y/ies): {', '.join(closed)}")
     elif args.command == "learnings":
         _run_learnings(args, cfg)
 

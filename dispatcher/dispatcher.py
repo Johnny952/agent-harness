@@ -9,6 +9,7 @@ import threading
 
 from dispatcher import (
     context_transfer,
+    debt,
     docker_exec,
     gates,
     handoff,
@@ -210,6 +211,7 @@ def _role_prompt(
     hive_dir: str,
     round_num: int | None = None,
     max_turns: int | None = None,
+    note: str = "",
 ) -> str:
     if role == project_docs.MAPPER_ROLE:
         # The mapper runs before the first phase, so there is no handoff to
@@ -245,6 +247,11 @@ def _role_prompt(
     traps = learnings.duties(role, task_id, slug, hive_dir)
     if traps:
         prompt += f"\n\n{traps}"
+    # Something this one call has to be told that no rule covers: today, the
+    # debt ids and card ids the auditor is about to file. It is computed by
+    # the dispatcher between phases, so it cannot come from `duties`.
+    if note:
+        prompt += f"\n\n{note}"
     schema = handoff.schema_for(role)
     if schema is not None:
         # Says out loud what the schema can only imply: the handoff is the
@@ -646,6 +653,107 @@ def _update_task_status(kanban: KanbanClient, issue_id: str | None, status: str)
         logger.warning("kanban status update failed for issue %s (%s): %s", issue_id, status, exc)
 
 
+def _file_accepted_debt(
+    cfg: Config,
+    kanban: KanbanClient,
+    task_id: str,
+    slug: str,
+    implemented: DispatchResult,
+    reviewed: DispatchResult,
+) -> list[tuple[str, str | None, debt.Declaration]]:
+    """Put the debt this task declared on the board, and name it for the auditor.
+
+    The dispatcher does this, not an agent, for two reasons the spec is blunt
+    about: an agent that can create tasks can assign itself work, and an agent
+    re-run for a second review round would create the same card twice.
+
+    It runs *before* the auditor because the card exists before the row does.
+    That order is what lets each side record the other's id: the ids are
+    assigned here, the cards are opened here, and the auditor — still the only
+    writer of the indexes — writes one row that already points at its card.
+
+    A project with no board loses only the cards. The entries are filed either
+    way, because the index is the source of truth and the board is the aid.
+    """
+    accepted = debt.accepted(implemented.handoff, reviewed.handoff)
+    if not accepted:
+        return []
+    # Read from the branch being built, not the project checkout: a re-run of
+    # a task that already filed entries has them on its own branch, and a
+    # board that fills with the same entry once per run is a board nobody
+    # reads. A read that fails costs a duplicate card, never the entry.
+    known: set[str] = set()
+    container = cleanup_container(cfg)
+    if container is not None:
+        worktree = (
+            f"{docker_exec.task_worktrees_dir(cfg.projects_root, slug, task_id)}"
+            f"/{docker_exec.WRITER_WORKTREE_NAME}"
+        )
+        try:
+            known = debt.index_fingerprints(debt.read_index(container, worktree))
+        except Exception as exc:
+            logger.warning("task %s: could not read %s: %s", task_id, project_docs.DEBT_INDEX, exc)
+    filed: list[tuple[str, str | None, debt.Declaration]] = []
+    for declaration in accepted:
+        if declaration.fingerprint in known:
+            logger.info("task %s: debt already in the index, no card: %s", task_id, declaration.what)
+            continue
+        known.add(declaration.fingerprint)
+        entry = debt.entry_id(task_id, len(filed) + 1)
+        card = None
+        try:
+            card = kanban.create_issue(
+                debt.card_title(declaration),
+                debt.card_description(task_id, entry, declaration),
+            )
+        except Exception as exc:
+            # Same rule as everywhere else the board is touched: it is a
+            # visibility aid, and the entry is filed with or without it.
+            logger.warning("kanban: debt %s gets no card: %s", entry, exc)
+        filed.append((entry, card, declaration))
+    return filed
+
+
+def close_resolved_debt(cfg: Config, kanban: KanbanClient, task_id: str, slug: str) -> list[str]:
+    """Close the cards of the debt a merged task says it resolved.
+
+    Only half of the spec's "mark the entry resolved and close the card" is
+    here, and deliberately: the row is marked resolved by the auditor, on the
+    branch, because it is the only writer of the indexes and the mark should
+    land with the merge commit that made it true. What is left is the half the
+    repository cannot do, and it runs after the merge — a branch that never
+    lands leaves the board exactly as it was.
+    """
+    entries = context_transfer.read_resolved_debt(cfg.hive_tasks_dir, task_id)
+    if not entries or not kanban.enabled:
+        return []
+    container = cleanup_container(cfg)
+    if container is None:
+        return []
+    # The merged checkout, this time: the card ids were written by whichever
+    # task filed the entry, which is usually not this one.
+    project_dir = f"{cfg.projects_root}/{slug}"
+    try:
+        cards = debt.card_ids(debt.read_index(container, project_dir), entries)
+    except Exception as exc:
+        logger.warning("task %s: could not read %s: %s", task_id, project_docs.DEBT_INDEX, exc)
+        return []
+    closed = []
+    for entry in entries:
+        card = cards.get(entry)
+        if card is None:
+            # Either the entry id is wrong or its row never got a card. Both
+            # are worth saying out loud: the work landed, and a human is still
+            # looking at an open card for it.
+            logger.warning(
+                "task %s: resolved debt %s has no card in %s", task_id, entry, project_docs.DEBT_INDEX
+            )
+            continue
+        _update_task_status(kanban, card, "done")
+        closed.append(entry)
+    return closed
+
+
 def cleanup_container(cfg: Config) -> str | None:
     """Which container to run worktree housekeeping in.
 
@@ -798,6 +906,7 @@ def run_task_cycle(
         fatal: bool = True,
         model: str | None = None,
         max_turns: int | None = None,
+        note: str = "",
     ) -> DispatchResult | None:
         nonlocal foreign_lock
         _update_task_status(kanban, issue_id, f"in_progress:{role}")
@@ -811,7 +920,7 @@ def run_task_cycle(
                 cfg, task_id, slug, role,
                 prompt=_role_prompt(
                     role, task_id, slug, task_file, description, scratch_dir, cfg.hive_tasks_dir,
-                    round_num=round_num, max_turns=max_turns,
+                    round_num=round_num, max_turns=max_turns, note=note,
                 ),
                 model=model or cfg.default_model,
                 effort=effort,
@@ -892,9 +1001,30 @@ def run_task_cycle(
             revisor_result = run_phase("revisor", round_num=round_num)
             if revisor_result is None:
                 return
-            if revisor_approved(revisor_result.result_text, revisor_result.handoff):
-                approved = True
+            disguised = debt.blocking(revisor_result.handoff)
+            if disguised:
+                # A block wearing a debt costume. Another round cannot supply
+                # a decision the task was never given, so this ends here
+                # rather than burning the remaining rounds to say so again.
+                logger.warning(
+                    "task %s: the revisor read %d declaration(s) as blocks: %s",
+                    task_id, len(disguised), "; ".join(disguised),
+                )
                 break
+            sent_back = debt.rejected(revisor_result.handoff)
+            if revisor_approved(revisor_result.result_text, revisor_result.handoff):
+                if not sent_back:
+                    approved = True
+                    break
+                # Rejected debt is work the revisor says this task should have
+                # done, which is a finding; a verdict of APPROVED over the top
+                # of one is a contradiction, and the finding wins. It costs a
+                # round like any other finding, so this still terminates.
+                logger.info(
+                    "task %s: round %d came back APPROVED with %d debt declaration(s) rejected, "
+                    "so it is not an approval: %s",
+                    task_id, round_num, len(sent_back), "; ".join(sent_back),
+                )
 
         if not approved:
             _update_task_status(kanban, issue_id, "blocked")
@@ -904,7 +1034,16 @@ def run_task_cycle(
         # can name the entries it owns and a later run can tell an entry that
         # was handed to a task from one nobody has picked up yet.
         learnings.carry(cfg.hive_tasks_dir, slug, task_id)
-        if run_phase("auditor", final=True) is None:
+        # Written to the task file rather than only handed to the auditor: the
+        # merge that closes these cards can happen days later, in `merge-task`,
+        # long after this handoff is prose in a file nobody parses.
+        context_transfer.set_resolved_debt(
+            cfg.hive_tasks_dir, task_id, debt.resolved(implemented.handoff)
+        )
+        # Before the auditor, because the auditor writes the rows that point
+        # at these cards.
+        filed = _file_accepted_debt(cfg, kanban, task_id, slug, implemented, revisor_result)
+        if run_phase("auditor", final=True, note=debt.filing_note(filed)) is None:
             return
         completed = True
 
@@ -915,6 +1054,9 @@ def run_task_cycle(
             # phase for a row the repo already has. A branch that did not
             # merge keeps them here, where the next task still sees them.
             learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
+            # Same "only now": the entry is marked resolved on the branch that
+            # just landed, so the card it mirrors has stopped being work.
+            close_resolved_debt(cfg, kanban, task_id, slug)
     finally:
         # Every way out of here is terminal for this run — done, blocked, or a
         # crash — and the reviewing checkouts are rebuilt on demand, so they can

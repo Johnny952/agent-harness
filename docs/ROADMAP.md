@@ -379,6 +379,16 @@ EOF
   `list_organizations` returns 401 without a cloud login.
   - Create one issue in a scratch project and delete it afterwards.
   - This gates item 1's debt cards and item 5's epic decomposition.
+    `create_issue` has a real caller now — `_file_accepted_debt` opens one
+    card per accepted debt declaration, before the auditor writes the row
+    that points at it — so clearing the login wall is what turns that half
+    on; until it clears, `NullKanbanClient` is the path every run takes
+    and the entries are filed without cards. Two more things to check
+    while the scratch issue exists: that the `[debt] ` title prefix
+    survives a round trip, since `create_issue` takes no label argument
+    and the prefix is the label; and which field the reply carries the id
+    in (V2.3's question, answered by the same create), because that id is
+    what the index row points at and what `merge-task` closes.
 
 ### V3 — End to end on one account (task quota)
 
@@ -468,6 +478,23 @@ The first real `run-task`, with costs capped.
     `merge_on_done: false` nothing then deletes it — the inbox is only
     emptied by a merge — so after the run the file is still there, stamped
     `carried_by: T-001`.
+  - The debt flow leaves its mark in three places, or in none at all.
+    A task this small may declare nothing, and "no debt declared" is the
+    expected result rather than a miss: the implementador's handoff
+    carries an empty `debt` list, and the auditor is told nothing about
+    it. If it did declare something, record all three: the revisor's
+    handoff carries one ruling per declaration, the dispatcher's log
+    names the id it assigned (`T-001-D1`) before the auditor ran, and the
+    task branch gains that row in `docs/debt/README.md` plus its entry
+    file under `docs/debt/`, with the row's `where` written as a
+    condition rather than a topic. With no `vibe_kanban` block the card
+    half is a no-op by design: the entries are filed identically, the
+    auditor is told "no card (this project has no board)", and nothing on
+    stderr mentions a board. The two rulings that change the outcome are
+    worth recording verbatim if they happen — `rejected` sends the task
+    round again and counts against `max_revision_rounds`, which at 1 ends
+    it `blocked`, and `blocks` ends it `blocked` with no further round at
+    all.
   - `cuenta1.json` goes back to `IDLE`.
   - Collector events for the run's session IDs are there.
 - **Expected failure to record:** "roles don't see each other's code".
@@ -879,6 +906,13 @@ logins.
   is whether a phase handed the table actually greps it before debugging;
   and `mark_orphaned` only runs on a cycle that ends without merging,
   which V4.1 is the cheapest way to produce.
+- Changes to `dispatcher/debt.py`: V3, and V2.6 for the card half. The
+  unit tests fake both `create_issue` and `docker exec`, so what they
+  cannot show is whether a real board accepts a `[debt] ` title and
+  answers with an id the index row can carry, nor whether the dedupe read
+  finds `docs/debt/README.md` in the writers' worktree of a project that
+  actually has one — a read that fails there costs a duplicate card and
+  says so only in the log.
 - `mapping_enabled` turned on for the first time: V3 again, against a
   project with no `docs/README.md`. The mapper is the only phase that
   ignores `default_model`, and the only one with a turn budget, so its

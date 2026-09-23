@@ -62,6 +62,11 @@ class TaskFile:
     # because the task file is what survives a restart, and because the id is
     # server-assigned: the harness can't derive it from the task id.
     kanban_issue_id: str | None = None
+    # The debt entries this task's implementation says it resolved. Kept here
+    # for the same reason as the issue id: the merge that closes their cards
+    # can happen in a later process — `merge-task` by hand, days after the
+    # cycle — and by then the handoff that claimed them is only prose.
+    resolved_debt: list[str] = dataclasses.field(default_factory=list)
 
 
 def task_file_path(hive_dir: str, task_id: str) -> str:
@@ -110,6 +115,7 @@ def read_task_file(path: str) -> TaskFile:
         # have no such key and must stay readable.
         description=fm.get("description"),
         kanban_issue_id=fm.get("kanban_issue_id"),
+        resolved_debt=fm.get("resolved_debt") or [],
     )
 
 
@@ -132,6 +138,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
     }
     if task.kanban_issue_id is not None:
         fm["kanban_issue_id"] = task.kanban_issue_id
+    if task.resolved_debt:
+        fm["resolved_debt"] = task.resolved_debt
     if task.description is not None:
         # Last key so the (multi-line) description sits next to the body,
         # with the short bookkeeping fields readable above it.
@@ -193,6 +201,23 @@ def set_kanban_issue_id(hive_dir: str, task_id: str, issue_id: str) -> None:
 def read_kanban_issue_id(hive_dir: str, task_id: str) -> str | None:
     """The issue this task mirrors, or None when it mirrors none."""
     return _read_or_new(hive_dir, task_id)[1].kanban_issue_id
+
+
+def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:
+    """Record which debt entries this task's work resolved.
+
+    Replaces rather than appends: a re-run's implementation is the current
+    claim about what this task fixes, and the previous round's claim was
+    about code that has since been rewritten.
+    """
+    path, task = _read_or_new(hive_dir, task_id)
+    task.resolved_debt = list(entries)
+    write_task_file(path, task)
+
+
+def read_resolved_debt(hive_dir: str, task_id: str) -> list[str]:
+    """The debt entries this task claims to have resolved, empty when none."""
+    return _read_or_new(hive_dir, task_id)[1].resolved_debt
 
 
 def acquire_lock(hive_dir: str, task_id: str, owner: str, ttl_seconds: int | None = None) -> TaskFile:
