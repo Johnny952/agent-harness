@@ -601,10 +601,15 @@ logins.
     cuenta2. The transcript cuenta2 wrote was then confirmed visible
     from `agent-cuenta1` at the same path, by both spellings — the
     precondition a cross-account resume rests on is intact; only
-    cuenta1's ability to spend is not. Re-measure the id
-    cross-account opportunistically, the next time both accounts can
-    spend at once. Evidence:
-    `.data/verify/v51-cross-account-resume.txt`.
+    cuenta1's ability to spend is not. That last clause expired on
+    2026-09-24: a real sonnet turn on `agent-cuenta1` came back
+    `api_error_status: null`, `stop_reason: end_turn`, against 34% of
+    the session and 51% of the week, so the 429 was the monthly wall
+    and the wall is down. The cross-account leg has an account to run
+    on again; do it as part of the two-account acceptance rather than
+    as a standalone turn, since the run exercises it anyway. Evidence:
+    `.data/verify/v51-cross-account-resume.txt` and
+    `.data/verify/quota-probe-local-only.txt`.
 - **V5.2 Dispatcher failover, with a fault injected.** Waiting for a real
   quota exhaustion is too slow and too expensive. Instead, make cuenta1
   report a 429 after doing the real work, and pass `/usage` through
@@ -1003,7 +1008,19 @@ logins.
      project's `docs/README.md` worktree path from `work` to `<phase>`,
      reading a `git worktree list` still padded with three earlier
      tasks' reviewer directories: the doc it is responsible for is now
-     wrong in the other direction.
+     wrong in the other direction. Fixed 2026-09-24 on the project's
+     `master`, and not by reverting the word: the auditor was reporting
+     what it saw, so the paragraph now describes both shapes — the
+     writers' shared `work`, which outlives the task until `dispatch
+     cleanup-task` removes it, and a reviewer's detached checkout named
+     after the role, rebuilt per run and deleted when the task ends —
+     and says in as many words that a directory it does not name turning
+     up in `git worktree list` is the harness working rather than the
+     doc going stale. A future auditor reading that list now finds it
+     already accounted for. `agent/task/T-004` keeps the wrong line: it
+     is this run's artefact, nothing branches from it (every task
+     branches from the project's `master`, which was never wrong), and
+     `merge_on_done: false` means it reaches nothing on its own.
    - **The quota probe stops reading at 0%.** Fixed 2026-09-24 as
      chosen: the `· resets <when>` clause is now optional per line in
      both of `parse_usage_output`'s regexes, and
@@ -1023,13 +1040,110 @@ logins.
      its line 6, and T-004's line 6 is the learnings INFO instead. The
      four quota-probe sessions are in the collector for both runs, so
      what changed is the reading, not the probe.
-3. Acceptance:
+   - **Nothing retires a learning the harness has since disproved.**
+     Fixed 2026-09-24 with two exits besides deletion, both on
+     evidence rather than on a model's opinion. Every entry is stamped,
+     when its task ends, with `harness_fingerprint(permission_mode,
+     allowed_tools, WRITER_ROLES)` — the permission surface and nothing
+     else, because those three settings are precisely what made both
+     known-false entries false, and a fingerprint over the whole config
+     would mark the inbox stale every time a timeout was tuned. An entry
+     written under a different surface is *stale*: still rendered, marked
+     in the status column, but dropped from the corroboration map, so it
+     can neither confirm nor be confirmed until a task hits it again
+     under the current one. Both fingerprints must be present for that,
+     so entries predating the stamp read as unknown and the feature does
+     not retire the inbox on its first run. The second exit is
+     phase-side: an entry carrying `refutes: <ref>` marks its target
+     `refuted` on the next `reconcile`, recording the refuting task in
+     `refuted_by`; the target leaves every phase's table and stays on
+     disk and in `dispatch learnings`. Three guards, each the mirror of
+     a promotion rule: a task cannot refute its own claim (that is
+     changing its mind mid-run), a promoted entry is only ever retired
+     by `dispatch learnings --refute` (a human put it in the shared store
+     for every project), and a refuted entry corroborates nothing. The
+     asymmetry is why this needs no human where promotion does: a wrong
+     refutation costs a later phase a debug it would have paid anyway
+     before the entry existed, while a wrong confirmation misleads every
+     phase that reads it. Ordering follows: confirmed rows survive the
+     40-row cap first, refuted rows fall off it first, stale rows sink
+     within their band. 9 new unit tests, 713 passing and 10 skipped in
+     the suite. Not yet exercised by a dispatched run: no run has been
+     paid for since, so what the phases do with `refutes:` when the
+     prompt offers it is unmeasured, and the two entries this harness
+     already knows to be false are still in its own inbox.
+   - **The handoff budgets were sized before a phase could write
+     anything.** Fixed 2026-09-24, from the eleven overages four
+     dispatched runs logged rather than by raising every limit until the
+     warning went quiet. The first finding was that the retry is not
+     overhead: every over-budget draft came back materially shorter and
+     still complete, and the auditor's landed T-004 handoff is 22
+     one-line entries plus one debt object — an editing pass worth
+     paying for. So only the two budgets *nothing* has ever met moved,
+     the rule being that a budget returns straddle is a budget doing its
+     job: revisor 3072 → 4096 (3139, 4010, 4149, 4386 in four runs; it
+     carries a verdict and a ruling per declaration, the same argument
+     that bought the implementador its room) and auditor 2048 → 3584
+     (4602 and 5209; it reports on the whole task and now commits the
+     docs it files, and its shortened returns measure about 2600, so
+     2048 was never reachable). Arquitecto and implementador stay, each
+     having met its budget at least once; cartografo stays because no
+     run has exercised it and its number is still a guess. Second, an
+     overage inside 10% of the budget, floored at 256 bytes, no longer
+     buys a `--resume`: four of the eleven were 46, 67, 170 and 280
+     bytes, a line and a half each for the price of a model call.
+     Replaying all eleven against the new numbers, the retries drop from
+     11 to 4, two returns now fit outright and five are taken as they
+     came. Third, the log now describes what landed: the draft size goes
+     to INFO, which is where the next tuning reads it, and WARNING is
+     reserved for a handoff that reaches the task file over budget —
+     the rewrite refused for want of a session, failed, or come back
+     long. Across the same four runs that line would have fired zero
+     times, which is what makes it worth reading. Fourth, the limit is
+     stated to the role in entries as well as bytes (`lines_for`
+     derives one from the other, so the two cannot drift): 14 for the
+     cartografo, 30 for the arquitecto, 38 for the implementador, 30 for
+     the revisor, 26 for the auditor. Nothing can count its own bytes
+     while writing, which is the likeliest reason every run so far
+     overran one; entries it can count, and an entry is what the fields
+     hold. Deliberately not done: `maxItems`/`maxLength` in the JSON
+     schema, which would make the CLI enforce it — a hard validation
+     failure drops the phase to the prose clamp, a worse outcome than
+     a long handoff, and nothing but a dispatched run can tell which
+     way the CLI takes it. 11 new unit tests, 724 passing and 10
+     skipped. Exercised by T-005 (2026-09-24), which hit all three
+     branches in one run: the arquitecto retried and came back inside,
+     the implementador missed by 267 bytes and was kept as it was
+     without paying for a `--resume`, and the revisor and auditor each
+     retried once and stayed over — two WARNINGs in a run, where the
+     four runs that motivated the numbers would have produced zero.
+     The margin does what it was added for and the WARNING means
+     something again. What the run did not settle is whether entries
+     read better than bytes: every role still overran, so the counts
+     are no more reliable a target than the byte budgets were. One
+     number is now suspect rather than confirmed — the arquitecto's
+     4096, left alone because its misses were 1%, 4% and 18%, was
+     missed by 43% here. That is one data point against the reasoning,
+     not yet a reason to move it.
+3. Acceptance: **passed 2026-09-24** (T-005, `.data/verify/t005-acceptance.txt`).
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
    - Pass:
      - The task ends `done`, or `blocked` only after real change requests.
      - The revisor and auditor review the implementador's commits.
      - The task branch holds the change, and `node --test` passes on it.
+   - All four met: `done` with the revisor APPROVED in round 1, both
+     reviewers citing `84490fe` by SHA, three commits carrying
+     `subtract` and its test, `node --test` green on the branch tip.
+   - What passing did not cover, because the config was run rather than
+     forced: the revisor approved in round 1, so rounds 2 and 3 and
+     `escalate_effort_after_round: 2` never opened; and no phase
+     failed, so failover never fired and cuenta2 sat IDLE beside a
+     working cuenta1. Two accounts were configured and one was used.
+     The cross-account `--resume` leg of V5.1 was meant to be folded in
+     here and was not — the three resumes this run made were handoff
+     shrinks, all on the one account. It still needs a run that makes a
+     phase change hands.
 4. Re-run V5.2 against the fixed pipeline. Commits and resumes now
    interact.
 
@@ -1220,3 +1334,5 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-09-23 | V1.2 (allowed-tools probe) | PASS | Claude Code CLI 2.1.273; agent-cuenta2 | Run straight after the V3 re-run to answer N1 without paying for another cycle: can a harness-side allowlist grant the one thing `acceptEdits` withholds? Five `claude -p` variants on `agent-cuenta2` over a toy project with one passing test, the prompt pinned to `node --test` and told not to rewrite the command. Control (`acceptEdits`, no allowlist): **not executed**, 3 turns, "The command requires your approval". `acceptEdits` + `Bash(node --test*)`, + `Bash(node*)`, + `Bash(node:*)`: **executed**, 2 turns each, "Tests ran and passed (1/1)". And **no mode at all + `Bash(node --test*)`: also executed** — so `allowed_tools` and `permission_mode` are orthogonal grants, not a refinement of one another, and a space-bearing pattern survives the hop as a single argv element. Decision, shipped in `e543188`: wire `allowed_tools` into the config, empty by default, restated on every phase command *and* on the shrink and gate retries, because `--resume` inherits no flags. `auto` is therefore not needed to answer N1, and the repo's own toy project got the `test:` key it was missing so the no-quota gate can cover the same ground for free. What this does **not** settle: the allowlist has never run on a dispatched cycle — it is proven on a toy prompt only. One more V3 re-run, with `allowed_tools` set, is what closes the README's *Known gaps* bullet, and it costs quota. Evidence: `.data/verify/allowed-tools-probe.json`. |
 | 2026-09-24 | V3 (re-run 2) | PASS | Claude Code CLI 2.1.273; agent-cuenta2 | The run the row above was waiting on: does the allowlist hold on a real dispatched cycle, not a toy prompt? **Yes.** Task `T-003`, 13:34:33Z->13:46:07Z (11m34s wall), exit 0, one config line added to the re-run's — `allowed_tools: [Bash(node --test*)]` on top of `permission_mode: acceptEdits`. The A/B now runs three deep on the same task shape: T-001 denied 43 of 62 calls and wrote nothing; T-002, with the mode, denied 17 of 54 and ended `blocked` on the test; **T-003 denied 12 of 95 and ended `done`, revisor APPROVED**, four phases (arquitecto -> implementador r1 -> revisor r1 -> auditor). Per tool, from the collector: Bash 31 pre / 19 post / 12 denied, Edit 6/6/0, Read 31/31/0, Write 20/20/0, StructuredOutput 7/7/0 — **only `Bash` was ever denied**. Five `node --test` runs across three worktrees under four phases, every one `# tests 2 # pass 2 # fail 0`, and all five are a phase's own execution: the dispatcher's free test gate calls `run_docker_exec` directly rather than through `claude`, so it fires no hook and emits no event, and the run log carries no "gates: no `test:` in ..." skip line, so the gate ran and was green. The 12 denials are a clean taxonomy, none of them mysterious: shell `for` loops (2), `git -C <absolute path>` even on the phase's own cwd (4), paths above the worktree root (3), `npm test --silent` (2 — left out of the allowlist on purpose, so a refusal would surface as a finding rather than be papered over), and `node --test *.test.js 2>&1; echo "EXIT=$?"` (1). That last one sharpens the pattern: chaining is *not* what breaks the match — another event chains two commands after a pipe and passes — it is `echo "EXIT=$?"` falling outside `Bash(node --test*)`. **What the run opened is four new README gaps**, all of them things only a run that could write could expose: both reviewing roles' worktrees were deleted with their edits uncommitted, and the auditor is the phase the prompts make responsible for the durable doc indexes; nothing retires a learning the harness has since disproved (T-002's "`node` needs approval" was read out of `archive/` by T-003's arquitecto, already false); `parse_usage_output` rejected `Current session: 0% used` for want of a `· resets` clause, so the quota probe went blind on the freshest account (a warning, not a stop — the run still exited 0); and three of four handoffs blew their byte budget — arquitecto 4266/4096, revisor 4386/3072, auditor 5209/2048 — at one paid `--resume` apiece. Still unexercised: the two-account half of Stage 1's acceptance, since cuenta1 is out of monthly spend. Evidence: `.data/verify/v3-allowlist.txt`, `.data/verify/v3-allowlist-run.log`. |
 | 2026-09-24 | V4 (auditor writes) | PASS | Claude Code CLI 2.1.273; agent-cuenta2; dispatcher image `sha256:3fb0c9d6c062` | The three fixes the row above opened, run through a dispatched cycle instead of unit tests. Task `T-004`, 17:37:54Z->17:47:51Z (9m57s wall), exit 0, same four phases, same verdict (`done`, revisor APPROVED at round 1). The A/B is one artefact, not one field: `config.yaml` is identical field-by-field to T-003's snapshot, and the dispatcher image — which bakes the source — was rebuilt 73 seconds before START. **(1) The auditor committed.** `ef3e53f` on `agent/task/T-004`, author `auditor (cuenta2)`, ten files and 295 insertions. **(2) The commit is scoped.** Every one of the ten paths is under `docs/`, no out-of-scope path was logged, the phase's session cwd moved from `worktrees/T-004/auditor` to `.../work`, and the cleanup line reads `removed review worktrees revisor` where T-003's read `auditor, revisor` — the revisor is still a reviewer by design and `git log --author=revisor` is empty. **(3) The quota probe parsed.** T-003's log had the `Unexpected /usage output format` warning at +4s as line 6; T-004's line 6 is the learnings INFO instead, with the same four quota-probe sessions in the collector. Refusals: **4 of 75 (5%)**, the best of the four runs (T-001 43/62, T-002 17/54, T-003 12/95), and the auditor's own 30 calls — ten `Write`, two `Edit` — were refused none. The four, verbatim: the arquitecto attempting its own commit (once, not retried), the revisor's `node --test *.test.js 2>&1; echo "EXIT=$?"` reproducing T-003's finding 5 in another phase, and two `ls` calls above the worktree root. No `git -C` and no `npm` was attempted at all. Two things it opened rather than closed: `learnings.reconcile` fired for the first time and promoted three entries to `confirmed`, while the one entry this very fix disproved (`T-003-phase-edit-missing-from-next-worktree.md`) stayed in the inbox and went to all four phases — a named instance of the stale-learning gap; and the auditor rewrote the toy project's `docs/README.md` worktree path from `work` to `<phase>`, off a `git worktree list` still padded with three earlier tasks' reviewer directories, so that doc is now wrong the other way. Handoff budgets blew three of four again, a different three (implementador 5400/5120, revisor 4149/3072, auditor 4602/2048). Still unexercised: the two-account half of Stage 1's acceptance, since cuenta1 is out of monthly spend. Evidence: `.data/verify/v4-auditor-commit.txt`, `.data/verify/v4-auditor-commit-run.log`. |
+| 2026-09-24 | V5.1 (quota probe) | FINDING | Claude Code CLI in agent-cuenta1 and agent-cuenta2; `--model sonnet` | Authorized as "a little quota on cuenta1", to find out whether the monthly wall V5.1 hit on 2026-09-23 was still standing. **It is not**: one real sonnet turn on `agent-cuenta1` answered `PROBE-OK` with `api_error_status: null`, `stop_reason: end_turn`, 1 turn, $0.0405, served by `claude-sonnet-5`. Session 33%→34%, week 51%, requests 239→240 across the turn, so the counters track spend and update promptly. Two side results. First, the containers really are two logins — sha256 fingerprints of `oauthAccount` and of `.credentials.json` differ on both axes (`407fc743…`/`a57c095f…` against `b05e3f6b…`/`5d770bbe…`), nothing printed in the clear. Second, and the reason this is a FINDING rather than a note: **`claude -p "/usage"` is a local command**, `local_command: "usage"`, `duration_api_ms: 0`, `num_turns: 0`, `total_cost_usd: 0`. `check_quota_ok` therefore reads counters off the container's disk and never asks the service, so a healthy percentage says nothing about whether the next call is refused — which is exactly the shape of the one refusal on record (V5.4: 429 on arrival, no session started). The output also states it covers "local sessions on this machine" only, so `quota_threshold_pct` is compared against a number that undercounts any use from another device, and `check_quota_ok` fails open on exception on top of that. Decision: record it as a README gap rather than fix it blind — the probe's $0/641ms is worth keeping, and nothing has yet measured whether a refused account answers `/usage` with numbers or an error, which is what decides between reading `/usage` harder and reacting to the first real call. Also stale as of this row: `config.yaml`'s header and its `accounts:` comment. Evidence: `.data/verify/quota-probe-local-only.txt`. |
+| 2026-09-24 | Stage 1 acceptance (V3, default config) | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image rebuilt 18:52:54 | Task `T-005`, 18:53:45→19:07:16 (13m31s wall), exit 0, launched with `--description` rather than a hand-seeded task file as the acceptance requires. All four criteria met: `status: done` with the revisor `APPROVED` in round 1; revisor and auditor both cite the implementador's commit `84490fe` by SHA; `agent/task/T-005` carries three commits (`16ee9c9` arquitecto, `84490fe` implementador, `b43b7f6` auditor), 16 files, +407/−4, with `subtract` exported from `sum.js` and a `test('subtract')` whose second assertion pins operand order; `node --test` green on the tip (2 pass, 0 fail). **cuenta1 served real pipeline work for the first time** — BUSY on T-005 for all four phases, after answering 429 on arrival since 2026-09-23. **Handoff budgets hit all three branches in one run**: arquitecto 5857/4096 retried to 3983 (inside), implementador 5387/5120 kept as-is inside the 512-byte margin without paying for a `--resume`, revisor 6060/4096 and auditor 5911/3584 each retried once and stayed 362 and 350 over — two WARNINGs where the four runs that set the numbers would have produced zero. **Finding: a revisor's edits never land.** Review worktrees are detached at the branch tip by design, so there is no branch to commit them onto; the revisor reported the `pointers` gate closed and its own grep agreed, while the same grep on the branch still returned both pointers. The auditor re-ran that verification on its own branch, found the gate open and repaired it in `b43b7f6` — turning the loose pointers into `docs/debt/T-005-D1.md` and `D2` — so the tip is clean. But the APPROVED verdict was issued by a phase that believed in a fix it had not made, and nothing but the auditor's own diligence caught it. This is the mechanism behind `T-003-phase-edit-missing-from-next-worktree`, which had the symptom without the reason. Also unprompted: the arquitecto's Risks list reintroduced the `<phase>`-for-`work` worktree-path error verbatim; the implementador checked it, refused the edit and filed the rule. 4 learnings filed and stamped. Not measured: failover (no phase failed, cuenta2 IDLE throughout), rounds 2–3 and effort escalation (approved in round 1), and V5.1's cross-account `--resume`. Decision: acceptance item 3 closes; the detached-revisor gap goes to the README as a known gap; item 4 (V5.2 re-run) is next and needs quota. See `.data/verify/t005-acceptance.txt` and `t005-acceptance-run.log`. |

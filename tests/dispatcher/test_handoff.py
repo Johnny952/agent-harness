@@ -98,6 +98,60 @@ def test_the_mapper_gets_as_little_room_as_any_role() -> None:
     assert mapper < handoff.budget_for("arquitecto")
 
 
+def test_every_budget_buys_enough_lines_to_report_with() -> None:
+    """The budgets are stated to the roles in entries, so a budget is only
+    sane if the entries it buys are enough to say what the role saw. The
+    shortest real auditor handoff on record ran to 22 of them."""
+    for role in ROLES:
+        assert handoff.lines_for(role) >= 12, role
+    assert handoff.lines_for("auditor") >= 22
+
+
+def test_an_unknown_role_gets_countable_lines_too() -> None:
+    assert handoff.lines_for("becario") > 0
+
+
+def test_lines_track_the_budget() -> None:
+    """The two numbers in the prompt describe one limit, so they cannot be
+    allowed to drift: the entries are derived from the bytes."""
+    ordered = sorted(ROLES, key=handoff.budget_for)
+    assert [handoff.lines_for(role) for role in ordered] == sorted(
+        handoff.lines_for(role) for role in ordered
+    )
+
+
+# --- the margin -------------------------------------------------------------
+
+def test_a_handoff_that_fits_is_never_worth_shrinking() -> None:
+    assert not handoff.worth_shrinking("revisor", 0)
+
+
+def test_a_small_overage_is_not_worth_a_model_call() -> None:
+    """Four of the eleven overages on record were under 300 bytes — a line and
+    a half in a file nobody was struggling to read, for the price of a
+    `--resume`."""
+    assert not handoff.worth_shrinking("arquitecto", 46)
+    assert not handoff.worth_shrinking("revisor", 67)
+    assert not handoff.worth_shrinking("arquitecto", 170)
+    assert not handoff.worth_shrinking("implementador", 280)
+
+
+def test_a_page_of_prose_over_is_worth_a_model_call() -> None:
+    """The overages worth paying for are the ones where the handoff is
+    carrying detail that belongs in a file."""
+    assert handoff.worth_shrinking("arquitecto", 721)
+    assert handoff.worth_shrinking("implementador", 1439)
+    assert handoff.worth_shrinking("auditor", 1018)
+
+
+def test_the_margin_is_a_share_of_the_budget_not_a_flat_count() -> None:
+    """A tight budget should tolerate fewer bytes than a loose one; a floor
+    keeps the tightest budgets from spending a call on a few dozen."""
+    assert handoff.worth_shrinking("cartografo", 300)
+    assert not handoff.worth_shrinking("implementador", 300)
+    assert not handoff.worth_shrinking("cartografo", 200), "the floor holds below the share"
+
+
 # --- parsing ----------------------------------------------------------------
 
 def test_parse_reads_the_envelope_field_not_the_result_text() -> None:
@@ -163,7 +217,7 @@ def test_over_budget_is_zero_when_it_fits() -> None:
 
 
 def test_over_budget_reports_the_overage() -> None:
-    payload = {"status": "complete", "risks": ["r" * 4000]}
+    payload = {"status": "complete", "risks": ["r" * (handoff.budget_for("revisor") + 1024)]}
     overage = handoff.over_budget("revisor", _structured(payload))
     assert overage == handoff.measure(_structured(payload)) - handoff.budget_for("revisor")
     assert overage > 0

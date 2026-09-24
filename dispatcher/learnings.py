@@ -15,9 +15,10 @@ it without waiting for a merge.
 
 The dispatcher's half of this runs with no model in the loop: it makes the
 directories, carries a task's entries forward, drops them once the branch that
-filed them merged, and unpicks them when the task they were riding died.
-Everything that needs judgement — is this a real trap, does it belong to every
-project — is the auditor's job, or a human's.
+filed them merged, unpicks them when the task they were riding died, and
+retires the ones the harness has outgrown. Everything that needs judgement — is
+this a real trap, does it belong to every project — is the auditor's job, or a
+human's.
 
 Two scopes, because they have different blast radii. `scope: project` is a
 trap in one codebase and the auditor files it into that project's
@@ -25,10 +26,24 @@ trap in one codebase and the auditor files it into that project's
 the container, the CLI, the worktree — and it reaches other projects only
 after a human has moved it into the cross-project store, which is the only
 thing in here no automated path writes to.
+
+Nothing in here is true for ever, and an entry is a claim about a harness as
+much as about a project: "`node --test` is refused" was right until
+`allowed_tools` was wired, and "a review phase's edits never reach the branch"
+was right until the auditor was given the writers' worktree. Both outlived
+their truth in the inbox, and three phases of one task spent turns arguing with
+the first of them. So there are two ways out for an entry besides deletion.
+Every entry is stamped with a fingerprint of the permission surface it was
+written under, and one written under a different surface is *stale*: still
+shown, because it may well still be right, but no longer counted as evidence.
+And a task that walked through another task's trap unharmed can say so, by
+writing `refutes: <ref>` on an entry of its own — which retires the old one
+without destroying either the claim or the correction.
 """
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import os
 import re
@@ -52,6 +67,10 @@ HARNESS_NAME = "harness"
 
 UNCONFIRMED = "unconfirmed"
 CONFIRMED = "confirmed"
+#: Retired on a later task's evidence, not on a guess: the trap was looked for
+#: where it was reported and did not bite. The entry stays on disk and stays in
+#: the human's listing; it stops reaching the phases.
+REFUTED = "refuted"
 
 SCOPE_PROJECT = "project"
 SCOPE_HARNESS = "harness"
@@ -62,6 +81,10 @@ SCOPE_HARNESS = "harness"
 #: often, the fix is the filtering the README describes — rows matching the
 #: task's profile, labels or the paths its plan names — not a bigger cap.
 MAX_ROWS = 40
+
+#: Confirmed rows survive the cut first because something independent backs
+#: them, refuted ones last because a later task went looking and found nothing.
+_STATUS_ORDER = {CONFIRMED: 0, UNCONFIRMED: 1, REFUTED: 2}
 
 #: One row has to stay a row. Longer than this and the entry file is the place
 #: for it, which is what the `#` column points at.
@@ -98,6 +121,32 @@ def ensure_dirs(hive_dir: str) -> str:
     for path in (inbox_dir(hive_dir), harness_dir(hive_dir)):
         os.makedirs(path, exist_ok=True)
     return root
+
+
+def harness_fingerprint(
+    permission_mode: str | None,
+    allowed_tools: list[str] | None,
+    writer_roles: frozenset[str] | set[str] | None,
+) -> str:
+    """What a phase was allowed to do, as one short string.
+
+    Only the permission surface goes in, not the whole config: these three
+    settings are what decided both entries that went false in this harness —
+    whether a command is refused, and whether a phase's edits reach the branch
+    — and a coarser fingerprint would mark the whole inbox stale every time a
+    timeout was tuned. Primitives rather than a Config, so this module keeps
+    importing nothing from the package but the path helpers.
+    """
+    surface = "\n".join(
+        (
+            f"permission_mode={permission_mode or ''}",
+            "allowed_tools=" + ",".join(sorted(allowed_tools or ())),
+            "writer_roles=" + ",".join(sorted(writer_roles or ())),
+        )
+    )
+    # Short: it is written into frontmatter a human reads and compared for
+    # equality, never for cryptographic anything.
+    return hashlib.sha256(surface.encode()).hexdigest()[:12]
 
 
 _FRONTMATTER_DELIM = "---"
@@ -178,6 +227,29 @@ class Entry:
     @property
     def carried_by(self) -> str:
         return self._str("carried_by")
+
+    @property
+    def harness(self) -> str:
+        """The permission surface this was written under, if it was stamped."""
+        return self._str("harness")
+
+    @property
+    def refutes(self) -> str:
+        """The entry this one was written to correct, as its author typed it."""
+        return self._str("refutes")
+
+    @property
+    def refuted_by(self) -> str:
+        return self._str("refuted_by")
+
+    def stale(self, harness: str) -> bool:
+        """Whether this was written under a harness that no longer exists.
+
+        Both fingerprints have to be there: an entry from before the stamp
+        existed is not stale, it is unknown, and treating unknown as stale
+        would retire the whole inbox the first time this ran.
+        """
+        return bool(harness and self.harness and self.harness != harness)
 
     @property
     def reviewed(self) -> bool:
@@ -288,18 +360,84 @@ def _tasks_by_fingerprint(entries: list[Entry]) -> dict[str, set[str]]:
     return seen
 
 
-def reconcile(hive_dir: str) -> list[str]:
-    """Confirm the entries a second task has now hit.
+def _match(entries: list[Entry], ref: str) -> Entry | None:
+    """The entry a `refutes:` line points at, by ref rather than by path.
+
+    Matched inside the list the caller is already holding, not re-read from
+    disk: reconcile mutates these objects, and a second copy of the same file
+    would be deciding on a status the first copy has already changed.
+    """
+    by_ref = {entry.ref: entry for entry in entries}
+    for candidate in _candidates(ref):
+        found = by_ref.get(candidate)
+        if found is not None:
+            return found
+    return None
+
+
+def _refute(entries: list[Entry]) -> list[str]:
+    """Retire the entries a later task went looking for and did not find.
+
+    The mirror of the confirmation rule, and it needs no model either: a phase
+    that hit an entry's exact situation and walked through it says so in its
+    own entry, and this reads the two together. A refutation is one task's
+    word, like any other entry — but it only ever *removes* a row, so the cost
+    of a wrong one is a later phase debugging something it was warned about,
+    not a later phase believing something false. That asymmetry is why this
+    runs unattended and promotion does not.
+    """
+    refuted, held = [], []
+    for entry in entries:
+        if not entry.refutes:
+            continue
+        target = _match(entries, entry.refutes)
+        if target is None or target.status == REFUTED:
+            continue
+        if target.task and target.task == entry.task:
+            # A task correcting itself is a task changing its mind mid-run,
+            # which is what editing the entry would have been. No evidence.
+            continue
+        if target.reviewed:
+            # A human put it in the shared store on behalf of every project;
+            # one task's counter-example is a reason to look, not a verdict.
+            held.append(f"{entry.ref} -> {target.ref}")
+            continue
+        target.meta["status"] = REFUTED
+        target.meta["refuted_by"] = entry.task or entry.ref
+        _write(target)
+        refuted.append(f"{target.ref} (by {entry.ref})")
+    if refuted:
+        logger.info("learnings: refuted by a later task: %s", ", ".join(refuted))
+    if held:
+        logger.info(
+            "learnings: these refute an entry a human promoted, so they are left for "
+            "`learnings --refute`: %s",
+            ", ".join(held),
+        )
+    return refuted
+
+
+def reconcile(hive_dir: str, harness: str = "") -> list[str]:
+    """Confirm the entries a second task has now hit, and retire the dead ones.
 
     The poisoning guard: one phase can write anything, so an entry is a claim
     until something independent backs it. Two distinct tasks reporting the
     same error is that something, and it is checkable without a model — which
     is the point, since the alternative is paying a phase to review claims.
+
+    The same pass is where entries leave: a refutation retires one outright,
+    and an entry written under a different permission surface stops counting
+    as evidence even though it keeps its row. Both are deliberately kept out
+    of the corroboration map rather than deleted — a stale entry that a second
+    task hits again under *this* harness is stamped with this harness and
+    corroborates normally from then on.
     """
     entries = read_all(hive_dir)
-    seen = _tasks_by_fingerprint(entries)
+    _refute(entries)
+    live = [entry for entry in entries if entry.status != REFUTED and not entry.stale(harness)]
+    seen = _tasks_by_fingerprint(live)
     confirmed = []
-    for entry in entries:
+    for entry in live:
         if entry.reviewed or entry.status == CONFIRMED:
             continue
         if len(seen.get(entry.fingerprint, ())) < 2:
@@ -309,7 +447,40 @@ def reconcile(hive_dir: str) -> list[str]:
         confirmed.append(entry.ref)
     if confirmed:
         logger.info("learnings: confirmed by a second task: %s", ", ".join(confirmed))
+    stale = [entry.ref for entry in entries if entry.stale(harness)]
+    if stale:
+        logger.info(
+            "learnings: written under a permission surface this run does not have, "
+            "shown but not counted: %s",
+            ", ".join(stale),
+        )
     return confirmed
+
+
+def stamp(hive_dir: str, task_id: str, harness: str) -> list[str]:
+    """Record which harness this task's entries were written under.
+
+    At the end of the task rather than as each file appears: the phases write
+    these themselves, in containers, and asking them for one more frontmatter
+    key they cannot compute would be a key they get wrong. Entries that
+    already carry a stamp are left alone, so a task resumed under a changed
+    config does not backdate its earlier findings.
+    """
+    if not harness:
+        return []
+    stamped = []
+    for entry in read_inbox(hive_dir):
+        if entry.task != task_id or entry.harness:
+            continue
+        entry.meta["harness"] = harness
+        _write(entry)
+        stamped.append(entry.ref)
+    if stamped:
+        logger.info(
+            "task %s: stamped inbox entries with harness %s: %s",
+            task_id, harness, ", ".join(stamped),
+        )
+    return stamped
 
 
 def _carried(entries: list[Entry], project: str) -> list[Entry]:
@@ -378,7 +549,9 @@ def mark_orphaned(hive_dir: str, task_id: str) -> list[str]:
     its confirmation: that sighting did not die with this task.
     """
     entries = read_inbox(hive_dir)
-    seen = _tasks_by_fingerprint(entries + read_harness(hive_dir))
+    seen = _tasks_by_fingerprint(
+        [entry for entry in entries + read_harness(hive_dir) if entry.status != REFUTED]
+    )
     orphaned = []
     for entry in entries:
         if entry.reviewed:
@@ -407,12 +580,24 @@ def mark_orphaned(hive_dir: str, task_id: str) -> list[str]:
     return orphaned
 
 
+def _candidates(ref: str) -> list[str]:
+    """Every ref that means this entry, for a human typing and an agent citing.
+
+    The backticks come off because the table renders the ref in them and a
+    phase copying a row out of its own prompt copies them too.
+    """
+    ref = (ref or "").strip().strip("`").strip()
+    if not ref:
+        return []
+    return [ref, f"{ref}.md",
+            os.path.join(INBOX_NAME, ref), os.path.join(INBOX_NAME, f"{ref}.md"),
+            os.path.join(HARNESS_NAME, ref), os.path.join(HARNESS_NAME, f"{ref}.md")]
+
+
 def resolve(hive_dir: str, ref: str) -> Entry | None:
     """One entry, by anything a human would type at it."""
     root = root_dir(hive_dir)
-    candidates = [ref, f"{ref}.md", os.path.join(INBOX_NAME, ref), os.path.join(INBOX_NAME, f"{ref}.md"),
-                  os.path.join(HARNESS_NAME, ref), os.path.join(HARNESS_NAME, f"{ref}.md")]
-    for candidate in candidates:
+    for candidate in _candidates(ref):
         path = os.path.join(root, candidate)
         if os.path.isfile(path):
             return _read_entry(root, path)
@@ -474,14 +659,25 @@ def _cell(text: str) -> str:
     return flat if len(flat) <= _CELL_CHARS else f"{flat[:_CELL_CHARS - 1]}…"
 
 
-def table(entries: list[Entry]) -> str:
-    """The rows, as the index everywhere else in the harness renders them."""
+def table(entries: list[Entry], harness: str = "") -> str:
+    """The rows, as the index everywhere else in the harness renders them.
+
+    `harness` is the permission surface being rendered against; without one
+    nothing is stale, which is what the human listing wants when it is asked
+    about a hive it is not currently running.
+    """
     # Confirmed first, so that a table cut off at MAX_ROWS keeps the entries
-    # something independent has already backed; ref second, so the order is
-    # stable between two phases of the same task.
-    ordered = sorted(entries, key=lambda e: (e.status != CONFIRMED, e.ref))
+    # something independent has already backed, and refuted last so those are
+    # the first rows to fall off the end; stale before fresh within each band,
+    # for the same reason. Ref last, so the order is stable between two phases
+    # of the same task.
+    ordered = sorted(
+        entries,
+        key=lambda e: (_STATUS_ORDER.get(e.status, 1), e.stale(harness), e.ref),
+    )
     rows = [
-        f"| `{entry.ref}` | {_cell(entry.rule)} | {_cell(entry.when)} | {entry.status} |"
+        f"| `{entry.ref}` | {_cell(entry.rule)} | {_cell(entry.when)} | "
+        f"{entry.status + ' (stale)' if entry.stale(harness) else entry.status} |"
         for entry in ordered[:MAX_ROWS]
     ]
     lines = ["| # | Learning | When it applies | Status |", "|---|---|---|---|", *rows]
@@ -499,7 +695,10 @@ _READ = (
     "worktree and shared by every task this harness runs. Before you spend a turn debugging "
     "anything, grep that directory for the exact error text in front of you: entries quote "
     "their errors verbatim precisely so that a grep for the message finds them. An entry "
-    "marked unconfirmed was reported once and never reproduced — read it, do not trust it."
+    "marked unconfirmed was reported once and never reproduced — read it, do not trust it. "
+    "One marked `(stale)` was written when this harness gave phases different permissions "
+    "than you have now, so it may describe a wall that is no longer there: check it against "
+    "what you can actually do before you plan around it."
 )
 
 _WRITE = (
@@ -533,7 +732,12 @@ _WRITE = (
     "and it reaches other projects only once a human has read it. Write `status: unconfirmed` "
     "and leave it alone: an entry is confirmed when a second task hits the same wall or a human "
     "says so, and neither of those is your call. A trap is \"do not step on this\"; work you "
-    "chose not to finish is debt, and that goes in your handoff instead."
+    "chose not to finish is debt, and that goes in your handoff instead.\n\n"
+    "If a row in the table below is wrong — you were in exactly the situation it describes "
+    "and the trap did not bite — do not edit or delete its file. Write your own entry the "
+    "same way, with the evidence that it did not bite, and add `refutes: <the ref from the "
+    "table, without the backticks>` to your frontmatter. That retires the old entry and "
+    "keeps both halves on disk; editing someone else's file just loses the argument."
 )
 
 _AUDITOR = (
@@ -550,7 +754,9 @@ _AUDITOR = (
 _ROLES = ("cartografo", "arquitecto", "implementador", "revisor", "auditor")
 
 
-def duties(role: str, task_id: str, project: str, hive_dir: str) -> str:
+def duties(
+    role: str, task_id: str, project: str, hive_dir: str, harness: str = ""
+) -> str:
     """The inbox, as a prompt fragment for one role.
 
     Empty for a role that does not run against the code, the same way an
@@ -564,9 +770,17 @@ def duties(role: str, task_id: str, project: str, hive_dir: str) -> str:
         _READ.format(root=root),
         _WRITE.format(inbox=inbox_dir(hive_dir), task_id=task_id, project=project, role=role),
     ]
-    rows = applicable(read_all(hive_dir), project)
+    # Refuted rows are gone from the phases' table but still on disk and still
+    # in the human's listing: the point of retiring one is to stop it costing
+    # turns, not to hide that it was ever written.
+    rows = [
+        entry for entry in applicable(read_all(hive_dir), project)
+        if entry.status != REFUTED
+    ]
     if rows:
-        parts.append(f"Entries that apply here, by file under `{root}/`:\n\n{table(rows)}")
+        parts.append(
+            f"Entries that apply here, by file under `{root}/`:\n\n{table(rows, harness)}"
+        )
         if role == "auditor":
             parts.append(_AUDITOR.format(task_id=task_id))
     return "\n\n".join(parts)

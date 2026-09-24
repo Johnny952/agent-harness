@@ -103,7 +103,11 @@ def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
             raise SystemExit(1)
         print(f"promoted to {entry.ref}: every project's phases now read it")
         return
-    for flag, status in (("confirm", learnings.CONFIRMED), ("unconfirm", learnings.UNCONFIRMED)):
+    for flag, status in (
+        ("confirm", learnings.CONFIRMED),
+        ("unconfirm", learnings.UNCONFIRMED),
+        ("refute", learnings.REFUTED),
+    ):
         ref = getattr(args, flag)
         if not ref:
             continue
@@ -127,7 +131,11 @@ def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
     if not entries:
         print(f"no learnings in {learnings.root_dir(hive)}")
         return
-    print(learnings.table(entries))
+    # Against the surface a run would have right now, so the listing marks the
+    # same rows stale that the next task's phases will see marked stale.
+    print(learnings.table(entries, learnings.harness_fingerprint(
+        cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES
+    )))
     print()
     print(f"the entries themselves are in {learnings.root_dir(hive)}/, one file per row")
 
@@ -264,6 +272,13 @@ def main() -> None:
     )
     learnings_group.add_argument(
         "--unconfirm", metavar="REF", help="Take a confirmation back: the entry stays, as a claim."
+    )
+    learnings_group.add_argument(
+        "--refute",
+        metavar="REF",
+        help="Retire one entry on evidence: it stays on disk and stays in this listing, "
+        "but the phases stop being handed it. Use this rather than --drop whenever the "
+        "entry was ever true, so that what was learned and what changed both survive.",
     )
     learnings_group.add_argument(
         "--drop", metavar="REF", help="Delete one entry. For a trap that was wrong, or one that no longer bites."

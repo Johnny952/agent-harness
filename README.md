@@ -76,6 +76,16 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   paths to the detail — plus the revisor's `verdict`), within a per-role byte
   budget the dispatcher enforces with one `--resume`; a phase that answers
   in prose anyway lands clamped to its first 500 and last 1,500 characters.
+  The budget is stated to the role twice, as a number of entries and as the
+  bytes those entries buy (`handoff.lines_for` derives the first from the
+  second, so they can't drift): nothing can count its own bytes while it
+  writes, which is why every run before 2026-09-24 overran one. The bytes are
+  what the dispatcher measures, and they were tuned from those runs —
+  `handoff.py` carries the numbers with the evidence for each. An overage
+  inside a 10% margin (floor 256 bytes) is taken as it came rather than spent
+  on a model call, and the size is logged at INFO either way, which is the
+  data the next tuning uses. A WARNING means a handoff went into the task
+  file over budget anyway: the rewrite was refused, failed, or came back long.
   Detail belongs in files, cited by path and a stable anchor: durable docs
   on the task branch, per-round scratch under `.hive/tasks/<task-id>/`.
   Used for cold-start role transitions; mid-role quota exhaustion instead
@@ -89,13 +99,18 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   what each of those phases left before the next role runs. The revisor
   gets its own checkout, detached at that branch's tip and rebuilt every
   round, so it always reads the code as it stands rather than a pristine
-  `HEAD`. What decides the split is what a role has to leave behind, not
-  where in the sequence it runs — the auditor is the phase that writes the
-  indexes, and a detached checkout is deleted with everything in it. It
-  runs last, though, after the revisor has approved, so its commit is held
-  to `docs/`: the paths its duties actually cover. Anything it changed
-  outside them is named in a warning and left in the worktree rather than
-  landing on a branch after the review that read it. When the cycle ends —
+  `HEAD`. Nothing it writes there survives: a detached `HEAD` is not a
+  branch, so the dispatcher has nowhere to commit it, and the checkout is
+  deleted at the end of the round. A revisor's finding has to travel as a
+  change request in its handoff, never as an edit — and the phase is not
+  currently told that, which is the known gap below. What decides the
+  split is what a role has to leave behind, not where in the sequence it
+  runs — the auditor is the phase that writes the indexes, so it shares
+  the writers' worktree for the same reason. It runs last, though, after
+  the revisor has approved, so its commit is held to `docs/`: the paths
+  its duties actually cover. Anything it changed outside them is named in
+  a warning and left in the worktree rather than landing on a branch after
+  the review that read it. When the cycle ends —
   `done`, `blocked`, or a crash — the review checkout is removed, since the
   next round would rebuild it anyway; the writers' one stays, holding
   whatever a failed phase left uncommitted. The exception is a task this
@@ -148,6 +163,10 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   found them. An entry is a claim until a second, distinct task hits the same
   wall or a human says so (`dispatch learnings --confirm`): one phase's
   wrong guess repeated to every later phase is worse than no note at all.
+  Entries leave the same way they arrive, on evidence: each is stamped with
+  a fingerprint of the permissions it was written under and stops counting
+  once those change, and a task that walked through another task's trap
+  unharmed retires it by writing `refutes: <ref>` on an entry of its own.
   Two scopes — a project's own trap, and one about this harness, which is the
   only kind that reaches `.hive/learnings/harness/` and only through a human
   running `dispatch learnings --promote`. The line it draws: a trap is "don't
@@ -589,6 +608,31 @@ poisoning — one phase's wrong guess, repeated to every later phase, is worse
 than no note at all — and it is why the prompt says an unconfirmed entry is
 a lead, not an answer.
 
+Nothing in there is true for ever, and an entry is a claim about a harness as
+much as about a project: "running `node` needs approval" was right until the
+allowlist shipped, and "a review phase's edits never reach the branch" was
+right until the auditor was given the writers' worktree. Both outlived their
+truth in the inbox, and one of them cost three phases of one task a turn each
+arguing with it. So there are two ways out besides `--drop`. Every entry is
+stamped, when its task ends, with a fingerprint of the permission surface it
+was written under — `permission_mode`, `allowed_tools`, and which roles get
+the writers' worktree, which is exactly what made both of those false — and
+one written under a different surface is *stale*: still in the table, marked,
+because it may well still be right, but no longer counted as the second
+sighting that confirms anything. An entry from before the stamp existed is
+unknown, not stale, so the feature does not retire the inbox the day it
+ships. The other way out is the mirror of the confirmation rule: a phase that
+was in an entry's exact situation and found no trap writes its own entry with
+`refutes: <ref>` in the frontmatter, and the next reconcile marks the old one
+`refuted` — off every phase's table, still on disk, still in yours, with the
+task that retired it named in `refuted_by`. A task cannot refute itself, and
+a promoted entry is never retired without a human: it is in the shared store
+on every project's behalf, so one project's counter-example is a reason to
+look, not a verdict. That refutation runs unattended where promotion does not
+because of the asymmetry — a wrong refutation costs a later phase the debug
+it would have had before anyone wrote the entry, while a wrong confirmation
+actively misleads every phase that reads it.
+
 The calls a script should not make are yours:
 
 ```bash
@@ -596,13 +640,18 @@ python -m dispatcher.cli --config config.yaml learnings
 python -m dispatcher.cli --config config.yaml learnings --project my-project
 python -m dispatcher.cli --config config.yaml learnings --confirm inbox/T-001-pg.md
 python -m dispatcher.cli --config config.yaml learnings --promote inbox/T-001-pg.md
+python -m dispatcher.cli --config config.yaml learnings --refute inbox/T-001-pg.md
 python -m dispatcher.cli --config config.yaml learnings --drop inbox/T-001-pg.md
 ```
 
 With no flag it prints every entry the harness holds, in the same table the
 phases are shown, so what you rule on is what they read. `--confirm` is the
 other half of the confirmation rule, for a trap you have hit yourself
-(`--unconfirm` takes it back); `--drop` deletes one that was wrong.
+(`--unconfirm` takes it back); `--refute` retires one the harness has
+outgrown, keeping the file and the row; `--drop` deletes one that was wrong
+to begin with and is worth nobody's screen space. The listing marks a stale
+row as stale against the permissions the config would give a run right now,
+which is the same mark the next task's phases will see.
 `--promote` moves an entry into `.hive/learnings/harness/`, the cross-project
 store, which every project's phases then read: that is one phase's word
 applied to every project at once, so there is deliberately no automatic path
@@ -819,43 +868,67 @@ run of the same task took it from `blocked` to `done`, with the revisor
 approving and the tests green on the branch, and the fourth — same task
 shape, same config, one rebuilt dispatcher image — closed two of the four
 gaps that run had opened, landing a `docs/`-scoped auditor commit on the
-task branch and reading a 0% session without a warning. The first two
-bullets are the other two, what those runs found and this session hasn't
-closed — neither costs correctness; they cost quota and accuracy. The
-last is what a no-quota check couldn't settle, and the unit tests mock
-Claude Code, Docker, and Vibe Kanban, so they don't settle it either.
+task branch and reading a 0% session without a warning. The last two —
+nothing retired a learning the harness had disproved, and the handoff
+budgets had been sized before a phase could write anything — were closed
+after it, and the fifth run carried them: Stage 1's acceptance passed on
+all four criteria, on two accounts and the default three-round config,
+without the task file being seeded by hand. What is left below is what a
+no-quota check couldn't settle, and the unit tests mock Claude Code,
+Docker, and Vibe Kanban, so they don't settle it either.
 
-- **Nothing retires a learning the harness has since disproved.** Every
-  phase is handed `.hive/learnings/inbox/`, entries only ever move to
-  `archive/` once consumed, and no status says "this was true of the run
-  that wrote it and is false now". T-003's arquitecto showed both halves at
-  once: told nothing about `archive/`, it ran `ls -R` on the learnings root,
-  found the three archived entries and read all of them — so `archive/` is
-  not out of reach, only quieter — and one of the three was T-002's "running
-  `node` needs approval", false since the allowlist shipped. It cost nothing
-  because the phase tried `node` anyway, which is luck, not design. A
-  `superseded` status pointing at what replaced it is the shape the fix
-  wants; that one entry has been marked so by hand meanwhile. T-004 then
-  produced the cleaner instance: the change that gave the auditor its commit
-  made `T-003-phase-edit-missing-from-next-worktree` false the moment the
-  image was rebuilt, and the run handed it to all four phases regardless. The
-  same run's `learnings.reconcile` promoted three other entries to
-  `confirmed` with no model in the loop, which is what makes the shape of the
-  gap plain: there is machinery for corroborating a learning and none for
-  retiring one. (V3, V4)
+- **A reviewing phase's edits are silently discarded.** Review worktrees
+  are detached at the task branch's tip on purpose — it is what lets the
+  revisor read the code as it stands — but a detached `HEAD` gives the
+  dispatcher no branch to commit onto, so anything the revisor writes
+  there is thrown away with the checkout at the end of the round. The
+  phase is never told. On T-005 (2026-09-24) the revisor reported that it
+  had closed a `pointers` gate by editing `docs/implementations/T-005.md`
+  in place, and its own `grep` in its own worktree confirmed the fix; the
+  same `grep` on `agent/task/T-005` returned both pointers, and still
+  does in the implementador's commit. The auditor re-ran that
+  verification on its branch, found the gate open, and repaired it — so
+  the branch tip is correct and the run passed. That is the shape of the
+  risk rather than a reason to discount it: the `APPROVED` verdict was
+  issued by a phase that believed in a fix it had not made, and what
+  caught it was the next phase choosing to check rather than anything the
+  harness required. A docs edit is the benign case. This is also the
+  mechanism behind `T-003-phase-edit-missing-from-next-worktree`, which
+  had the symptom and not the reason. The fix is a choice, not a patch:
+  either reviewers get a branch of their own to commit to, or the
+  dispatcher refuses their writes loudly enough that the phase records a
+  change request instead of an edit. Evidence:
+  `.data/verify/t005-acceptance.txt`.
 
-- **The handoff budgets were sized before a phase could write anything.**
-  Three of the four overran on 2026-09-24 — arquitecto 4266 bytes against
-  4096, revisor 4386 against 3072, auditor 5209 against 2048 — and the run
-  that afternoon overran three of four again, a different three:
-  implementador 5400 against 5120, revisor 4149 against 3072, auditor 4602
-  against 2048. Each overrun buys one `--resume` asking for less, so the
-  budgets cost three paid turns on a four-phase task, twice over. The squeeze
-  gets worse down the pipeline: the auditor has the smallest budget and the
-  most to report, since it is the phase that rules on debt and files the
-  indexes — and now that its writes survive, it has more to report than when
-  the budgets were set. The overage warning exists precisely to retune them
-  from data, and there are now three runs of it. (V3, V4)
+- **The quota gate is blind to the refusal that has actually happened.**
+  `check_quota_ok` runs `claude -p "/usage"` and compares the two
+  percentages against `quota_threshold_pct`. That call is a *local* slash
+  command — measured 2026-09-24 on cuenta1 at `local_command: "usage"`,
+  `duration_api_ms: 0`, `num_turns: 0`, `total_cost_usd: 0` — so it reads
+  counters off the container's disk and never asks the service anything.
+  Low numbers therefore mean the account has not spent much here, not that
+  it can serve the next call. The one real refusal on record is the
+  opposite shape: on 2026-09-23 cuenta1 returned a 429 on arrival without
+  starting a session (V5.1, V5.4), and a `/usage` run beside it would have
+  reported comfortable numbers and waved the phase through. The gate
+  catches accumulated spend, which is the slow case, and misses
+  refusal-on-arrival, which is the one that stopped a check. Two smaller
+  edges of the same fact: the output says in as many words that it is
+  "based on local sessions on this machine — does not include other
+  devices or claude.ai", so an account also used from a phone or the web
+  reads low here and `quota_threshold_pct` is applied to an undercount;
+  and `check_quota_ok` fails open on any exception, so an account whose
+  `/usage` errors outright is treated as healthy. What holds the line
+  today is not this gate but `is_rate_limit_error` classifying the 429
+  after the phase has already spent the attempt. Worth keeping whatever
+  the fix is: the probe costs $0 and 641 ms, which is why
+  `_recheck_cooling_accounts` can re-probe as often as it likes — paying a
+  real turn to test an account would trade this gap for a worse one.
+  Undecided, because nothing has measured it: whether a 429-on-arrival
+  account answers `/usage` with numbers or with an error, which is what
+  says whether this is fixable by reading `/usage` harder or only by
+  reacting to the first real call. Evidence:
+  `.data/verify/quota-probe-local-only.txt`.
 
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
@@ -869,9 +942,12 @@ Claude Code, Docker, and Vibe Kanban, so they don't settle it either.
     for the next failover: a resume answers under the same session ID,
     never a new one, so the ID recorded when a phase first runs stays
     valid for every later resume of it. That ID was read on a
-    same-account resume, though — cuenta1 is out of monthly spend and
-    can't open a session at all, so nothing cross-account can run until
-    that resets. The precondition is verified regardless: the transcript
+    same-account resume, though, because cuenta1 was out of monthly spend
+    that day and returned a 429 without starting a session. It is not any
+    more: a real sonnet turn on `agent-cuenta1` answered on 2026-09-24
+    with `api_error_status: null`, against 34% of the session and 51% of
+    the week. So the measurement that was waiting on a reset can now run,
+    and the precondition it rests on was already verified — the transcript
     cuenta2 wrote is visible from `agent-cuenta1` at the same path, size
     and mode. (V5.1)
   - Vibe Kanban's responses and status names: `vibe_kanban_client.py`

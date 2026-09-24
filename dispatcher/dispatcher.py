@@ -243,6 +243,7 @@ def _role_prompt(
     description: str,
     scratch_dir: str,
     hive_dir: str,
+    harness: str = "",
     round_num: int | None = None,
     max_turns: int | None = None,
     note: str = "",
@@ -278,7 +279,7 @@ def _role_prompt(
     # Read fresh on every phase, not once per task: an entry the implementador
     # wrote in round 2 is in the revisor's table in the same round, which is
     # the earliest anyone can be warned off a trap.
-    traps = learnings.duties(role, task_id, slug, hive_dir)
+    traps = learnings.duties(role, task_id, slug, hive_dir, harness)
     if traps:
         prompt += f"\n\n{traps}"
     # Something this one call has to be told that no rule covers: today, the
@@ -292,15 +293,24 @@ def _role_prompt(
         # summary, the detail lives in files, and the two have different
         # lifetimes. Without this the role writes its findings into the
         # return, blows the budget, and costs a round to say it again.
+        #
+        # The limit is stated twice, in entries and in bytes, because they are
+        # not equally useful to the one reading it: nothing can count its own
+        # bytes while writing, which is most of why every run that logged an
+        # overage logged one. Entries are countable, and an entry is what the
+        # fields hold anyway. The bytes stay because that is what the
+        # dispatcher measures, and a limit you are checked against should be
+        # a limit you were told.
         prompt += (
-            f"\n\nReturn the structured handoff your schema describes, in "
-            f"{handoff.budget_for(role)} bytes or less. Every later phase reads it, so it carries "
-            "the summary and not the detail: anything longer than a line goes in a file that you "
-            "cite under `paths`, by path plus heading or symbol name, never by line number. "
-            f"Detail worth keeping (an ADR, a learning, docs/implementations/{task_id}.md) goes on "
-            "the task branch; working notes for this task alone (review findings, test logs, a "
-            f"scratch plan) go in {scratch_dir}/, which is outside the repo and is not read once "
-            "the task is done."
+            f"\n\nReturn the structured handoff your schema describes: about "
+            f"{handoff.lines_for(role)} entries in all, counting every list together, one line "
+            f"each — {handoff.budget_for(role)} bytes of JSON. Every later phase reads it, so it "
+            "carries the summary and not the detail: anything longer than a line goes in a file "
+            "that you cite under `paths`, by path plus heading or symbol name, never by line "
+            f"number. Detail worth keeping (an ADR, a learning, docs/implementations/{task_id}.md) "
+            "goes on the task branch; working notes for this task alone (review findings, test "
+            f"logs, a scratch plan) go in {scratch_dir}/, which is outside the repo and is not "
+            "read once the task is done."
         )
     if role == "revisor":
         if schema is not None:
@@ -421,6 +431,15 @@ def _shrink_over_budget(
     more convincing. The retry is taken as it comes, over budget or not — the
     point is to keep the task file readable, not to win an argument.
 
+    Only overages worth the call are asked about. A `--resume` is a model call,
+    and four of the eleven overages on record were under 300 bytes: a line and
+    a half in a file nobody was struggling to read.
+
+    What it logs is what landed, not what was drafted. A first draft over
+    budget that the rewrite brings back under it is the system working, so it
+    goes to INFO with its size, which is the data the budgets are tuned from.
+    A WARNING means a handoff went into the task file over budget anyway.
+
     This runs inside the heartbeat loop by construction (its caller holds it),
     because the task lock's TTL is only kept alive there: a retry outside it
     is a window for another dispatcher to take the task mid-call.
@@ -433,14 +452,24 @@ def _shrink_over_budget(
 
     size = handoff.measure(result)
     budget = handoff.budget_for(role)
-    # Logged on every overage, including the ones that cannot be retried: the
-    # budgets are guesses until there is data, and this line is the data.
-    logger.warning(
-        "%s handoff was %d bytes, %d over its %d-byte budget", role, size, overage, budget
+    if not handoff.worth_shrinking(role, overage):
+        logger.info(
+            "%s handoff was %d bytes, %d over its %d-byte budget; inside the margin, kept as it is",
+            role, size, overage, budget,
+        )
+        return result
+    logger.info(
+        "%s handoff was %d bytes, %d over its %d-byte budget; asking for a shorter one",
+        role, size, overage, budget,
     )
     if not result.session_id:
         # Nothing to resume into. The clamp in `handoff.body` still keeps the
         # task file bounded, so this is a worse handoff, not a failed phase.
+        logger.warning(
+            "%s handoff is %d bytes over its %d-byte budget and there is no session to resume: "
+            "it goes in the task file as it is",
+            role, overage, budget,
+        )
         return result
 
     retry = docker_exec.exec_claude(
@@ -461,7 +490,26 @@ def _shrink_over_budget(
         # rate-limited retry is nothing. Keep the first, and let the phase
         # succeed on it — failing over the account here would throw away work
         # that is already done over a formatting problem.
+        logger.warning(
+            "%s could not be asked for a shorter handoff; the %d-byte return goes in the task "
+            "file over its %d-byte budget",
+            role, size, budget,
+        )
         return result
+
+    left = handoff.over_budget(role, retry)
+    if left:
+        # Asked, answered, still long. This is the line that says a budget may
+        # be wrong rather than a role careless, because it survived an edit.
+        logger.warning(
+            "%s handoff is %d bytes after a rewrite, still %d over its %d-byte budget",
+            role, handoff.measure(retry), left, budget,
+        )
+    else:
+        logger.info(
+            "%s handoff came back at %d bytes, inside its %d-byte budget",
+            role, handoff.measure(retry), budget,
+        )
     return retry
 
 
@@ -935,7 +983,14 @@ def run_task_cycle(
     # runs no model, it only notices that a second task has now reported an
     # error some earlier task reported alone.
     learnings.ensure_dirs(cfg.hive_tasks_dir)
-    learnings.reconcile(cfg.hive_tasks_dir)
+    # What this run lets a phase do, as one string. An entry written when the
+    # answer was different is still shown, but it stops counting as evidence:
+    # two of the entries in this harness's own inbox went false exactly this
+    # way, when a permission they described as missing was wired up.
+    harness = learnings.harness_fingerprint(
+        cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES
+    )
+    learnings.reconcile(cfg.hive_tasks_dir, harness)
     # The card this task already mirrors, if any: seeded by `run-task
     # --kanban-issue-id`, or left behind by an earlier run that opened one.
     issue_id = (
@@ -998,6 +1053,7 @@ def run_task_cycle(
                 cfg, task_id, slug, role,
                 prompt=_role_prompt(
                     role, task_id, slug, task_file, description, scratch_dir, cfg.hive_tasks_dir,
+                    harness=harness,
                     round_num=round_num, max_turns=max_turns, note=note,
                 ),
                 model=model or cfg.default_model,
@@ -1157,6 +1213,10 @@ def run_task_cycle(
         # never owned: another dispatcher is still working in those worktrees.
         if not foreign_lock:
             _drop_review_worktrees(cfg, task_id, slug)
+            # Whether or not it finished: what a phase was allowed to do while
+            # it wrote these is settled, and stamping it here is the only way
+            # a later run can tell an entry that aged out from one that holds.
+            learnings.stamp(cfg.hive_tasks_dir, task_id, harness)
             if not completed:
                 # The entries stay — this task is the reason nobody has
                 # filed them yet — but they stop claiming a carrier that is

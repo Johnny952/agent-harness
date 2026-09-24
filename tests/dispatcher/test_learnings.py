@@ -343,3 +343,136 @@ def test_only_the_auditor_is_told_which_entries_it_owns(tmp_path: Path) -> None:
     assert "| `inbox/db.md` |" in implementador
     assert "carried_by: task-9" in auditor
     assert "carried_by" not in implementador
+
+
+def test_the_harness_fingerprint_covers_the_permissions_and_nothing_else() -> None:
+    """The surface that decides whether a trap is real: what a phase may run,
+    and whether its edits reach the branch. Order inside the lists is the
+    config file's business, not a different harness."""
+    base = learnings.harness_fingerprint("acceptEdits", ["Bash(git:*)", "Read"], {"revisor", "auditor"})
+
+    assert base == learnings.harness_fingerprint("acceptEdits", ["Read", "Bash(git:*)"], {"auditor", "revisor"})
+    assert base != learnings.harness_fingerprint("auto", ["Bash(git:*)", "Read"], {"revisor", "auditor"})
+    assert base != learnings.harness_fingerprint("acceptEdits", [], {"revisor", "auditor"})
+    assert base != learnings.harness_fingerprint("acceptEdits", ["Bash(git:*)", "Read"], {"revisor"})
+
+
+def test_an_entry_written_before_the_stamp_existed_is_unknown_not_stale(tmp_path: Path) -> None:
+    """Treating unknown as stale would retire every entry in the inbox the
+    first time a harness with this feature ran."""
+    hive = tmp_path / "hive"
+    _entry(hive, "old.md")
+    _entry(hive, "new.md", harness="deadbeefcafe")
+
+    new, old = learnings.read_inbox(str(hive))  # read_dir sorts by ref
+
+    assert not old.stale("0123456789ab")
+    assert new.stale("0123456789ab")
+    assert not new.stale("deadbeefcafe")
+    assert not new.stale("")  # a caller with no harness in hand marks nothing
+
+
+def test_reconcile_does_not_let_a_stale_entry_corroborate_a_live_one(tmp_path: Path) -> None:
+    """An entry written when phases could not run `node` says nothing about a
+    harness where they can, so it is not the second sighting that confirms."""
+    hive = tmp_path / "hive"
+    gone = _entry(hive, "task-1-db.md", task="task-1", harness="oldoldoldold")
+    here = _entry(hive, "task-2-db.md", task="task-2", harness="newnewnewnew")
+
+    assert learnings.reconcile(str(hive), "newnewnewnew") == []
+    assert _meta(gone)["status"] == learnings.UNCONFIRMED
+    assert _meta(here)["status"] == learnings.UNCONFIRMED
+    # Same two files under the harness they were both written for: arithmetic.
+    assert sorted(learnings.reconcile(str(hive))) == ["inbox/task-1-db.md", "inbox/task-2-db.md"]
+
+
+def test_stamp_records_the_surface_this_tasks_entries_were_written_under(tmp_path: Path) -> None:
+    """The phases cannot compute it, so the dispatcher writes it once the task
+    is over — and never over a stamp that is already there, so a task resumed
+    under a changed config does not backdate what it found earlier."""
+    hive = tmp_path / "hive"
+    mine = _entry(hive, "task-1-db.md", task="task-1")
+    earlier = _entry(hive, "task-1-disk.md", task="task-1", harness="oldoldoldold")
+    theirs = _entry(hive, "task-2-db.md", task="task-2")
+
+    assert learnings.stamp(str(hive), "task-1", "newnewnewnew") == ["inbox/task-1-db.md"]
+    assert _meta(mine)["harness"] == "newnewnewnew"
+    assert _meta(earlier)["harness"] == "oldoldoldold"
+    assert "harness" not in _meta(theirs)
+    assert learnings.stamp(str(hive), "task-1", "") == []  # nothing to say, nothing written
+
+
+def test_a_later_task_retires_an_entry_it_went_looking_for_and_did_not_find(tmp_path: Path) -> None:
+    """The mirror of the confirmation rule: one task's word, but it only ever
+    removes a row, so it runs unattended where promotion does not."""
+    hive = tmp_path / "hive"
+    wrong = _entry(hive, "task-1-node.md", task="task-1", rule="`node --test` is refused here.")
+    _entry(hive, "task-2-node.md", task="task-2", refutes="inbox/task-1-node.md",
+           rule="`node --test` runs; the refusal was a permission this harness no longer lacks.")
+
+    learnings.reconcile(str(hive))
+
+    assert _meta(wrong)["status"] == learnings.REFUTED
+    assert _meta(wrong)["refuted_by"] == "task-2"
+    assert learnings.reconcile(str(hive)) == []  # and it is not then confirmed by its own refuter
+
+
+def test_a_task_cannot_refute_its_own_claim(tmp_path: Path) -> None:
+    """That is a task changing its mind mid-run, which is what editing the
+    entry would have been. No second sighting, no evidence."""
+    hive = tmp_path / "hive"
+    mine = _entry(hive, "task-1-node.md", task="task-1")
+    _entry(hive, "task-1-again.md", task="task-1", refutes="task-1-node")
+
+    learnings.reconcile(str(hive))
+
+    assert _meta(mine)["status"] == learnings.UNCONFIRMED
+
+
+def test_a_promoted_entry_is_not_retired_without_a_human(tmp_path: Path) -> None:
+    """A human put it in the shared store on behalf of every project; one
+    project's counter-example is a reason to look, not a verdict."""
+    hive = tmp_path / "hive"
+    shared = _entry(hive, "node.md", where=learnings.HARNESS_NAME, task="task-1",
+                    scope=learnings.SCOPE_HARNESS)
+    _entry(hive, "task-2-node.md", task="task-2", refutes="harness/node.md")
+
+    learnings.reconcile(str(hive))
+
+    assert _meta(shared)["status"] == learnings.UNCONFIRMED
+    # The door for that one is the CLI's --refute, which is the same door as
+    # every other ruling a human makes on the shared store.
+    assert learnings.set_status(str(hive), "harness/node.md", learnings.REFUTED) is not None
+    assert _meta(shared)["status"] == learnings.REFUTED
+
+
+def test_the_phases_stop_being_handed_a_refuted_entry(tmp_path: Path) -> None:
+    """Retiring one is about it no longer costing turns, not about hiding that
+    it was ever written: the file stays, and so does the human's row."""
+    hive = tmp_path / "hive"
+    _entry(hive, "task-1-node.md", task="task-1", status=learnings.REFUTED,
+           rule="`node --test` is refused here.")
+    _entry(hive, "task-2-db.md", task="task-2")
+
+    text = learnings.duties("implementador", "task-9", "myproj", str(hive))
+
+    assert "`node --test` is refused here." not in text
+    assert "Start postgres before the suite" in text
+    assert "`node --test` is refused here." in learnings.table(learnings.read_all(str(hive)))
+
+
+def test_the_table_cuts_the_retired_rows_first_and_flags_the_stale_ones() -> None:
+    """What survives the cap is what a second task backed; what falls off it
+    first is what a later task went looking for and did not find."""
+    rows = [
+        _row("inbox/a.md", status=learnings.REFUTED),
+        _row("inbox/b.md", status=learnings.UNCONFIRMED, harness="oldoldoldold"),
+        _row("inbox/c.md", status=learnings.UNCONFIRMED, harness="newnewnewnew"),
+        _row("inbox/d.md", status=learnings.CONFIRMED),
+    ]
+
+    order = [line.split("`")[1] for line in learnings.table(rows, "newnewnewnew").splitlines()[2:]]
+
+    assert order == ["inbox/d.md", "inbox/c.md", "inbox/b.md", "inbox/a.md"]
+    assert "| unconfirmed (stale) |" in learnings.table(rows, "newnewnewnew")
+    assert "(stale)" not in learnings.table(rows)

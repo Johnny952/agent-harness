@@ -200,26 +200,56 @@ _ROLE_EXTRAS: dict[str, dict] = {
     "auditor": {},
 }
 
-#: Bytes of JSON a role's handoff may spend. Guesses, deliberately: what makes
-#: them tunable is that every overage is logged with the role and the size, so
-#: the numbers can be moved from data rather than taste. The reviewing roles
-#: get less because their detail belongs in files under the task's scratch
-#: directory, not in a body every later phase rereads.
+#: What one entry costs: a line a later phase reads, plus the quoting and the
+#: comma the JSON puts around it. Measured off the returns in `.data/verify/`,
+#: where the phases that were asked to shorten came back at 100-120 characters
+#: a line. Deliberately a little over that, so a role told it has N lines can
+#: spend them all without going over the bytes.
+_LINE_BYTES = 128
+
+#: The JSON around the lines: every key, every empty array, the status string.
+_ENVELOPE_BYTES = 256
+
+#: Bytes of JSON a role's handoff may spend. No longer guesses: four dispatched
+#: runs logged every overage with the role and the size, and these are those
+#: numbers. The rule applied to them was to leave a budget alone when a return
+#: has met it at least once — a budget the returns straddle is a budget doing
+#: its job — and to move one nothing has ever met, because four sessions
+#: missing the same number is evidence about the number.
 _BUDGET_BYTES: dict[str, int] = {
     # The mapper's output is the docs it wrote, not its handoff: what the next
-    # phase needs from it is a pointer to the index and how far it got, so it
-    # gets no more room than the tightest reviewing role.
+    # phase needs from it is a pointer to the index and how far it got. No run
+    # has exercised it yet, so this one is still a guess and stays put.
     "cartografo": 2048,
+    # Met once in four, missed three times by 1%, 4% and 18%. That is what a
+    # budget set right looks like from the inside; the small misses are the
+    # margin's problem, not the number's.
     "arquitecto": 4096,
     # The one role that pays for two structured lists on top of the common
     # fields: a debt declaration is six fields, and several of them fit in a
-    # round. shrink_prompt is still the backstop when they do not.
+    # round. Met in half the runs.
     "implementador": 5120,
-    "revisor": 3072,
-    "auditor": 2048,
+    # Was 3072, which nothing ever met: 3139, 4010, 4149 and 4386 bytes in four
+    # runs. It carries a verdict and a ruling per declaration on top of the
+    # common fields, which is the same argument that bought the implementador
+    # its extra room, and after being asked to shorten it lands near 2600.
+    "revisor": 4096,
+    # Was 2048, which nothing ever met either: 4602 and 5209. It is the phase
+    # that reports on the whole task and now commits the docs it files, and
+    # its shortened returns measure about 2600 — so it gets room for those and
+    # keeps a limit its first drafts still have to be edited down to.
+    "auditor": 3584,
 }
 
 _DEFAULT_BUDGET_BYTES = 4096
+
+#: How far over a role may go before the dispatcher spends a call on it. A
+#: `--resume` costs about what a small phase costs, so it only pays when it
+#: buys back something a later phase would otherwise have had to read: over
+#: four runs, four of the eleven overages were 46, 67, 170 and 280 bytes —
+#: a line and a half each, for the price of a model call.
+_SHRINK_MARGIN = 0.10
+_SHRINK_MARGIN_FLOOR = 256
 
 
 def schema_for(role: str) -> dict | None:
@@ -242,6 +272,18 @@ def schema_for(role: str) -> dict | None:
 
 def budget_for(role: str) -> int:
     return _BUDGET_BYTES.get(role, _DEFAULT_BUDGET_BYTES)
+
+
+def lines_for(role: str) -> int:
+    """The same budget in the unit the role can count while it writes.
+
+    A model cannot measure its own output in bytes, which is most of why the
+    byte budget was missed in every run that logged one. Entries it can count,
+    and an entry is what the fields hold anyway: the dispatcher asks for this
+    number and checks the other one, and they cannot drift because this one is
+    derived.
+    """
+    return max(1, (budget_for(role) - _ENVELOPE_BYTES) // _LINE_BYTES)
 
 
 def _strip_fence(text: str) -> str:
@@ -291,6 +333,17 @@ def measure(result: docker_exec.ClaudeResult) -> int:
 def over_budget(role: str, result: docker_exec.ClaudeResult) -> int:
     """Bytes over this role's budget, 0 when it fits."""
     return max(0, measure(result) - budget_for(role))
+
+
+def worth_shrinking(role: str, overage: int) -> bool:
+    """Whether an overage is big enough to be worth a `--resume`.
+
+    The budget is the editorial line and the retry is the editing pass, but
+    the pass is not free. An overage inside the margin is taken as it comes:
+    the task file is a line longer and nobody notices, which is the cheaper of
+    the two ways to be wrong here.
+    """
+    return overage >= max(_SHRINK_MARGIN_FLOOR, int(budget_for(role) * _SHRINK_MARGIN))
 
 
 def shrink_prompt(role: str, size: int, budget: int) -> str:

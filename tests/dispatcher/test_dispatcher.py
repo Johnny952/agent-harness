@@ -246,10 +246,15 @@ _USAGE_TEXT = (
     "Current week (all models): 10% used · resets later"
 )
 
-#: Over the revisor's 3072-byte budget by a wide margin, and over it in the
-#: payload rather than in the prose — the prose is what the CLI replaces with
-#: a placeholder once a schema is in play.
-_FAT_HANDOFF = {"status": "complete", "verdict": "APPROVED", "risks": ["r" * 4000]}
+#: Over the revisor's budget by a wide margin, and over it in the payload
+#: rather than in the prose — the prose is what the CLI replaces with a
+#: placeholder once a schema is in play. Sized off the budget rather than
+#: written down, so that moving a budget cannot quietly turn these tests into
+#: tests of a handoff that now fits.
+_FAT_HANDOFF = {
+    "status": "complete", "verdict": "APPROVED",
+    "risks": ["r" * (handoff.budget_for("revisor") + 1024)],
+}
 _LEAN_HANDOFF = {"status": "complete", "verdict": "APPROVED", "risks": ["see docs/adr/0007.md#risks"]}
 
 
@@ -464,6 +469,19 @@ def test_dispatch_phase_handoff_is_none_when_the_phase_answered_in_prose(tmp_pat
     assert result.result_text == "I had a look and it is fine"
 
 
+def _budget_warnings(caplog):
+    """The WARNINGs about a budget, and only those.
+
+    A phase logs other things at WARNING — a session id the subagent lookup
+    does not recognise, for one — and a test about what the budget says should
+    not fail or pass on those.
+    """
+    return [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "budget" in r.getMessage()
+    ]
+
+
 def test_dispatch_phase_asks_once_for_a_shorter_handoff_when_over_budget(tmp_path, monkeypatch) -> None:
     """The retry resumes the same session — it is a rewrite of an answer that
     session already has — and carries the schema but not the skills: the
@@ -482,7 +500,7 @@ def test_dispatch_phase_asks_once_for_a_shorter_handoff_when_over_budget(tmp_pat
     assert retry["json_schema"] == handoff.schema_for("revisor")
     assert not retry.get("plugin_dirs")
     assert not retry.get("append_system_prompt")
-    assert "3072" in retry["prompt"]
+    assert str(handoff.budget_for("revisor")) in retry["prompt"]
     assert result.handoff == _LEAN_HANDOFF
 
 
@@ -507,7 +525,10 @@ def test_the_shrink_retry_restates_the_permission_flags(tmp_path, monkeypatch) -
 def test_dispatch_phase_takes_the_retry_even_if_it_is_still_over_budget(tmp_path, monkeypatch) -> None:
     """Shorter is the win; exactly-in-budget is not worth a third call."""
     cfg = _make_config(tmp_path)
-    still_fat = {"status": "complete", "verdict": "APPROVED", "risks": ["r" * 3500]}
+    still_fat = {
+        "status": "complete", "verdict": "APPROVED",
+        "risks": ["r" * (handoff.budget_for("revisor") + 256)],
+    }
     calls = _phase_recorder(monkeypatch, [
         ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
         ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": still_fat}),
@@ -594,8 +615,8 @@ def test_dispatch_phase_does_not_retry_a_failed_phase(tmp_path, monkeypatch) -> 
 
 
 def test_dispatch_phase_logs_an_overage_it_cannot_retry(tmp_path, monkeypatch, caplog) -> None:
-    """The budgets are guesses until there is data. This line is the data, so
-    it is written even on the path where nothing can be done about it."""
+    """Nothing can be done about this one, and that is why it warns: the long
+    handoff goes into the task file for every later phase to read."""
     cfg = _make_config(tmp_path)
     _phase_recorder(monkeypatch, [
         ClaudeResult(session_id=None, result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
@@ -604,7 +625,99 @@ def test_dispatch_phase_logs_an_overage_it_cannot_retry(tmp_path, monkeypatch, c
     with caplog.at_level("WARNING"):
         dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
 
-    assert any("over its 3072-byte budget" in r.getMessage() for r in caplog.records)
+    budget = handoff.budget_for("revisor")
+    assert any(
+        f"over its {budget}-byte budget" in r.getMessage() and "no session to resume" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_dispatch_phase_does_not_pay_for_a_resume_over_a_small_overage(tmp_path, monkeypatch, caplog) -> None:
+    """A `--resume` costs about what a small phase costs. Half a line over is
+    not worth one, and the handoff is taken as it came."""
+    cfg = _make_config(tmp_path)
+    budget = handoff.budget_for("revisor")
+    # A line and a half over, which is the size of the smallest overages on
+    # record: 46, 67, 170 and 280 bytes across four dispatched runs.
+    barely = {"status": "complete", "verdict": "APPROVED", "risks": ["r" * (budget + 128)]}
+    overage = handoff.over_budget("revisor", ClaudeResult(
+        session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": barely},
+    ))
+    assert overage, "the fixture has to actually be over budget for the test to mean anything"
+    assert not handoff.worth_shrinking("revisor", overage), "and it has to be inside the margin"
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": barely}),
+    ])
+
+    with caplog.at_level("INFO"):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 1, "an overage inside the margin should not buy a model call"
+    assert result.handoff == barely
+    assert any("kept as it is" in r.getMessage() for r in caplog.records)
+    assert not _budget_warnings(caplog), (
+        "a handoff this close to its budget is not something to warn about"
+    )
+
+
+def test_dispatch_phase_warns_only_about_the_handoff_that_lands(tmp_path, monkeypatch, caplog) -> None:
+    """A first draft over budget that the rewrite brings back under it is the
+    system working. The size still gets logged, because it is what the budgets
+    are tuned from — but at INFO, so a WARNING keeps meaning that something
+    over budget went into the task file."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    with caplog.at_level("INFO"):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert not _budget_warnings(caplog)
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    budget = handoff.budget_for("revisor")
+    assert any(f"over its {budget}-byte budget" in m for m in messages), "the tuning data survives"
+    assert any(f"inside its {budget}-byte budget" in m for m in messages)
+
+
+def test_dispatch_phase_warns_when_a_rewrite_is_still_over_budget(tmp_path, monkeypatch, caplog) -> None:
+    """Asked, answered, still long. That survived an edit, so it is evidence
+    about the budget rather than about the role, and it is worth a line."""
+    cfg = _make_config(tmp_path)
+    budget = handoff.budget_for("revisor")
+    still_fat = {
+        "status": "complete", "verdict": "APPROVED",
+        "risks": ["r" * (budget + 1024)],
+    }
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": still_fat}),
+    ])
+
+    with caplog.at_level("INFO"):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert any(
+        r.levelname == "WARNING" and "still" in r.getMessage() and "after a rewrite" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_dispatch_phase_warns_when_the_retry_could_not_be_made(tmp_path, monkeypatch, caplog) -> None:
+    """The phase still succeeds on the first return, but the thing that went
+    in the task file is over budget and nothing edited it."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="boom", raw={"is_error": True}),
+    ])
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.handoff == _FAT_HANDOFF
+    assert any("could not be asked for a shorter handoff" in r.getMessage() for r in caplog.records)
 
 
 def _gate_recorder(monkeypatch, reports):
