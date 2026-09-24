@@ -135,6 +135,11 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
         logger.warning("quota probe failed for account %s: %s", account, exc)
         return True
     if quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
+        logger.warning(
+            "account %s is at %d%% of its session and %d%% of its week, over the %d%% threshold; "
+            "parking it PRE_COOLDOWN and looking for another",
+            account, usage.session_pct, usage.week_pct, cfg.quota_threshold_pct,
+        )
         state_machine.set_state(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
         return False
     return True
@@ -171,6 +176,7 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             logger.warning("quota recheck failed for account %s: %s", acc.name, exc)
             exceeds = False
         if not exceeds:
+            logger.info("account %s came back from %s and is IDLE again", acc.name, state.value)
             state_machine.set_state(cfg.state_dir, acc.name, AccountState.IDLE)
             recovered.append(acc.name)
     return recovered
@@ -388,22 +394,44 @@ def _commit_message(
     )
 
 
-def _with_revive_note(container: str, prompt: str, session_id: str | None) -> str:
-    """The prompt, plus what this session already has running, if anything.
+# Measured on T-006: an arquitecto that failed over mid-phase resumed on the
+# second account and was handed its own opening environment block again, with
+# `Status: (clean)` over three files it had modified minutes earlier. That run
+# checked the tree itself and lost nothing; a phase that trusted the block
+# would have redone the work.
+_STALE_CONTEXT_NOTE = (
+    "One warning about your own context before you start. The environment block at the top of "
+    "this session — the working directory, the git status, the recent commits — was written when "
+    "the session first opened, and it is re-sent to you unchanged every time the session resumes. "
+    "It does not describe the worktree as it is now, and a `Status: (clean)` in it is not evidence "
+    "that your earlier edits were lost or never made: it is a snapshot taken before them. Run "
+    "`git status --short` and `git diff` to see the tree, and do not redo work on the strength of "
+    "that block alone."
+)
 
-    Only ever called on a `--resume`. A phase that picks a session back up is
-    the one place a subagent can be revived rather than started again — the
-    CLI names the ones that outlived the session, and this says what to do
-    with them. A fresh session has none of its own and gets nothing appended,
-    which is why this is not in the role's system prompt: that text is paid
-    for on every call.
 
-    The shrink retry is deliberately left out. It resumes a session too, but
-    it asks for the same return in fewer bytes; there is no work there to hand
-    back to a subagent, so the note would be a cost with no use.
+def _with_resume_notes(container: str, prompt: str, session_id: str | None) -> str:
+    """The prompt, plus what a phase picking a session back up needs to know.
+
+    Only ever called on a `--resume`, and both notes are here for the same
+    reason: neither is true of a fresh session, and the role's system prompt is
+    paid for on every call.
+
+    The stale-context warning goes on unconditionally, because the block it
+    warns about is re-sent on every resume whatever else is true. The revive
+    note only appears when the session left subagents behind — a resume is the
+    one point in a phase's life where one can be revived rather than started
+    again, and the CLI is what names the ones that outlived the session.
+
+    The shrink retry is deliberately left out of both. It resumes a session
+    too, but it asks for the same return in fewer bytes: there is no work there
+    to hand back to a subagent, and nothing it could conclude about the tree.
     """
-    note = subagents.revive_note(subagents.of_session(container, session_id))
-    return f"{prompt}\n\n{note}" if note else prompt
+    notes = [_STALE_CONTEXT_NOTE]
+    revive = subagents.revive_note(subagents.of_session(container, session_id))
+    if revive:
+        notes.append(revive)
+    return "\n\n".join([prompt, *notes])
 
 
 def _phase_handoff(container: str, result: docker_exec.ClaudeResult) -> dict | None:
@@ -589,7 +617,7 @@ def _run_gates(
         task_id, role, len(report.findings),
     )
     retry = docker_exec.exec_claude(
-        container, workdir, _with_revive_note(container, report.resume_prompt(), result.session_id),
+        container, workdir, _with_resume_notes(container, report.resume_prompt(), result.session_id),
         resume_session_id=result.session_id, model=model, effort=effort,
         timeout_seconds=cfg.phase_timeout_seconds,
         # No skills on the retry, for the same reason the shrink retry gets
@@ -635,6 +663,10 @@ def dispatch_phase(
             # is followed by a fresh pick, so this is bounded by 2N+1 passes.
             if any(acc not in tried for acc in _recheck_cooling_accounts(cfg)):
                 continue
+            logger.error(
+                "task %s: no account is left for the %s phase; tried %s",
+                task_id, role, ", ".join(sorted(tried)) or "none",
+            )
             return DispatchResult(success=False, session_id=resume_session_id, result_text="no accounts available", account="")
         tried.add(account)
 
@@ -642,6 +674,11 @@ def dispatch_phase(
             continue
 
         container = container_for(cfg, account)
+        logger.info(
+            "task %s: %s%s goes to account %s, %s",
+            task_id, role, f" round {round_num}" if round_num is not None else "", account,
+            f"resuming session {resume_session_id}" if resume_session_id else "in a new session",
+        )
         state_machine.set_state(cfg.state_dir, account, AccountState.BUSY, current_task_id=task_id)
         lock_acquired = False
         project_dir = f"{cfg.projects_root}/{slug}"
@@ -661,7 +698,7 @@ def dispatch_phase(
                 # fails over twice gets one note about the session it is
                 # actually picking up, not two stacked from earlier accounts.
                 phase_prompt = (
-                    _with_revive_note(container, prompt, resume_session_id)
+                    _with_resume_notes(container, prompt, resume_session_id)
                     if resume_session_id
                     else prompt
                 )
@@ -709,6 +746,11 @@ def dispatch_phase(
             docker_exec.restore_owner(container, project_dir, owner)
 
         if is_rate_limit_error(result):
+            logger.warning(
+                "task %s: account %s refused the %s phase as rate-limited; it goes COOLING_DOWN, "
+                "the task lock is released, and the phase is handed on resuming session %s",
+                task_id, account, role, result.session_id or resume_session_id or "unknown",
+            )
             state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
             context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id

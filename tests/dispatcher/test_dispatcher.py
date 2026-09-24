@@ -988,6 +988,64 @@ def test_a_resumed_phase_is_told_what_it_left_running(tmp_path, monkeypatch) -> 
     assert ("agent-cuenta1", _SESSION_UUID) in asked
 
 
+def test_a_resumed_phase_is_warned_its_context_block_predates_its_own_work(tmp_path, monkeypatch) -> None:
+    """The CLI re-sends the session's opening environment block verbatim on
+    every resume, so a phase that changed hands mid-flight opens on a git
+    status taken before its own edits — on T-006, `Status: (clean)` over three
+    files it had just modified. Unlike the revive note this goes on every
+    resume, because the block does: a session with nothing left running is
+    handed the same stale snapshot as one that has subagents to revive."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="carried on", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(
+        cfg, "task-1", "myproj", "implementador", "carry on",
+        resume_session_id=_SESSION_UUID,
+    )
+
+    prompt = calls[0]["prompt"]
+    assert prompt.startswith("carry on\n\n"), "the note is appended, never a replacement"
+    assert "git status --short" in prompt, "the one instruction that settles it"
+    assert "SendMessage" not in prompt, "nothing was left running to revive"
+
+
+def test_the_gate_retry_is_warned_about_the_stale_context_block_too(tmp_path, monkeypatch) -> None:
+    """It resumes the session exactly as a failover does, and it is about to
+    read the tree to answer findings against it. Trusting the opening snapshot
+    there would undo the very fix it is being asked for."""
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _fake_subagents(monkeypatch, agents=())
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+    _gate_recorder(monkeypatch, [_one_finding(gates.ASK), gates.Report()])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert "git status --short" in calls[1]["prompt"]
+
+
+def test_the_shrink_retry_is_not_warned_about_the_context_block(tmp_path, monkeypatch) -> None:
+    """Same reason the revive note stays off it: it asks for the return it
+    already has in fewer bytes. It reaches no conclusion about the tree, so
+    the warning would be pure cost on the one call meant to be smaller."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert calls[1]["resume_session_id"] == _SESSION_UUID, "it is a resume all the same"
+    assert "git status --short" not in calls[1]["prompt"]
+
+
 def test_a_phase_that_fails_over_twice_carries_one_note_about_where_it_landed(tmp_path, monkeypatch) -> None:
     """Each attempt builds its prompt from the untouched original. Appending
     in place would stack a note per failover, each about an account's session
@@ -1394,6 +1452,147 @@ def test_dispatch_phase_picks_untried_recovered_account_after_recheck(tmp_path, 
     assert result.success is True
     assert result.account == "cuenta3"
     assert get_state(cfg.state_dir, "cuenta2") == AccountState.COOLING_DOWN
+
+
+def test_a_failover_leaves_the_whole_handover_in_the_log(tmp_path, monkeypatch, caplog) -> None:
+    """The one transition that changes accounts mid-phase used to write
+    nothing at all: T-006's log was shaped exactly like a clean run's, and the
+    failover had to be inferred from a state file that holds only the current
+    state. Each step now names itself — who had it, why it gave it up, who
+    picked it up and which session they picked up."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+    )
+    _fake_subagents(monkeypatch, agents=())
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        if container == "agent-cuenta1":
+            return ClaudeResult(session_id=_SESSION_UUID, result_text="usage limit reached", raw={"is_error": True})
+        return ClaudeResult(session_id=_SESSION_UUID, result_text="carried on", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        result = dispatcher_mod.dispatch_phase(
+            cfg, "T-006", "myproj", "arquitecto", "do the thing", round_num=1,
+        )
+
+    assert result.success is True
+    assert result.account == "cuenta2"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "T-006" in m and "arquitecto round 1 goes to account cuenta1" in m and "new session" in m
+        for m in messages
+    ), "the account a phase ran on was never written down either"
+    refusals = [m for m in messages if "rate-limited" in m]
+    assert len(refusals) == 1, "one line per handover, not one per attempt"
+    assert "cuenta1" in refusals[0]
+    assert "COOLING_DOWN" in refusals[0]
+    assert _SESSION_UUID in refusals[0], "the session is what the next account resumes"
+    assert any(
+        f"goes to account cuenta2, resuming session {_SESSION_UUID}" in m for m in messages
+    )
+
+
+def test_parking_an_account_over_its_quota_threshold_says_so(tmp_path, monkeypatch, caplog) -> None:
+    """The pre-emptive park is the quiet twin of the reactive one: the account
+    leaves the pool without having refused anything, so the numbers that took
+    it out are the only explanation there will ever be."""
+    cfg = _make_config(tmp_path)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 95% used · resets later\n"
+                "Current week (all models): 40% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    parked = [r.getMessage() for r in caplog.records if "PRE_COOLDOWN" in r.getMessage()]
+    assert len(parked) == 1
+    assert "cuenta1" in parked[0]
+    assert "95%" in parked[0] and "40%" in parked[0], "both halves, since either can be the one over"
+    assert "90%" in parked[0], "the threshold it was measured against"
+
+
+def test_an_account_coming_back_from_cooling_says_where_it_came_from(tmp_path, monkeypatch, caplog) -> None:
+    """Recovery is a re-check on dispatch, so an account rejoins the pool at a
+    moment nothing else marks. The prior state is what makes the line worth
+    reading: back from COOLING_DOWN means a refusal has expired, back from
+    PRE_COOLDOWN only that a number fell."""
+    cfg = _make_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 5% used · resets later\n"
+                "Current week (all models): 5% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        assert dispatcher_mod._recheck_cooling_accounts(cfg) == ["cuenta1"]
+
+    assert any(
+        "cuenta1" in r.getMessage() and "COOLING_DOWN" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_an_empty_pool_is_logged_with_the_accounts_it_tried(tmp_path, monkeypatch, caplog) -> None:
+    """This return stops the task. Without the accounts named, the log cannot
+    say whether the pool was empty before the phase started or emptied itself
+    one account at a time while it ran."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+    )
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 95% used · resets later\n"
+                "Current week (all models): 95% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.result_text == "no accounts available"
+    exhausted = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(exhausted) == 1
+    assert "task-1" in exhausted[0] and "arquitecto" in exhausted[0]
+    assert "cuenta1, cuenta2" in exhausted[0]
 
 
 def test_dispatch_phase_returns_failure_when_exec_crashes_with_empty_raw(tmp_path, monkeypatch) -> None:
