@@ -20,6 +20,23 @@ def test_the_mapper_writes_the_same_tree_the_other_writers_do() -> None:
     assert project_docs.MAPPER_ROLE in docker_exec.WRITER_ROLES
 
 
+def test_the_auditor_writes_the_same_tree_too() -> None:
+    """It files the indexes last, after the revisor has approved. A review
+    checkout would be deleted with its entries in it — measured 2026-09-24."""
+    assert "auditor" in docker_exec.WRITER_ROLES
+
+
+def test_the_auditor_commits_only_the_docs_it_was_asked_for() -> None:
+    """Being a writer that runs after the review is what makes the scope
+    necessary: everything else it touched would land unread."""
+    assert project_docs.commit_scope("auditor") == (project_docs.DOCS_DIR,)
+
+
+@pytest.mark.parametrize("role", ["cartografo", "arquitecto", "implementador", "revisor"])
+def test_every_other_role_commits_whatever_it_produced(role: str) -> None:
+    assert project_docs.commit_scope(role) is None
+
+
 def test_implementation_doc_is_one_file_per_task() -> None:
     assert project_docs.implementation_doc("task-7") == "docs/implementations/task-7.md"
 

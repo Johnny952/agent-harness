@@ -644,6 +644,7 @@ def dispatch_phase(
                     message=_commit_message(role, task_id, account, result.session_id, round_num),
                     author_name=f"{role} ({account})",
                     author_email=f"{role}@ia-harness.invalid",
+                    paths=project_docs.commit_scope(role),
                 )
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives

@@ -45,6 +45,23 @@ IMPLEMENTATIONS_DIR = f"{DOCS_DIR}/implementations"
 #: without, and never touches the code.
 MAPPER_ROLE = "cartografo"
 
+#: What each role's commit is allowed to stage, for the roles that need
+#: holding to it. The auditor is one of the writers (docker_exec.WRITER_ROLES)
+#: so its indexes survive the task, but it runs after the revisor has already
+#: approved: a commit taking the whole tree would put anything else it touched
+#: on the branch with nobody having read it. Everything it is asked to write
+#: is under DOCS_DIR, which is what makes the scope exactly the duty.
+_COMMIT_SCOPES = {"auditor": (DOCS_DIR,)}
+
+
+def commit_scope(role: str) -> tuple[str, ...] | None:
+    """The paths this role may commit, or None for the whole worktree.
+
+    None is the default because most roles are asked for the work itself, and
+    the work has no fixed shape to hold them to.
+    """
+    return _COMMIT_SCOPES.get(role)
+
 
 def implementation_doc(task_id: str) -> str:
     """Where one task records how it was built."""

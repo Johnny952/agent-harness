@@ -105,7 +105,9 @@ class _FakeGit:
         self.review_cleanups = []
         self.merges = []
 
-    def commit_worktree(self, container, workdir, message, author_name, author_email):
+    def commit_worktree(
+        self, container, workdir, message, author_name, author_email, paths=None,
+    ):
         self.commits.append(
             dict(
                 container=container,
@@ -113,6 +115,7 @@ class _FakeGit:
                 message=message,
                 author_name=author_name,
                 author_email=author_email,
+                paths=paths,
             )
         )
         return True
@@ -2238,6 +2241,36 @@ def test_dispatch_phase_commits_the_writing_phase(tmp_path, monkeypatch, fake_gi
     assert commit["message"].startswith("agent(implementador): task-1 round 2")
     assert "Account: cuenta1" in commit["message"]
     assert "Session: sess-1" in commit["message"]
+
+
+def test_dispatch_phase_holds_the_auditor_to_its_docs(tmp_path, monkeypatch, fake_git) -> None:
+    """It writes, so it commits — but it runs after the revisor has approved,
+    and a commit taking the whole tree would land code nobody read."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="indexed", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "auditor", "file the indexes")
+
+    assert len(fake_git.commits) == 1
+    assert fake_git.commits[0]["paths"] == ("docs",)
+
+
+def test_dispatch_phase_leaves_the_other_writers_unscoped(tmp_path, monkeypatch, fake_git) -> None:
+    """The work itself has no fixed shape to hold a role to."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert fake_git.commits[0]["paths"] is None
 
 
 def test_dispatch_phase_does_not_commit_a_reviewing_phase(tmp_path, monkeypatch, fake_git) -> None:

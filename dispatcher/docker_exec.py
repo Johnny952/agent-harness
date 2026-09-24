@@ -164,11 +164,23 @@ _GIT_ENV = {"LC_ALL": "C"}
 # "cartografo" is spelled out rather than imported from project_docs, which
 # imports this module: the mapping phase writes the project's docs, so it
 # needs the same shared checkout the other writers get.
-WRITER_ROLES = frozenset({"cartografo", "arquitecto", "implementador"})
+WRITER_ROLES = frozenset({"cartografo", "arquitecto", "implementador", "auditor"})
 """Roles that change the tree, and so share one worktree on the task branch.
 
 Everyone else reviews what they produced and gets a throwaway detached
 checkout instead — see create_worktree.
+
+The auditor is here because of what it writes, not where it runs. Its own
+prompt opens "you are the only phase that writes the indexes"
+(project_docs._AUDITOR), and a review worktree is detached and deleted with
+everything in it: measured on 2026-09-24, the phase filed the learnings and
+debt entries it was asked for and the branch that landed had none of them.
+A role that reviews belongs outside this set; a role that has to leave
+something behind belongs in it, whenever it happens to run.
+
+It runs after the revisor has approved, though, so a commit taking the whole
+tree would land code nobody reviewed. Its commit is held to the docs instead
+— see project_docs.commit_scope and the `paths` argument of commit_worktree.
 """
 
 WRITER_WORKTREE_NAME = "work"
@@ -549,14 +561,34 @@ def commit_worktree(
     message: str,
     author_name: str,
     author_email: str,
+    paths: Sequence[str] | None = None,
 ) -> bool:
-    """Commit everything in a worktree. False when there was nothing to commit.
+    """Commit a worktree's work. False when there was nothing to commit.
 
     The identity is passed per invocation so each commit names the role and
     account that produced it; `-c` outranks the image's --system fallback (see
     docker/agent/Dockerfile) without writing any repo-local config.
+
+    `paths` holds the commit to the part of the tree the role's duties cover,
+    for a phase that shares the writers' worktree but runs after the review —
+    see project_docs.commit_scope. Anything changed outside them stays in the
+    worktree and is named in a warning: a phase writing where it was not asked
+    to is worth seeing, and dropping it silently is the bug this whole
+    argument exists to keep from coming back somewhere else.
     """
-    add = run_docker_exec(container, workdir, ["git", "add", "-A"], env=_GIT_ENV)
+    if paths is None:
+        add = run_docker_exec(container, workdir, ["git", "add", "-A"], env=_GIT_ENV)
+    else:
+        # A pathspec matching nothing is a hard error in git, not an empty
+        # commit: `git add -A -- docs` exits 128 on a tree with no docs/, and
+        # a role that wrote nothing is the ordinary case, not a failure.
+        present = [path for path in paths if path_exists(container, f"{workdir}/{path}")]
+        if not present:
+            return False
+        _warn_changes_outside(container, workdir, present)
+        add = run_docker_exec(
+            container, workdir, ["git", "add", "-A", "--", *present], env=_GIT_ENV,
+        )
     if add.returncode != 0:
         raise RuntimeError(f"git add failed: {add.stderr}")
 
@@ -577,6 +609,32 @@ def commit_worktree(
         # committed. Not an error, and not worth an empty commit.
         return False
     raise RuntimeError(f"git commit failed: {proc.stderr or proc.stdout}")
+
+
+def _warn_changes_outside(container: str, workdir: str, scope: Sequence[str]) -> None:
+    """Name what a scoped commit is about to leave behind, and leave it.
+
+    Best-effort on purpose: this is an observation about a commit that is
+    otherwise fine, so a `git status` that will not run must not be the thing
+    that stops it.
+    """
+    proc = run_docker_exec(
+        container, workdir, ["git", "status", "--porcelain"], env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return
+    prefixes = tuple(f"{path.rstrip('/')}/" for path in scope)
+    bare = {path.rstrip("/") for path in scope}
+    # Porcelain v1 is two status columns, a space, then the path.
+    changed = (line[3:].strip() for line in proc.stdout.splitlines() if line.strip())
+    outside = sorted(
+        {path for path in changed if path not in bare and not path.startswith(prefixes)}
+    )
+    if outside:
+        logger.warning(
+            "%s: left uncommitted, outside this phase's scope (%s): %s",
+            workdir, ", ".join(scope), ", ".join(outside[:10]),
+        )
 
 
 def _nothing_to_commit(stdout: str, stderr: str) -> bool:

@@ -33,6 +33,11 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   `arquitecto → implementador → revisor → auditor`. Before each phase it
   picks an IDLE account, probes `/usage` to keep it under
   `quota_threshold_pct`, and rechecks cooling accounts when none are IDLE.
+  That probe reads free text, so it takes only what it decides on: both
+  percentages are required and a missing one fails the probe loudly, while
+  the `· resets <when>` clause beside each is optional, because the CLI
+  drops it from a line reading 0% — and nothing schedules off those
+  timestamps anyway, since recovery is a re-probe.
   Account state is a small JSON file per account (`state_dir`), written
   atomically. Rate-limit responses move an account to `COOLING_DOWN` and
   retry on another account, resuming the same Claude session via
@@ -78,14 +83,21 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   (heartbeat older than `heartbeat_ttl_seconds`) are reaped at the start of
   each task cycle; a live lock held by another owner is refused, and the
   task goes `blocked`. A task has one branch,
-  `agent/task/<task-id>`: the roles that write to it (arquitecto,
-  implementador) share one worktree checked out on it, and the dispatcher
-  commits what each of those phases left before the next role runs. The
-  reviewing roles (revisor, auditor) get their own checkout, detached at
-  that branch's tip and rebuilt every round, so they always read the code
-  as it stands rather than a pristine `HEAD`. When the cycle ends — `done`,
-  `blocked`, or a crash — those reviewing checkouts are removed, since the
-  next round would rebuild them anyway; the writers' one stays, holding
+  `agent/task/<task-id>`: the roles that leave something behind
+  (arquitecto, implementador, the auditor, and the mapping phase when it
+  runs) share one worktree checked out on it, and the dispatcher commits
+  what each of those phases left before the next role runs. The revisor
+  gets its own checkout, detached at that branch's tip and rebuilt every
+  round, so it always reads the code as it stands rather than a pristine
+  `HEAD`. What decides the split is what a role has to leave behind, not
+  where in the sequence it runs — the auditor is the phase that writes the
+  indexes, and a detached checkout is deleted with everything in it. It
+  runs last, though, after the revisor has approved, so its commit is held
+  to `docs/`: the paths its duties actually cover. Anything it changed
+  outside them is named in a warning and left in the worktree rather than
+  landing on a branch after the review that read it. When the cycle ends —
+  `done`, `blocked`, or a crash — the review checkout is removed, since the
+  next round would rebuild it anyway; the writers' one stays, holding
   whatever a failed phase left uncommitted. The exception is a task this
   run never owned: if it bounced off another dispatcher's lock, that other
   run is still working in those worktrees, so they are left alone.
@@ -790,9 +802,11 @@ covered stack plumbing and the Vibe Kanban MCP surface; the checks that
 needed quota came later, on 2026-09-23 — a first end-to-end task (V3),
 with headless permissions and the `/usage` probe answered for free inside
 that same run (V1.2, V1.3), plus cross-account resume (V5.1) and a real
-rate-limit result (V5.4). V3 has run three times in all, one config
-change apiece, and the third — 2026-09-24, the first to reach `done` —
-is where the bullets below come from. Still unverified: V1.1, the
+rate-limit result (V5.4). The same cycle has been dispatched four times
+in all — three V3 runs, one config change apiece, the third being the
+first to reach `done`, and a fourth on 2026-09-24 that changed no config
+and measured the fixes that run forced. The bullets below are what the
+last two left open. Still unverified: V1.1, the
 failure paths, and the cross-account half of failover — see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results log and
 what's still pending. Their results decide how the known gaps get
@@ -802,32 +816,14 @@ fixed, and each prioritized item lists the checks it depends on.
 
 The core pipeline works end to end as of 2026-09-24: the third dispatched
 run of the same task took it from `blocked` to `done`, with the revisor
-approving and the tests green on the branch. The first four bullets are
-what that run found — one contradiction that makes the docs the harness
-produces untrustworthy, and three that cost quota or accuracy rather than
-correctness. The last is what a no-quota check couldn't settle, and the
-unit tests mock Claude Code, Docker, and Vibe Kanban, so they don't settle
-it either.
-
-- **The auditor is the only phase that writes the docs, and its writes are
-  deleted.** Its prompt opens with it — "You are the only phase that writes
-  the indexes, which is what keeps two phases from editing them at once" —
-  and the auditor is a reviewing role, whose detached checkout
-  `run_task_cycle` removes in its `finally`. Nothing commits for a
-  reviewer: the per-phase commit covers the writer roles only. Measured on
-  2026-09-24 (T-003): the auditor wrote `docs/learnings/README.md` plus
-  seven entries, `docs/debt/README.md` plus one, and updated
-  `docs/README.md`; the log then reads `task T-003: removed review worktrees
-  auditor, revisor`, and the branch holds five files, none of them those.
-  The branch's own `docs/README.md` still says "Nothing else exists yet — no
-  ADRs, no learnings, no debt." The same round had already eaten the
-  revisor's edit; the auditor noticed, filed a learning about it, redid the
-  fix — and lost that the same way. This is not the loss the design already
-  accepts: per-round scratch lives under `.hive/tasks/<task-id>/`, outside
-  any worktree, and it survived intact. It is the durable half, the half a
-  role was assigned, going the same way. Either a reviewing phase gets the
-  per-phase commit the writers get, or the docs duty moves to a role whose
-  worktree is kept. (V3)
+approving and the tests green on the branch, and the fourth — same task
+shape, same config, one rebuilt dispatcher image — closed two of the four
+gaps that run had opened, landing a `docs/`-scoped auditor commit on the
+task branch and reading a 0% session without a warning. The first two
+bullets are the other two, what those runs found and this session hasn't
+closed — neither costs correctness; they cost quota and accuracy. The
+last is what a no-quota check couldn't settle, and the unit tests mock
+Claude Code, Docker, and Vibe Kanban, so they don't settle it either.
 
 - **Nothing retires a learning the harness has since disproved.** Every
   phase is handed `.hive/learnings/inbox/`, entries only ever move to
@@ -839,28 +835,27 @@ it either.
   `node` needs approval", false since the allowlist shipped. It cost nothing
   because the phase tried `node` anyway, which is luck, not design. A
   `superseded` status pointing at what replaced it is the shape the fix
-  wants; that one entry has been marked so by hand meanwhile. (V3)
-
-- **The quota probe stops reading at 0%.** `parse_usage_output`
-  (`dispatcher/quota.py`) requires `· resets <when>` on both lines, and the
-  CLI omits that clause from `Current session:` when the session is at 0% —
-  so the harness loses its quota reading exactly when an account is
-  freshest. On 2026-09-24: `quota probe failed for account cuenta2:
-  Unexpected /usage output format`, on a `Current session: 0% used` with a
-  well-formed week line under it. It warns rather than stops, so the run
-  went on blind and still exited 0 — the right default, and why this went
-  unnoticed for two runs. Make the reset clause optional per line, and keep
-  failing loudly on a percentage that won't parse. (V1.3)
+  wants; that one entry has been marked so by hand meanwhile. T-004 then
+  produced the cleaner instance: the change that gave the auditor its commit
+  made `T-003-phase-edit-missing-from-next-worktree` false the moment the
+  image was rebuilt, and the run handed it to all four phases regardless. The
+  same run's `learnings.reconcile` promoted three other entries to
+  `confirmed` with no model in the loop, which is what makes the shape of the
+  gap plain: there is machinery for corroborating a learning and none for
+  retiring one. (V3, V4)
 
 - **The handoff budgets were sized before a phase could write anything.**
   Three of the four overran on 2026-09-24 — arquitecto 4266 bytes against
-  4096, revisor 4386 against 3072, auditor 5209 against 2048 — and each
-  overrun buys one `--resume` asking for less, so the budgets cost three
-  paid turns on a four-phase task. The squeeze gets worse down the pipeline:
-  the auditor has the smallest budget and the most to report, since it is
-  the phase that rules on debt and files the indexes. The overage warning
-  exists precisely to retune them from data, and there are now two runs of
-  it. (V3)
+  4096, revisor 4386 against 3072, auditor 5209 against 2048 — and the run
+  that afternoon overran three of four again, a different three:
+  implementador 5400 against 5120, revisor 4149 against 3072, auditor 4602
+  against 2048. Each overrun buys one `--resume` asking for less, so the
+  budgets cost three paid turns on a four-phase task, twice over. The squeeze
+  gets worse down the pipeline: the auditor has the smallest budget and the
+  most to report, since it is the phase that rules on debt and files the
+  indexes — and now that its writes survive, it has more to report than when
+  the budgets were set. The overage warning exists precisely to retune them
+  from data, and there are now three runs of it. (V3, V4)
 
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
@@ -1059,10 +1054,11 @@ it either.
      `.hive/tasks/<task-id>/`. The `.hive` task file keeps the summary plus
      the paths. Detail on disk only survives if it's committed or lives
      outside the worktree — the dispatcher's per-phase commit covers the
-     first case for writer roles, but a reviewing role's detached checkout
-     is rebuilt every round, so anything it writes there is gone — which
-     is exactly what the auditor's writes hit, since it is a reviewing
-     role the duties above give durable docs to file (see *Known gaps*).
+     first case for the roles that share the task branch's worktree, and
+     the auditor is one of them for exactly this reason: a reviewing
+     role's detached checkout is rebuilt every round and deleted at the
+     end, so anything written there is gone, which is what the auditor's
+     indexes hit until its commit was scoped to `docs/`.
      The recorded subagent IDs are what let a resumed or later phase
      attempt the revive above.
    - *Docs and tests kept current, enforced outside the model.* Today

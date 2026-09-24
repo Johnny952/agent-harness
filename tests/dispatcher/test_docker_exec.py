@@ -866,15 +866,20 @@ def test_create_worktree_rebuilds_a_detached_checkout_for_reviewers(monkeypatch)
     ]
 
 
-def test_create_worktree_gives_each_reviewer_its_own_path(monkeypatch) -> None:
+def test_create_worktree_shares_one_path_across_the_writers_and_not_the_reviewer(
+    monkeypatch,
+) -> None:
+    """The split the whole scheme rests on: one tree to build in, one to review."""
     monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([]))
 
     paths = {
         role: create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", role)
-        for role in ("arquitecto", "revisor", "auditor")
+        for role in ("arquitecto", "implementador", "auditor", "revisor")
     }
 
-    assert len(set(paths.values())) == 3
+    writers = {paths[role] for role in ("arquitecto", "implementador", "auditor")}
+    assert len(writers) == 1
+    assert paths["revisor"] not in writers
 
 
 def test_create_worktree_raises_when_the_review_checkout_cannot_be_rebuilt(monkeypatch) -> None:
@@ -1109,6 +1114,101 @@ def test_commit_worktree_raises_when_staging_fails(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="git add failed"):
         commit_worktree(_CONTAINER, "/wd", "msg", "name", "mail@example.invalid")
+
+
+def test_commit_worktree_stages_only_the_paths_a_role_was_scoped_to(monkeypatch) -> None:
+    """The auditor commits after the review, so it commits only its own docs."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls))
+
+    committed = commit_worktree(
+        _CONTAINER, f"{_PROJECT}/worktrees/task-1/work",
+        message="agent(auditor): task-1",
+        author_name="auditor (cuenta1)",
+        author_email="auditor@ia-harness.invalid",
+        paths=["docs"],
+    )
+
+    assert committed is True
+    assert ["git", "add", "-A", "--", "docs"] in [_in_container(cmd) for cmd in calls]
+    assert ["git", "add", "-A"] not in [_in_container(cmd) for cmd in calls]
+
+
+def test_commit_worktree_checks_the_scope_exists_before_staging_it(monkeypatch) -> None:
+    """`git add -- docs` exits 128 on a tree with no docs/, and a phase that
+    wrote nothing is the ordinary case rather than a failure."""
+    calls = []
+
+    def respond(args):
+        return (1, "", "") if args[:2] == ["test", "-e"] else (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, respond))
+
+    committed = commit_worktree(
+        _CONTAINER, "/wd", "msg", "name", "mail@example.invalid", paths=["docs"],
+    )
+
+    assert committed is False
+    assert [_in_container(cmd)[0] for cmd in calls] == ["test"]
+
+
+def test_commit_worktree_warns_about_what_a_scoped_commit_leaves_behind(
+    monkeypatch, caplog,
+) -> None:
+    """A phase writing outside its scope is worth seeing, not dropping silently."""
+
+    def respond(args):
+        if args[:2] == ["git", "status"]:
+            return (0, " M docs/README.md\n M src/app.py\n?? notes.txt\n", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with caplog.at_level(logging.WARNING, logger="dispatcher.docker_exec"):
+        commit_worktree(
+            _CONTAINER, "/wd", "msg", "name", "mail@example.invalid", paths=["docs"],
+        )
+
+    assert "src/app.py" in caplog.text
+    assert "notes.txt" in caplog.text
+    assert "docs/README.md" not in caplog.text
+
+
+def test_commit_worktree_is_quiet_when_a_scoped_commit_leaves_nothing_behind(
+    monkeypatch, caplog,
+) -> None:
+    def respond(args):
+        if args[:2] == ["git", "status"]:
+            return (0, " M docs/README.md\n?? docs/learnings/L-001.md\n", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with caplog.at_level(logging.WARNING, logger="dispatcher.docker_exec"):
+        commit_worktree(
+            _CONTAINER, "/wd", "msg", "name", "mail@example.invalid", paths=["docs"],
+        )
+
+    assert caplog.text == ""
+
+
+def test_commit_worktree_commits_anyway_when_the_scope_check_cannot_run(
+    monkeypatch, caplog,
+) -> None:
+    """The warning is an observation about a commit that is otherwise fine."""
+
+    def respond(args):
+        return (128, "", "fatal: bad\n") if args[:2] == ["git", "status"] else (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with caplog.at_level(logging.WARNING, logger="dispatcher.docker_exec"):
+        committed = commit_worktree(
+            _CONTAINER, "/wd", "msg", "name", "mail@example.invalid", paths=["docs"],
+        )
+
+    assert committed is True
+    assert caplog.text == ""
 
 
 def test_read_owner_returns_the_host_uid_and_gid(monkeypatch) -> None:
