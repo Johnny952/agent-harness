@@ -605,9 +605,11 @@ logins.
     2026-09-24: a real sonnet turn on `agent-cuenta1` came back
     `api_error_status: null`, `stop_reason: end_turn`, against 34% of
     the session and 51% of the week, so the 429 was the monthly wall
-    and the wall is down. The cross-account leg has an account to run
-    on again; do it as part of the two-account acceptance rather than
-    as a standalone turn, since the run exercises it anyway. Evidence:
+    and the wall is down. The cross-account leg then ran, on
+    2026-09-24, inside V5.2's dispatched failover rather than as a
+    standalone turn: T-006's arquitecto started on cuenta1, was refused,
+    and the same session continued on cuenta2 in the same worktree with
+    its context intact. **Settled.** Evidence:
     `.data/verify/v51-cross-account-resume.txt` and
     `.data/verify/quota-probe-local-only.txt`.
 - **V5.2 Dispatcher failover, with a fault injected.** Waiting for a real
@@ -635,6 +637,25 @@ logins.
     - `docker exec agent-cuenta1 sh -c 'p=$(command -v claude); mv "$p.real" "$p"'`
     - Or `$DA up -d --force-recreate --no-deps agent-cuenta1`, which also
       re-checks V0.4's persistence.
+  - Ran 2026-09-24 on task `T-006`: **passed on all four**, and the
+    wrapper came off with the `mv` line above — `claude` is the original
+    symlink again and `claude.real` is gone. The transcript is the whole
+    proof of criteria 1 and 2 at once: one session id, the arquitecto
+    prompt in it twice (the second with a parent uuid, which is what an
+    append-on-resume looks like), under a projects directory whose name
+    is the cwd, identical for both accounts. Two notes for whoever runs
+    this next. The lock release is proved by cuenta2's acquisition five
+    seconds later rather than by a log line, because there is no log
+    line — `dispatch_phase` records neither the account it picked nor
+    the hand-off, so a real exhaustion would look like a clean run.
+    And the resumed phase was handed the *pre-failure* git status block
+    verbatim, telling it the worktree was clean while cuenta1's three
+    edits sat in it; it checked and did not redo them, but that was the
+    phase's judgement, not the harness's. Both are README gaps now.
+    Still untested here, and the reason V5.3 stays open: a failover on a
+    phase whose predecessor had already committed, and an account
+    returning from `COOLING_DOWN` mid-task. Evidence:
+    `.data/verify/v52-failover.txt`.
 - **V5.3 Recovery re-check.**
   1. Leave `cuenta1.json` at `COOLING_DOWN`.
   2. Set `dispatcher_state/cuenta2.json` to
@@ -1124,7 +1145,14 @@ logins.
      number is now suspect rather than confirmed — the arquitecto's
      4096, left alone because its misses were 1%, 4% and 18%, was
      missed by 43% here. That is one data point against the reasoning,
-     not yet a reason to move it.
+     not yet a reason to move it. T-006 (2026-09-24) made it two: the
+     arquitecto overran by 44% again, 5911 against 4096, near enough to
+     T-005's 5857 to look like that role's natural length rather than
+     noise — the next tuning should raise it. The rest of that run is
+     the numbers working: four handoffs, four inside budget, no
+     WARNING, against two of four on T-005. Three roles retried once
+     each and came back in, and the revisor's 377-byte overage was kept
+     as it came — the second time the margin has paid for itself.
 3. Acceptance: **passed 2026-09-24** (T-005, `.data/verify/t005-acceptance.txt`).
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
@@ -1142,10 +1170,29 @@ logins.
      working cuenta1. Two accounts were configured and one was used.
      The cross-account `--resume` leg of V5.1 was meant to be folded in
      here and was not — the three resumes this run made were handoff
-     shrinks, all on the one account. It still needs a run that makes a
-     phase change hands.
-4. Re-run V5.2 against the fixed pipeline. Commits and resumes now
-   interact.
+     shrinks, all on the one account. Item 4 below has since made a
+     phase change hands and settled it.
+4. V5.2 re-run: **passed 2026-09-24** (T-006,
+   `.data/verify/v52-failover.txt`). The run the item above left owing:
+   a phase changing hands mid-flight, forced with the injected 429 so it
+   did not have to wait on a real exhaustion. All four of V5.2's criteria
+   met, and the claim this item was written to test — that commits and
+   resumes now interact — held in the sharpest form available: the
+   arquitecto did its whole job on cuenta1, was refused, left its edits
+   uncommitted in the shared worktree because `_should_commit` declines a
+   rate-limited phase, and cuenta2 resumed the same session in the same
+   worktree, verified rather than redid, and the dispatcher landed one
+   commit under cuenta2's name carrying both accounts' work. One phase,
+   two accounts, one commit, one `## arquitecto` section.
+   - What passing did not cover: cuenta1 failed on the *first* phase, so
+     the failover was never asked to resume a phase whose predecessor had
+     already committed, and `_recheck_cooling_accounts` never ran, because
+     cuenta2 was idle before every phase — nothing has exercised an
+     account coming *back* from `COOLING_DOWN` mid-task. That is V5.3,
+     and it is still the recovery path nothing has tested end to end.
+   - What it opened: the failover writes nothing to the log, and a
+     resumed phase is handed the pre-resume git snapshot as if it were
+     current. Both are now README gaps.
 
 ### When to re-run checks later
 
@@ -1154,7 +1201,13 @@ logins.
 - `vibe-kanban` image updated: V0.8 only. Nothing on the dispatcher's path
   to the board reads it.
 - Compose or image changes: V0.
-- Changes to `dispatch_phase` or `run_task_cycle`: V3 and V4.
+- Changes to `dispatch_phase` or `run_task_cycle`: V3 and V4, plus V5.2
+  if the change touches the failover branch — `is_rate_limit_error`, the
+  `COOLING_DOWN` transition, `release_stale_lock`, `_should_commit`, or
+  how `resume_session_id` is carried across the `continue`. V3 and V4
+  both run on one account that never gets refused, so they walk straight
+  past that branch; V5.2 is the only check that enters it, and it needs
+  the injected 429 to do so.
 - The `test:` command in a project's `docs/README.md` changed, or a
   project gained an index for the first time: V3 again against that
   project. That command is the only gate that runs project code, it runs
@@ -1336,3 +1389,4 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-09-24 | V4 (auditor writes) | PASS | Claude Code CLI 2.1.273; agent-cuenta2; dispatcher image `sha256:3fb0c9d6c062` | The three fixes the row above opened, run through a dispatched cycle instead of unit tests. Task `T-004`, 17:37:54Z->17:47:51Z (9m57s wall), exit 0, same four phases, same verdict (`done`, revisor APPROVED at round 1). The A/B is one artefact, not one field: `config.yaml` is identical field-by-field to T-003's snapshot, and the dispatcher image — which bakes the source — was rebuilt 73 seconds before START. **(1) The auditor committed.** `ef3e53f` on `agent/task/T-004`, author `auditor (cuenta2)`, ten files and 295 insertions. **(2) The commit is scoped.** Every one of the ten paths is under `docs/`, no out-of-scope path was logged, the phase's session cwd moved from `worktrees/T-004/auditor` to `.../work`, and the cleanup line reads `removed review worktrees revisor` where T-003's read `auditor, revisor` — the revisor is still a reviewer by design and `git log --author=revisor` is empty. **(3) The quota probe parsed.** T-003's log had the `Unexpected /usage output format` warning at +4s as line 6; T-004's line 6 is the learnings INFO instead, with the same four quota-probe sessions in the collector. Refusals: **4 of 75 (5%)**, the best of the four runs (T-001 43/62, T-002 17/54, T-003 12/95), and the auditor's own 30 calls — ten `Write`, two `Edit` — were refused none. The four, verbatim: the arquitecto attempting its own commit (once, not retried), the revisor's `node --test *.test.js 2>&1; echo "EXIT=$?"` reproducing T-003's finding 5 in another phase, and two `ls` calls above the worktree root. No `git -C` and no `npm` was attempted at all. Two things it opened rather than closed: `learnings.reconcile` fired for the first time and promoted three entries to `confirmed`, while the one entry this very fix disproved (`T-003-phase-edit-missing-from-next-worktree.md`) stayed in the inbox and went to all four phases — a named instance of the stale-learning gap; and the auditor rewrote the toy project's `docs/README.md` worktree path from `work` to `<phase>`, off a `git worktree list` still padded with three earlier tasks' reviewer directories, so that doc is now wrong the other way. Handoff budgets blew three of four again, a different three (implementador 5400/5120, revisor 4149/3072, auditor 4602/2048). Still unexercised: the two-account half of Stage 1's acceptance, since cuenta1 is out of monthly spend. Evidence: `.data/verify/v4-auditor-commit.txt`, `.data/verify/v4-auditor-commit-run.log`. |
 | 2026-09-24 | V5.1 (quota probe) | FINDING | Claude Code CLI in agent-cuenta1 and agent-cuenta2; `--model sonnet` | Authorized as "a little quota on cuenta1", to find out whether the monthly wall V5.1 hit on 2026-09-23 was still standing. **It is not**: one real sonnet turn on `agent-cuenta1` answered `PROBE-OK` with `api_error_status: null`, `stop_reason: end_turn`, 1 turn, $0.0405, served by `claude-sonnet-5`. Session 33%→34%, week 51%, requests 239→240 across the turn, so the counters track spend and update promptly. Two side results. First, the containers really are two logins — sha256 fingerprints of `oauthAccount` and of `.credentials.json` differ on both axes (`407fc743…`/`a57c095f…` against `b05e3f6b…`/`5d770bbe…`), nothing printed in the clear. Second, and the reason this is a FINDING rather than a note: **`claude -p "/usage"` is a local command**, `local_command: "usage"`, `duration_api_ms: 0`, `num_turns: 0`, `total_cost_usd: 0`. `check_quota_ok` therefore reads counters off the container's disk and never asks the service, so a healthy percentage says nothing about whether the next call is refused — which is exactly the shape of the one refusal on record (V5.4: 429 on arrival, no session started). The output also states it covers "local sessions on this machine" only, so `quota_threshold_pct` is compared against a number that undercounts any use from another device, and `check_quota_ok` fails open on exception on top of that. Decision: record it as a README gap rather than fix it blind — the probe's $0/641ms is worth keeping, and nothing has yet measured whether a refused account answers `/usage` with numbers or an error, which is what decides between reading `/usage` harder and reacting to the first real call. Also stale as of this row: `config.yaml`'s header and its `accounts:` comment. Evidence: `.data/verify/quota-probe-local-only.txt`. |
 | 2026-09-24 | Stage 1 acceptance (V3, default config) | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image rebuilt 18:52:54 | Task `T-005`, 18:53:45→19:07:16 (13m31s wall), exit 0, launched with `--description` rather than a hand-seeded task file as the acceptance requires. All four criteria met: `status: done` with the revisor `APPROVED` in round 1; revisor and auditor both cite the implementador's commit `84490fe` by SHA; `agent/task/T-005` carries three commits (`16ee9c9` arquitecto, `84490fe` implementador, `b43b7f6` auditor), 16 files, +407/−4, with `subtract` exported from `sum.js` and a `test('subtract')` whose second assertion pins operand order; `node --test` green on the tip (2 pass, 0 fail). **cuenta1 served real pipeline work for the first time** — BUSY on T-005 for all four phases, after answering 429 on arrival since 2026-09-23. **Handoff budgets hit all three branches in one run**: arquitecto 5857/4096 retried to 3983 (inside), implementador 5387/5120 kept as-is inside the 512-byte margin without paying for a `--resume`, revisor 6060/4096 and auditor 5911/3584 each retried once and stayed 362 and 350 over — two WARNINGs where the four runs that set the numbers would have produced zero. **Finding: a revisor's edits never land.** Review worktrees are detached at the branch tip by design, so there is no branch to commit them onto; the revisor reported the `pointers` gate closed and its own grep agreed, while the same grep on the branch still returned both pointers. The auditor re-ran that verification on its own branch, found the gate open and repaired it in `b43b7f6` — turning the loose pointers into `docs/debt/T-005-D1.md` and `D2` — so the tip is clean. But the APPROVED verdict was issued by a phase that believed in a fix it had not made, and nothing but the auditor's own diligence caught it. This is the mechanism behind `T-003-phase-edit-missing-from-next-worktree`, which had the symptom without the reason. Also unprompted: the arquitecto's Risks list reintroduced the `<phase>`-for-`work` worktree-path error verbatim; the implementador checked it, refused the edit and filed the rule. 4 learnings filed and stamped. Not measured: failover (no phase failed, cuenta2 IDLE throughout), rounds 2–3 and effort escalation (approved in round 1), and V5.1's cross-account `--resume`. Decision: acceptance item 3 closes; the detached-revisor gap goes to the README as a known gap; item 4 (V5.2 re-run) is next and needs quota. See `.data/verify/t005-acceptance.txt` and `t005-acceptance-run.log`. |
+| 2026-09-24 | V5.2 (failover, fault injected) | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image `sha256:e4cd2f01739f` | The check the acceptance run could not reach, and the one the pipeline had never been through: a phase changing hands mid-flight. Task `T-006`, 22:32:49Z→22:48:28Z (15m39s wall), exit 0, both state files `IDLE` at the start, launched with `--description`. The fault is a 204-byte wrapper on `agent-cuenta1`'s `claude`: `-p /usage` execs the real binary unchanged, so the quota gate stays honest, and everything else runs for real and then has `is_error`/`api_error_status: 429` written into its JSON. **All four criteria met.** (1) The arquitecto ran on cuenta1 and did the work — edited `sum.js` and `sum.test.js`, ran `node --test`, wrote `docs/implementations/T-006.md` — then came back a 429; cuenta1 ended `COOLING_DOWN` with `current_task_id: null`, and the lock was *released*, not left to expire: cuenta2 acquired it five seconds later, far inside the 120s heartbeat TTL that `acquire_lock` refuses a live foreign owner through. (2) The phase resumed on cuenta2 in the same session, `7b13f2fa`: the arquitecto prompt appears twice in one transcript, at 22:32:52 with `parentUuid: null` and at 22:34:39 with a parent, and the transcript sits under `-data-projects-scratch-worktrees-T-006-work` — the same cwd for both accounts, which is the cross-account `--resume` leg V5.1 left owing. (3) One `## arquitecto` section in the task file, four headings total. (4) All three writer commits are authored `(cuenta2)`; cuenta1 was never re-probed, because `_recheck_cooling_accounts` only fires when no account is idle. **And the point of Stage 1's fourth acceptance item — commits and resumes interacting — lands concretely:** cuenta1's edits stayed uncommitted in the shared writers' worktree (`_should_commit` returns False on a rate limit, by design, so a half-done phase is not put in history twice), cuenta2 inherited them, and the dispatcher committed them once as `2f33664`, 3 files, +33/−2. One phase, two accounts, one commit. Two things the run opened, both new README gaps. First, **the failover is silent**: `dispatch_phase` makes no `logger` call at all — not when it picks an account, not when it reads a 429, not when it hands over — so this run's log is shaped exactly like a clean one and the only trace is the state file and the commit author. Second, **a resumed phase is handed a stale git snapshot**: the session-start context block is re-sent verbatim on `--resume`, so the cuenta2 arquitecto was told `Status: (clean)` while three of its own edits sat modified in that worktree. It ran `git status --short`, found them, did not redo them, and filed the learning the auditor landed as `docs/learnings/session-context-block-is-stale.md` — so the check passed because the phase distrusted its context, not because the harness prevented the misread. Side result: the re-sized handoff budgets went four for four inside budget (arquitecto 5911→3540, implementador 6051→5015, revisor 4473 kept inside the 10% margin, auditor 4622→3527) against two of four on T-005, with no WARNING — though the arquitecto again overran by 44%, a second data point against leaving its 4096 alone. Wrapper removed immediately after the run; `claude` is the original symlink and `claude.real` is gone. Evidence: `.data/verify/v52-failover.txt`, `.data/verify/v52-failover-run.log`. |
