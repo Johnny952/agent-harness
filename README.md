@@ -799,15 +799,19 @@ get fixed, and each prioritized item lists the checks it depends on.
 ### Known gaps (fix first)
 
 The first end-to-end run found one thing in the core pipeline that is
-broken, and it is the bullet below. The rest is what a no-quota check
-couldn't settle — and the unit tests mock Claude Code, Docker, and Vibe
-Kanban, so none of them settle it either.
+broken, and it is the bullet below — fixed since, and a re-run confirmed
+most of it; the part it did not confirm is why the bullet is still here.
+The rest is what a no-quota check couldn't settle — and the unit tests
+mock Claude Code, Docker, and Vibe Kanban, so none of them settle it
+either.
 
-- **A phase can't write, and can't read its handoff.** Measured end to
-  end on 2026-09-23 (V3): 43 of 62 tool calls were denied and not one
-  file was written, inside the phase's own worktree or out of it. Two
-  independent causes, and a fix needs both halves.
-  - `build_claude_command` (`dispatcher/docker_exec.py`) passes no
+- **A phase can't write, and can't read its handoff.** **Fixed on
+  2026-09-23 and confirmed by a re-run the same day — except that a
+  phase still can't run anything.** Measured end to end that morning
+  (V3): 43 of 62 tool calls were denied and not one file was written,
+  inside the phase's own worktree or out of it. Two independent causes,
+  and the fix needed both halves.
+  - `exec_claude` (`dispatcher/docker_exec.py`) passed no
     `--permission-mode`, no `--allowedTools` and no
     `--dangerously-skip-permissions`, and `hooks/install_settings.py`
     sets no `permissions`. Under `-p` the CLI's `--permission-prompts`
@@ -822,10 +826,35 @@ Kanban, so none of them settle it either.
     handoff. The only context that travelled is the task description,
     which the dispatcher embeds whole in every prompt.
 
-  Candidate fix: a permission mode plus `--add-dir /data/.hive` on every
-  phase command, or passing the handoff body in the prompt instead of its
-  path. Until then a dispatched task can plan and review but not
-  implement, and each phase starts from the description alone. (V3, V1.2)
+  What shipped, and what a second run of the same task proved: one
+  config line, `permission_mode` (default `acceptEdits`), plus
+  `--add-dir` on the hive root. Calls that never completed fell from 43
+  of 62 to 17 of 54, and 16 of those 17 are denials; Write and Edit went
+  from 0 of 10 to 10 of 11; all three phases opened their handoff as
+  their first tool call and all three succeeded; the branch carried a
+  real change at the end, where V3's had been identical to master.
+  Learnings travelled too, and got used — the implementador read the
+  arquitecto's before repeating its mistake. Evidence:
+  `.data/verify/v3-rerun-permissions.txt`.
+
+  What the re-run did not fix, and the reason this bullet stays: `node
+  --test` never executed, in either run. Six attempts across three
+  phases, every one refused. `acceptEdits` grants the file tools plus
+  the CLI's own read-only Bash set — `ls`, `cat`, `grep`, `git status`,
+  `git log` — and stops short of running a program, and a phase cannot
+  grant itself the rest: writing `.claude/settings.local.json` into its
+  own worktree is refused too. The dispatcher's test gate did not
+  compensate, because that project declared no test command for it to
+  find. So the task was blocked, correctly, over an acceptance criterion
+  nothing in the loop could reach.
+
+  `allowed_tools` is the answer to that, and it shipped after the
+  re-run: a harness-side allowlist, empty by default, restated on every
+  phase command and on the shrink and gate retries, which inherit no
+  flags. On a toy prompt `Bash(node --test*)` is the whole difference
+  between "requires your approval" and tests that run; on a dispatched
+  cycle it has never been tried. One more re-run is what would close
+  this bullet, and it costs quota. (V3, V1.2)
 
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
