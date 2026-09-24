@@ -790,71 +790,77 @@ covered stack plumbing and the Vibe Kanban MCP surface; the checks that
 needed quota came later, on 2026-09-23 — a first end-to-end task (V3),
 with headless permissions and the `/usage` probe answered for free inside
 that same run (V1.2, V1.3), plus cross-account resume (V5.1) and a real
-rate-limit result (V5.4). What V3 found is the first bullet below. Still
-unverified: V1.1, the failure paths, and the cross-account half of
-failover — see [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results
-log and what's still pending. Their results decide how the known gaps
-get fixed, and each prioritized item lists the checks it depends on.
+rate-limit result (V5.4). V3 has run three times in all, one config
+change apiece, and the third — 2026-09-24, the first to reach `done` —
+is where the bullets below come from. Still unverified: V1.1, the
+failure paths, and the cross-account half of failover — see
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results log and
+what's still pending. Their results decide how the known gaps get
+fixed, and each prioritized item lists the checks it depends on.
 
 ### Known gaps (fix first)
 
-The first end-to-end run found one thing in the core pipeline that is
-broken, and it is the bullet below — fixed since, and a re-run confirmed
-most of it; the part it did not confirm is why the bullet is still here.
-The rest is what a no-quota check couldn't settle — and the unit tests
-mock Claude Code, Docker, and Vibe Kanban, so none of them settle it
-either.
+The core pipeline works end to end as of 2026-09-24: the third dispatched
+run of the same task took it from `blocked` to `done`, with the revisor
+approving and the tests green on the branch. The first four bullets are
+what that run found — one contradiction that makes the docs the harness
+produces untrustworthy, and three that cost quota or accuracy rather than
+correctness. The last is what a no-quota check couldn't settle, and the
+unit tests mock Claude Code, Docker, and Vibe Kanban, so they don't settle
+it either.
 
-- **A phase can't write, and can't read its handoff.** **Fixed on
-  2026-09-23 and confirmed by a re-run the same day — except that a
-  phase still can't run anything.** Measured end to end that morning
-  (V3): 43 of 62 tool calls were denied and not one file was written,
-  inside the phase's own worktree or out of it. Two independent causes,
-  and the fix needed both halves.
-  - `exec_claude` (`dispatcher/docker_exec.py`) passed no
-    `--permission-mode`, no `--allowedTools` and no
-    `--dangerously-skip-permissions`, and `hooks/install_settings.py`
-    sets no `permissions`. Under `-p` the CLI's `--permission-prompts`
-    defaults to `host`; with no SDK host and no `--permission-prompt-tool`
-    there is nobody to answer, so anything that would prompt is denied
-    automatically — Write, Edit and Bash alike.
-  - `_role_prompt` hands the role the *path* of its handoff,
-    `/data/.hive/tasks/<task-id>.md`, which lies outside the phase's
-    working directory and so is unreachable by the file tools even where
-    the OS says it's readable; `.hive/learnings/` is out of reach the
-    same way. No phase in that run ever received the previous phase's
-    handoff. The only context that travelled is the task description,
-    which the dispatcher embeds whole in every prompt.
+- **The auditor is the only phase that writes the docs, and its writes are
+  deleted.** Its prompt opens with it — "You are the only phase that writes
+  the indexes, which is what keeps two phases from editing them at once" —
+  and the auditor is a reviewing role, whose detached checkout
+  `run_task_cycle` removes in its `finally`. Nothing commits for a
+  reviewer: the per-phase commit covers the writer roles only. Measured on
+  2026-09-24 (T-003): the auditor wrote `docs/learnings/README.md` plus
+  seven entries, `docs/debt/README.md` plus one, and updated
+  `docs/README.md`; the log then reads `task T-003: removed review worktrees
+  auditor, revisor`, and the branch holds five files, none of them those.
+  The branch's own `docs/README.md` still says "Nothing else exists yet — no
+  ADRs, no learnings, no debt." The same round had already eaten the
+  revisor's edit; the auditor noticed, filed a learning about it, redid the
+  fix — and lost that the same way. This is not the loss the design already
+  accepts: per-round scratch lives under `.hive/tasks/<task-id>/`, outside
+  any worktree, and it survived intact. It is the durable half, the half a
+  role was assigned, going the same way. Either a reviewing phase gets the
+  per-phase commit the writers get, or the docs duty moves to a role whose
+  worktree is kept. (V3)
 
-  What shipped, and what a second run of the same task proved: one
-  config line, `permission_mode` (default `acceptEdits`), plus
-  `--add-dir` on the hive root. Calls that never completed fell from 43
-  of 62 to 17 of 54, and 16 of those 17 are denials; Write and Edit went
-  from 0 of 10 to 10 of 11; all three phases opened their handoff as
-  their first tool call and all three succeeded; the branch carried a
-  real change at the end, where V3's had been identical to master.
-  Learnings travelled too, and got used — the implementador read the
-  arquitecto's before repeating its mistake. Evidence:
-  `.data/verify/v3-rerun-permissions.txt`.
+- **Nothing retires a learning the harness has since disproved.** Every
+  phase is handed `.hive/learnings/inbox/`, entries only ever move to
+  `archive/` once consumed, and no status says "this was true of the run
+  that wrote it and is false now". T-003's arquitecto showed both halves at
+  once: told nothing about `archive/`, it ran `ls -R` on the learnings root,
+  found the three archived entries and read all of them — so `archive/` is
+  not out of reach, only quieter — and one of the three was T-002's "running
+  `node` needs approval", false since the allowlist shipped. It cost nothing
+  because the phase tried `node` anyway, which is luck, not design. A
+  `superseded` status pointing at what replaced it is the shape the fix
+  wants; that one entry has been marked so by hand meanwhile. (V3)
 
-  What the re-run did not fix, and the reason this bullet stays: `node
-  --test` never executed, in either run. Six attempts across three
-  phases, every one refused. `acceptEdits` grants the file tools plus
-  the CLI's own read-only Bash set — `ls`, `cat`, `grep`, `git status`,
-  `git log` — and stops short of running a program, and a phase cannot
-  grant itself the rest: writing `.claude/settings.local.json` into its
-  own worktree is refused too. The dispatcher's test gate did not
-  compensate, because that project declared no test command for it to
-  find. So the task was blocked, correctly, over an acceptance criterion
-  nothing in the loop could reach.
+- **The quota probe stops reading at 0%.** `parse_usage_output`
+  (`dispatcher/quota.py`) requires `· resets <when>` on both lines, and the
+  CLI omits that clause from `Current session:` when the session is at 0% —
+  so the harness loses its quota reading exactly when an account is
+  freshest. On 2026-09-24: `quota probe failed for account cuenta2:
+  Unexpected /usage output format`, on a `Current session: 0% used` with a
+  well-formed week line under it. It warns rather than stops, so the run
+  went on blind and still exited 0 — the right default, and why this went
+  unnoticed for two runs. Make the reset clause optional per line, and keep
+  failing loudly on a percentage that won't parse. (V1.3)
 
-  `allowed_tools` is the answer to that, and it shipped after the
-  re-run: a harness-side allowlist, empty by default, restated on every
-  phase command and on the shrink and gate retries, which inherit no
-  flags. On a toy prompt `Bash(node --test*)` is the whole difference
-  between "requires your approval" and tests that run; on a dispatched
-  cycle it has never been tried. One more re-run is what would close
-  this bullet, and it costs quota. (V3, V1.2)
+- **The handoff budgets were sized before a phase could write anything.**
+  Three of the four overran on 2026-09-24 — arquitecto 4266 bytes against
+  4096, revisor 4386 against 3072, auditor 5209 against 2048 — and each
+  overrun buys one `--resume` asking for less, so the budgets cost three
+  paid turns on a four-phase task. The squeeze gets worse down the pipeline:
+  the auditor has the smallest budget and the most to report, since it is
+  the phase that rules on debt and files the indexes. The overage warning
+  exists precisely to retune them from data, and there are now two runs of
+  it. (V3)
 
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
@@ -1054,9 +1060,11 @@ either.
      the paths. Detail on disk only survives if it's committed or lives
      outside the worktree — the dispatcher's per-phase commit covers the
      first case for writer roles, but a reviewing role's detached checkout
-     is rebuilt every round, so anything it writes there is gone. The
-     recorded subagent IDs
-     are what let a resumed or later phase attempt the revive above.
+     is rebuilt every round, so anything it writes there is gone — which
+     is exactly what the auditor's writes hit, since it is a reviewing
+     role the duties above give durable docs to file (see *Known gaps*).
+     The recorded subagent IDs are what let a resumed or later phase
+     attempt the revive above.
    - *Docs and tests kept current, enforced outside the model.* Today
      nothing requires either: `_role_prompt` sends only the role, the task
      ID, and the task file; the dispatcher never runs tests or looks at the
