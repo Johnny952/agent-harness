@@ -447,3 +447,16 @@ def test_local_board_keeps_an_id_from_naming_a_file_elsewhere(tmp_path: Path) ->
     assert board.get_issue("../escaped") is None
     with pytest.raises(LookupError):
         board.set_status("../escaped", "done")
+
+
+def test_local_board_get_issue_does_not_raise_on_an_id_no_path_can_hold(tmp_path: Path) -> None:
+    board = local_board(tmp_path)
+    board.create_issue("Add a /healthz")
+
+    # `get_issue` is a lookup and does not raise, for any id: a task file's
+    # `kanban_issue_id` is a YAML scalar, and a double-quoted one can carry an
+    # escape no filesystem call accepts ("embedded null byte" is a ValueError,
+    # not an OSError). A lookup answers "no such issue" rather than exploding.
+    assert board.get_issue("nul\x00byte") is None
+    with pytest.raises(LookupError):
+        board.set_status("nul\x00byte", "done")

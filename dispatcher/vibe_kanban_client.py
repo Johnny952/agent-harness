@@ -250,10 +250,13 @@ class LocalBoardClient:
             data = json.loads(Path(path).read_text())
         except FileNotFoundError:
             return None  # an id with no card; the caller decides what that means
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             # Writes here are atomic, so a document that will not parse came
             # from outside this client. Worth saying out loud, not worth
-            # turning a lookup into an exception.
+            # turning a lookup into an exception. `ValueError` and not
+            # `json.JSONDecodeError` (which is one) so that an id no path can
+            # hold — a YAML escape leaves "embedded null byte" reachable from a
+            # task file — is answered with "no such issue" rather than raised.
             logger.warning("local board: ignoring unreadable card %s: %s", path, exc)
             return None
         return data if isinstance(data, dict) and isinstance(data.get("issue_id"), str) else None
