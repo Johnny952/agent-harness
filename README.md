@@ -947,21 +947,28 @@ either.
   along with others not listed here (dind isolation, the registry mirror
   and bind mounts — V0.7, not yet run, blocked by V0.1 (no `sysbox-runc`
   on the verification host)):
-  - Vibe Kanban's responses and status names: `vibe_kanban_client.py`
-    now speaks the surface verified live against `vibe-kanban@0.1.44`
-    (stdio, `create_issue`/`list_issues`/`get_issue`/`update_issue`,
-    keyed on `issue_id` — V2.1–V2.2), but no issue has ever been created
-    or read back: a cloud login at `api.vibekanban.com` gates every
-    project/issue call (`list_organizations` returns 401, and
-    `list_projects` needs an organization ID unobtainable without it), so
-    the description round-trip (V2.5) never ran past it (V2.6). What the
-    schemas say but nothing has confirmed: that ids are server-assigned
-    uuids and that `update_issue.status` takes a fixed, per-project set
-    of names (V2.3–V2.4). The client is built for both — it keeps the
-    server's uuid rather than minting one, and `status_map` exists to be
-    corrected — and its response parser accepts every shape an MCP server
-    may legally answer with, since the reply schemas are published
-    nowhere. Re-run V2.3–V2.6 once credentials exist. (V2.1–V2.6)
+  - Vibe Kanban's responses and status names: **not verifiable, and no
+    longer worth verifying.** `vibe_kanban_client.py` speaks the surface
+    measured live against `vibe-kanban@0.1.44` (stdio,
+    `create_issue`/`list_issues`/`get_issue`/`update_issue`, keyed on
+    `issue_id` — V2.1–V2.2), but no issue has ever been created or read
+    back and none can be: the 2026-09-25 re-run found the remote service
+    retired, not gated. `api.vibekanban.com` answers the same SPA shell
+    to `/`, `/api/organizations` and `/health`; `create_issue` fails with
+    `project_id is required` because projects are the feature
+    `vibe-kanban` PR #3387 sunset in 0.1.44; and 0.1.45, the build whose
+    notes promise local projects back, was unpublished from npm two hours
+    after release, leaving 0.1.44 as `latest`. So V2.3–V2.5 have nothing
+    to read an id, a status name or a description off, and V2.6 fails
+    outright — for everyone, not for this machine. The 33 tools the MCP
+    server still advertises are registered unconditionally; advertising
+    is not capability. What the client assumed stays assumed and stops
+    mattering: that ids are server-assigned uuids, and that
+    `update_issue.status` takes a fixed per-project set of names. The
+    seam it sits behind is what survives — see
+    [`docs/plans/board.md`](docs/plans/board.md), whose Phase 0 puts a
+    local implementation behind it so the two prioritized items that
+    wait on `create_issue` stop waiting. (V2.1–V2.6)
 
 ### Prioritized
 

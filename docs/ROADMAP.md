@@ -317,10 +317,16 @@ on. An unknown flag there would fail every escalated round.
 `dispatcher/vibe_kanban_client.py` now speaks the surface V2.1-V2.2
 verified: stdio over the server's `mcp` subcommand, and the issue
 vocabulary (`list_issues`, `create_issue`, `get_issue`, `update_issue`,
-`delete_issue`) keyed on a server-assigned `issue_id`. What the schemas
-say but no run has confirmed is V2.3-V2.6, and all four sit behind the
-`api.vibekanban.com` cloud login (V2.6) — re-run them once an operator has
-credentials and a reachable project.
+`delete_issue`) keyed on a server-assigned `issue_id`. V2.3-V2.6 were
+re-run on 2026-09-25 and are closed: **not verifiable, and not worth
+verifying again.** `api.vibekanban.com` serves the same SPA shell on
+`/api/organizations` and on `/health` as on `/`, so the 401 is what is
+left of the service and not a gate credentials would open; `create_issue`
+fails on a `project_id` that cannot be obtained, because projects are the
+feature PR #3387 retired in 0.1.44, and the 0.1.45 build said to bring
+them back was unpublished two hours after release. What follows is kept
+as the record of what was measured, not as work waiting on an operator —
+`docs/plans/board.md` replaces the dependency with a local client.
 
 Probe the real server from the host venv. It is spawned, not dialled;
 there is no URL:
@@ -354,41 +360,52 @@ EOF
   rewritten onto the issue tools. Of the 33 tools, it calls four, so the
   agent-launching ones (`start_workspace`, `create_session`, ...) never
   come up.
-- **V2.3 IDs.** Schema only: every id is `format: "uuid"`, so the server
-  assigns them and `create_issue` takes no caller-chosen id. The client
-  keeps what comes back, in the task file's `kanban_issue_id`; `run-task
-  --kanban-issue-id` attaches an issue that already exists. Confirm live
-  that a create reply really carries the id, and in which field — the
-  response schemas are published nowhere, so the parser takes several.
-- **V2.4 Status values.** Schema only: `update_issue.status` "must match a
-  project status name", and no tool lists a project's names. `status_map`
-  in `config.yaml` is the guess (`In Progress`/`In Review`/`Done`).
-  Confirm the real names, and record the rejection verbatim: the client
-  raises on an `is_error` reply and the phase logs it rather than failing,
-  so a wrong name is silent apart from that line.
+- **V2.3 IDs.** Closed, schema only. Every id is `format: "uuid"`, so the
+  server assigns them and `create_issue` takes no caller-chosen id. The
+  client keeps what comes back, in the task file's `kanban_issue_id`;
+  `run-task --kanban-issue-id` attaches an issue that already exists.
+  Which field a create reply carries the id in was never observable —
+  no create ever succeeded — and the parser still takes several. The uuid
+  shape is the one part of this that outlived the dependency:
+  `dispatcher/cli.py` rejects a `--kanban-issue-id` that does not parse as
+  a uuid, so the local client of `docs/plans/board.md` mints uuid4 rather
+  than short handles, and a readable id stays a display concern.
+- **V2.4 Status values.** Closed, schema only. `update_issue.status` "must
+  match a project status name", and no tool lists a project's names —
+  `list_projects` needs an `organization_id` that `list_organizations`
+  (401) cannot supply. `status_map` in `config.yaml` is the guess
+  (`In Progress`/`In Review`/`Done`) and is now inert, since no run
+  reaches a remote board. It stays as the shape of the mapping: the local
+  client owns its status names, so the guess becomes a choice.
 - **V2.5 Description round-trip.**
   - Question: can an issue's description be read back (`get_issue`)?
-  - Not run: no issue ever existed to read. `description` is settable on
-    `create_issue`, which implies it comes back, but nothing confirms it.
-  - This no longer gates stage 1's "agents never see the task" fix —
+  - Closed, not verifiable: no issue ever existed to read, and after the
+    2026-09-25 re-run none can be made to exist. `description` is settable
+    on `create_issue`, which implies it comes back, but nothing confirms
+    it and nothing now will.
+  - This never gated stage 1's "agents never see the task" fix —
     `run-task` takes `--description`/`--description-file` as of
-    2026-09-19. Reading it back stays worth having, so an operator driving
-    the board doesn't retype the ask on the command line.
-- **V2.6 Issue creation.** The blocker for the three above: `create_issue`
-  needs a `project_id`, a project sits under an organization, and
-  `list_organizations` returns 401 without a cloud login.
-  - Create one issue in a scratch project and delete it afterwards.
-  - This gates item 1's debt cards and item 5's epic decomposition.
-    `create_issue` has a real caller now — `_file_accepted_debt` opens one
+    2026-09-19. Reading a description back is still worth having, and is
+    verifiable against local storage: Phase 0 requires the round trip as
+    one of its tests, which is the check this row could not run.
+- **V2.6 Issue creation.** FAIL, and the reason the three above are
+  unverifiable: `create_issue` needs a `project_id`, a project sits under
+  an organization, and `list_organizations` returns 401. The 2026-09-25
+  re-run settled that this is not a login wall — `api.vibekanban.com`
+  answers the same SPA shell on every path that would have to be JSON,
+  and projects are the feature PR #3387 sunset in 0.1.44.
+  - `create_issue` has a real caller — `_file_accepted_debt` opens one
     card per accepted debt declaration, before the auditor writes the row
-    that points at it — so clearing the login wall is what turns that half
-    on; until it clears, `NullKanbanClient` is the path every run takes
-    and the entries are filed without cards. Two more things to check
-    while the scratch issue exists: that the `[debt] ` title prefix
-    survives a round trip, since `create_issue` takes no label argument
-    and the prefix is the label; and which field the reply carries the id
-    in (V2.3's question, answered by the same create), because that id is
-    what the index row points at and what `merge-task` closes.
+    that points at it — so until something answers it, `NullKanbanClient`
+    is the path every run takes and the entries are filed without cards.
+  - This no longer waits on an operator. Item 1's debt cards and item 5's
+    epic decomposition now depend on Phase 0 of `docs/plans/board.md`,
+    which gives `create_issue` a local implementation. The two things this
+    row wanted to check while a scratch issue existed carry over to it:
+    that the `[debt] ` title prefix survives a round trip, since
+    `create_issue` takes no label argument and the prefix is the label,
+    and which field the reply carries the id in, because that id is what
+    the index row points at and what `merge-task` closes.
 
 ### V3 — End to end on one account (task quota)
 
@@ -416,8 +433,9 @@ The first real `run-task`, with costs capped.
     first — every role is told to grep the traps before debugging, and an
     empty grep should cost a phase one command, not a detour.
 - **Task.** Passed on the command line now that `--description` exists;
-  no hand-seeded task file. If V2.3 showed Kanban assigns its own IDs,
-  create the card there too and record both IDs.
+  no hand-seeded task file. No card is created alongside it: V2.6 closed
+  FAIL, so `NullKanbanClient` is the path this run takes, and the card
+  half comes back with Phase 0 of `docs/plans/board.md`.
 - **Run:**
   ```bash
   dispatch run-task --task-id T-001 --project scratch --description "Add a
@@ -768,9 +786,21 @@ logins.
      rather than carried in a tag or a note: nothing on the board is known
      to take one, and inventing a place for it would be a second guess on
      top of the status names. The client calls four of the 33 tools, so
-     the agent-launching ones never come up. Still open behind V2.6's
-     cloud-login wall: V2.4's real status names and V2.5's description
-     round-trip.
+     the agent-launching ones never come up. V2.3-V2.6 closed on
+     2026-09-25 as not verifiable: the remote service is retired, not
+     gated, so the real status names (V2.4) and the description round trip
+     (V2.5) have no server left to answer them. The client stays; what it
+     talks to is what changes.
+   - What the board is at all (forced by that re-run: the harness has a
+     `KanbanClient` seam, four call sites that use it, and nothing behind
+     it). Adopt another product, or implement one. Answered 2026-09-25 in
+     `docs/plans/board.md`: implement, in phases, starting with a
+     `LocalBoardClient` that satisfies the existing four-method seam
+     against local storage — because a generic board cannot model the four
+     things this harness actually tracks (the role inside `in_progress`,
+     quota as the scarce resource, `depends_on` as a graph, and heartbeat
+     TTL locks), and because the seam makes the first phase half a day.
+     Phase 0 is queued as `T-008`, to be built by the harness itself.
    - Fixing README step 5's host run (confirmed, V0.3: `state_dir`/
      `hive_tasks_dir` are container paths and `vibe-kanban`/`collector`
      only resolve on `ia_harness_net`): drop it, or document a host-side
@@ -788,8 +818,9 @@ logins.
      the task file's frontmatter (not the body, which accumulates phase
      summaries) and embedded whole in every role's prompt; a task with no
      description anywhere is a usage error instead of four phases of
-     quota. Seeding it from Vibe Kanban (V2.5) stays open, and needs the
-     cloud-login wall (V2.6) cleared first.
+     quota. Seeding it from a board (V2.5) stays open, and now waits on
+     Phase 0 of `docs/plans/board.md` rather than on a cloud login: the
+     description round trip is one of that phase's tests.
    - **Roles don't see each other's code.** Fixed 2026-09-19, as
      designed: one branch per task (`agent/task/<task-id>`), one shared
      worktree on it for the writing roles (arquitecto, implementador), a
@@ -947,10 +978,14 @@ logins.
      JSON inside a text block and bare prose all read; an `is_error`
      reply raises carrying the server's complaint, so a rejected status
      name can't pass for a successful update; and a shape the parser
-     can't read is an empty list, not a crash. Still open behind the
-     cloud-login wall: the real status names (V2.4), the description
-     round-trip (V2.5), and which field a create reply carries the id in
-     (V2.3). 56 new unit tests, 313 in the suite.
+     can't read is an empty list, not a crash — a looseness that was
+     never tested against a real reply and now cannot be: the re-run of
+     2026-09-25 closed the real status names (V2.4), the description round
+     trip (V2.5) and which field a create reply carries the id in (V2.3)
+     as not verifiable, the service being retired rather than gated. The
+     loose parsers stay, unexercised, because the seam is what makes a
+     local replacement half a day's work. 56 new unit tests, 313 in the
+     suite.
    - **A phase can't write, and can't read its handoff.** Fixed
      2026-09-23, closed by measurement 2026-09-24. Two causes, one
      config field apiece, and a three-run A/B on the same task shape to
@@ -1357,13 +1392,14 @@ logins.
   is whether a phase handed the table actually greps it before debugging;
   and `mark_orphaned` only runs on a cycle that ends without merging,
   which V4.1 is the cheapest way to produce.
-- Changes to `dispatcher/debt.py`: V3, and V2.6 for the card half. The
-  unit tests fake both `create_issue` and `docker exec`, so what they
-  cannot show is whether a real board accepts a `[debt] ` title and
-  answers with an id the index row can carry, nor whether the dedupe read
-  finds `docs/debt/README.md` in the writers' worktree of a project that
-  actually has one — a read that fails there costs a duplicate card and
-  says so only in the log.
+- Changes to `dispatcher/debt.py`: V3, and — for the card half — a board
+  that answers. V2.6 was that board and closed FAIL, so the check now
+  waits on Phase 0 of `docs/plans/board.md`. The unit tests fake both
+  `create_issue` and `docker exec`, so what they cannot show is whether a
+  board accepts a `[debt] ` title and answers with an id the index row can
+  carry, nor whether the dedupe read finds `docs/debt/README.md` in the
+  writers' worktree of a project that actually has one — a read that fails
+  there costs a duplicate card and says so only in the log.
 - `mapping_enabled` turned on for the first time: V3 again, against a
   project with no `docs/README.md`. The mapper is the only phase that
   ignores `default_model`, and the only one with a turn budget, so its
@@ -1381,11 +1417,11 @@ depends on. A gate that fails reshapes the item before any design work.
 
 | Item (README *Prioritized*) | Run first | Notes |
 |---|---|---|
-| 1. Project memory | D1, D5, V2.6 | Debt cards need `create_issue`; D5 sharpens the test gate rather than blocking it |
+| 1. Project memory | D1, D5, board Phase 0 | Debt cards need `create_issue`, which V2.6 closed FAIL — `docs/plans/board.md` supplies it locally; D5 sharpens the test gate rather than blocking it |
 | 2. Token economy | V1.1 fields, D2, D3 | D3 only if the caveman wrap is adopted |
 | 3. Unattended 24/7 operation | V4.2, V4.4, D2 | V4.2 sizes the orphan-phase race; D2 gives machine-readable reset times |
 | 4. Per-role model selection | Item 2's usage records | Data-driven split, not a guess |
-| 5. Task profiles | D4, D5, D6, V2.6 | Epic decomposition needs `create_issue` |
+| 5. Task profiles | D4, D5, D6, board Phase 0 | Epic decomposition needs `create_issue`, now Phase 0's to provide |
 | 6. Observability and hardening | V0.5, V0.6 | Note: the dispatcher mounts `claude_shared` and `docker.sock` |
 | 7. Code-intelligence tooling | D4 (for `--mcp-config`), D7 | Memory headroom for indexers, as in D6; D7 sizes the per-worktree index |
 | 8. Mid-phase compaction | — | Only if V3 or stage 1 runs show long phases failing |
@@ -1524,3 +1560,5 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-09-24 | Stage 1 acceptance (V3, default config) | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image rebuilt 18:52:54 | Task `T-005`, 18:53:45→19:07:16 (13m31s wall), exit 0, launched with `--description` rather than a hand-seeded task file as the acceptance requires. All four criteria met: `status: done` with the revisor `APPROVED` in round 1; revisor and auditor both cite the implementador's commit `84490fe` by SHA; `agent/task/T-005` carries three commits (`16ee9c9` arquitecto, `84490fe` implementador, `b43b7f6` auditor), 16 files, +407/−4, with `subtract` exported from `sum.js` and a `test('subtract')` whose second assertion pins operand order; `node --test` green on the tip (2 pass, 0 fail). **cuenta1 served real pipeline work for the first time** — BUSY on T-005 for all four phases, after answering 429 on arrival since 2026-09-23. **Handoff budgets hit all three branches in one run**: arquitecto 5857/4096 retried to 3983 (inside), implementador 5387/5120 kept as-is inside the 512-byte margin without paying for a `--resume`, revisor 6060/4096 and auditor 5911/3584 each retried once and stayed 362 and 350 over — two WARNINGs where the four runs that set the numbers would have produced zero. **Finding: a revisor's edits never land.** Review worktrees are detached at the branch tip by design, so there is no branch to commit them onto; the revisor reported the `pointers` gate closed and its own grep agreed, while the same grep on the branch still returned both pointers. The auditor re-ran that verification on its own branch, found the gate open and repaired it in `b43b7f6` — turning the loose pointers into `docs/debt/T-005-D1.md` and `D2` — so the tip is clean. But the APPROVED verdict was issued by a phase that believed in a fix it had not made, and nothing but the auditor's own diligence caught it. This is the mechanism behind `T-003-phase-edit-missing-from-next-worktree`, which had the symptom without the reason. Also unprompted: the arquitecto's Risks list reintroduced the `<phase>`-for-`work` worktree-path error verbatim; the implementador checked it, refused the edit and filed the rule. 4 learnings filed and stamped. Not measured: failover (no phase failed, cuenta2 IDLE throughout), rounds 2–3 and effort escalation (approved in round 1), and V5.1's cross-account `--resume`. Decision: acceptance item 3 closes; the detached-revisor gap goes to the README as a known gap; item 4 (V5.2 re-run) is next and needs quota. See `.data/verify/t005-acceptance.txt` and `t005-acceptance-run.log`. |
 | 2026-09-24 | V5.2 (failover, fault injected) | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image `sha256:e4cd2f01739f` | The check the acceptance run could not reach, and the one the pipeline had never been through: a phase changing hands mid-flight. Task `T-006`, 22:32:49Z→22:48:28Z (15m39s wall), exit 0, both state files `IDLE` at the start, launched with `--description`. The fault is a 204-byte wrapper on `agent-cuenta1`'s `claude`: `-p /usage` execs the real binary unchanged, so the quota gate stays honest, and everything else runs for real and then has `is_error`/`api_error_status: 429` written into its JSON. **All four criteria met.** (1) The arquitecto ran on cuenta1 and did the work — edited `sum.js` and `sum.test.js`, ran `node --test`, wrote `docs/implementations/T-006.md` — then came back a 429; cuenta1 ended `COOLING_DOWN` with `current_task_id: null`, and the lock was *released*, not left to expire: cuenta2 acquired it five seconds later, far inside the 120s heartbeat TTL that `acquire_lock` refuses a live foreign owner through. (2) The phase resumed on cuenta2 in the same session, `7b13f2fa`: the arquitecto prompt appears twice in one transcript, at 22:32:52 with `parentUuid: null` and at 22:34:39 with a parent, and the transcript sits under `-data-projects-scratch-worktrees-T-006-work` — the same cwd for both accounts, which is the cross-account `--resume` leg V5.1 left owing. (3) One `## arquitecto` section in the task file, four headings total. (4) All three writer commits are authored `(cuenta2)`; cuenta1 was never re-probed, because `_recheck_cooling_accounts` only fires when no account is idle. **And the point of Stage 1's fourth acceptance item — commits and resumes interacting — lands concretely:** cuenta1's edits stayed uncommitted in the shared writers' worktree (`_should_commit` returns False on a rate limit, by design, so a half-done phase is not put in history twice), cuenta2 inherited them, and the dispatcher committed them once as `2f33664`, 3 files, +33/−2. One phase, two accounts, one commit. Two things the run opened, both new README gaps. First, **the failover is silent**: `dispatch_phase` makes no `logger` call at all — not when it picks an account, not when it reads a 429, not when it hands over — so this run's log is shaped exactly like a clean one and the only trace is the state file and the commit author. Second, **a resumed phase is handed a stale git snapshot**: the session-start context block is re-sent verbatim on `--resume`, so the cuenta2 arquitecto was told `Status: (clean)` while three of its own edits sat modified in that worktree. It ran `git status --short`, found them, did not redo them, and filed the learning the auditor landed as `docs/learnings/session-context-block-is-stale.md` — so the check passed because the phase distrusted its context, not because the harness prevented the misread. Side result: the re-sized handoff budgets went four for four inside budget (arquitecto 5911→3540, implementador 6051→5015, revisor 4473 kept inside the 10% margin, auditor 4622→3527) against two of four on T-005, with no WARNING — though the arquitecto again overran by 44%, a second data point against leaving its 4096 alone. Wrapper removed immediately after the run; `claude` is the original symlink and `claude.real` is gone. Evidence: `.data/verify/v52-failover.txt`, `.data/verify/v52-failover-run.log`. |
 | 2026-09-25 | V5.3 (recovery) + V5.2 re-run | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image `sha256:478699bd3c319` | The recovery path nothing had ever entered, plus a re-run of the row above against the two gaps it opened. Task `T-007`, 00:17:17Z→00:36:49Z (19m32s wall, launched 21:17 local on the 24th), exit 0, launched with `--description`. Two changes to V5.2's fault make this a different check: the 429 wrapper is **one-shot** — a `/tmp/.429-spent` marker, so the second call through it is the real binary — and **cuenta2 was seeded `COOLING_DOWN`** before the run. So when the arquitecto's result came back a 429 at 00:20:30 there was no idle account left, `pick_idle_account` returned `None`, and **`_recheck_cooling_accounts` ran for the first time in a real task**: two `/usage` probes, both accounts back to `IDLE` at 00:20:31 and 00:20:34, and the phase resumed on cuenta2 at 00:20:36 in session `f6c2f310` and the same worktree. One shot is what makes the recovery testable — an account re-probed four seconds later is genuinely healthy — and it is also what saved the run: a recovered cuenta1 is first in config order, so phases 2-4 ran on it, which is the whole point of recovering an account rather than parking it. **The two T-006 gaps re-checked in the same run and hold.** The log now carries four lines where T-006 carried none — the account picked, the refusal with the session id it is handed on, and one line per recovery — so the hand-over is legible without reading state files. And the resumed prompt is 9659 bytes against the first call's 9090: the 569-byte difference is `_STALE_CONTEXT_NOTE`, while the 347-byte handoff-shrink retry in the same session correctly carries none of it. The note was acted on, not just delivered: the resumed phase's first two commands, at 00:20:41 and 00:20:42, were the `git status --short` and `git log --oneline -3` the note names; it then re-read both sources, re-ran `node --test`, wrote a mutation check under `.hive/tasks/T-007/mutation/` to confirm the assertions fail on a broken divide, and **never re-edited `sum.js` or `sum.test.js`**. Outcome as on T-006: one `## arquitecto` section, and one commit `66eb8cd` authored `arquitecto (cuenta2)` carrying both accounts' work (5 files, +102/−4); then `863f71c` implementador and `4208960` auditor, both `(cuenta1)`, `node --test` green on the tip (2 pass, 0 fail), both state files `IDLE` at the end. Handoff budgets four for four inside for the third run running (arquitecto 5374→3961, implementador 6589→4614, revisor no line at all, auditor 4203→3032) — though the first two overran by 31% and 29%, a third data point that those two budgets are set below what the roles naturally write. 4 learnings filed and stamped. **Not covered, and now the only clause of acceptance item 4 still open:** the 429 fired on the *first* real call again, so a failover on a phase whose predecessor had already committed remains untested — forcing it needs a wrapper that lets the first phase through and refuses the second. Of the five new log lines the over-threshold park `WARNING` and the exhausted-pool `ERROR` need real quota exhaustion and stay unit-tested only. Wrapper and marker removed immediately after the run; `claude` is the original symlink, `claude.real` is gone, `claude --version` answers 2.1.273. Evidence: `.data/verify/v53-recovery.txt`, `.data/verify/v53-recovery-run.log`. |
+| 2026-09-25 | V2.3, V2.4, V2.5 (re-run) | NOT VERIFIABLE | npm vibe-kanban@0.1.44 in a disposable container off the agent image | Re-measured nine days after the 2026-09-16 rows above, to settle whether the block was a missing credential or a retired service. It is the service. `api.vibekanban.com` answers `HTTP 200 ct=text/html` — the same `Vibe Kanban Remote` SPA shell — on `/`, on `/api/organizations` and on `/health`, so there is no API left behind the 401 that `list_organizations` reports. `list_issues{}` fails with `project_id is required (not available from workspace context)`, and no `project_id` is obtainable: `list_projects{}` demands an `organization_id` that `list_organizations` (401) cannot supply, and projects are exactly what PR #3387 ("Sunset project routes to an export-only page", shipped in 0.1.44) retired. So V2.3 has no issue to read an id off, V2.4 has no issue to carry a status, and V2.5 has no created issue to round-trip a description through. The 0.1.45 prerelease said to restore local projects is uninstallable: `npx vibe-kanban@0.1.45` gives `ETARGET`, the registry keeps both 0.1.45 entries in `time` and neither in `versions` — the signature of an unpublish, roughly two hours after publication — and `latest` is still 0.1.44, the build that removed the feature. **Decision: closed as not verifiable and retired as checks.** No credential changes any of it; `docs/plans/board.md` replaces the dependency with a local client rather than waiting on a dead one. Evidence: `.data/verify/v2-rerun-2026-09-25.txt`. |
+| 2026-09-25 | V2.6 (re-run) | FAIL | npm vibe-kanban@0.1.44 in a disposable container off the agent image | `create_issue{title, description}` over MCP stdio returned `{"success": false, "error": "project_id is required (not available from workspace context)"}` — the same answer as 2026-09-16, now attributable: the parameter is unobtainable by construction, not withheld from this machine. This is the one V2 check that fails outright rather than going unmeasured, and it fails for everyone. The two calls that do succeed, `list_repos` and `list_workspaces`, are the local half of the surface and return empty-but-successful, which splits the 33 advertised tools cleanly into local (works) and remote (dead); the server registers all 33 unconditionally, so advertising is not capability. **Decision: `create_issue` is not coming back**, so the two prioritized items that waited on it — 1. Project memory and 5. Task profiles — now depend on Phase 0 of `docs/plans/board.md` instead. Evidence: `.data/verify/v2-rerun-2026-09-25.txt`. |

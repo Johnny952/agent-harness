@@ -120,12 +120,18 @@ permission_mode: acceptEdits
 # while `Bash(npm*)` is `npm install <anything>`. Patterns containing a space
 # survive intact.
 #
+# The list is flat while `projects_root` holds more than one project, so it
+# ends up the union of what each declares — a Node project's `node --test`
+# and a Python one's `python3 -m pytest` side by side. A role only ever gets
+# to run the one its own project actually has.
+#
 # Optional; defaults to empty, which sends no flag. What a project's phases
 # may run is a decision about that project, so nothing is assumed — but note
 # that leaving it empty means the test gate is the only thing that ever runs
 # the code.
 allowed_tools:
   - Bash(node --test*)
+  - Bash(python3 -m pytest*)
 
 # Cap on implementador/revisor rounds per task: after arquitecto hands off,
 # implementador and revisor alternate until the revisor's response ends with
