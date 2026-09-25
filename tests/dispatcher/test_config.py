@@ -307,3 +307,35 @@ def test_load_config_rejects_a_malformed_vibe_kanban_block(
 
     with pytest.raises(ValueError, match=message):
         load_config(str(config_path))
+
+
+def test_the_refusal_cooldown_defaults_to_half_an_hour(tmp_path: Path) -> None:
+    """The knob is optional: a config written before the cooldown existed still
+    loads, and still holds a refused account out of the pool."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.quota_cooldown_seconds == 1800
+
+
+def test_load_config_reads_the_refusal_cooldown(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nquota_cooldown_seconds: 600\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.quota_cooldown_seconds == 600
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "30m", "true"])
+def test_load_config_rejects_an_invalid_refusal_cooldown(tmp_path: Path, bad_value: str) -> None:
+    """Zero or a negative would make the floor no floor at all, and silently
+    put back the behaviour it exists to stop: a refused account recovered on
+    local counters that cannot see the refusal."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nquota_cooldown_seconds: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="quota_cooldown_seconds must be a positive integer"):
+        load_config(str(config_path))

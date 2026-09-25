@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 from dispatcher import (
     context_transfer,
@@ -130,9 +131,32 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
         result = docker_exec.exec_claude(
             container, cfg.projects_root, "/usage", timeout_seconds=_USAGE_PROBE_TIMEOUT_SECONDS,
         )
+    except Exception as exc:
+        logger.warning(
+            "quota probe failed for account %s: %s; waving it through unverified", account, exc,
+        )
+        return True
+    # Read the refusal before the numbers. /usage is a local slash command and
+    # normally costs nothing, but if the CLI refuses even that, the refusal is
+    # the one thing the probe can tell us that its own counters never could —
+    # and parse_usage_output would raise on the error text, dropping it into
+    # the fail-open below.
+    if is_rate_limit_error(result):
+        logger.warning(
+            "account %s answered the quota probe with a rate-limit refusal; it goes COOLING_DOWN "
+            "and the phase looks for another account",
+            account,
+        )
+        state_machine.record_rate_limit(cfg.state_dir, account)
+        state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
+        return False
+    try:
         usage = quota.parse_usage_output(result.result_text)
     except Exception as exc:
-        logger.warning("quota probe failed for account %s: %s", account, exc)
+        logger.warning(
+            "quota probe for account %s returned an unreadable usage report: %s; "
+            "waving it through unverified", account, exc,
+        )
         return True
     if quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
         logger.warning(
@@ -153,10 +177,30 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
     # probe whenever no account is IDLE, and flips back to IDLE the moment
     # it clears the threshold. Without this, an account that ever crosses the
     # threshold stays dead for the life of the process.
+    #
+    # The exception is an account the service itself refused: that probe is
+    # blind to a refusal, so a recorded one holds the account until the
+    # cooldown has passed, whatever the local counters say.
     recovered = []
+    now = time.time()
     for acc in cfg.accounts:
         state = state_machine.get_state(cfg.state_dir, acc.name)
         if state not in (AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN):
+            continue
+        # A refusal the service itself issued outranks the probe, for the
+        # length of the cooldown. /usage reads counters this machine wrote, so
+        # an account turned away a moment ago still reports healthy numbers
+        # here — and recovering it on those numbers is exactly how a real 429
+        # was thrown away: refused, parked, probed, IDLE again, refused again.
+        # Holding it costs nothing; the alternative spends a phase to relearn
+        # what the last one already found out.
+        refused_at = state_machine.get_rate_limited_at(cfg.state_dir, acc.name)
+        if refused_at is not None and now - refused_at < cfg.quota_cooldown_seconds:
+            logger.warning(
+                "account %s was refused %ds ago and stays %s: the /usage probe reads local "
+                "counters and cannot see that refusal, so it waits out the %ds cooldown",
+                acc.name, int(now - refused_at), state.value, cfg.quota_cooldown_seconds,
+            )
             continue
         container = container_for(cfg, acc.name)
         # Same free-text format drift risk as check_quota_ok: a probe failure
@@ -170,6 +214,16 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             result = docker_exec.exec_claude(
                 container, cfg.projects_root, "/usage", timeout_seconds=_USAGE_PROBE_TIMEOUT_SECONDS,
             )
+            # Same reason as in check_quota_ok, and here it also restarts the
+            # clock: a probe that is itself refused is fresh evidence, so the
+            # floor above holds the account on the next pass instead of asking
+            # again immediately.
+            if is_rate_limit_error(result):
+                logger.warning(
+                    "account %s is still being refused and stays %s", acc.name, state.value,
+                )
+                state_machine.record_rate_limit(cfg.state_dir, acc.name)
+                continue
             usage = quota.parse_usage_output(result.result_text)
             exceeds = quota.exceeds_threshold(usage, cfg.quota_threshold_pct)
         except Exception as exc:
@@ -177,6 +231,9 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             exceeds = False
         if not exceeds:
             logger.info("account %s came back from %s and is IDLE again", acc.name, state.value)
+            # The cooldown is over and the numbers agree, so the old refusal
+            # must not go on holding the account on the next pass.
+            state_machine.clear_rate_limit(cfg.state_dir, acc.name)
             state_machine.set_state(cfg.state_dir, acc.name, AccountState.IDLE)
             recovered.append(acc.name)
     return recovered
@@ -838,6 +895,11 @@ def dispatch_phase(
                 "the task lock is released, and the phase is handed on resuming session %s",
                 task_id, account, role, result.session_id or resume_session_id or "unknown",
             )
+            # The refusal is the only direct evidence this harness ever gets
+            # that the service is turning the account away, and the /usage
+            # recheck cannot reproduce it. Write it down before parking the
+            # account, or the next recheck recovers it on stale local numbers.
+            state_machine.record_rate_limit(cfg.state_dir, account)
             state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
             context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id
@@ -851,6 +913,10 @@ def dispatch_phase(
                 account=account, handoff=_phase_handoff(container, result), gates=gate_report,
             )
 
+        # A turn the service actually served is proof the refusal is over —
+        # better proof than any /usage report, and the only kind worth
+        # dropping the mark for.
+        state_machine.clear_rate_limit(cfg.state_dir, account)
         state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
         return DispatchResult(
             success=True, session_id=result.session_id, result_text=result.result_text,

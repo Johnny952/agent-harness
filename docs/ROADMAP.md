@@ -1211,6 +1211,57 @@ logins.
      dispatched run: no run has been paid for since, so the WARNING, the
      correction turn and the verdict a phase actually returns to it have
      only been seen against fakes.
+   - **The quota gate is blind to the refusal that has actually
+     happened.** Fixed 2026-09-25. Measured 2026-09-24 (V5.1,
+     `.data/verify/quota-probe-local-only.txt`): `claude -p "/usage"` is
+     a *local* slash command — `local_command: "usage"`,
+     `duration_api_ms: 0`, `num_turns: 0`, `total_cost_usd: 0`, 641 ms —
+     so `check_quota_ok` compared `quota_threshold_pct` against counters
+     the container itself had written, and never asked the service
+     anything. The one real refusal on record is the opposite shape: a
+     429 on arrival with no session started (V5.4, 2026-09-23), which a
+     `/usage` beside it would have waved through on comfortable numbers.
+     The harness did already learn that truth reactively —
+     `is_rate_limit_error` on the phase result parks the account — and
+     then threw it away, because `_recheck_cooling_accounts` re-probed
+     with the same blind command and flipped the just-refused account
+     back to `IDLE` on healthy local numbers. So the refusal is now
+     persisted rather than re-derived: `record_rate_limit` writes
+     `rate_limited_at` beside the account's state, `set_state` carries it
+     across the whole-document rewrite every transition performs — an
+     account is refused, parked and re-probed in three separate writes,
+     and the mark is only worth anything if it survives to the third —
+     and for `quota_cooldown_seconds` (new, default 1800, rejected at
+     load unless a positive int) it outranks the probe in both places:
+     the gate will not hand the account out, and the recheck does not
+     spend a probe on it at all. Inside the floor only a turn the service
+     actually served drops the mark (`clear_rate_limit` after a
+     successful phase) — a clean `/usage` cannot, being the reading that
+     was blind in the first place. Once the floor has passed the probe
+     decides again, and the recheck clears the mark as it takes the
+     account back, so an expired refusal never holds it a second time.
+     The question the gap left open — whether a refused account answers
+     `/usage` with numbers or with an error — no longer needs an answer:
+     both shapes are covered, because the probe result is run through
+     `is_rate_limit_error` before anything parses percentages out of it,
+     in the gate and in the recheck alike, and a refused probe is a
+     fresh refusal that restarts the floor. The probe stays free, which
+     the gap named as worth keeping: nothing here spends a turn to test
+     an account. Two things are deliberately unchanged. The gate still
+     fails open on any other exception — the phase is the backstop, and
+     failing closed would park healthy accounts on a transient docker
+     error — but it now logs that it waved one through unverified
+     instead of reporting a pass. And the undercount stands: `/usage`
+     says in as many words that it covers "local sessions on this
+     machine", so an account also used from a phone or claude.ai reads
+     low here and nothing local can see it. Rejected: a last-resort
+     escape letting the oldest-refused account through when every
+     account is cooling. Holding is strictly better — the alternative
+     spends the phase on an account known to refuse — and `tried`
+     already stops the retry loop without it. 15 new unit tests, 756
+     passing and 10 skipped. Not yet exercised by a dispatched run: the
+     cool-down, both probe-refusal paths and the fail-open WARNING have
+     only been seen against fakes.
 3. Acceptance: **passed 2026-09-24** (T-005, `.data/verify/t005-acceptance.txt`).
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.

@@ -21,6 +21,14 @@ accounts:
 # assigning it new work and lets it cool down. Optional; defaults to 90.
 quota_threshold_pct: 90
 
+# How long an account that the service actually refused (a 429 on a real
+# phase, or on the quota probe itself) is held out of the pool. The probe the
+# dispatcher runs is the CLI's local `/usage`, which reads counters on this
+# machine and cannot see a refusal at all, so without this floor a refused
+# account is recovered on healthy local numbers and handed straight back the
+# work it was just refused. Optional; defaults to 1800 (half an hour).
+quota_cooldown_seconds: 1800
+
 # How long a heartbeat is considered fresh before a lock is treated as
 # abandoned and reaped. Optional; defaults to 120.
 heartbeat_ttl_seconds: 120

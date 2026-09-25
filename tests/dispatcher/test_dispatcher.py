@@ -20,7 +20,13 @@ from dispatcher.context_transfer import (
     write_task_file,
 )
 from dispatcher.docker_exec import ClaudeResult
-from dispatcher.state_machine import AccountState, get_state, set_state
+from dispatcher.state_machine import (
+    AccountState,
+    get_rate_limited_at,
+    get_state,
+    record_rate_limit,
+    set_state,
+)
 from dispatcher.vibe_kanban_client import NullKanbanClient
 
 
@@ -57,6 +63,7 @@ def _make_config(tmp_path, **overrides):
     defaults = dict(
         accounts=[AccountConfig(name="cuenta1", container="agent-cuenta1")],
         quota_threshold_pct=90,
+        quota_cooldown_seconds=1800,
         heartbeat_ttl_seconds=120,
         heartbeat_interval_seconds=1,
         projects_root=str(tmp_path / "projects"),
@@ -1529,13 +1536,14 @@ def test_dispatch_phase_does_not_loop_forever_when_cooling_probe_raises_and_phas
 
 
 def test_dispatch_phase_picks_untried_recovered_account_after_recheck(tmp_path, monkeypatch) -> None:
-    # cuenta1 rate-limits and joins `tried`; the recheck that follows also
-    # recovers cuenta1 (now COOLING_DOWN) alongside cuenta3, which was
-    # already cooling from a prior call. Picking idle[0] without excluding
-    # `tried` would hand the retry straight back to cuenta1 and immediately
-    # fail closed instead of trying cuenta3. cuenta2 stays over-threshold
-    # through the recheck, proving the pick isn't just "any recovered
-    # account" either.
+    # cuenta1 rate-limits and joins `tried`; the recheck that follows finds
+    # cuenta3, which was already cooling from a prior call, and recovers it.
+    # Picking idle[0] without excluding `tried` would hand the retry straight
+    # back to cuenta1 and immediately fail closed instead of trying cuenta3
+    # — `tried` is what has to carry that, because the recheck could also
+    # have recovered cuenta1 itself, and did before the refusal cooldown
+    # started holding it. cuenta2 stays over-threshold through the recheck,
+    # proving the pick isn't just "any recovered account" either.
     cfg = _make_config(
         tmp_path,
         accounts=[
@@ -1581,6 +1589,142 @@ def test_dispatch_phase_picks_untried_recovered_account_after_recheck(tmp_path, 
     assert result.success is True
     assert result.account == "cuenta3"
     assert get_state(cfg.state_dir, "cuenta2") == AccountState.COOLING_DOWN
+
+
+def test_check_quota_ok_parks_an_account_whose_probe_is_itself_refused(tmp_path, monkeypatch, caplog) -> None:
+    """/usage is local and normally free, so a refusal to run even that is the
+    one thing the probe can report that its own counters never could. Before
+    the refusal was read first, parse_usage_output choked on the error text and
+    the fail-open below waved the account through."""
+    cfg = _make_config(tmp_path)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(session_id=None, result_text="usage limit reached", raw={"is_error": True})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        ok = dispatcher_mod.check_quota_ok(cfg, "cuenta1")
+
+    assert ok is False
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.COOLING_DOWN
+    assert get_rate_limited_at(cfg.state_dir, "cuenta1") is not None
+    assert "cuenta1" in caplog.text
+
+
+def test_a_recently_refused_account_is_not_even_probed_by_the_recheck(tmp_path, monkeypatch, caplog) -> None:
+    """The probe would say the account is healthy — it reads counters this
+    machine wrote — and recovering it on those numbers is how the real 429 of
+    2026-09-23 was thrown away. The refusal outranks them, and the probe is not
+    worth running at all while it does."""
+    cfg = _make_config(tmp_path)
+    record_rate_limit(cfg.state_dir, "cuenta1", at=time.time() - 60)
+    set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        raise AssertionError("the recheck should not have probed a just-refused account")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        recovered = dispatcher_mod._recheck_cooling_accounts(cfg)
+
+    assert recovered == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.COOLING_DOWN
+    assert "cuenta1" in caplog.text
+
+
+def test_the_recheck_takes_the_account_back_once_the_cooldown_has_passed(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    record_rate_limit(cfg.state_dir, "cuenta1", at=time.time() - cfg.quota_cooldown_seconds - 1)
+    set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    recovered = dispatcher_mod._recheck_cooling_accounts(cfg)
+
+    assert recovered == ["cuenta1"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+    # The old mark must go with the recovery, or the next refusal-free pass
+    # would keep measuring the cooldown from a limit that has already lifted.
+    assert get_rate_limited_at(cfg.state_dir, "cuenta1") is None
+
+
+def test_a_recheck_probe_that_is_itself_refused_restarts_the_cooldown(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    stale = time.time() - cfg.quota_cooldown_seconds - 1
+    record_rate_limit(cfg.state_dir, "cuenta1", at=stale)
+    set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(session_id=None, result_text="usage limit reached", raw={"is_error": True})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    recovered = dispatcher_mod._recheck_cooling_accounts(cfg)
+
+    assert recovered == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.COOLING_DOWN
+    # Fresh evidence, so the floor holds the account on the next pass instead
+    # of asking again on every call.
+    assert get_rate_limited_at(cfg.state_dir, "cuenta1") > stale
+
+
+def test_a_refused_phase_writes_the_refusal_down_and_the_recheck_honours_it(tmp_path, monkeypatch) -> None:
+    """End to end over the defect: the phase 429s, the account is parked, and
+    the recheck that follows sees healthy local numbers. It used to hand the
+    work straight back to the account that had just been refused; now the pool
+    comes up empty without spending a second attempt to relearn that."""
+    cfg = _make_config(tmp_path)
+    probes = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            probes.append(container)
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        return ClaudeResult(session_id="sess-a", result_text="usage limit reached", raw={"is_error": True})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.success is False
+    assert result.result_text == "no accounts available"
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.COOLING_DOWN
+    assert get_rate_limited_at(cfg.state_dir, "cuenta1") is not None
+    # One probe: the gate before the phase. The recheck never ran a second,
+    # because the refusal already answered the question it would have asked.
+    assert probes == ["agent-cuenta1"]
+
+
+def test_a_turn_the_service_actually_served_clears_an_old_refusal(tmp_path, monkeypatch) -> None:
+    """A clean /usage is not evidence the limit lifted, for the same reason the
+    refusal had to be recorded at all. A served phase is."""
+    cfg = _make_config(tmp_path)
+    record_rate_limit(cfg.state_dir, "cuenta1", at=time.time() - cfg.quota_cooldown_seconds - 1)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        return ClaudeResult(session_id="sess-1", result_text="phase done", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.success is True
+    assert get_rate_limited_at(cfg.state_dir, "cuenta1") is None
 
 
 def test_a_failover_leaves_the_whole_handover_in_the_log(tmp_path, monkeypatch, caplog) -> None:

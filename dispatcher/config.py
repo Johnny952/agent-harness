@@ -57,6 +57,7 @@ PERMISSION_MODES = frozenset(
 class Config:
     accounts: list[AccountConfig]
     quota_threshold_pct: int
+    quota_cooldown_seconds: int
     heartbeat_ttl_seconds: int
     heartbeat_interval_seconds: int
     projects_root: str
@@ -203,6 +204,13 @@ def load_config(path: str) -> Config:
     mapping_max_turns = raw.get("mapping_max_turns", 40)
     if isinstance(mapping_max_turns, bool) or not isinstance(mapping_max_turns, int) or mapping_max_turns <= 0:
         raise ValueError("mapping_max_turns must be a positive integer")
+    quota_cooldown_seconds = raw.get("quota_cooldown_seconds", 1800)
+    if (
+        isinstance(quota_cooldown_seconds, bool)
+        or not isinstance(quota_cooldown_seconds, int)
+        or quota_cooldown_seconds <= 0
+    ):
+        raise ValueError("quota_cooldown_seconds must be a positive integer")
     gates_test_timeout_seconds = raw.get("gates_test_timeout_seconds", 900)
     if (
         isinstance(gates_test_timeout_seconds, bool)
@@ -213,6 +221,13 @@ def load_config(path: str) -> Config:
     return Config(
         accounts=accounts,
         quota_threshold_pct=raw.get("quota_threshold_pct", 90),
+        # How long a refusal outranks the /usage numbers. The probe is local
+        # and cannot see a refusal at all, so without a floor an account that
+        # was just turned away is recovered on healthy local counters and sent
+        # straight back to be turned away again. Half an hour is a compromise:
+        # long enough to stop that churn, short enough that a limit which
+        # lifts early does not cost the pool an account for the day.
+        quota_cooldown_seconds=quota_cooldown_seconds,
         heartbeat_ttl_seconds=raw.get("heartbeat_ttl_seconds", 120),
         heartbeat_interval_seconds=raw.get("heartbeat_interval_seconds", 30),
         projects_root=raw["projects_root"],

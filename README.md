@@ -38,6 +38,29 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   the `· resets <when>` clause beside each is optional, because the CLI
   drops it from a line reading 0% — and nothing schedules off those
   timestamps anyway, since recovery is a re-probe.
+  What the probe cannot see is a refusal. `/usage` is a *local* slash
+  command — it reads counters this machine wrote, for $0 and 641 ms, and
+  never asks the service — so it says what the account has spent here,
+  not whether the next call will be served. Its counters also cover this
+  machine only, so an account used from a phone or claude.ai reads low
+  here and `quota_threshold_pct` is applied to an undercount; nothing
+  local fixes that. What is fixable is that a refusal is observable at
+  the moment it happens, so it gets written down: a 429 — from a phase,
+  or from the probe call itself, which is classified as a refusal before
+  anything tries to read percentages out of it — records
+  `rate_limited_at` beside the account's state, and for
+  `quota_cooldown_seconds` (1800, half an hour) that mark outranks the
+  numbers. The gate will not hand the account out and the recheck will
+  not even probe it, so an account the service just turned away can no
+  longer be recovered on local counters that never saw the refusal.
+  Inside the floor only a turn the service actually served drops the
+  mark; a clean `/usage` cannot, being the reading that was blind in the
+  first place. Once the floor has passed the probe decides again, and
+  clearing the mark is part of letting the account back in, so an
+  expired refusal never holds it twice. A probe that errors some other
+  way still counts as healthy, since the phase itself is the backstop,
+  but the log now says the account was waved through unverified instead
+  of reporting a pass.
   Account state is a small JSON file per account (`state_dir`), written
   atomically. Rate-limit responses move an account to `COOLING_DOWN` and
   retry on another account, resuming the same Claude session via
@@ -919,36 +942,6 @@ What is left below is what a no-quota check couldn't settle, and the unit
 tests mock Claude Code, Docker, and Vibe Kanban, so they don't settle it
 either.
 
-- **The quota gate is blind to the refusal that has actually happened.**
-  `check_quota_ok` runs `claude -p "/usage"` and compares the two
-  percentages against `quota_threshold_pct`. That call is a *local* slash
-  command — measured 2026-09-24 on cuenta1 at `local_command: "usage"`,
-  `duration_api_ms: 0`, `num_turns: 0`, `total_cost_usd: 0` — so it reads
-  counters off the container's disk and never asks the service anything.
-  Low numbers therefore mean the account has not spent much here, not that
-  it can serve the next call. The one real refusal on record is the
-  opposite shape: on 2026-09-23 cuenta1 returned a 429 on arrival without
-  starting a session (V5.1, V5.4), and a `/usage` run beside it would have
-  reported comfortable numbers and waved the phase through. The gate
-  catches accumulated spend, which is the slow case, and misses
-  refusal-on-arrival, which is the one that stopped a check. Two smaller
-  edges of the same fact: the output says in as many words that it is
-  "based on local sessions on this machine — does not include other
-  devices or claude.ai", so an account also used from a phone or the web
-  reads low here and `quota_threshold_pct` is applied to an undercount;
-  and `check_quota_ok` fails open on any exception, so an account whose
-  `/usage` errors outright is treated as healthy. What holds the line
-  today is not this gate but `is_rate_limit_error` classifying the 429
-  after the phase has already spent the attempt. Worth keeping whatever
-  the fix is: the probe costs $0 and 641 ms, which is why
-  `_recheck_cooling_accounts` can re-probe as often as it likes — paying a
-  real turn to test an account would trade this gap for a worse one.
-  Undecided, because nothing has measured it: whether a 429-on-arrival
-  account answers `/usage` with numbers or with an error, which is what
-  says whether this is fixable by reading `/usage` harder or only by
-  reacting to the first real call. Evidence:
-  `.data/verify/quota-probe-local-only.txt`.
-
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
   along with others not listed here (dind isolation, the registry mirror
@@ -1294,14 +1287,18 @@ either.
      per cooling account, and both parse free text. It costs less than it
      looks: V1.3 measured `/usage` under `-p` as a *local* command — no
      assistant turn, no result record, no cost — so the case for
-     replacing it is the free-text parsing, not the spend. The CLI
+     replacing it is the free-text parsing, not the spend, plus the
+     blindness that local counters cannot cure: a recorded
+     `rate_limited_at` and its fixed cool-down work around that, they do
+     not remove it. The CLI
      (checked in 2.1.273) defines a `rate_limit_event` stream message whose
      `rate_limit_info` carries `status`, `utilization`, `resetsAt`,
      `rateLimitType`, and `surpassedThreshold`. If
      `--output-format stream-json --verbose` emits it for a Pro account
      (unverified), every phase reports quota as a by-product: no extra CLI
      run, no text parsing, and a machine-readable reset time for item 3's
-     retries. `exec_claude` would then read the final `result` message
+     retries — and for the cool-down, which would then wait out the real
+     reset instead of `quota_cooldown_seconds`' fixed guess. `exec_claude` would then read the final `result` message
      from the stream instead of a single JSON object.
    - *Trim the fixed startup context.* Every phase pays its startup
      context (system prompt, tool and MCP schemas, `CLAUDE.md`, skill
