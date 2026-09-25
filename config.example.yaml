@@ -77,6 +77,21 @@ state_dir: /state
 #     blocked: In Review
 #     done: Done
 
+# A board that is a directory. Optional, commented out, and an alternative to
+# `vibe_kanban` rather than a companion: configuring both is a startup error,
+# because a run talks to one board and silently ignoring the other would leave
+# you watching cards nothing moves. This one needs no service, no Node and no
+# account — the dispatcher writes one JSON document per issue, atomically, and
+# reads them back. Unlike the block above it stores the dispatcher's own
+# status strings verbatim, `in_progress:<role>` included, so the role survives
+# on the card; there is no column here to rename, so there is no status_map.
+#
+# local_board:
+#   # Directory inside the dispatcher container, created on first write. Put
+#   # it on a mounted volume or the cards go with the container: /state is the
+#   # ../../dispatcher_state mount from docker-compose.yml.
+#   dir: /state/board
+
 # Observability collector URL, reached over ia_harness_net by service name.
 collector_url: http://collector:8787
 

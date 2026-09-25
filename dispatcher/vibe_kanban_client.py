@@ -4,14 +4,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import datetime
 import json
 import logging
 import os
+import tempfile
+import uuid
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from dispatcher.config import VibeKanbanConfig
+from dispatcher.config import LocalBoardConfig, VibeKanbanConfig
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +141,181 @@ class VibeKanbanClient:
         return {"project_id": self.config.project_id} if self.config.project_id else {}
 
 
-#: Either board a run can be given. The dispatcher takes one of these and
-#: calls it unconditionally; which one it got is `enabled`.
-KanbanClient = VibeKanbanClient | NullKanbanClient
+#: What one stored card holds, and therefore the only keys `list_issues` will
+#: filter on. `simple_id` is not among them: a display handle is the UI's
+#: problem and it can number by `created_at`.
+CARD_FIELDS = frozenset({"issue_id", "title", "description", "status", "created_at"})
+
+#: A card's status before any phase has moved it. The dispatcher's own
+#: vocabulary, like every status this board stores — `_update_task_status`
+#: sends "in_progress:<role>", "blocked" and "done", and they are written down
+#: whole, role included. There is no board here to rename a column, so the one
+#: dimension a generic kanban flattens is the one this keeps.
+INITIAL_CARD_STATUS = "pending"
+
+_CARD_SUFFIX = ".json"
+
+
+class LocalBoardClient:
+    """A board that is a directory, for a harness with nowhere to put cards.
+
+    The same four methods as `VibeKanbanClient` with no service behind them:
+    one JSON document per issue under `local_board.dir`, written atomically
+    the way `state_machine.py` writes account state. It is the source of truth
+    for nothing — `.hive/tasks/*.md` still is — so what it holds is an index a
+    later phase can read rather than dispatch state a run depends on.
+
+    Two differences from the remote client, both deliberate. Ids are minted
+    here rather than server-assigned, as `uuid4`, because `cli.py` rejects a
+    `--kanban-issue-id` that is not a uuid and a short id would mean relaxing
+    that. And `set_status` on an id this board has never heard of raises
+    instead of warning: a remote board could legitimately be out of sync, but
+    local storage that has forgotten a card the task file still points at is a
+    bug, and every call site already wraps this in try/except and logs.
+    """
+
+    enabled = True
+
+    def __init__(self, config: LocalBoardConfig):
+        self.config = config
+
+    # --- issues -----------------------------------------------------------
+
+    def list_issues(self, **filters: object) -> list[KanbanIssue]:
+        """Every stored issue whose fields equal the filters given.
+
+        An unknown filter key raises rather than being ignored: answering
+        "filter by `assignee`" with every issue on the board is the failure
+        mode that costs the caller silently. A filter set to None is dropped,
+        as the Vibe Kanban client drops it, so `status=None` reads as "any".
+        """
+        unknown = sorted(set(filters) - CARD_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"local board has no issue field {unknown[0]!r} to filter on; "
+                "stored fields are " + ", ".join(sorted(CARD_FIELDS))
+            )
+        wanted = {key: value for key, value in filters.items() if value is not None}
+        return [
+            _card_issue(card)
+            for card in self._cards()
+            if all(card.get(key) == value for key, value in wanted.items())
+        ]
+
+    def get_issue(self, issue_id: str) -> KanbanIssue | None:
+        """One issue, or None. A lookup: it does not raise."""
+        card = self._read_card(issue_id)
+        return _card_issue(card) if card is not None else None
+
+    def create_issue(self, title: str, description: str | None = None) -> str:
+        card = {
+            "issue_id": str(uuid.uuid4()),
+            "title": title,
+            "description": description,
+            "status": INITIAL_CARD_STATUS,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        self._write_card(card)
+        return card["issue_id"]
+
+    def set_status(self, issue_id: str, status: str) -> None:
+        """Move a stored card to a dispatcher status, verbatim."""
+        card = self._read_card(issue_id)
+        if card is None:
+            raise LookupError(
+                f"no issue {issue_id} on the local board at {self.config.dir}"
+            )
+        self._write_card({**card, "status": status})
+
+    # --- storage ----------------------------------------------------------
+
+    def _card_path(self, issue_id: str) -> str | None:
+        """Where one issue's document lives, or None for an unusable id.
+
+        The id arrives from a task file's frontmatter, so it is text some
+        phase wrote: one with a separator in it would name a file outside the
+        board directory, and that is not a card, it is a bug with reach.
+        """
+        name = f"{issue_id}{_CARD_SUFFIX}"
+        if not issue_id or os.path.basename(name) != name:
+            return None
+        return os.path.join(self.config.dir, name)
+
+    def _read_card(self, issue_id: str) -> dict | None:
+        path = self._card_path(issue_id)
+        return self._read_path(path) if path is not None else None
+
+    def _read_path(self, path: str) -> dict | None:
+        try:
+            data = json.loads(Path(path).read_text())
+        except FileNotFoundError:
+            return None  # an id with no card; the caller decides what that means
+        except (OSError, json.JSONDecodeError) as exc:
+            # Writes here are atomic, so a document that will not parse came
+            # from outside this client. Worth saying out loud, not worth
+            # turning a lookup into an exception.
+            logger.warning("local board: ignoring unreadable card %s: %s", path, exc)
+            return None
+        return data if isinstance(data, dict) and isinstance(data.get("issue_id"), str) else None
+
+    def _cards(self) -> list[dict]:
+        """Every readable card, oldest first.
+
+        A missing directory is a board with no issues, not an error: the
+        directory is created by the first write.
+        """
+        try:
+            names = sorted(os.listdir(self.config.dir))
+        except FileNotFoundError:
+            return []
+        cards = [
+            card
+            for name in names
+            if name.endswith(_CARD_SUFFIX) and not name.startswith(".")
+            if (card := self._read_path(os.path.join(self.config.dir, name))) is not None
+        ]
+        cards.sort(key=lambda card: (card.get("created_at") or "", card["issue_id"]))
+        return cards
+
+    def _write_card(self, card: dict) -> None:
+        """Replace one card's document, atomically.
+
+        A temp file in the target directory and then `os.replace`, the way
+        `state_machine.py` writes account state: a half-written card is not a
+        state this harness has to reason about, and a second client reading the
+        directory at the same moment sees either the old document or the new
+        one.
+        """
+        directory = self.config.dir
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        path = os.path.join(directory, f"{card['issue_id']}{_CARD_SUFFIX}")
+        # Dotted prefix and a .tmp suffix so a write interrupted between the
+        # temp file and the replace leaves something `_cards` skips rather
+        # than an issue nobody created.
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", dir=directory, prefix=".card-", suffix=".tmp", delete=False
+        )
+        try:
+            tmp.write(json.dumps(card))
+        finally:
+            tmp.close()
+        os.replace(tmp.name, path)
+
+
+def _card_issue(card: dict) -> KanbanIssue:
+    status = card.get("status")
+    return KanbanIssue(
+        issue_id=card["issue_id"],
+        title=card.get("title") or "",
+        status=status if isinstance(status, str) else None,
+        # No short handle in this phase: there is no board rendering one.
+        simple_id=None,
+    )
+
+
+#: Any board a run can be given. The dispatcher takes one of these and calls
+#: it unconditionally; which one it got is `enabled`.
+KanbanClient = VibeKanbanClient | LocalBoardClient | NullKanbanClient
 
 
 # --- response parsing -----------------------------------------------------

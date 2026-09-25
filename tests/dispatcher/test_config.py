@@ -309,6 +309,61 @@ def test_load_config_rejects_a_malformed_vibe_kanban_block(
         load_config(str(config_path))
 
 
+LOCAL_BOARD_YAML = """
+local_board:
+  dir: /state/board
+"""
+
+
+def test_load_config_has_no_local_board_by_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    # Opt-in: a harness that has been running with no cards must not start
+    # writing them because it was upgraded.
+    assert load_config(str(config_path)).local_board is None
+
+
+def test_load_config_reads_the_local_board_block(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + LOCAL_BOARD_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.local_board is not None
+    assert cfg.local_board.dir == "/state/board"
+    assert cfg.vibe_kanban is None
+
+
+def test_load_config_refuses_two_boards(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + KANBAN_YAML + LOCAL_BOARD_YAML)
+
+    # Not a precedence rule: an operator who wrote both meant one of them, and
+    # the message has to say which one to drop.
+    with pytest.raises(ValueError, match="Drop local_board"):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize(
+    ("block", "message"),
+    [
+        ("local_board: /state/board\n", "must be a mapping"),
+        ("local_board: {}\n", "dir must be a non-empty string"),
+        ("local_board:\n  dir: 44\n", "dir must be a non-empty string"),
+        ('local_board:\n  dir: ""\n', "dir must be a non-empty string"),
+    ],
+)
+def test_load_config_rejects_a_malformed_local_board_block(
+    tmp_path: Path, block: str, message: str
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\n" + block)
+
+    with pytest.raises(ValueError, match=message):
+        load_config(str(config_path))
+
+
 def test_the_refusal_cooldown_defaults_to_half_an_hour(tmp_path: Path) -> None:
     """The knob is optional: a config written before the cooldown existed still
     loads, and still holds a refused account out of the pool."""

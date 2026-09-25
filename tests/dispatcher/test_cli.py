@@ -10,7 +10,7 @@ import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import learnings
 from dispatcher.context_transfer import read_kanban_issue_id, set_description, set_resolved_debt
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
-from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
+from dispatcher.vibe_kanban_client import LocalBoardClient, NullKanbanClient, VibeKanbanClient
 
 CONFIG_YAML = """
 accounts:
@@ -30,16 +30,26 @@ vibe_kanban:
   command: ["vibe-kanban", "mcp"]
 """
 
+LOCAL_BOARD_YAML = """
+local_board:
+  dir: {board_dir}
+"""
+
 ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
 
 
-def _write_config(tmp_path: Path, board: bool = False) -> Path:
+def _write_config(tmp_path: Path, board: bool = False, local_board: bool = False) -> Path:
     """A config whose hive_tasks_dir is a real directory: run-task reads it
     to decide whether the task already carries a description. `board` adds the
-    optional vibe_kanban block, which most runs don't have."""
+    optional vibe_kanban block and `local_board` the optional local one, which
+    most runs don't have — and which config.yaml refuses to carry together."""
     config_path = tmp_path / "config.yaml"
     text = CONFIG_YAML.format(hive_tasks_dir=str(tmp_path / "hive"))
-    config_path.write_text(text + KANBAN_YAML if board else text)
+    if board:
+        text += KANBAN_YAML
+    if local_board:
+        text += LOCAL_BOARD_YAML.format(board_dir=str(tmp_path / "board"))
+    config_path.write_text(text)
     return config_path
 
 
@@ -195,6 +205,29 @@ def test_cli_run_task_with_a_board_uses_the_real_client(tmp_path: Path, monkeypa
 
     assert isinstance(captured["kanban"], VibeKanbanClient)
     assert captured["kanban"].config.command == ["vibe-kanban", "mcp"]
+
+
+def test_cli_run_task_with_a_local_board_uses_the_local_client(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = _write_config(tmp_path, local_board=True)
+    captured = _capture_cycle(monkeypatch)
+
+    _run(monkeypatch, config_path, "--description", "Add a /healthz endpoint.")
+
+    assert isinstance(captured["kanban"], LocalBoardClient)
+    assert captured["kanban"].config.dir == str(tmp_path / "board")
+
+
+def test_cli_run_task_stores_an_issue_id_for_a_local_board(tmp_path: Path, monkeypatch) -> None:
+    config_path = _write_config(tmp_path, local_board=True)
+    _capture_cycle(monkeypatch)
+
+    _run(monkeypatch, config_path, "--description", "Add a /healthz.", "--kanban-issue-id", ISSUE_ID)
+
+    # A local board reads the id the same way the remote one does, so the flag
+    # has to be accepted for it too — the check is "no board", not "no MCP".
+    assert read_kanban_issue_id(str(tmp_path / "hive"), "task-1") == ISSUE_ID
 
 
 def test_cli_run_task_stores_the_kanban_issue_id(tmp_path: Path, monkeypatch) -> None:
