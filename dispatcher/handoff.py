@@ -357,6 +357,38 @@ def shrink_prompt(role: str, size: int, budget: int) -> str:
     )
 
 
+def discarded_writes_prompt(role: str, paths: list[str]) -> str:
+    """The one `--resume` a reviewing phase gets when it wrote to its worktree.
+
+    A reviewing checkout is detached and rebuilt every round
+    (docker_exec.create_worktree), and nothing in it is ever committed, so an
+    edit made there is gone the moment the round ends and the phase is never
+    told. This is the telling. The edit is lost either way; what the phase
+    still decides is whether the next phase hears about it at all.
+    """
+    listed = ", ".join(paths[:10])
+    if "verdict" in _ROLE_EXTRAS.get(role, {}):
+        correction = (
+            f"Return `verdict: {CHANGES_REQUESTED}` with the change you wanted "
+            "described under `findings`, precisely enough that the phase owning the "
+            "branch can make it without you."
+        )
+    else:
+        correction = (
+            "Describe the change you wanted under `findings`, precisely enough that "
+            "the phase owning the branch can make it without you."
+        )
+    return (
+        "Your checkout is detached and throwaway: it is deleted when this round ends "
+        "and nothing in it is committed, so what you changed there never reaches the "
+        f"task branch — {listed}. It is already lost. Do not try to save it, and do "
+        "not report it as work you did. "
+        f"{correction} "
+        "Send the same structured return again with that correction and every other "
+        "field as it was."
+    )
+
+
 def verdict_of(payload: dict | None) -> str | None:
     """The revisor's verdict as the schema carries it, or None."""
     if not payload:

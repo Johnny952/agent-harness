@@ -423,9 +423,11 @@ def _with_resume_notes(container: str, prompt: str, session_id: str | None) -> s
     one point in a phase's life where one can be revived rather than started
     again, and the CLI is what names the ones that outlived the session.
 
-    The shrink retry is deliberately left out of both. It resumes a session
-    too, but it asks for the same return in fewer bytes: there is no work there
-    to hand back to a subagent, and nothing it could conclude about the tree.
+    The shrink retry and the discarded-write one are deliberately left out of
+    both. They resume a session too, but each asks for the same return said
+    differently — fewer bytes, or a finding in place of a claim: there is no
+    work there to hand back to a subagent, and neither reads the tree, so
+    there is nothing either could conclude about it out of date.
     """
     notes = [_STALE_CONTEXT_NOTE]
     revive = subagents.revive_note(subagents.of_session(container, session_id))
@@ -636,6 +638,85 @@ def _run_gates(
     return retry, _gate_report(cfg, container, workdir, project_dir, task_id, round_num)
 
 
+def _refuse_review_writes(
+    cfg: Config,
+    container: str,
+    workdir: str,
+    task_id: str,
+    role: str,
+    result: docker_exec.ClaudeResult,
+    model: str | None,
+    effort: str | None,
+) -> docker_exec.ClaudeResult:
+    """One `--resume` telling a reviewing phase the edits it made are gone.
+
+    A reviewing role's checkout is detached at the task branch's tip and
+    rebuilt every round (docker_exec.create_worktree), and `_should_commit`
+    never commits it, so whatever it writes there is dropped with the checkout
+    and nobody is told. Measured on T-005: the revisor closed a gate by
+    editing the implementation doc, its own grep in its own worktree agreed
+    with it, the branch never saw the change, and the APPROVED verdict was
+    issued over a fix that did not exist.
+
+    The write itself cannot be rescued — committing it would put the
+    reviewer's own change on the branch it is in the middle of approving, and
+    the detached checkout is what keeps a reviewer reading the code as it
+    stands. What is fixable is the silence: the WARNING is the record that it
+    happened, and the retry asks the phase to hand the change on as a finding
+    instead of reporting work it did not land.
+
+    Like the other two retries this runs inside the heartbeat loop by
+    construction, costs one turn in a session that is already warm, and is
+    only spent when the reviewer actually wrote something.
+    """
+    if role in docker_exec.WRITER_ROLES:
+        return result
+    if not _exec_succeeded(result) or is_rate_limit_error(result):
+        # A phase that did not finish has no handoff to correct, and a
+        # rate-limited one is being handed to another account anyway.
+        return result
+    paths = docker_exec.dirty_paths(container, workdir)
+    if not paths:
+        return result
+
+    logger.warning(
+        "task %s: the %s phase wrote to %s, a detached review checkout that is deleted at "
+        "the end of the round; the change never reaches the branch: %s",
+        task_id, role, workdir, ", ".join(paths[:10]),
+    )
+    if not result.session_id:
+        # Nothing to resume into. The phase keeps whatever it claimed, which
+        # is what used to happen every time; the WARNING above is still more
+        # than the run said before.
+        logger.warning(
+            "task %s: there is no session to tell the %s phase those edits were discarded; "
+            "its handoff goes on as it is",
+            task_id, role,
+        )
+        return result
+
+    retry = docker_exec.exec_claude(
+        container, workdir, handoff.discarded_writes_prompt(role, paths),
+        resume_session_id=result.session_id, model=model, effort=effort,
+        timeout_seconds=cfg.phase_timeout_seconds,
+        # No skills, schema restated, permissions restated: the same reasons
+        # as the shrink retry's, and the corrected return is the one that has
+        # to land in the task file.
+        json_schema=handoff.schema_for(role),
+        **_phase_permission_flags(cfg),
+    )
+    if not _exec_succeeded(retry) or is_rate_limit_error(retry):
+        # The first return stands. It overstates what the phase did, but it
+        # holds the review itself, and the WARNING is in the log either way.
+        logger.warning(
+            "task %s: the %s phase could not be told its edits were discarded; its first "
+            "return goes on as it is",
+            task_id, role,
+        )
+        return result
+    return retry
+
+
 def dispatch_phase(
     cfg: Config,
     task_id: str,
@@ -721,6 +802,12 @@ def dispatch_phase(
                 result, gate_report = _run_gates(
                     cfg, container, workdir, project_dir, task_id, role,
                     result, model, effort, round_num,
+                )
+                # Between the two for the same reason: it can rewrite the
+                # handoff as well, and the gates only ever run for the
+                # implementador, which this never fires for.
+                result = _refuse_review_writes(
+                    cfg, container, workdir, task_id, role, result, model, effort,
                 )
                 result = _shrink_over_budget(cfg, container, workdir, role, result, model, effort)
             if _should_commit(role, result):

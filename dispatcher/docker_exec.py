@@ -611,6 +611,24 @@ def commit_worktree(
     raise RuntimeError(f"git commit failed: {proc.stderr or proc.stdout}")
 
 
+def dirty_paths(container: str, workdir: str) -> list[str]:
+    """What this checkout holds that its HEAD does not, as sorted paths.
+
+    Best-effort on purpose: every caller asks this about a phase that has
+    already returned, to say something extra about what it left behind, so a
+    `git status` that will not run answers "nothing" rather than raising.
+    """
+    proc = run_docker_exec(
+        container, workdir, ["git", "status", "--porcelain"], env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return []
+    # Porcelain v1 is two status columns, a space, then the path.
+    return sorted(
+        {line[3:].strip() for line in proc.stdout.splitlines() if line.strip()}
+    )
+
+
 def _warn_changes_outside(container: str, workdir: str, scope: Sequence[str]) -> None:
     """Name what a scoped commit is about to leave behind, and leave it.
 
@@ -618,18 +636,13 @@ def _warn_changes_outside(container: str, workdir: str, scope: Sequence[str]) ->
     otherwise fine, so a `git status` that will not run must not be the thing
     that stops it.
     """
-    proc = run_docker_exec(
-        container, workdir, ["git", "status", "--porcelain"], env=_GIT_ENV,
-    )
-    if proc.returncode != 0:
-        return
     prefixes = tuple(f"{path.rstrip('/')}/" for path in scope)
     bare = {path.rstrip("/") for path in scope}
-    # Porcelain v1 is two status columns, a space, then the path.
-    changed = (line[3:].strip() for line in proc.stdout.splitlines() if line.strip())
-    outside = sorted(
-        {path for path in changed if path not in bare and not path.startswith(prefixes)}
-    )
+    outside = [
+        path
+        for path in dirty_paths(container, workdir)
+        if path not in bare and not path.startswith(prefixes)
+    ]
     if outside:
         logger.warning(
             "%s: left uncommitted, outside this phase's scope (%s): %s",

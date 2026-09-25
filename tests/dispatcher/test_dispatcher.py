@@ -95,12 +95,17 @@ class _FakeGit:
 
     owner = "1000:1000"
 
+    #: What a phase's worktree is holding when it returns. Clean is the
+    #: ordinary case, and the only one every other test cares about.
+    dirty = ()
+
     outcome = dispatcher_mod.docker_exec.MergeOutcome(
         dispatcher_mod.docker_exec.MERGED, "main", "merged agent/task/task-1 into main"
     )
 
     def __init__(self):
         self.commits = []
+        self.status_checks = []
         self.restored = []
         self.review_cleanups = []
         self.merges = []
@@ -119,6 +124,10 @@ class _FakeGit:
             )
         )
         return True
+
+    def dirty_paths(self, container, workdir):
+        self.status_checks.append((container, workdir))
+        return list(self.dirty)
 
     def read_owner(self, container, path):
         return self.owner
@@ -139,6 +148,7 @@ class _FakeGit:
 def fake_git(monkeypatch):
     fake = _FakeGit()
     monkeypatch.setattr(dispatcher_mod.docker_exec, "commit_worktree", fake.commit_worktree)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "dirty_paths", fake.dirty_paths)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "read_owner", fake.read_owner)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "restore_owner", fake.restore_owner)
     monkeypatch.setattr(
@@ -1121,6 +1131,125 @@ def test_the_shrink_retry_is_not_told_about_subagents(tmp_path, monkeypatch) -> 
     assert calls[1]["resume_session_id"] == _SESSION_UUID, "it is a resume all the same"
     assert "SendMessage" not in calls[1]["prompt"]
     assert _SUBAGENT.id not in calls[1]["prompt"]
+
+
+#: The return the reviewer is asked for instead: the change it wanted, handed
+#: on to whoever owns the branch.
+_CHANGES_REQUESTED = {
+    "status": "complete",
+    "verdict": "CHANGES_REQUESTED",
+    "findings": ["docs/implementations/T-005.md is missing the pointers section"],
+}
+
+
+def test_a_reviewer_that_wrote_to_its_worktree_is_told_the_change_is_gone(
+    tmp_path, monkeypatch, caplog, fake_git,
+) -> None:
+    """Measured on T-005: the revisor closed a gate by editing the
+    implementation doc, its own grep in its own worktree agreed with it, the
+    branch never saw it, and APPROVED was issued over a fix that did not
+    exist. The edit cannot be rescued — what changes is that the phase is told
+    and hands the change on as a finding instead of claiming it as work."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    fake_git.dirty = ("docs/implementations/T-005.md",)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _CHANGES_REQUESTED}),
+    ])
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 2, "one resume, the same as the gate and shrink retries"
+    assert calls[1]["resume_session_id"] == _SESSION_UUID
+    assert "docs/implementations/T-005.md" in calls[1]["prompt"]
+    assert result.handoff == _CHANGES_REQUESTED, "the corrected return is the one that lands"
+    assert any(
+        "docs/implementations/T-005.md" in r.getMessage() and "never reaches the branch" in r.getMessage()
+        for r in caplog.records
+    ), "the log is the record that it happened at all"
+
+
+def test_a_clean_review_worktree_costs_the_phase_nothing(tmp_path, monkeypatch, fake_git) -> None:
+    """The ordinary case. The CLI is refused when it writes settings, and the
+    gate logs go to the scratch dir, so a review that reviewed is clean."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 1
+    assert result.handoff == _LEAN_HANDOFF
+    assert fake_git.status_checks == [
+        ("agent-cuenta1", f"{cfg.projects_root}/myproj/worktrees/task-1")
+    ], "asked once, answered nothing, and that is the whole cost"
+
+
+def test_a_writing_phase_is_never_asked_what_it_left_behind(tmp_path, monkeypatch, fake_git) -> None:
+    """A writer works in the task branch's own worktree and `_should_commit`
+    commits it, so a dirty tree there is the phase having done its job. The
+    question is only ever about a checkout nothing will commit."""
+    cfg = _make_config(tmp_path)
+    fake_git.dirty = ("src/app.py",)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw={"is_error": False}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert len(calls) == 1
+    assert fake_git.status_checks == []
+
+
+def test_a_discarded_edit_is_logged_even_with_no_session_to_resume(
+    tmp_path, monkeypatch, caplog, fake_git,
+) -> None:
+    """Without a session the phase cannot be corrected, and its handoff goes
+    on overstating what it did — which is what used to happen every time. The
+    warning is still more than the run said before."""
+    cfg = _make_config(tmp_path)
+    fake_git.dirty = ("docs/implementations/T-005.md",)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=None, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 1
+    assert result.handoff == _LEAN_HANDOFF
+    assert any(
+        "no session to tell the revisor phase" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_correction_that_will_not_run_leaves_the_review_standing(
+    tmp_path, monkeypatch, caplog, fake_git,
+) -> None:
+    """The first return overstates what the phase did, but it holds the review
+    itself, and throwing that away costs the round for nothing. The WARNING is
+    in the log either way."""
+    cfg = _make_config(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    fake_git.dirty = ("docs/implementations/T-005.md",)
+    calls = _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=_SESSION_UUID, result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+        ClaudeResult(session_id=_SESSION_UUID, result_text="boom", raw={"is_error": True}),
+    ])
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert len(calls) == 2
+    assert result.success is True
+    assert result.handoff == _LEAN_HANDOFF
+    assert any(
+        "could not be told its edits were discarded" in r.getMessage() for r in caplog.records
+    )
 
 
 def test_the_handoff_gets_the_subagent_ids_from_disk(tmp_path, monkeypatch) -> None:

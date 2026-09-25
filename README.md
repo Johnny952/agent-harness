@@ -115,9 +115,21 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   `HEAD`. Nothing it writes there survives: a detached `HEAD` is not a
   branch, so the dispatcher has nowhere to commit it, and the checkout is
   deleted at the end of the round. A revisor's finding has to travel as a
-  change request in its handoff, never as an edit — and the phase is not
-  currently told that, which is the known gap below. What decides the
-  split is what a role has to leave behind, not where in the sequence it
+  change request in its handoff, never as an edit, and its prompt opens
+  with that. When it writes anyway, the dispatcher says so instead of
+  letting the round swallow it: every phase outside the writing set is
+  asked for `git status --porcelain` on its own checkout the moment it
+  returns, and a dirty one is a WARNING naming the role, the checkout and
+  the paths, plus one `--resume` telling the phase its edits are already
+  lost and asking for the change back as a finding — `verdict:
+  CHANGES_REQUESTED` for the revisor — with every other field as it was.
+  The corrected return is the one that lands in the task file. The edit
+  itself is unrecoverable either way: committing it would put the
+  reviewer's own change onto the branch it is in the middle of approving.
+  What the retry buys is that the next phase hears about it at all. If the
+  phase left no session to resume, or the resume fails, its first return
+  stands and the WARNING is the whole record. What decides the split is
+  what a role has to leave behind, not where in the sequence it
   runs — the auditor is the phase that writes the indexes, so it shares
   the writers' worktree for the same reason. It runs last, though, after
   the revisor has approved, so its commit is held to `docs/`: the paths
@@ -906,29 +918,6 @@ account each phase ran on, and a resumed arquitecto that opened with
 What is left below is what a no-quota check couldn't settle, and the unit
 tests mock Claude Code, Docker, and Vibe Kanban, so they don't settle it
 either.
-
-- **A reviewing phase's edits are silently discarded.** Review worktrees
-  are detached at the task branch's tip on purpose — it is what lets the
-  revisor read the code as it stands — but a detached `HEAD` gives the
-  dispatcher no branch to commit onto, so anything the revisor writes
-  there is thrown away with the checkout at the end of the round. The
-  phase is never told. On T-005 (2026-09-24) the revisor reported that it
-  had closed a `pointers` gate by editing `docs/implementations/T-005.md`
-  in place, and its own `grep` in its own worktree confirmed the fix; the
-  same `grep` on `agent/task/T-005` returned both pointers, and still
-  does in the implementador's commit. The auditor re-ran that
-  verification on its branch, found the gate open, and repaired it — so
-  the branch tip is correct and the run passed. That is the shape of the
-  risk rather than a reason to discount it: the `APPROVED` verdict was
-  issued by a phase that believed in a fix it had not made, and what
-  caught it was the next phase choosing to check rather than anything the
-  harness required. A docs edit is the benign case. This is also the
-  mechanism behind `T-003-phase-edit-missing-from-next-worktree`, which
-  had the symptom and not the reason. The fix is a choice, not a patch:
-  either reviewers get a branch of their own to commit to, or the
-  dispatcher refuses their writes loudly enough that the phase records a
-  change request instead of an edit. Evidence:
-  `.data/verify/t005-acceptance.txt`.
 
 - **The quota gate is blind to the refusal that has actually happened.**
   `check_quota_ok` runs `claude -p "/usage"` and compares the two

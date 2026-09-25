@@ -8,6 +8,7 @@ import dispatcher.docker_exec as docker_exec_mod
 from dispatcher.docker_exec import (
     commit_worktree,
     create_worktree,
+    dirty_paths,
     exec_claude,
     merge_task_branch,
     read_owner,
@@ -1209,6 +1210,39 @@ def test_commit_worktree_commits_anyway_when_the_scope_check_cannot_run(
 
     assert committed is True
     assert caplog.text == ""
+
+
+def test_dirty_paths_names_everything_the_checkout_holds_that_head_does_not(
+    monkeypatch,
+) -> None:
+    """Staged, unstaged and untracked alike: the question is what would be lost."""
+
+    def respond(args):
+        if args[:2] == ["git", "status"]:
+            return (0, "M  docs/a.md\n M src/app.py\n?? notes.txt\n", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    assert dirty_paths(_CONTAINER, "/wd") == ["docs/a.md", "notes.txt", "src/app.py"]
+
+
+def test_dirty_paths_is_empty_on_a_clean_checkout(monkeypatch) -> None:
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([]))
+
+    assert dirty_paths(_CONTAINER, "/wd") == []
+
+
+def test_dirty_paths_answers_nothing_when_git_status_will_not_run(monkeypatch) -> None:
+    """Best-effort: every caller is saying something extra about a phase that
+    already returned, so a broken `git status` is not an error to raise."""
+
+    def respond(args):
+        return (128, "", "fatal: not a git repository\n")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    assert dirty_paths(_CONTAINER, "/wd") == []
 
 
 def test_read_owner_returns_the_host_uid_and_gid(monkeypatch) -> None:

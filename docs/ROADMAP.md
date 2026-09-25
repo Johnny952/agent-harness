@@ -1180,6 +1180,37 @@ logins.
      and the drafts are growing — 5387, 6051, 6589 against 5120 — so its
      budget is the second one set too low. The revisor, by contrast,
      needed neither a retry nor the margin for the first time.
+   - **A reviewing phase's edits are silently discarded.** Fixed
+     2026-09-25. Measured on T-005 (`.data/verify/t005-acceptance.txt`):
+     the revisor said it had closed a `pointers` gate by editing
+     `docs/implementations/T-005.md`, its own `grep` in its own worktree
+     agreed with it, the branch never saw the file, and APPROVED was
+     issued over a fix that did not exist. The cause is deliberate and
+     stays: a review worktree is added `--detach` at the task branch's
+     tip so the reviewer reads the code as it stands, and a detached
+     HEAD leaves the dispatcher no branch to commit onto, so whatever
+     the reviewer writes goes out with the checkout at the end of the
+     round. The alternative considered and rejected was giving reviewers
+     a branch of their own to commit to: that puts the reviewer's own
+     change onto the branch it is in the middle of approving, and the
+     verdict then covers its own work. So the edit is still lost — what
+     changes is that the loss is loud. Every phase outside
+     `WRITER_ROLES` is asked for `git status --porcelain` on its own
+     checkout the moment it returns (`docker_exec.dirty_paths`, factored
+     out of the check `_warn_changes_outside` already ran). A dirty one
+     logs a WARNING naming the role, the checkout and the paths, then
+     spends one `--resume` telling the phase its edits never reach the
+     branch and asking for the change back as a finding — `verdict:
+     CHANGES_REQUESTED` for the revisor — with every other field as it
+     was, and that corrected return is the one that lands in the task
+     file. Both degrade paths keep the first return: a phase that left
+     no session to resume, and a resume that errors, are logged and the
+     review stands as it came. The revisor's prompt now opens with the
+     same fact, so the cheap case is the retry never firing. 8 new unit
+     tests, 739 passing and 10 skipped. Not yet exercised by a
+     dispatched run: no run has been paid for since, so the WARNING, the
+     correction turn and the verdict a phase actually returns to it have
+     only been seen against fakes.
 3. Acceptance: **passed 2026-09-24** (T-005, `.data/verify/t005-acceptance.txt`).
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
