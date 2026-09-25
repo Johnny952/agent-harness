@@ -48,9 +48,16 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   the same transcript in the same worktree — measured end to end on
   T-006, where an arquitecto refused on cuenta1 continued on cuenta2 with
   its context intact and the work landed in one commit (V5.2). Any prompt
-  that resumes a session carries a note listing the subagents that session
-  started, read off disk from the CLI's own state, so the phase revives
-  them instead of spawning replacements it would have to brief again.
+  that resumes a session carries two notes: one listing the subagents that
+  session started, read off disk from the CLI's own state, so the phase
+  revives them instead of spawning replacements it would have to brief
+  again; and one telling it that the session-start `gitStatus` block is
+  the snapshot from *before* its own edits, so it re-reads the worktree
+  instead of redoing work already sitting in it. Every step of a
+  hand-over is logged by name — the refusal and the session being handed
+  on, the account going `COOLING_DOWN`, each account that comes back
+  `IDLE`, and the account every phase runs on — so a run that changed
+  hands no longer reads like a clean one (T-007, V5.3).
   Each phase runs under an in-container `timeout`
   (`phase_timeout_seconds`, 2 hours by default) and counts as failed
   when it expires.
@@ -857,14 +864,17 @@ covered stack plumbing and the Vibe Kanban MCP surface; the checks that
 needed quota came later, on 2026-09-23 — a first end-to-end task (V3),
 with headless permissions and the `/usage` probe answered for free inside
 that same run (V1.2, V1.3), plus cross-account resume (V5.1) and a real
-rate-limit result (V5.4). The same cycle has been dispatched six times
+rate-limit result (V5.4). The same cycle has been dispatched seven times
 in all — three V3 runs, one config change apiece, the third being the
 first to reach `done`; a fourth on 2026-09-24 that changed no config and
 measured the fixes that run forced; then Stage 1's two-account acceptance
 (T-005) and the failover check with an injected 429 (T-006, V5.2), both
-the same day. The bullets below are what the last two left open. Still
-unverified: V1.1, the failure paths, and an account coming back from
-`COOLING_DOWN` mid-task (V5.3) — see
+the same day; and a seventh on 2026-09-25 (T-007) that re-ran that
+failover against the two fixes it forced and, the 429 now spent once
+rather than for good, caught an account coming back from `COOLING_DOWN`
+mid-task (V5.3). The bullets below are what those runs left open. Still
+unverified: V1.1, the failure paths, and a failover on a phase whose
+predecessor had already committed — see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results log and
 what's still pending. Their results decide how the known gaps get
 fixed, and each prioritized item lists the checks it depends on.
@@ -886,49 +896,16 @@ five clean runs had never produced — a phase changing hands mid-flight,
 with a 429 injected into cuenta1's CLI — and the failover held: one
 session, two accounts, one commit, and the cross-account `--resume` that
 had been an unverified assumption since the design spec is now a measured
-fact. It also opened the two gaps at the top of the list below, both
-about what the harness fails to *say*. What is left below is what a
-no-quota check couldn't settle, and the unit tests mock Claude Code,
-Docker, and Vibe Kanban, so they don't settle it either.
-
-- **A failover leaves no trace in the log.** `dispatch_phase` picks an
-  account, may find it rate-limited, cools it down, releases the lock and
-  hands the same phase to another account — and writes not one line about
-  any of it. There is no `logger` call anywhere in the function. Measured
-  on T-006 (2026-09-24), the run that forced a failover on purpose: its
-  log is shaped exactly like a clean run's, four handoff-budget lines and
-  nothing else, and the only durable evidence that a hand-off happened at
-  all is `dispatcher_state/cuenta1.json` sitting at `COOLING_DOWN`
-  afterwards and the `Account:` trailer in the commit message. In a real
-  exhaustion that means an account can drop out of the pool, take its
-  phase's spent attempt with it, and leave the operator reading a log that
-  says nothing happened; and if both accounts go, the task fails with no
-  record of why. The state file is a poor substitute because it holds only
-  the current state — by the time anyone looks, a recovered account reads
-  `IDLE` again and the incident is gone. This is the observability half of
-  a check that otherwise passed: V5.2's first criterion had to be proved
-  by cuenta2 acquiring the lock five seconds later, because no line
-  records the release. Evidence: `.data/verify/v52-failover.txt`.
-
-- **A resumed phase is handed a stale view of its own worktree.** The
-  session-start context block — the `gitStatus` snapshot naming the branch,
-  the working tree's state and the recent commits — is taken when the
-  session starts and re-sent verbatim when it is resumed, so a phase that
-  changes accounts mid-flight is told what the worktree looked like
-  *before* its own edits. On T-006 the arquitecto edited `sum.js`,
-  `sum.test.js` and its implementation doc on cuenta1, was refused, and
-  the resumed session on cuenta2 opened with `Status: (clean)` and no task
-  commit while all three edits sat modified in that same directory. It ran
-  `git status --short`, found them, and wrote the run up correctly — the
-  learning is now `docs/learnings/session-context-block-is-stale.md` in
-  the toy project — but the obvious reading of that block is "the previous
-  phase's work is gone, redo it", and a phase that acts on it duplicates
-  code instead of a docs edit. The dispatcher already appends a note to a
-  resumed prompt (`_with_revive_note`, for subagents that outlived the
-  session); telling a resumed phase not to trust its own status block, or
-  handing it a fresh `git status`, belongs in the same place. This is one
-  of the two gaps that only exist on the resume path, which is why five
-  runs never surfaced it. Evidence: `.data/verify/v52-failover.txt`.
+fact. It also opened two gaps about what the harness fails to *say* — a
+failover invisible in the log, and a resumed phase reading a status block
+taken before its own edits — and the seventh run, same injected 429 but
+spent once, measured both fixes on the only path that produces them: four
+lines naming the refusal, the cool-down, the two recoveries and the
+account each phase ran on, and a resumed arquitecto that opened with
+`git status` and its own log and then re-verified instead of rewriting.
+What is left below is what a no-quota check couldn't settle, and the unit
+tests mock Claude Code, Docker, and Vibe Kanban, so they don't settle it
+either.
 
 - **A reviewing phase's edits are silently discarded.** Review worktrees
   are detached at the task branch's tip on purpose — it is what lets the
