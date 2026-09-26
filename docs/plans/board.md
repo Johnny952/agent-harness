@@ -13,7 +13,8 @@ was committed as `1d4ca62` and APPROVED, the auditor closed the task, and
 read-modify-write, and [`T-008-D2`](../debt/T-008-D2.md), a card that will
 not parse is skipped without telling a caller the board is short. Phase 1
 owns the second of those. See the T-008 rows in `docs/ROADMAP.md`.
-Phases 1–6 are unstarted.
+Phase 1 is specified below and unstarted; phases 2–6 have a row in the
+table and no spec.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
 used, and the only surface a human gets is `observability/dashboard/`: 67 lines
@@ -196,3 +197,195 @@ unknown key; two clients over the same directory seeing each other's issues;
 and the interface-parity test in `tests/dispatcher/test_vibe_kanban_client.py`
 extended so `LocalBoardClient` is held to the same public surface as the other
 two.
+
+## Phase 1 — a read API in Python
+
+Phase 0 gave the harness somewhere to keep cards. This phase gives a reader
+somewhere to ask what is true, over HTTP, in the language the parsers are
+already written in. Nothing here writes: every endpoint is a `GET`, every
+mount is `:ro`, and the phase is done when a Next.js page could be written
+against it without a mock.
+
+### Why it comes next
+
+Phase 2 is a rendering problem only if the data arrives shaped. The
+architecture decision above — the frontmatter parser stays in Python — is what
+this phase implements. Four readers already exist and not one is reachable
+from outside the container that holds it: `dispatcher/context_transfer.py`
+turns a task file into a `TaskFile`, `dispatcher/state_machine.py` answers what
+an account is doing, `observability/collector/db.py` lists events, and
+`dispatcher/debt.py` parses the debt index's table. The phase is an HTTP
+surface over code that is written and tested, which is why it is half a day
+and no risk.
+
+It pays before Phase 2 exists, too: `curl` against a running harness answers
+"which account is on which task, and since when" without a container shell and
+without reading root-owned JSON through a throwaway container.
+
+### Where it runs
+
+A new service, `observability/api/`, beside the collector and the dashboard —
+not inside the dashboard. The dashboard is what Phase 2 deletes, so endpoints
+put there would move twice. It also mounts nothing but the events volume
+today, and this phase needs the task files, the dispatcher's state directory
+and a project checkout: hanging those off the page a password protects widens
+what one auth bug reaches, for no gain.
+
+Published on `127.0.0.1:8789` like every other port in this compose file, and
+on `ia_harness_net` so Phase 2 reaches it by service name.
+
+### The endpoints, verbatim
+
+```
+GET /api/tasks                                list of Task
+GET /api/tasks/<task_id>                      one Task, or 404
+GET /api/accounts                             list of Account
+GET /api/events?limit=&source_app=&since=     list of Event
+GET /api/debt?project=<slug>                  list of DebtRow
+```
+
+Every one answers with the same envelope, and that envelope is this phase's
+one invention:
+
+```json
+{"data": [], "warnings": []}
+```
+
+`warnings` names what the endpoint could not read — a task file that will not
+parse, a card whose JSON is truncated, a debt index that is not there. See
+*What this closes*.
+
+The shapes:
+
+- **Task** — `task_id`, `status`, `owner`, `heartbeat`, `description`,
+  `kanban_issue_id`, `resolved_debt`, and `card`: the board document that
+  `kanban_issue_id` points at, or `null` when there is no board or no such
+  card. The fields are `TaskFile`'s. The endpoint invents none.
+- **Account** — `name` and `container` from the config; `state`,
+  `current_task` and `rate_limited_at` from `state_dir`.
+- **Event** — what `db.list_events` already returns: `id`, `source_app`,
+  `event_type`, `payload` parsed rather than a string, `created_at`.
+- **DebtRow** — `id`, `what`, `where`, `fix`, `card`, and `resolved`. The last
+  is best-effort: the index marks a resolved entry in place by opening its
+  **what** cell with a bolded `Resolved`, which is a convention in prose and
+  not a schema, so the flag is offered and the row is never hidden by it.
+
+### Required behaviour
+
+- **Nothing is dropped silently.** One unreadable file answers with the others
+  and a warning naming it; it never empties the list and never 500s. This is
+  the rule the rest of the phase follows from, and the reason the envelope is
+  not a bare array.
+- **`since` is an id, not a time.** `db.list_events` orders by `id DESC` under
+  a limit; Phase 3 tails by `id > last`. Building that read here means the SSE
+  phase is a loop around an endpoint that already exists. `since` and `limit`
+  compose: the newest `limit` events with an id above `since`.
+- **The events database is opened read-only and its schema is never created.**
+  `db.init_db` runs `CREATE TABLE` and the volume is mounted `:ro`, so a
+  schema call is a 500 on the first request of a cold start. Connect through
+  `file:<path>?mode=ro`, and answer a database that is not there with an empty
+  list and a warning — a harness that has never run has no events, and that is
+  not an error.
+- **An unknown query parameter is a 400**, on Phase 0's reasoning about
+  `list_issues`: a filter that silently does nothing costs the caller more
+  than no filter at all.
+- **`project` is optional where `projects_root` holds exactly one checkout**
+  and required where it holds several; naming one that is not there is a 404,
+  not an empty list.
+- **The config is the dispatcher's own**, loaded with `dispatcher/config.py`
+  from a read-only mount, and this phase adds no keys to it. That works only
+  because the mounts reproduce the paths the dispatcher already uses — see
+  *Configuration*.
+- **One parser per fact.** The API imports the dispatcher's readers; it does
+  not re-read a file format. Two of them need a path-based entry point they do
+  not have today: `debt.read_index` reads through `docker exec`, and the row
+  parsing behind it is private. Add `debt.index_rows(text) -> list[dict]` and
+  put both callers through it.
+- **Auth is the dashboard's, factored out.** `check_auth` and `requires_auth`
+  move from `observability/dashboard/app.py` to `observability/auth.py` and
+  both apps import them: the timing-safe comparison and the
+  `auth.type != "basic"` guard are worth having once rather than twice. The
+  dashboard's behaviour does not change, which is what its existing tests are
+  there to hold.
+
+### Configuration
+
+No new keys. The service mounts the same host directories the dispatcher and
+the agents mount, at the same container paths, so `state_dir: /state`,
+`hive_tasks_dir: /data/.hive/tasks` and `projects_root: /data/projects` are
+true in this container too:
+
+```yaml
+  api:
+    build:
+      context: ../..
+      dockerfile: observability/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8789:8789"
+    volumes:
+      - observability_data:/events:ro
+      - ../../dispatcher_state:/state:ro
+      - ../../.hive:/data/.hive:ro
+      - ../../.data/projects:/data/projects:ro
+      - ../../config.yaml:/app/config.yaml:ro
+    environment:
+      - COLLECTOR_DB_PATH=/events/events.db
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+    depends_on:
+      - collector
+    networks:
+      - ia_harness_net
+```
+
+The events volume lands somewhere other than `/data` on purpose: `/data` is
+where the two bind mounts live in the dispatcher's and the agents' layout, and
+nesting the volume under them to keep `COLLECTOR_DB_PATH` byte-identical would
+trade a legible mount list for an environment variable.
+
+The image copies `dispatcher/` as well as `observability/`, which is the price
+of one parser per fact: this service rebuilds when the dispatcher's readers
+change. It gets no docker socket — `dispatcher/docker_exec.py` comes along as
+an import and is never called.
+
+The container runs as root, like the collector and the dashboard, and here
+that is load-bearing rather than unexamined: `dispatcher_state/*.json` are
+written root-owned mode 600, so a non-root `USER` in this image is a change to
+who owns that directory first.
+
+### What this closes
+
+[`T-008-D2`](../debt/T-008-D2.md) — a card that will not parse is skipped with
+a warning nobody reads, and `list_issues` hands back a board that is quietly
+short. The envelope is the fix: `LocalBoardClient` gains
+`unreadable() -> list[str]`, a scan that names the files that do not parse,
+and `/api/tasks` puts them in `warnings`. The shared interface does not move —
+the API builds its own client from the config and knows which one it got — and
+nothing is renamed or quarantined, because that is a write and this phase has
+none. The entry is then marked resolved in place in `docs/debt/README.md`, per
+that index's own rule.
+
+[`T-008-D1`](../debt/T-008-D1.md) is not closed here and is not made worse:
+this phase adds a reader, and the race it describes is between writers.
+
+### Out of scope for Phase 1
+
+No writes of any kind, no SSE — that is Phase 3, and it is a loop around
+`/api/events?since=` — no Next.js, no change to what the dashboard renders, no
+schema migration, and no deletion of the dashboard. Phase 2 replaces it, and
+gets to remove it once there is something better to look at.
+
+### Done when
+
+`python3 -m pytest` is green, including new tests that cover: every endpoint
+against a temporary-directory fixture rather than a running harness; a task
+file that does not parse appearing in `warnings` while the other tasks still
+come back; a card that does not parse doing the same; `/api/events?since=`
+returning only ids above it, under `limit`; an events database that does not
+exist answering empty rather than 500; an unknown query parameter answering
+400; every endpoint answering 401 without credentials; and the dashboard's
+existing auth tests passing unchanged against the extracted module.
+
+And, by hand once, against a harness that has run a task with `local_board`
+configured: `curl -u` on `/api/tasks` returns that task with `card` populated.
