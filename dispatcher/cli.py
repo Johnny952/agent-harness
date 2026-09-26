@@ -16,7 +16,12 @@ from dispatcher.dispatcher import (
     run_single_phase,
     run_task_cycle,
 )
-from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
+from dispatcher.vibe_kanban_client import (
+    KanbanClient,
+    LocalBoardClient,
+    NullKanbanClient,
+    VibeKanbanClient,
+)
 
 
 #: The roles `run-phase` will dispatch. Held here rather than derived from
@@ -74,19 +79,20 @@ def _seed_kanban_issue_id(
     """
     if args.kanban_issue_id is None:
         return
-    if cfg.vibe_kanban is None:
+    if cfg.vibe_kanban is None and cfg.local_board is None:
         parser.error(
-            "--kanban-issue-id, but config.yaml has no vibe_kanban block: nothing "
-            "would ever read the id. Configure the board, or drop the flag."
+            "--kanban-issue-id, but config.yaml has no vibe_kanban and no local_board "
+            "block: nothing would ever read the id. Configure a board, or drop the flag."
         )
     try:
         uuid.UUID(args.kanban_issue_id)
     except ValueError:
-        # The board shows a short id (VK-7); every MCP tool wants the uuid.
-        # Catching the mix-up here beats a rejected update_issue four phases in.
+        # A board shows a short id (VK-7); every MCP tool wants the uuid, and a
+        # local board mints one. Catching the mix-up here beats a rejected
+        # update_issue four phases in.
         parser.error(
-            f"--kanban-issue-id: {args.kanban_issue_id!r} is not a uuid. Vibe Kanban's "
-            "issue_id is the issue's uuid, not the short id shown on the card."
+            f"--kanban-issue-id: {args.kanban_issue_id!r} is not a uuid. An issue_id is "
+            "the issue's uuid, not the short id shown on the card."
         )
     context_transfer.set_kanban_issue_id(cfg.hive_tasks_dir, args.task_id, args.kanban_issue_id)
 
@@ -148,14 +154,19 @@ def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
     print(f"the entries themselves are in {learnings.root_dir(hive)}/, one file per row")
 
 
-def _kanban(cfg: Config) -> NullKanbanClient | VibeKanbanClient:
+def _kanban(cfg: Config) -> KanbanClient:
     """The board this config talks to, or the one that does nothing.
 
     Every subcommand that can move a card builds it the same way, so that a
-    project with no `vibe_kanban` block runs the identical code path and says
-    nothing about a board it was never given.
+    project with no board block runs the identical code path and says nothing
+    about a board it was never given. Both blocks at once never reaches here:
+    `load_config` refuses that rather than picking one.
     """
-    return VibeKanbanClient(cfg.vibe_kanban) if cfg.vibe_kanban else NullKanbanClient()
+    if cfg.vibe_kanban:
+        return VibeKanbanClient(cfg.vibe_kanban)
+    if cfg.local_board:
+        return LocalBoardClient(cfg.local_board)
+    return NullKanbanClient()
 
 
 #: Read once, at startup, so a run can be made louder or quieter without
@@ -220,10 +231,10 @@ def main() -> None:
     )
     run_parser.add_argument(
         "--kanban-issue-id",
-        help="The uuid of the Vibe Kanban issue this task mirrors, so the board "
+        help="The uuid of the board issue this task mirrors, so the board "
         "follows the run. Stored in the task file, so it is only needed once "
-        "per task. Without it (or without a vibe_kanban block in config.yaml) "
-        "the run simply has no board.",
+        "per task. Without it (or without a vibe_kanban or local_board block "
+        "in config.yaml) the run simply has no board.",
     )
 
     phase_parser = sub.add_parser(

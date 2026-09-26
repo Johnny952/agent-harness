@@ -16,9 +16,12 @@
 # defaults those to the values the compose files already assume and only
 # asks about them under --advanced.
 #
-# It never writes a `vibe_kanban` block: the board is optional, the
-# dispatcher runs without one, and wiring it up means picking a command that
-# exists (see config.example.yaml). The generated config points at that.
+# It writes neither board block. A board is optional, the dispatcher runs
+# without one, and there are two to choose between: `local_board`, a
+# directory of JSON cards that needs no service, and `vibe_kanban`, which
+# needs a command that exists. They are alternatives — configuring both is a
+# startup error — so the choice is the operator's, and the generated config
+# points at config.example.yaml for either.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -249,9 +252,12 @@ if [ "$write_config" -eq 1 ]; then
         echo "hive_tasks_dir: $HIVE_TASKS_DIR"
         echo "state_dir: $STATE_DIR"
         echo "collector_url: $COLLECTOR_URL"
-        echo "# A Vibe Kanban board is optional and left unconfigured here."
-        echo "# To mirror tasks onto one, copy the commented \`vibe_kanban\`"
-        echo "# block from config.example.yaml and make its command runnable."
+        echo "# A board is optional and left unconfigured here. To mirror tasks"
+        echo "# onto one, copy a commented block from config.example.yaml:"
+        echo "# \`local_board\` is a directory of JSON cards and needs only a"
+        echo "# \`dir\` on a mounted volume; \`vibe_kanban\` talks to a Vibe Kanban"
+        echo "# server and needs its command runnable. They are alternatives:"
+        echo "# configuring both blocks is a startup error."
     } > "$CONFIG_OUT"
     echo "Wrote $CONFIG_OUT"
 fi

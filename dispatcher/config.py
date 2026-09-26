@@ -44,6 +44,19 @@ class VibeKanbanConfig:
     )
 
 
+@dataclasses.dataclass
+class LocalBoardConfig:
+    """Where a board with no service behind it keeps its cards.
+
+    `dir` is a directory inside the dispatcher container, one JSON document
+    per issue. It is the whole configuration: there is no project to name and
+    no status_map to correct, because nothing here renames a column — the
+    dispatcher's own status strings are what gets stored.
+    """
+
+    dir: str
+
+
 #: The permission modes the CLI accepts (`claude --help`, 2.1.280). Checked at
 #: load time for the same reason the integer caps are: a typo is otherwise
 #: only caught by the CLI itself, which exits on an unknown choice after the
@@ -64,6 +77,7 @@ class Config:
     hive_tasks_dir: str
     state_dir: str
     vibe_kanban: VibeKanbanConfig | None
+    local_board: LocalBoardConfig | None
     collector_url: str
     default_model: str
     permission_mode: str | None
@@ -125,6 +139,41 @@ def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
             raise ValueError(f"vibe_kanban.status_map[{key!r}] must be a non-empty string")
         status_map[key] = value
     return VibeKanbanConfig(command=command, project_id=project_id, status_map=status_map)
+
+
+def _load_local_board(raw: dict) -> LocalBoardConfig | None:
+    """Read the optional `local_board` block, or None when there is none.
+
+    Opt-in, exactly like `vibe_kanban`: a harness that has been running with
+    no cards should not start writing them because it was upgraded.
+    """
+    block = raw.get("local_board")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError("local_board must be a mapping")
+    directory = block.get("dir")
+    if not isinstance(directory, str) or not directory:
+        raise ValueError("local_board.dir must be a non-empty string")
+    return LocalBoardConfig(dir=directory)
+
+
+def _load_boards(raw: dict) -> tuple[VibeKanbanConfig | None, LocalBoardConfig | None]:
+    """The one board this config configures, as the pair of optional blocks.
+
+    Both blocks at once is a config error rather than a precedence rule: an
+    operator who wrote both meant one of them, and silently ignoring the other
+    leaves them watching a board the run never touches.
+    """
+    vibe_kanban = _load_vibe_kanban(raw)
+    local_board = _load_local_board(raw)
+    if vibe_kanban is not None and local_board is not None:
+        raise ValueError(
+            "vibe_kanban and local_board are both configured, and a run talks to one "
+            "board. Drop local_board to keep the Vibe Kanban board, or drop "
+            "vibe_kanban to keep the local one."
+        )
+    return vibe_kanban, local_board
 
 
 def _load_permission_mode(raw: dict) -> str | None:
@@ -218,6 +267,7 @@ def load_config(path: str) -> Config:
         or gates_test_timeout_seconds <= 0
     ):
         raise ValueError("gates_test_timeout_seconds must be a positive integer")
+    vibe_kanban, local_board = _load_boards(raw)
     return Config(
         accounts=accounts,
         quota_threshold_pct=raw.get("quota_threshold_pct", 90),
@@ -233,7 +283,8 @@ def load_config(path: str) -> Config:
         projects_root=raw["projects_root"],
         hive_tasks_dir=raw["hive_tasks_dir"],
         state_dir=raw["state_dir"],
-        vibe_kanban=_load_vibe_kanban(raw),
+        vibe_kanban=vibe_kanban,
+        local_board=local_board,
         collector_url=raw["collector_url"],
         default_model=raw.get("default_model", "opus"),
         permission_mode=_load_permission_mode(raw),

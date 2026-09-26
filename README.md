@@ -102,7 +102,10 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   that fails never fails the phase. Its MCP server is spawned as a
   subprocess and speaks stdio, so nothing dials it over the network; the
   web UI is bound to `127.0.0.1` only, never exposed off-host, and sits
-  behind a Compose profile.
+  behind a Compose profile. Its service is retired (see Known gaps), so the
+  board with nothing behind it is the one that works: a `local_board` block
+  names a directory and the dispatcher keeps one JSON card per issue in it.
+  One block or the other, never both.
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
   (`status`, `owner`, `depends_on`, `heartbeat`, the operator's
   `description`, and `kanban_issue_id` when there's a board) plus a body
@@ -806,20 +809,24 @@ the container, the CLI, the worktree, the tooling. And the closing rule, in
 every role's prompt: a trap is "don't step on this"; work you chose not to
 finish is debt, and that goes in the handoff instead.
 
-**The board, if you want one.** A Vibe Kanban board is optional and
-unconfigured by default: with no `vibe_kanban` block in `config.yaml` the
-dispatcher runs exactly as it does above and says nothing about a board.
-Add the block — copy the commented one in `config.example.yaml` — and each
-`run-task` opens an issue for the task, then moves it as the cycle goes
-`in_progress:<role>` → `blocked`/`done`. `--kanban-issue-id <uuid>` points
-a task at an issue that already exists instead; ids are server-assigned
-uuids, so `list_issues` (filtered by `search` or `simple_id`) is how you
-find one. The id lands in the task file's frontmatter as
-`kanban_issue_id`, which is what survives a restart. The board is a
-visibility aid and never dispatch state: every call to it is best-effort,
-and one that fails is logged rather than failing the phase.
+**The board, if you want one.** A board is optional and unconfigured by
+default: with neither board block in `config.yaml` the dispatcher runs
+exactly as it does above and says nothing about a board. Add one — copy a
+commented block from `config.example.yaml` — and each `run-task` opens an
+issue for the task, then moves it as the cycle goes `in_progress:<role>` →
+`blocked`/`done`. `--kanban-issue-id <uuid>` points a task at an issue that
+already exists instead; ids are uuids either way, server-assigned by Vibe
+Kanban and minted by the local board, so `list_issues` is how you find one.
+The id lands in the task file's frontmatter as `kanban_issue_id`, which is
+what survives a restart. The board is a visibility aid and never dispatch
+state: every call to it is best-effort, and one that fails is logged rather
+than failing the phase.
 
-Two things to know before uncommenting that block:
+There are two blocks to choose between, `vibe_kanban` and `local_board`,
+and configuring both is a startup error naming which one to drop rather
+than a silent precedence rule (`docs/decisions.md` ADR 2).
+
+Two things to know before uncommenting the `vibe_kanban` block:
 
 - **Its MCP server speaks stdio, not HTTP.** The dispatcher spawns
   `vibe_kanban.command` as a subprocess; there is no URL to point at. The
@@ -836,6 +843,17 @@ Two things to know before uncommenting that block:
   skipped with a warning rather than sent. Creating or reading issues
   also needs that server signed in to Vibe Kanban's cloud — see Known
   gaps.
+
+**The board that is a directory.** `local_board:` with a `dir:` — say
+`/state/board`, on the `dispatcher_state` mount so the cards outlive the
+container — is the other block, and the one that works today: no service,
+no Node, no account. The dispatcher writes one JSON document per issue
+into that directory, atomically, and reads them back, so an `ls` is the
+whole board until Phase 2 of [`docs/plans/board.md`](docs/plans/board.md)
+renders it. It has no `status_map` and needs none: there is no column here
+to rename, so a card carries the dispatcher's own status verbatim,
+`in_progress:<role>` included — the one dimension a generic board flattens.
+Why each of those is the way it is: `docs/decisions.md` ADR 1.
 
 **What "issuing commands from the interface" means today:** nothing flows
 the other way. Creating or updating an issue on the board does not make
@@ -1067,10 +1085,13 @@ either.
     is not capability. What the client assumed stays assumed and stops
     mattering: that ids are server-assigned uuids, and that
     `update_issue.status` takes a fixed per-project set of names. The
-    seam it sits behind is what survives — see
-    [`docs/plans/board.md`](docs/plans/board.md), whose Phase 0 puts a
-    local implementation behind it so the two prioritized items that
-    wait on `create_issue` stop waiting. (V2.1–V2.6)
+    seam it sits behind is what survives, and Phase 0 of
+    [`docs/plans/board.md`](docs/plans/board.md) has put a local
+    implementation behind it — `local_board` in `config.yaml`,
+    `LocalBoardClient`, `docs/decisions.md` ADR 1 — so the two prioritized
+    items that waited on `create_issue` no longer wait on this. What that
+    client does is covered by the suite and has not yet run in a real
+    dispatch; V2.6 is the check that would say otherwise. (V2.1–V2.6)
 
 - **The handoff budgets are sized on a toy repo.** `_BUDGET_BYTES` in
   `dispatcher/handoff.py` was tuned on four runs against the toy project,
