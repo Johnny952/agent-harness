@@ -210,6 +210,47 @@ actions queue the front writes to. The queue then has one shape and two
 producers, a human and an agent, and the worker that drains it is the only
 thing in the system holding the socket.
 
+## The conversational thread does not write code
+
+Decided 2026-09-25, and it is a rule about a thread, not about an account. The
+primary account writes code all the time under this plan — *Not every phase
+deserves the fallback* above is the whole argument for letting an implementador
+run in `cuenta1` when the pool is dry. What must not write is the session that
+holds the conversation. Two threads in one account, one talking and one
+implementing, is the arrangement, so the account is not the unit the rule is
+about; writing it as *the primary account does not write* would contradict this
+plan's own fallback.
+
+The harness already has the shape for it. `WRITER_ROLES`
+(`dispatcher/docker_exec.py:167`) is `{cartografo, arquitecto, implementador,
+auditor}` and the revisor sits outside it on purpose, which is why a revisor's
+writes are refused out loud instead of being dropped in silence. The
+conversational thread is the same kind of participant: one that reads, decides
+and dispatches, and whose writes are a bug rather than a shortcut.
+
+So it is enforced where a phase's permissions are enforced and not in a prompt.
+The chat channel's `claude -p --resume` is built with `Write`, `Edit` and
+`NotebookEdit` denied and `Bash` restricted to an allowlist of reads —
+`allowed_tools` in `config.yaml` already carries that exact shape for the
+phases. Leaving `Bash` open is what would make the rule decorative, because
+`sed -i` writes files. And a rule that lives only in the system prompt is a
+request, held by the one participant whose context is periodically discarded;
+the *Context compaction* section below is the reason that is not good enough.
+
+The escape hatch is the queue, not a temporary grant. "Edge cases with prior
+approval" has two implementations and only one survives compaction: the thread
+enqueues a one-step task through the same MCP tool *How a front reaches all
+this* gives it, and a phase does the writing. Granting the thread write access
+for a turn is state somebody has to remember to revoke. Through the queue there
+is one path by which work gets executed, and it is the path that is already
+audited.
+
+**Today's exception is this session.** The acting primary is a Claude Code
+session on the host and it does write code, by the operator's standing
+instruction — the same exception *Which account the conversational thread runs
+under* records above. The rule is written for the deployed primary; it does not
+govern the thread that is building it.
+
 ## Context compaction is the primary thread's problem, not a phase's
 
 Asked whether the agents should get autocompact, the answer splits on the same

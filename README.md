@@ -1061,7 +1061,7 @@ either.
    handoff.** Highest leverage for the least code. Every phase is a fresh
    `claude -p` session that starts cold: a role is only a name in the
    prompt, it rediscovers the target repo from scratch, and what it leaves
-   the next role is truncated freeform prose. Nine pieces, which pay off
+   the next role is truncated freeform prose. Ten pieces, which pay off
    together:
    - *Role skills (method).* Give Claude in each agent container
      (arquitecto, implementador, revisor, auditor) a small set of skills
@@ -1074,7 +1074,8 @@ either.
      shared `/root/.claude` (see item 5): candidates are
      `--append-system-prompt-file`, `--agents`, or a per-role
      `--plugin-dir`, the same flag item 5 uses for packs. Three sources,
-     all vendored and trimmed rather than installed:
+     all vendored and trimmed rather than installed, and a fourth not yet
+     read:
      - [superpowers](https://github.com/obra/superpowers), for the
        general method. Don't install the plugin in the agent image: its
        `SessionStart` hook injects `using-superpowers`, whose "invoke a
@@ -1128,6 +1129,19 @@ either.
        [`docs/ROADMAP.md`](docs/ROADMAP.md)). Unmeasured here: whether an
        always-on ladder also suppresses work the task did ask for, which
        would land on the revisor.
+     - [ECC](https://github.com/affaan-m/ECC), unread as of 2026-09-25 and
+       recorded here so the evaluation has a home rather than living in a
+       conversation. The test to apply when it is read is the one the
+       three above were judged against: a skill describes method, never a
+       project's conventions, and only the first half belongs in this
+       item. Anything that survives that filter has two possible homes,
+       and they are not equivalent. One is `ROLE_SKILLS` in
+       `dispatcher/role_skills.py`, where a skill is bound to a role and
+       where `cartografo` currently has none at all. The other is the root
+       thread, which runs no skills today and is the harder case, because
+       a skill loaded there is paid on every turn of a long conversation
+       instead of once per phase — the cost argument of item 2 applies to
+       it with the multiplier reversed.
    - *Revive before respawn.* A phase that resumes a session is told this
      rule: to resume work delegated to a subagent, first revive that
      subagent by its ID (Claude Code's `SendMessage` to the agent ID
@@ -1197,6 +1211,47 @@ either.
      *Prioritized* item are never trimmed when a piece of it lands.
      T-008's roles could read neither half, which is the first evidence
      that this piece is load-bearing and not just tidy.
+   - *Limits go on what travels, not on what exists.* The question that
+     produced this bullet was whether to cap documents and source files at
+     some number of lines. The answer the harness's own machinery already
+     gives is to cap what a phase is handed, in bytes, and to leave alone
+     what merely sits on disk. Three caps exist and all three are of the
+     first kind: `_BUDGET_BYTES` in `dispatcher/handoff.py` (2048–5120 per
+     role), `MAX_ROWS = 40` with `_CELL_CHARS = 160` in
+     `dispatcher/learnings.py`, and the `wc -c` threshold in *Indexes and
+     pointers* below that decides inline against by-path. Every byte there
+     is paid again by every phase of every task, which is what makes a
+     number defensible; a file nobody opens costs nothing. The cautionary
+     half is *The handoff budgets are sized on a toy repo* under *Known
+     gaps* above: T-008 had three roles blow the byte budget in one run,
+     so the mechanism is right and the constants are not, which is what
+     happens to a limit chosen without data.
+     A line cap on the docs a human reads is rejected. This README is past
+     1900 lines and [`docs/ROADMAP.md`](docs/ROADMAP.md) past 1600, and
+     that length is an index of decisions doing its job; a cap would not
+     delete content, it would move it somewhere nobody reads. What bounds
+     them is structural and already in force, and it is the convention the
+     piece above names: a fixed gap is deleted rather than annotated, its
+     record goes to Stage 1 item 2 of the roadmap, operational prose goes
+     to the body section it belongs to. A cap on a `SKILL.md` is the
+     opposite case and is accepted, because a skill is read by a phase —
+     that is the short-`SKILL.md`-plus-references rule this item already
+     states under *Role skills*, arrived at there for the same reason.
+     A line cap on source files is rejected too, but a signal is not. A
+     hard cap produces `utils2.py` and splits coherent modules to satisfy
+     a number. The evidence for measuring anyway is good:
+     `dispatcher/dispatcher.py` is 1420 lines against 786 for the next
+     largest, and it is the module [`docs/plans/balancer.md`](docs/plans/balancer.md)
+     independently decided to refactor in its Phase 1, because the
+     per-phase bookkeeping is buried inside `run_task_cycle`. A
+     measurement would have named the same file with no argument attached.
+     So the form is a fifth gate in `dispatcher/gates.py`, `NOTE` level,
+     looking only at files the diff touched and reporting that one crossed
+     a threshold. 800 lines for Python: today that names `dispatcher.py`
+     alone out of seventeen modules, and leaves `learnings.py` at 786 just
+     under, a margin thin enough that the number is provisional by
+     construction. It blocks nothing, which is that module's stated
+     posture — *every gate errs toward saying nothing*.
    - *Indexes and pointers.* What keeps that memory cheap to read as it
      grows:
      - Every index has a trigger column ("when it applies" for learnings,
