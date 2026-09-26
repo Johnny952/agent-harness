@@ -92,6 +92,37 @@ services:
     networks:
       - ia_harness_net
 
+  # The read API (docs/plans/board.md Phase 1), mirrored from
+  # docker-compose.yml: this file is the one-resource deploy path, so a service
+  # only the split files carry is a service a Coolify deployment silently does
+  # not have. tests/integration/test_compose_invariants.py asserts both files
+  # on the same two properties — no docker socket, every mount :ro.
+  api:
+    build:
+      context: ../..
+      dockerfile: observability/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8789:8789"
+    volumes:
+      # Not under /data: that is where the two bind mounts below live in the
+      # dispatcher's and the agents' layout, and nesting the volume under them
+      # to keep COLLECTOR_DB_PATH byte-identical with the dashboard's would
+      # trade a legible mount list for an environment variable.
+      - observability_data:/events:ro
+      - ../../dispatcher_state:/state:ro
+      - ../../.hive:/data/.hive:ro
+      - ../../.data/projects:/data/projects:ro
+      - ../../config.yaml:/app/config.yaml:ro
+    environment:
+      - COLLECTOR_DB_PATH=/events/events.db
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+    depends_on:
+      - collector
+    networks:
+      - ia_harness_net
+
   registry-mirror:
     image: registry:2
     restart: unless-stopped

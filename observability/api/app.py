@@ -68,8 +68,11 @@ DEFAULT_EVENT_LIMIT = 100
 #: What a task file can fail with. `yaml.YAMLError` is in here and is not a
 #: `ValueError`: a task file whose frontmatter does not scan raises it out of
 #: `read_task_file`, and without it one hand-edited card would 500 the endpoint
-#: that exists to report that kind of damage.
-_UNREADABLE = (OSError, ValueError, KeyError, yaml.YAMLError)
+#: that exists to report that kind of damage. `TypeError` is here for the third
+#: way the same file fails: parsing succeeding does not mean the document has a
+#: shape. `---\nTODO write this up\n---` scans into a `str` and a list of bullets
+#: into a `list`, and `read_task_file`'s `fm["task_id"]` then subscripts it.
+_UNREADABLE = (OSError, TypeError, ValueError, KeyError, yaml.YAMLError)
 
 #: Said once per request that would have read cards, when the harness is
 #: pointed at a remote board instead of a local one. See `docs/decisions.md`
@@ -151,10 +154,14 @@ def create_app(config_path: str, db_path: str, username: str, password_hash: str
                 row["rate_limited_at"] = state_machine.get_rate_limited_at(
                     cfg.state_dir, account.name
                 )
-            except (OSError, ValueError, KeyError) as exc:
+            except (OSError, TypeError, AttributeError, ValueError, KeyError) as exc:
                 # The account is configured whatever its state file says, so it
                 # stays in the list with the unreadable half nulled: dropping it
                 # would hide an account from the one page that watches the pool.
+                # `TypeError` and `AttributeError` for the same reason
+                # `_UNREADABLE` carries `TypeError`: a state file holding a JSON
+                # array parses, and `get_state`'s `data["state"]` and
+                # `get_current_task`'s `data.get(...)` then fail on its shape.
                 warnings.append(f"{path}: unreadable account state: {exc}")
                 row.update(state=None, current_task=None, rate_limited_at=None)
             data.append(row)
@@ -220,7 +227,14 @@ def _envelope(data, warnings: list[str]):
 
 
 def _error(message: str, status: int):
-    """Every non-200 but the 401, which `observability/auth.py` owns."""
+    """Every non-200 this module returns but the 401, which `observability/auth.py` owns.
+
+    Not every non-200 the caller can see: Flask answers a path no route matches
+    and a write verb on a route itself, in HTML, and neither reaches this.
+    `docs/decisions.md` ADR 5 says so and
+    `tests/observability/test_api.py:test_flasks_own_404_and_405_are_html_not_this_envelope`
+    pins it, so a Phase 2 client knows to guard the content type.
+    """
     return jsonify({"error": message}), status
 
 

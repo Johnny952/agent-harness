@@ -154,8 +154,15 @@ unreadable one — and Phase 2 is written against whatever this phase did.
 
 **Decision.** In `observability/api/app.py`:
 
-- Every non-200 but the 401 is `{"error": "<one sentence naming what was
-  wrong>"}`. There is no `warnings` key on an error: nothing was read.
+- Every non-200 *this module returns*, but the 401, is
+  `{"error": "<one sentence naming what was wrong>"}`. There is no `warnings`
+  key on an error: nothing was read. The two Flask raises for itself are not
+  covered and are not JSON: a path no route matches answers 404 and a write
+  verb on a route answers 405, both `text/html` with a Werkzeug page. Measured,
+  not assumed. A Phase 2 client that calls `.json()` on any non-200 therefore
+  has to guard the content type, which is the cheaper half of the trade — an
+  `errorhandler` per status would make the promise true at the cost of hiding
+  a typo'd path behind the same envelope shape a real endpoint answers with.
 - 400 for an unknown query parameter, for a non-integer `limit`/`since`, for a
   non-positive `limit`, and for an absent `project` where `projects_root` holds
   more than one checkout. An empty value (`?limit=&since=`) reads as absent, so

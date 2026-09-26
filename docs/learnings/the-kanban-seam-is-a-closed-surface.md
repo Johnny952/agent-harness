@@ -16,13 +16,19 @@ public surface twice over:
   everything `VibeKanbanClient` exposes — `enabled`, `list_issues`,
   `get_issue`, `create_issue`, `set_status`;
 - `test_the_local_board_adds_nothing_to_the_shared_surface` asserts
-  `LocalBoardClient` exposes *exactly* that set, not a superset.
+  `LocalBoardClient` exposes *exactly* `VibeKanbanClient`'s names plus the
+  named exceptions in that module's `LOCAL_BOARD_ONLY` — not a free superset.
 
-So a public method on one client only — a Phase 1 reader method, a `delete`,
-a `count` — fails the second test. That is deliberate:
+So a public method on one client only — a `delete`, a `count` — fails the
+second test unless it is named in `LOCAL_BOARD_ONLY` first. That is deliberate:
 `dispatcher/dispatcher.py` does not know which implementation it got, so a
-method only one board has is a method nothing can call. Widening the seam means
-widening it for every client, in one change, with the ADR to say why.
+method only one board has is a method *it* can never call. There are two ways
+through, and neither is silent. Widen the seam for every client, in one change,
+with the ADR to say why; or add the name to `LOCAL_BOARD_ONLY` with an ADR, on
+the standing condition that `dispatcher/dispatcher.py` never calls it and only
+a caller that knows which implementation it built does. T-009 took the second
+for `LocalBoardClient.unreadable()`: `observability/api/app.py:_read_cards`
+constructs its own `LocalBoardClient` from the config, so it knows.
 
 ## What needs no edit
 
@@ -41,3 +47,10 @@ both went false the moment a second client minted its own ids and stored no
 
 T-008, revisor finding 2 and the two parity tests. `docs/decisions.md` ADR 1
 carries the field list and the status vocabulary.
+
+T-009 added `LOCAL_BOARD_ONLY` and the reasoning for `unreadable()` is
+`docs/decisions.md` ADR 4. It also found the assertion weaker than this file
+claimed: it compared `LocalBoardClient`'s names against the *union* of both
+clients' names, which contains whatever `LocalBoardClient` exposes, so it had
+never failed a superset at all. An "exactly this surface" assertion has to name
+the reference surface explicitly — `VibeKanbanClient`'s — or it asserts nothing.

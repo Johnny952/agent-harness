@@ -236,23 +236,31 @@ def test_every_agent_service_has_collector_url_and_source_app() -> None:
         assert "SOURCE_APP" in env_keys, f"{name} is missing SOURCE_APP"
 
 
-def test_the_read_api_gets_no_socket_and_mounts_everything_read_only() -> None:
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_the_read_api_gets_no_socket_and_mounts_everything_read_only(
+    compose_file: str,
+) -> None:
     """The read API (docs/plans/board.md Phase 1) is a web process holding the
     dispatcher's own directories, so two properties are load-bearing: it never
     gets /var/run/docker.sock — `dispatcher/docker_exec.py` travels into the
     image as an import and is never called, and a socket there would be root on
     the host for anyone who reached the page — and every mount is `:ro`, which
     is what lets it be handed root-owned state at all. Asserted statically
-    because both are one hand-edit away from being undone."""
-    api = _load("docker-compose.yml")["services"]["api"]
+    because both are one hand-edit away from being undone, and on both files
+    because the Coolify one is a whole deploy path: a service missing from it
+    is a deployment that silently has no /api/*, which is how Phase 2 would
+    come to be built against something that never starts."""
+    api = _load(compose_file)["services"]["api"]
 
     for volume in api["volumes"]:
         assert isinstance(volume, str), "long-syntax mounts would escape this check"
         source, target, *options = volume.split(":")
         assert "docker.sock" not in source, (
-            "the api service must not mount the docker socket: it reads files and "
-            "calls nothing out of process"
+            f"the api service in {compose_file} must not mount the docker socket: "
+            "it reads files and calls nothing out of process"
         )
         assert options == ["ro"], f"{target} must be mounted :ro, found {volume!r}"
-    # Loopback-only like every other published port in this file.
+    # Loopback-only like every other published port in these files.
     assert api["ports"] == ["127.0.0.1:8789:8789"]

@@ -222,6 +222,22 @@ def test_a_task_file_whose_frontmatter_does_not_scan_is_a_warning_too(tmp_path: 
     assert str(broken) in body["warnings"][0]
 
 
+def test_frontmatter_that_scans_into_a_scalar_is_a_warning_too(tmp_path: Path) -> None:
+    # The third way a task file fails, and the one no exception in the yaml or
+    # the value families covers: it scans, into something that is not a mapping.
+    # read_task_file then subscripts a str and raises TypeError.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-2"))
+    broken.write_text("---\nTODO write this up\n---\n\nbody\n")
+
+    resp = _get(harness, "/api/tasks")
+
+    assert resp.status_code == 200
+    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
+    assert str(broken) in resp.get_json()["warnings"][0]
+
+
 def test_a_task_carries_the_card_its_issue_id_points_at(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     issue_id = harness.board.create_issue("Phase 1", "a read API")
@@ -405,6 +421,23 @@ def test_an_unreadable_account_state_file_is_a_warning_naming_it(tmp_path: Path)
     assert body["data"][1]["state"] == "BUSY"
 
 
+def test_a_state_file_that_is_not_an_object_is_a_warning_naming_it(tmp_path: Path) -> None:
+    # json.loads succeeds and state_machine then subscripts a list: parsed is
+    # not shaped, and TypeError is not a ValueError. The account stays in the
+    # list with the unreadable half nulled, as an unparseable file does.
+    harness = _harness(tmp_path)
+    path = Path(harness.state_dir) / "cuenta1.json"
+    path.write_text(json.dumps(["BUSY"]))
+
+    resp = _get(harness, "/api/accounts")
+
+    assert resp.status_code == 200
+    [account] = resp.get_json()["data"]
+    assert account["name"] == "cuenta1"
+    assert account["state"] is None
+    assert str(path) in resp.get_json()["warnings"][0]
+
+
 # --- events ---------------------------------------------------------------
 
 
@@ -574,6 +607,25 @@ def test_no_route_accepts_a_write(tmp_path: Path) -> None:
     for route in ROUTES:
         for method in (harness.client.post, harness.client.put, harness.client.delete):
             assert method(route, headers=_auth()).status_code == 405
+
+
+def test_flasks_own_404_and_405_are_html_not_this_envelope(tmp_path: Path) -> None:
+    # docs/decisions.md ADR 5 promises a JSON {"error": ...} for every non-200
+    # this module *returns*, and these two it does not return: Flask raises them
+    # before any view. Pinned rather than assumed, because a Phase 2 client
+    # calling .json() on any non-200 hits these on exactly the mistakes it makes
+    # most — a typo'd path and a wrong verb. A later task that registers
+    # errorhandlers to make the promise unconditional should fail here and
+    # update the ADR with it.
+    harness = _harness(tmp_path)
+
+    missing = _get(harness, "/api/nope")
+    wrong_verb = harness.client.post("/api/tasks", headers=_auth())
+
+    assert (missing.status_code, wrong_verb.status_code) == (404, 405)
+    for resp in (missing, wrong_verb):
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert resp.get_json(silent=True) is None
 
 
 def test_reading_the_events_endpoint_creates_no_schema(tmp_path: Path) -> None:
