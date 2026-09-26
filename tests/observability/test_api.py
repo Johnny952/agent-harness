@@ -481,10 +481,14 @@ def test_a_missing_events_database_is_an_empty_list_and_a_warning(tmp_path: Path
     assert resp.status_code == 200
     assert resp.get_json()["data"] == []
     assert harness.db_path in resp.get_json()["warnings"][0]
+    assert "no events database yet" in resp.get_json()["warnings"][0]
     assert not Path(harness.db_path).exists()
 
 
 def test_a_database_that_is_not_one_is_a_warning_rather_than_a_500(tmp_path: Path) -> None:
+    # A file that is there and will not open is a different situation from a
+    # harness that has never run, and sqlite's own message says neither: the
+    # two warnings are told apart so an operator knows which one they have.
     harness = _harness(tmp_path, with_db=False)
     Path(harness.db_path).write_text("this is not a database")
 
@@ -492,7 +496,10 @@ def test_a_database_that_is_not_one_is_a_warning_rather_than_a_500(tmp_path: Pat
 
     assert resp.status_code == 200
     assert resp.get_json()["data"] == []
-    assert harness.db_path in resp.get_json()["warnings"][0]
+    warning = resp.get_json()["warnings"][0]
+    assert harness.db_path in warning
+    assert "could not be opened read-only" in warning
+    assert "-shm" in warning
 
 
 # --- debt -----------------------------------------------------------------

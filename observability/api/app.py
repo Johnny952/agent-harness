@@ -184,7 +184,7 @@ def create_app(config_path: str, db_path: str, username: str, password_hash: str
             # A harness that has never run has no events database, and this
             # service may not create one: the volume is `:ro` and `init_db`
             # would run `CREATE TABLE`. No events is not an error.
-            return _envelope([], [f"{db_path}: no readable events database: {exc}"])
+            return _envelope([], [_no_events_warning(db_path, exc)])
         return _envelope(rows, [])
 
     @app.get("/api/debt")
@@ -312,6 +312,29 @@ def _read_cards(cfg: Config) -> tuple[dict[str, dict], list[str]]:
     return {
         issue.issue_id: dataclasses.asdict(issue) for issue in board.list_issues()
     }, warnings
+
+
+def _no_events_warning(db_path: str, exc: Exception) -> str:
+    """Why `/api/events` came back empty, in terms of the file and not of sqlite.
+
+    Two situations answer the same way and deserve different sentences, because
+    sqlite's own message (`unable to open database file`) says nothing about
+    either. A harness that has never run has no database there, and that is not
+    an error. A database that *is* there and will not open read-only is almost
+    always the second one, measured rather than guessed
+    (`docs/implementations/T-009.md`, "The events volume is `:ro` and the
+    collector writes WAL"): a read-only open of a WAL database creates the
+    `-shm` sidecar beside it when no writer is holding one, and a `:ro` mount
+    cannot host that write. An operator reading `[]` is owed the difference,
+    since one of the two is a cold start and the other is a mount to argue with.
+    """
+    if not os.path.exists(db_path):
+        return f"{db_path}: no events database yet: {exc}"
+    return (
+        f"{db_path}: events database could not be opened read-only: {exc}. "
+        "Usually the `-shm` sidecar a WAL database needs, which a read-only "
+        "mount cannot create; see docs/implementations/T-009.md."
+    )
 
 
 def _project_slugs(projects_root: str) -> list[str]:
