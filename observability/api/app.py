@@ -15,7 +15,10 @@ Two rules shape the whole module:
 - **Every 200 is `{"data": …, "warnings": […]}`.** One file that will not parse
   costs a warning naming it and nothing else: the rest of the list still comes
   back, and no read in here answers 500. Nothing is dropped silently, which is
-  the entire reason the envelope is not a bare array.
+  the entire reason the envelope is not a bare array. Never-500 is bounded and
+  the bound is written down — `docs/decisions.md` ADR 5: it is what the guards
+  in this module enforce over the files they read, not a property of Flask, and
+  the two raises Flask keeps for itself answer HTML.
 - **An unknown query parameter is a 400.** Answering a misspelled filter with
   everything is the failure mode that costs the caller without telling them —
   the same reasoning `LocalBoardClient.list_issues` follows for an unknown
@@ -117,10 +120,23 @@ def create_app(config_path: str, db_path: str, username: str, password_hash: str
             path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
             try:
                 task = context_transfer.read_task_file(path)
+                # The guard wraps the *use* of the parsed values and not only
+                # the parse. A frontmatter value of the wrong shape raises
+                # where it is used: `_task` looks `kanban_issue_id` up as a
+                # dict key, so a mapping or a sequence there is an unhashable
+                # type. `app.json.dumps` is the serialisation `_envelope` does
+                # anyway, run here so a value YAML builds and JSON cannot —
+                # `owner: !!set {a: null}` — costs this one task a warning
+                # instead of 500-ing the whole list from outside every
+                # `except` in the module. It is the provider `jsonify` uses,
+                # not `json.dumps`, so a YAML date still serialises. Narrowing
+                # this `try` back to the parse reopens both.
+                row = _task(task, cards)
+                app.json.dumps(row)
             except _UNREADABLE as exc:
                 warnings.append(f"{path}: unreadable task file: {exc}")
                 continue
-            data.append(_task(task, cards))
+            data.append(row)
         return _envelope(data, warnings)
 
     @app.get("/api/tasks/<task_id>")
@@ -137,12 +153,16 @@ def create_app(config_path: str, db_path: str, username: str, password_hash: str
         cards, warnings = _read_cards(cfg)
         try:
             found = context_transfer.read_task_file(path)
+            # Shaping and serialisation inside the guard, as on `/api/tasks`
+            # and for the same reason; the comment there says why.
+            row = _task(found, cards)
+            app.json.dumps(row)
         except _UNREADABLE as exc:
             # A 404 here would say the task does not exist, which is a lie
             # about a file that does: the caller gets `null` and the reason.
             warnings.append(f"{path}: unreadable task file: {exc}")
             return _envelope(None, warnings)
-        return _envelope(_task(found, cards), warnings)
+        return _envelope(row, warnings)
 
     @app.get("/api/accounts")
     @requires_auth
@@ -336,12 +356,20 @@ def _read_cards(cfg: Config) -> tuple[dict[str, dict], list[str]]:
     turns a board that is quietly short — `docs/debt/T-008-D2.md` — into a
     warning a reader can see.
 
-    The `except OSError` is on this side of the seam on purpose.
+    The `except (OSError, TypeError)` is on this side of the seam on purpose.
     `LocalBoardClient._scan` catches `FileNotFoundError` only, because for the
     dispatcher a missing directory is a board with no issues while a
     `local_board.dir` that is a regular file must raise — `create_issue` would
     otherwise mint cards nobody can list. Here the contract is the other one:
     no read answers 500, and every path it could not read is named.
+
+    `TypeError` is in there because a card's fields are text some phase wrote
+    and `_read_path` validates one of them: it checks the document is a mapping
+    with a string `issue_id` and leaves the rest whatever was on disk. `_scan`
+    then sorts on `created_at`, so two cards whose `created_at` are of
+    different types compare a `str` against an `int`. Fixing that in `_scan` or
+    `_read_path` would be a `dispatcher/` contract change this service has no
+    reason to make; never-500 belongs on this side.
     """
     if cfg.local_board is None:
         return {}, [_REMOTE_BOARD_WARNING] if cfg.vibe_kanban is not None else []
@@ -352,8 +380,8 @@ def _read_cards(cfg: Config) -> tuple[dict[str, dict], list[str]]:
             for path in board.unreadable()
         ]
         cards = {issue.issue_id: dataclasses.asdict(issue) for issue in board.list_issues()}
-    except OSError as exc:
-        return {}, [f"{cfg.local_board.dir}: unreadable board directory: {exc}"]
+    except (OSError, TypeError) as exc:
+        return {}, [f"{cfg.local_board.dir}: unreadable board: {exc}"]
     return cards, warnings
 
 

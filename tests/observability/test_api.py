@@ -238,6 +238,70 @@ def test_frontmatter_that_scans_into_a_scalar_is_a_warning_too(tmp_path: Path) -
     assert str(broken) in resp.get_json()["warnings"][0]
 
 
+def test_a_kanban_issue_id_that_is_not_a_string_is_a_warning_and_not_a_500(
+    tmp_path: Path,
+) -> None:
+    # The fourth way a task file fails, and the first that survives the parse:
+    # `read_task_file` hands `kanban_issue_id` back whatever YAML built, and
+    # `_task` looks it up as a dict key. A mapping there is unhashable, so the
+    # TypeError lands at the use and not at the read.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-2"))
+    broken.write_text(
+        "---\ntask_id: T-2\nstatus: in_progress\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\nkanban_issue_id:\n  id: 11111111-2222-3333-4444-555555555555\n"
+        "---\n\nbody\n"
+    )
+
+    resp = _get(harness, "/api/tasks")
+
+    assert resp.status_code == 200
+    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
+    assert str(broken) in resp.get_json()["warnings"][0]
+
+
+def test_frontmatter_json_cannot_serialise_is_a_warning_and_not_a_500(tmp_path: Path) -> None:
+    # The fifth, and the one that used to land outside every `except` in the
+    # module: `!!set` is a tag `yaml.safe_load` builds and `jsonify` refuses,
+    # and `jsonify` runs inside `_envelope`, after the guard has been left.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-2"))
+    broken.write_text(
+        "---\ntask_id: T-2\nstatus: in_progress\nowner: !!set {a: null}\n"
+        "depends_on: []\nheartbeat: null\n---\n\nbody\n"
+    )
+
+    resp = _get(harness, "/api/tasks")
+
+    assert resp.status_code == 200
+    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
+    assert str(broken) in resp.get_json()["warnings"][0]
+
+
+def test_a_frontmatter_date_serialises_rather_than_costing_the_task_a_warning(
+    tmp_path: Path,
+) -> None:
+    # The check above is `app.json.dumps` and not `json.dumps` for this file:
+    # `owner: 2026-09-26` scans into a `datetime.date`, which Flask's provider
+    # renders and the stdlib refuses. Checking with the stdlib would answer 200
+    # by warning about a task the service has always served.
+    harness = _harness(tmp_path)
+    dated = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))
+    dated.write_text(
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: 2026-09-26\n"
+        "depends_on: []\nheartbeat: null\n---\n\nbody\n"
+    )
+
+    resp = _get(harness, "/api/tasks")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["warnings"] == []
+    [task] = resp.get_json()["data"]
+    assert task["owner"] == "Sat, 26 Sep 2026 00:00:00 GMT"
+
+
 def test_a_task_carries_the_card_its_issue_id_points_at(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     issue_id = harness.board.create_issue("Phase 1", "a read API")
@@ -316,7 +380,39 @@ def test_a_board_directory_that_is_a_file_is_a_warning_and_not_a_500(tmp_path: P
     assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
     assert resp.get_json()["data"][0]["card"] is None
     assert str(harness.board_dir) in resp.get_json()["warnings"][0]
-    assert "unreadable board directory" in resp.get_json()["warnings"][0]
+    assert "unreadable board" in resp.get_json()["warnings"][0]
+
+
+def test_a_card_whose_created_at_will_not_sort_is_a_warning_and_not_a_500(
+    tmp_path: Path,
+) -> None:
+    # `_read_path` checks the document is a mapping with a string `issue_id`
+    # and nothing else, so `created_at` is whatever was on disk and `_scan`
+    # sorts on it. Two cards are the point: a one-element sort compares
+    # nothing. The fix is this side's `except`, not `_scan`'s key — see
+    # `_read_cards`.
+    harness = _harness(tmp_path)
+    good = harness.board.create_issue("Phase 1")
+    unsortable = harness.board_dir / "99999999-8888-7777-6666-555555555555.json"
+    unsortable.write_text(
+        json.dumps(
+            {
+                "issue_id": "99999999-8888-7777-6666-555555555555",
+                "title": "hand-written",
+                "status": "pending",
+                "created_at": 1758900000,
+            }
+        )
+    )
+    _task(harness.tasks_dir, "T-1", kanban_issue_id=good)
+
+    resp = _get(harness, "/api/tasks")
+
+    assert resp.status_code == 200
+    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
+    assert resp.get_json()["data"][0]["card"] is None
+    assert str(harness.board_dir) in resp.get_json()["warnings"][0]
+    assert "unreadable board" in resp.get_json()["warnings"][0]
 
 
 def test_a_remote_board_is_a_warning_rather_than_a_dialled_subprocess(tmp_path: Path) -> None:
@@ -377,6 +473,41 @@ def test_one_task_that_will_not_parse_is_null_with_a_warning_not_a_404(tmp_path:
     harness = _harness(tmp_path)
     broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))
     broken.write_text("no frontmatter here at all\n")
+
+    resp = _get(harness, "/api/tasks/T-1")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["data"] is None
+    assert str(broken) in resp.get_json()["warnings"][0]
+
+
+def test_one_task_whose_kanban_issue_id_is_not_a_string_is_null_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    # Same guard as `/api/tasks`, reached by the route that reads one file:
+    # a task that will not shape answers `null` and the reason, not a 500.
+    harness = _harness(tmp_path)
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))
+    broken.write_text(
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\nkanban_issue_id:\n  - 11111111-2222-3333-4444-555555555555\n"
+        "---\n\nbody\n"
+    )
+
+    resp = _get(harness, "/api/tasks/T-1")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["data"] is None
+    assert str(broken) in resp.get_json()["warnings"][0]
+
+
+def test_one_task_json_cannot_serialise_is_null_with_a_warning(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))
+    broken.write_text(
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: !!set {a: null}\n"
+        "depends_on: []\nheartbeat: null\n---\n\nbody\n"
+    )
 
     resp = _get(harness, "/api/tasks/T-1")
 

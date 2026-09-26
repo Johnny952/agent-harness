@@ -184,12 +184,25 @@ unreadable one — and Phase 2 is written against whatever this phase did.
 - A missing or unopenable events database, and a missing debt index, are `[]`
   plus a warning. Neither is an error: a harness that has never run has no
   events, and a project that has filed no debt has no index.
-- A `local_board.dir` that cannot be listed at all — it is a regular file, or
-  the mount is gone — is every `card` null plus one warning naming the
-  directory, not a 500. `LocalBoardClient._scan` raises for anything but a
-  missing directory, and correctly so: for the dispatcher a board that reads as
-  empty would let `create_issue` mint cards nobody can list. The widening
+- A `local_board.dir` that cannot be listed at all — it is a regular file, the
+  mount is gone, or its cards will not sort against each other — is every
+  `card` null plus one warning naming the directory, not a 500.
+  `LocalBoardClient._scan` raises for anything but a missing directory, and
+  correctly so: for the dispatcher a board that reads as empty would let
+  `create_issue` mint cards nobody can list, and a card's fields are text some
+  phase wrote of which only `issue_id` is checked on the way in. The widening
   belongs on this side of the seam, where never-500 is the contract.
+- **Never-500 is bounded, and the bound is a guard and not a promise about
+  Flask.** Each task row is read, shaped *and* serialised inside one `try`:
+  a frontmatter value of the wrong type raises where it is used — as a dict
+  key in `_task`, or inside `jsonify` — and both points are covered, so such a
+  task costs a warning naming its file. Two things stay outside it, both
+  measured. The 404 and 405 Flask raises for itself are HTML, as the first
+  bullet says. And the guard is per task row: a value that reaches `_envelope`
+  from `/api/accounts`, `/api/events` or `/api/debt` is not serialisation-
+  checked, because those three shape their own rows out of `str` and `int` and
+  have no frontmatter to carry a `set`. A later endpoint that returns anything
+  a parser built inherits the obligation, not the guarantee.
 
 **Consequences.** A Phase 2 client can treat `data === null` and `data === []`
 as "nothing to show, read `warnings`" and reserve its error path for non-200s.
