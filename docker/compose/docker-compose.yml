@@ -63,13 +63,14 @@ services:
   # an operator — and Phase 2's UI — stops reading root-owned
   # dispatcher_state/*.json through a throwaway container.
   #
-  # Every mount is :ro and nothing here writes, which is why it can be handed
-  # the dispatcher's own directories at the dispatcher's own container paths:
-  # `state_dir: /state`, `hive_tasks_dir: /data/.hive/tasks` and
-  # `projects_root: /data/projects` are true in this container too, so
-  # config.yaml needs no key for this service. It gets no docker socket: the
-  # dispatcher's readers arrive with it, docker_exec included, and none of the
-  # latter is ever called.
+  # Every mount but the events volume is :ro and nothing here writes, which is
+  # why it can be handed the dispatcher's own directories at the dispatcher's
+  # own container paths: `state_dir: /state`, `hive_tasks_dir: /data/.hive/tasks`
+  # and `projects_root: /data/projects` are true in this container too, so
+  # config.yaml needs no key for this service. The events volume is the single
+  # exception, forced by SQLite's WAL sidecar and argued at the mount itself.
+  # It gets no docker socket: the dispatcher's readers arrive with it,
+  # docker_exec included, and none of the latter is ever called.
   api:
     build:
       context: ../..
@@ -82,7 +83,15 @@ services:
       # dispatcher's and the agents' layout, and nesting the volume under them
       # to keep COLLECTOR_DB_PATH byte-identical with the dashboard's would
       # trade a legible mount list for an environment variable.
-      - observability_data:/events:ro
+      #
+      # The one mount here that is not :ro, and the only one that cannot be
+      # (docs/debt/T-009-D4.md): the collector keeps events.db in WAL mode, and
+      # SQLite creates the `-shm` sidecar beside the file even for a read-only
+      # open, which a :ro mount refuses — so /api/events answered [] plus a
+      # warning that read like a missing database on every request. The API
+      # still opens it with `mode=ro` in the URI and never calls init_db, so
+      # what this grants is the sidecar, not the rows.
+      - observability_data:/events
       - ../../dispatcher_state:/state:ro
       - ../../.hive:/data/.hive:ro
       - ../../.data/projects:/data/projects:ro

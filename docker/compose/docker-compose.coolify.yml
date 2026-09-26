@@ -96,7 +96,8 @@ services:
   # docker-compose.yml: this file is the one-resource deploy path, so a service
   # only the split files carry is a service a Coolify deployment silently does
   # not have. tests/integration/test_compose_invariants.py asserts both files
-  # on the same two properties — no docker socket, every mount :ro.
+  # on the same two properties — no docker socket, and every mount :ro but the
+  # one named in API_WRITABLE_MOUNTS.
   api:
     build:
       context: ../..
@@ -109,7 +110,15 @@ services:
       # dispatcher's and the agents' layout, and nesting the volume under them
       # to keep COLLECTOR_DB_PATH byte-identical with the dashboard's would
       # trade a legible mount list for an environment variable.
-      - observability_data:/events:ro
+      #
+      # The one mount here that is not :ro, and the only one that cannot be
+      # (docs/debt/T-009-D4.md): the collector keeps events.db in WAL mode, and
+      # SQLite creates the `-shm` sidecar beside the file even for a read-only
+      # open, which a :ro mount refuses — so /api/events answered [] plus a
+      # warning that read like a missing database on every request. The API
+      # still opens it with `mode=ro` in the URI and never calls init_db, so
+      # what this grants is the sidecar, not the rows.
+      - observability_data:/events
       - ../../dispatcher_state:/state:ro
       - ../../.hive:/data/.hive:ro
       - ../../.data/projects:/data/projects:ro

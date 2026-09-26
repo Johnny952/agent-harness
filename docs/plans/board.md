@@ -324,7 +324,7 @@ true in this container too:
     ports:
       - "127.0.0.1:8789:8789"
     volumes:
-      - observability_data:/events:ro
+      - observability_data:/events
       - ../../dispatcher_state:/state:ro
       - ../../.hive:/data/.hive:ro
       - ../../.data/projects:/data/projects:ro
@@ -343,6 +343,18 @@ The events volume lands somewhere other than `/data` on purpose: `/data` is
 where the two bind mounts live in the dispatcher's and the agents' layout, and
 nesting the volume under them to keep `COLLECTOR_DB_PATH` byte-identical would
 trade a legible mount list for an environment variable.
+
+It is also the one mount here without `:ro`, which this block specified until
+2026-09-26 and Phase 1 implemented. It could not work: the collector keeps
+`events.db` in WAL mode and a read-only sqlite open still creates the `-shm`
+sidecar beside the file, so `/api/events` answered `[]` plus a warning on every
+request. Phase 1 declared it rather than overriding its own plan — debt
+[T-009-D4](../debt/T-009-D4.md), fixed out of cycle once the by-hand check
+against the running stack confirmed the mount was the cause. Everything else
+here stays `:ro`, and `tests/integration/test_compose_invariants.py` holds that
+as `API_WRITABLE_MOUNTS = {"/events"}`: a second writable mount fails the suite.
+The API itself still opens with `mode=ro` and never calls `init_db`, so what the
+mount grants is the sidecar, not the rows.
 
 The image copies `dispatcher/` as well as `observability/`, which is the price
 of one parser per fact: this service rebuilds when the dispatcher's readers

@@ -19,6 +19,19 @@ import yaml
 COMPOSE_DIR = Path(__file__).parent.parent.parent / "docker" / "compose"
 DOCKERFILE_PATH = Path(__file__).parent.parent.parent / "docker" / "agent" / "Dockerfile"
 
+# The only api mount that may be read-write, by container path. The collector
+# keeps events.db in WAL mode and SQLite creates the `-shm` sidecar beside the
+# file even for a read-only open, which a `:ro` mount refuses -- so /api/events
+# answered [] plus a warning that read like a missing database on every request
+# (docs/debt/T-009-D4.md, confirmed against the running stack 2026-09-26 and
+# fixed the same day). `observability/api/app.py` still opens the database with
+# `mode=ro` in the URI and never calls `init_db`, so the write permission buys
+# the sidecar, not the rows. Named here rather than softening the assertion
+# below: every other mount must still be `:ro`, and a second writable mount --
+# /state above all, which is root-owned dispatcher state -- is a regression this
+# test exists to catch.
+API_WRITABLE_MOUNTS = {"/events"}
+
 
 def _load(name: str) -> dict:
     with open(COMPOSE_DIR / name) as f:
@@ -239,19 +252,24 @@ def test_every_agent_service_has_collector_url_and_source_app() -> None:
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
-def test_the_read_api_gets_no_socket_and_mounts_everything_read_only(
+def test_the_read_api_gets_no_socket_and_only_the_events_volume_is_writable(
     compose_file: str,
 ) -> None:
     """The read API (docs/plans/board.md Phase 1) is a web process holding the
     dispatcher's own directories, so two properties are load-bearing: it never
     gets /var/run/docker.sock — `dispatcher/docker_exec.py` travels into the
     image as an import and is never called, and a socket there would be root on
-    the host for anyone who reached the page — and every mount is `:ro`, which
-    is what lets it be handed root-owned state at all. Asserted statically
-    because both are one hand-edit away from being undone, and on both files
-    because the Coolify one is a whole deploy path: a service missing from it
-    is a deployment that silently has no /api/*, which is how Phase 2 would
-    come to be built against something that never starts."""
+    the host for anyone who reached the page — and every mount is `:ro` except
+    the one in API_WRITABLE_MOUNTS, which is what lets it be handed root-owned
+    state at all. Asserted statically because both are one hand-edit away from
+    being undone, and on both files because the Coolify one is a whole deploy
+    path: a service missing from it is a deployment that silently has no
+    /api/*, which is how Phase 2 would come to be built against something that
+    never starts.
+
+    Named `..._mounts_everything_read_only` until T-009-D4 was fixed; the
+    exception is one mount wide and enumerated above, so a new writable mount
+    still fails here."""
     api = _load(compose_file)["services"]["api"]
 
     for volume in api["volumes"]:
@@ -261,6 +279,12 @@ def test_the_read_api_gets_no_socket_and_mounts_everything_read_only(
             f"the api service in {compose_file} must not mount the docker socket: "
             "it reads files and calls nothing out of process"
         )
+        if target in API_WRITABLE_MOUNTS:
+            assert options == [], (
+                f"{target} is the WAL-sidecar exception (see API_WRITABLE_MOUNTS) "
+                f"and takes no mount options, found {volume!r}"
+            )
+            continue
         assert options == ["ro"], f"{target} must be mounted :ro, found {volume!r}"
     # Loopback-only like every other published port in these files.
     assert api["ports"] == ["127.0.0.1:8789:8789"]

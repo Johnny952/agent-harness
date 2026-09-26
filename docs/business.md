@@ -35,6 +35,13 @@ defect; it is the list somebody is being asked to rule on.
   offers the stray name in the 400 that says so. Nothing marks a directory as a
   harness checkout; `bootstrap-project`'s layout is the only convention.
   A human should say whether a marker file ought to be the test instead.
+  Observed rather than only inferred on 2026-09-26, by hand against the running
+  stack: `/api/debt` with no project answers `400 project is required:
+  /data/projects holds ia-harness, scratch`, and `scratch` is the toy repo the
+  V0 checks use — so the behaviour is real, not a misreading of `_project_slugs`
+  (`.data/verify/t009-api-verification.txt`). It stays here because what is
+  missing is the ruling, not the evidence: no doc, ADR or comment says a
+  directory parked under `projects_root` is meant to be a project.
 - **An account whose state file holds the JSON literal `null` is treated as
   `IDLE`.** `dispatcher/state_machine.get_state` reads it as the default rather
   than as damage, so such an account is eligible for dispatch and `/api/accounts`
