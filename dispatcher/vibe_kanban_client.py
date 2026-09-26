@@ -24,11 +24,16 @@ logger = logging.getLogger(__name__)
 class KanbanIssue:
     """One issue as the board reports it.
 
-    `issue_id` is a server-assigned uuid, not a name this harness can mint:
-    every id in Vibe Kanban's MCP schema is `format: "uuid"`. `simple_id` is
-    the short human handle the board shows ("VK-12") and is the one field an
-    operator can search on, so it is worth keeping even though the harness
-    keys on the uuid.
+    `issue_id` is a uuid either way, because every id in Vibe Kanban's MCP
+    schema is `format: "uuid"` and `dispatcher/cli.py` rejects a
+    `--kanban-issue-id` that does not parse as one. `VibeKanbanClient` is
+    handed it by the server; `LocalBoardClient` mints it.
+
+    `simple_id` is the remote board's short human handle ("VK-12"), worth
+    keeping even though the harness keys on the uuid. A local card has none:
+    `LocalBoardClient` leaves it `None` and `CARD_FIELDS` does not store it,
+    so `list_issues(simple_id=...)` is an unknown filter there rather than a
+    search that quietly matches nothing.
     """
 
     issue_id: str
@@ -238,6 +243,10 @@ class LocalBoardClient:
         """
         name = f"{issue_id}{_CARD_SUFFIX}"
         if not issue_id or os.path.basename(name) != name:
+            # Rejecting it silently would leave the reach — a `kanban_issue_id`
+            # that tried to name a file elsewhere — looking exactly like a card
+            # the board never had.
+            logger.warning("local board: %r cannot name a card in this board", issue_id)
             return None
         return os.path.join(self.config.dir, name)
 
@@ -259,7 +268,13 @@ class LocalBoardClient:
             # task file — is answered with "no such issue" rather than raised.
             logger.warning("local board: ignoring unreadable card %s: %s", path, exc)
             return None
-        return data if isinstance(data, dict) and isinstance(data.get("issue_id"), str) else None
+        if isinstance(data, dict) and isinstance(data.get("issue_id"), str):
+            return data
+        # Parsed, but not a card. Same story as an unreadable one, and dropping
+        # it without a line leaves a reader counting cards no way to find out
+        # why the count is short.
+        logger.warning("local board: ignoring card %s with no string issue_id", path)
+        return None
 
     def _cards(self) -> list[dict]:
         """Every readable card, oldest first.

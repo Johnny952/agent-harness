@@ -41,8 +41,11 @@ state. Within that:
   is a bug. Every call site in `dispatcher/dispatcher.py`
   (`_update_task_status`, `_open_kanban_issue`) already catches `Exception` and
   logs, so this surfaces without threatening a run.
-- `get_issue` is a lookup: a missing file, an unparseable document and an id
-  that is not a bare filename all return `None`, the last two with a warning.
+- `get_issue` is a lookup and returns `None` for anything it cannot answer. A
+  missing file is silent: it is the ordinary "no such issue". The other three
+  each log a warning, because each means someone wrote something this client
+  did not — a document that will not parse, a document that parses but carries
+  no string `issue_id`, and an id that is not a bare filename.
 - A missing directory is a board with no issues. The first write creates it.
 
 **Consequences.** Phase 1's read API and Phase 2's UI read these documents, so

@@ -438,7 +438,7 @@ def test_local_board_ignores_what_it_did_not_write(tmp_path: Path, caplog) -> No
     assert "unreadable card" in caplog.text
 
 
-def test_local_board_keeps_an_id_from_naming_a_file_elsewhere(tmp_path: Path) -> None:
+def test_local_board_keeps_an_id_from_naming_a_file_elsewhere(tmp_path: Path, caplog) -> None:
     board = local_board(tmp_path)
     board.create_issue("Add a /healthz")
     (tmp_path / "escaped.json").write_text(json.dumps({"issue_id": "escaped", "title": "no"}))
@@ -447,6 +447,21 @@ def test_local_board_keeps_an_id_from_naming_a_file_elsewhere(tmp_path: Path) ->
     assert board.get_issue("../escaped") is None
     with pytest.raises(LookupError):
         board.set_status("../escaped", "done")
+
+    # Refused out loud: an id with reach is not the same event as a card the
+    # board never had, and only the log tells them apart.
+    assert "cannot name a card" in caplog.text
+
+
+def test_local_board_says_out_loud_that_a_document_is_not_a_card(tmp_path: Path, caplog) -> None:
+    board = local_board(tmp_path)
+    issue_id = board.create_issue("Add a /healthz")
+    # Parses as JSON, but carries no card: the shape `_read_path` requires is
+    # a dict with a string `issue_id`.
+    (Path(board.config.dir) / "listy.json").write_text(json.dumps(["not", "a", "card"]))
+
+    assert [i.issue_id for i in board.list_issues()] == [issue_id]
+    assert "no string issue_id" in caplog.text
 
 
 def test_local_board_get_issue_does_not_raise_on_an_id_no_path_can_hold(tmp_path: Path) -> None:
