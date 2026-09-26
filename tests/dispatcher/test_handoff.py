@@ -269,6 +269,38 @@ def test_verdict_of_is_none_when_there_is_no_verdict() -> None:
     assert handoff.verdict_of({"verdict": ["APPROVED"]}) is None
 
 
+# --- the block --------------------------------------------------------------
+
+def test_blocked_reads_the_status() -> None:
+    assert handoff.blocked({"status": handoff.BLOCKED}) is True
+    assert handoff.blocked({"status": "complete"}) is False
+    assert handoff.blocked({"status": "partial"}) is False
+
+
+def test_blocked_normalizes_case_and_padding() -> None:
+    """Same reason as the verdict: a payload that came back through the prose
+    fallback never went through the CLI's enum."""
+    assert handoff.blocked({"status": " Blocked \n"}) is True
+
+
+def test_blocked_is_false_when_there_is_no_status() -> None:
+    """False, not True: a phase that said nothing ran, and a missing field is
+    not a role asking a human for a decision."""
+    assert handoff.blocked(None) is False
+    assert handoff.blocked({}) is False
+    assert handoff.blocked({"status": ""}) is False
+    assert handoff.blocked({"status": ["blocked"]}) is False
+
+
+def test_pending_reads_the_lines() -> None:
+    assert handoff.pending({"pending": ["what the empty state shows", " ", ""]}) == [
+        "what the empty state shows",
+    ]
+    assert handoff.pending(None) == []
+    assert handoff.pending({}) == []
+    assert handoff.pending({"pending": "one string"}) == []
+
+
 # --- rendering --------------------------------------------------------------
 
 def test_render_drops_empty_sections() -> None:

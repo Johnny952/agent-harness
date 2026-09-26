@@ -4,6 +4,10 @@ One ADR per decision a later task could undo without knowing it was a
 decision. Append; never rewrite an entry that is already here — to replace
 one, strike its heading through and point at the number that supersedes it.
 
+Everything here was decided by an agent doing the work, which is what makes it
+supersedable by a later one. A ruling a human made is not an ADR and does not
+belong here: it goes in [`charter.md`](charter.md), where no role may edit it.
+
 ## ADR 1 — A local board is a directory of JSON cards, and stores dispatcher vocabulary
 
 **Status:** accepted (T-008, 2026-09-25).

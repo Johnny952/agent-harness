@@ -23,7 +23,11 @@ from dispatcher import debt, docker_exec
 
 logger = logging.getLogger(__name__)
 
-_STATUS_VALUES = ("complete", "partial", "blocked")
+#: The only status the cycle acts on. The other two are for whoever reads
+#: the task file; this one ends the task before the next phase runs.
+BLOCKED = "blocked"
+
+_STATUS_VALUES = ("complete", "partial", BLOCKED)
 
 APPROVED = "APPROVED"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
@@ -413,6 +417,35 @@ def verdict_of(payload: dict | None) -> str | None:
     if not isinstance(verdict, str):
         return None
     return verdict.strip().upper() or None
+
+
+def blocked(payload: dict | None) -> bool:
+    """Whether the phase said it could not do its job.
+
+    The field has been in the schema from the beginning and nothing read it:
+    `render` printed it into the task file and the cycle ran the next phase
+    anyway. Reading it is deliberately narrow — one role, one branch in
+    `run_task_cycle` — because a status is cheap for a role to set, and every
+    place that acts on one is a place a role can end a task from.
+    """
+    if not payload:
+        return False
+    status = payload.get("status")
+    if not isinstance(status, str):
+        return False
+    return status.strip().lower() == BLOCKED
+
+
+def pending(payload: dict | None) -> list[str]:
+    """What the phase left for the next one, as it stated it.
+
+    On a blocked phase this is the list of things that have to be decided
+    before the task can run again, which is why the block is worth reading:
+    a status with nothing under it names no way out.
+    """
+    if not payload:
+        return []
+    return _lines(payload, "pending")
 
 
 def fallback_body(text: str, head: int = 500, tail: int = 1500) -> str:

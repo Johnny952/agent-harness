@@ -176,13 +176,16 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
 - **Project docs** (`dispatcher/project_docs.py`) — what a target repo knows
   about itself, written by the roles as a side effect of the work and
   committed with its code, so a re-clone still has it. The layout is the
-  contract: `docs/README.md` is the index, `docs/decisions.md` the numbered
-  ADRs (appended to and struck through, never rewritten), `docs/architecture.md`
-  and `docs/business.md` the map and the domain, `docs/learnings/` and
+  contract: `docs/README.md` is the index, `docs/charter.md` the rulings a
+  human made that no role may edit or re-decide, `docs/decisions.md` the
+  numbered ADRs an agent made (appended to and struck through, never
+  rewritten), `docs/architecture.md` and `docs/business.md` the map and the
+  domain, `docs/learnings/` and
   `docs/debt/` one file per entry behind an index whose every row carries a
   trigger — the condition that says when to open it — and
   `docs/implementations/<task-id>.md` how one task was built. Each role is
-  handed its duty in the prompt: the arquitecto records ADRs, the
+  handed its duty in the prompt: the arquitecto reads the charter and records
+  ADRs, and blocks the task when what it read does not specify it; the
   implementador writes that implementation doc and proposes learnings and
   debt in its handoff, the revisor treats a contract change with no doc
   change as a finding, and the auditor is the only phase that writes the
@@ -660,6 +663,23 @@ a warning and whatever docs exist. The check is made against the project's
 checkout, so with `merge_on_done: false` a map still sitting on an unmerged
 task branch reads as missing and the next task maps again. Merge the first
 task, or expect a second map.
+
+**The block, before anything is written.** The arquitecto is the only phase
+that can end a task with no code written, and the one phase where that costs
+less than the alternative: it reads the plan, the charter and the indexes
+before anyone touches the worktree, so a decision the task was never given is
+visible there and nowhere earlier. `status: blocked` in its handoff ends the
+cycle at that point — the card goes `blocked`, and what it listed under
+`pending` is what a human has to answer to restart it. No other phase's
+`status` is read: it is rendered into the task file and the cycle runs on
+regardless, because a status is cheap for a role to set and every place that
+acts on one is a place a role can end a task from. The prompt draws the line
+— block for a decision nobody has made, not for a problem that is merely
+hard, since anything the arquitecto can decide itself and record as an ADR is
+its to decide. Work a user sees is where this bites most often: a screen
+whose empty, stale and failed states nobody specified is not a detail the
+implementador fills in. It invents one, and the revisor then reviews the
+invention.
 
 **The gates, before anyone pays for a review.** Between the implementador
 and the revisor the dispatcher checks the worktree itself, through

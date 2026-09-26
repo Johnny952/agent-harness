@@ -2352,6 +2352,67 @@ def test_run_task_cycle_blocks_the_card_when_every_round_was_gated(tmp_path, mon
     assert (_ISSUE_ID, "blocked") in kanban.statuses
 
 
+def test_run_task_cycle_stops_when_the_arquitecto_blocked(tmp_path, monkeypatch, caplog) -> None:
+    """An implementador handed a task nobody specified does not stop, it invents
+    the missing decision. The arquitecto is the last phase that can say so
+    before anything is written, so its `blocked` ends the task there, and what
+    it put in `pending` is what a human has to answer to restart it."""
+    cfg = _make_config(tmp_path)
+    roles = []
+    missing = [
+        "What the board shows while `/api/tasks` is in flight",
+        "Whether `warnings` renders per card or once for the page",
+    ]
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        roles.append(role)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="Structured output provided successfully",
+            account="cuenta1",
+            handoff={"status": "blocked", "pending": missing} if role == "arquitecto" else {"status": "complete"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    kanban = _FakeKanban()
+    with caplog.at_level("WARNING"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert roles == ["arquitecto"]
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    # The reason has to reach the operator: a block naming nothing is a task
+    # nobody can restart.
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert all(item in logged for item in missing)
+    # And the task file keeps it, for whoever opens the card instead of the log.
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert missing[0] in task.body
+
+
+def test_run_task_cycle_releases_the_implementador_on_a_partial_arquitecto(tmp_path, monkeypatch) -> None:
+    """Only `blocked` blocks. `partial` is the ordinary arquitecto — it left
+    work for the next phase, which is what `pending` is for and exactly what
+    the implementador is there to pick up."""
+    cfg = _make_config(tmp_path)
+    roles = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        roles.append(role)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="Structured output provided successfully",
+            account="cuenta1",
+            handoff={"status": "partial", "pending": ["Wire the route the plan names"], "verdict": "APPROVED"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
+    assert (_ISSUE_ID, "done") in kanban.statuses
+
+
 def test_run_task_cycle_approves_on_a_verdict_field(tmp_path, monkeypatch) -> None:
     """End to end: a revisor whose text says nothing still gates the cycle,
     and the auditor runs after it."""

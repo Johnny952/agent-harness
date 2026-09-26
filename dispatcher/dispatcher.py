@@ -1466,7 +1466,22 @@ def run_task_cycle(
             if ctx.foreign_lock:
                 return
 
-        if run_phase(ctx, "arquitecto") is None:
+        arquitecto = run_phase(ctx, "arquitecto")
+        if arquitecto is None:
+            return
+        if handoff.blocked(arquitecto.handoff):
+            # The one phase whose block costs less than the work it stops. The
+            # arquitecto reads the plan, the charter and the indexes before
+            # anything is written, so a decision the task was never given is
+            # visible here and nowhere earlier — and an implementador released
+            # without it does not stall, it invents one, and the revisor then
+            # reviews the invention.
+            missing = handoff.pending(arquitecto.handoff)
+            logger.warning(
+                "task %s: the arquitecto blocked before implementation: %s",
+                task_id, "; ".join(missing) or "no reason given",
+            )
+            _update_task_status(kanban, ctx.issue_id, "blocked")
             return
 
         approved = False

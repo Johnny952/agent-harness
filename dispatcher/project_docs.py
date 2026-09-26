@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 DOCS_DIR = "docs"
 #: The index, and what its absence means: a project nobody has mapped yet.
 INDEX = f"{DOCS_DIR}/README.md"
+#: The one doc in here a human writes and no role may edit: the rulings a task
+#: is given rather than allowed to re-decide. Everything else under DOCS_DIR is
+#: agent-authored, which is exactly why this one is separate — every file a role
+#: is told to write, a role will write.
+CHARTER = f"{DOCS_DIR}/charter.md"
 #: Numbered ADRs, appended to and struck through, never rewritten.
 DECISIONS = f"{DOCS_DIR}/decisions.md"
 ARCHITECTURE = f"{DOCS_DIR}/architecture.md"
@@ -138,11 +143,25 @@ _ARQUITECTO = (
     "This project's docs are in `docs/`, and about this project they outrank your skills and "
     f"any CLAUDE.md. Start at `{INDEX}` and follow it: the learnings and debt indexes carry a "
     "trigger per row saying when the entry applies and where it bites, so read the index whole "
-    "and open only the entries whose trigger matches this task. When the task decides something "
+    f"and open only the entries whose trigger matches this task. `{CHARTER}`, if it exists, is "
+    "the one doc a human wrote and no role may edit: read its triggers the same way and treat "
+    "the entries that match as given, not as something to weigh. A charter entry you cannot "
+    "satisfy is reported — in `risks` if the task can still be finished, as a block if it "
+    "cannot — and never edited or worked around. When the task decides something "
     f"a later task could undo without knowing it was a decision, append an ADR to `{DECISIONS}`: "
     "the next number, the context, the decision, its consequences, and a status. Never rewrite "
     "an ADR that is already there — to replace one, strike its heading through and point at the "
-    "number that supersedes it."
+    "number that supersedes it.\n\n"
+    "If the task cannot be specified from what you were given, set `status` to `blocked` and put "
+    "each missing definition on its own line in `pending`. That ends the task here, before the "
+    "implementador runs, which is the point: an implementador handed an underspecified task does "
+    "not stop, it invents the missing decision, and the review that follows reviews the invention. "
+    "Block for a decision nobody has made, not for a problem that is merely hard — anything you can "
+    "decide yourself and record as an ADR is yours to decide. Work a user sees is where this bites "
+    "most often: if the task changes a screen and no plan or charter entry says what that screen "
+    "shows, how it behaves with no data, with stale data or when the call fails, those are missing "
+    "definitions and not details to fill in. Name each one concretely enough that one answer "
+    "unblocks it."
 )
 
 _IMPLEMENTADOR = (

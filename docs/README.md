@@ -78,6 +78,7 @@ externally-managed.
 | Doc | When to open it |
 |---|---|
 | `README.md` (repo root) | The operator's manual: what the stack is, how to bring it up, the known gaps and the prioritized work. Long. Read the section you need, not the file. |
+| `docs/charter.md` | Before deciding anything the project may already have ruled on: which account is primary, what may spend quota, what a phase owes the docs. The only doc here a human writes and no role may edit — its entries are given, not arguments. |
 | `docs/ROADMAP.md` | The verification log. Every check that has been run against the real stack, its result and its evidence file. Open it before claiming something is or is not verified. |
 | `docs/plans/board.md` | The phased plan for replacing the dashboard with a real board, and the spec for each phase. Phase 0 is the first task dispatched against this repo. |
 | `docs/plans/balancer.md` | Before changing how accounts are picked, or how a cycle is driven. The plan for a steppable cycle under a conversational account, the two gaps the 2026-09-25 reboot exposed, which account the conversational thread runs under, and how a front-end reaches the pool. Phase 0 done; 1–3 unstarted. |

@@ -11,6 +11,11 @@ Each rule is **confirmed** (stated in a doc, an ADR or a comment, cited) or
 **unconfirmed** (inferred from the code by reading it). Unconfirmed is not a
 defect; it is the list somebody is being asked to rule on.
 
+This file runs code → human: an agent writes what it found, a human rules on it.
+The other direction is [`charter.md`](charter.md), which a human writes and no
+role may edit. A rule here that the charter already settles is not unconfirmed —
+cite the entry and move it up, or drop the row.
+
 ## Reading the harness's state
 
 - **A task's `card` is the board document its `kanban_issue_id` points at, or
