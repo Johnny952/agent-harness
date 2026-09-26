@@ -141,3 +141,32 @@ never out of scope, and "the task did not ask for docs" is not a reason.
 
 The counterpart is that a doc nobody will open is worse than no doc: what gets
 written is what a later task, reading a trigger, would open.
+
+---
+
+### C-7 — The board is Flask and Jinja, not Next.js
+
+**Ruled:** 2026-09-26, answering the open question in *The toolchain is the one
+question this spec does not answer* in
+[`docs/plans/board.md`](plans/board.md).
+**Trigger:** you are building, extending or containerising the board, or you
+are about to add a `package.json`, a lockfile or a Node build step to this
+repo.
+
+This repo is Python and Docker. A Node lockfile, a build step and a CVE
+surface are paid for when a screen needs them — a live execution timeline,
+Phase 5 — and not before. Phase 2 is four tables and a strip of accounts over
+five read-only endpoints; it is half a day of Jinja against the same
+`python:3.11-slim` base the api already uses.
+
+The phases plan says Node pays for itself at Phase 4. Having written both
+specs, the real trigger is Phase 5: Phase 4's actions are a form post and a
+queue, which Jinja serves. Either way the trigger is after Phase 3, and
+nothing after Phase 3 starts before Phase 3 has run against a real dispatch.
+
+What follows for whoever builds it: the board is an HTTP client of the api and
+nothing else — no volumes, no `.hive/`, no events database, no socket. That is
+the property that makes this ruling cheap to reverse. If phases 4–6 are
+approved, the replacement is written against the same specification; the
+screens, the states, the warnings and the exclusions do not change, and only
+*Where it runs* and *Configuration* name a toolchain at all.

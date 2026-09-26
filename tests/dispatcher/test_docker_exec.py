@@ -1212,6 +1212,85 @@ def test_commit_worktree_commits_anyway_when_the_scope_check_cannot_run(
     assert caplog.text == ""
 
 
+def test_commit_worktree_subtracts_the_excludes_from_a_scoped_commit(monkeypatch) -> None:
+    """The auditor's scope is docs/ and the charter lives under it, so the
+    exclusion has to be a pathspec rather than a different scope."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls))
+
+    committed = commit_worktree(
+        _CONTAINER, "/wd", "msg", "name", "mail@example.invalid",
+        paths=["docs"], excludes=["docs/charter.md"],
+    )
+
+    assert committed is True
+    assert ["git", "add", "-A", "--", "docs", ":(exclude)docs/charter.md"] in [
+        _in_container(cmd) for cmd in calls
+    ]
+
+
+def test_commit_worktree_subtracts_the_excludes_from_an_unscoped_commit(monkeypatch) -> None:
+    """`git add -A` takes no pathspec, so the exclusion needs a positive base to
+    be subtracted from: `.`, which is what -A already means at a worktree root."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls))
+
+    commit_worktree(
+        _CONTAINER, "/wd", "msg", "name", "mail@example.invalid",
+        excludes=["docs/charter.md"],
+    )
+
+    assert ["git", "add", "-A", "--", ".", ":(exclude)docs/charter.md"] in [
+        _in_container(cmd) for cmd in calls
+    ]
+
+
+def test_commit_worktree_names_an_excluded_path_the_phase_changed(
+    monkeypatch, caplog,
+) -> None:
+    """Louder than the out-of-scope warning, and separate from it: that one
+    reports an untidy phase, this one reports a rule broken. The commit goes
+    ahead without the file and the edit stays in the worktree for a human."""
+
+    def respond(args):
+        if args[:2] == ["git", "status"]:
+            return (0, " M docs/README.md\n M docs/charter.md\n", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with caplog.at_level(logging.WARNING, logger="dispatcher.docker_exec"):
+        committed = commit_worktree(
+            _CONTAINER, "/wd", "msg", "name", "mail@example.invalid",
+            paths=["docs"], excludes=["docs/charter.md"],
+        )
+
+    assert committed is True
+    assert "docs/charter.md" in caplog.text
+    assert "docs/README.md" not in caplog.text
+
+
+def test_commit_worktree_is_quiet_when_the_excluded_paths_were_left_alone(
+    monkeypatch, caplog,
+) -> None:
+    """The ordinary case: every phase carries the exclusion, almost none trip it."""
+
+    def respond(args):
+        if args[:2] == ["git", "status"]:
+            return (0, " M docs/README.md\n", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with caplog.at_level(logging.WARNING, logger="dispatcher.docker_exec"):
+        commit_worktree(
+            _CONTAINER, "/wd", "msg", "name", "mail@example.invalid",
+            paths=["docs"], excludes=["docs/charter.md"],
+        )
+
+    assert caplog.text == ""
+
+
 def test_dirty_paths_names_everything_the_checkout_holds_that_head_does_not(
     monkeypatch,
 ) -> None:

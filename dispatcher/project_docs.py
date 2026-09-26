@@ -58,6 +58,15 @@ MAPPER_ROLE = "cartografo"
 #: is under DOCS_DIR, which is what makes the scope exactly the duty.
 _COMMIT_SCOPES = {"auditor": (DOCS_DIR,)}
 
+#: What no role's commit stages, whatever its scope says. The scope above is
+#: DOCS_DIR and CHARTER is under it, so without this the auditor — the one role
+#: whose whole duty is writing docs — is also the one role that could quietly
+#: rewrite the ruling it was given. The charter's own "When an entry is wrong"
+#: gives a role three ways to report a ruling it cannot satisfy, and editing
+#: the entry is not one of them: this is that paragraph made true of the
+#: commit rather than left to the prompt.
+_COMMIT_EXCLUDES = (CHARTER,)
+
 
 def commit_scope(role: str) -> tuple[str, ...] | None:
     """The paths this role may commit, or None for the whole worktree.
@@ -66,6 +75,15 @@ def commit_scope(role: str) -> tuple[str, ...] | None:
     the work has no fixed shape to hold them to.
     """
     return _COMMIT_SCOPES.get(role)
+
+
+def commit_excludes() -> tuple[str, ...]:
+    """The paths no role's commit stages, whoever the role is.
+
+    Not keyed by role, unlike the scope: "no role may edit it" is the whole
+    point of the charter, and a mapping invites an exception.
+    """
+    return _COMMIT_EXCLUDES
 
 
 def implementation_doc(task_id: str) -> str:

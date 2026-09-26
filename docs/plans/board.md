@@ -13,11 +13,20 @@ was committed as `1d4ca62` and APPROVED, the auditor closed the task, and
 read-modify-write, and [`T-008-D2`](../debt/T-008-D2.md), a card that will
 not parse is skipped without telling a caller the board is short. Phase 1
 owns the second of those. See the T-008 rows in `docs/ROADMAP.md`.
-Phase 1 is specified below and unstarted; phases 2–6 have a row in the
-table and no spec.
+Phase 1 is built and merged too. It was dispatched as T-009 on 2026-09-26 and
+landed as `observability/api/`, five read-only `GET` endpoints behind the same
+basic auth the dashboard uses — ADRs 2–5 and
+[`docs/implementations/T-009.md`](../implementations/T-009.md) are the record.
+Three Phase 1 items stay open as debt: [`T-009-D2`](../debt/T-009-D2.md), no
+clamp on `/api/events?limit=`; [`T-009-D3`](../debt/T-009-D3.md), a debt cell
+ending in inline code loses its closing backtick; and
+[`T-009-D4`](../debt/T-009-D4.md), the events volume had to be mounted
+read-write for a `mode=ro` reader. Phase 2 owns the second of those — it is the
+phase that renders the cell. Phase 2 is specified below and unstarted; phases
+3–6 have a row in the table and no spec.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
-used, and the only surface a human gets is `observability/dashboard/`: 67 lines
+used, and the only surface a human gets is `observability/dashboard/`: 43 lines
 of Flask rendering the last 200 hook events as one table. This plan says what
 replaces it, in what order, and what each phase is allowed to assume.
 
@@ -87,7 +96,10 @@ same feature with a blast radius.
 **Node is a real cost.** Next.js adds a toolchain, a lockfile and a CVE surface
 to a repo that is Python and Docker. It pays for itself at Phase 4 and not
 before. If phases 4–6 are not going to happen, Flask plus htmx delivers phases
-1–3 in about a day with no new toolchain.
+1–3 in about a day with no new toolchain. Ruled in
+[`docs/charter.md`](../charter.md) C-7, which keeps the reasoning and moves the
+trigger from Phase 4 to Phase 5: Phase 4's actions are a form post and a queue,
+which Jinja serves.
 
 ## Phases
 
@@ -95,13 +107,13 @@ before. If phases 4–6 are not going to happen, Flask plus htmx delivers phases
 |---|---|---|---|
 | 0 | `LocalBoardClient` behind the existing seam | ~½ day | none — new code behind an unchanged interface |
 | 1 | Read API in Python: `/api/tasks`, `/api/accounts`, `/api/events`, `/api/debt` | ~½ day | none — reads only |
-| 2 | Next.js read-only board (App Router, Server Components) | 1.5–2 days | new toolchain |
+| 2 | Read-only board over those endpoints | ½ day | none — C-7 rules it Flask and Jinja |
 | 3 | Live tail: SSE over `events` by `id > last` | ½–1 day | low |
 | 4 | Actions from the UI: `run-task`, `merge-task`, `cleanup-task` | 2–3 days | privilege — queue + worker, never a mounted socket |
 | 5 | Live execution timeline: `--output-format stream-json`, incremental `Popen` | 3–5 days | **highest** — touches the dispatcher's critical path |
 | 6 | Per-worktree diff and merge review | 2–3 days | medium |
 
-Phases 0–3 are the useful subtotal: 3–4 days for a board that shows the truth.
+Phases 0–3 are the useful subtotal: 2–2½ days for a board that shows the truth.
 Phases 4–6 are another 7–11 days and turn it into a control surface. Nothing
 after Phase 3 should start before Phase 3 has run against a real dispatch.
 
@@ -203,8 +215,8 @@ two.
 Phase 0 gave the harness somewhere to keep cards. This phase gives a reader
 somewhere to ask what is true, over HTTP, in the language the parsers are
 already written in. Nothing here writes: every endpoint is a `GET`, every
-mount is `:ro`, and the phase is done when a Next.js page could be written
-against it without a mock.
+mount is `:ro`, and the phase is done when a board could be written against it
+without a mock.
 
 ### Why it comes next
 
@@ -384,7 +396,7 @@ this phase adds a reader, and the race it describes is between writers.
 ### Out of scope for Phase 1
 
 No writes of any kind, no SSE — that is Phase 3, and it is a loop around
-`/api/events?since=` — no Next.js, no change to what the dashboard renders, no
+`/api/events?since=` — no board, no change to what the dashboard renders, no
 schema migration, and no deletion of the dashboard. Phase 2 replaces it, and
 gets to remove it once there is something better to look at.
 
@@ -401,3 +413,303 @@ existing auth tests passing unchanged against the extracted module.
 
 And, by hand once, against a harness that has run a task with `local_board`
 configured: `curl -u` on `/api/tasks` returns that task with `card` populated.
+
+## Phase 2 — a read-only board
+
+### Why it comes next
+
+Phase 1 made the harness readable over HTTP and nothing reads it. Every fact
+an operator chases today is behind a `docker exec`, a root-owned
+`dispatcher_state/*.json` or a `.hive/` file that needs a container to open;
+the api answers all of it on one port and nobody has opened it. This phase is
+the first thing a human looks at instead of a shell prompt.
+
+It is read-only on purpose. Every screen is a `GET` of an endpoint that
+already exists, and the phase adds two fields to the api and no new source of
+truth. That keeps the parse count at one: the dispatcher's modules parse the
+files, the api serves the rows, the board renders them. A board with its own
+frontmatter parser is a second answer to the same question, and the first time
+the two disagree the operator has to work out which one is lying.
+
+What it replaces is `observability/dashboard/`: 43 lines rendering the last
+200 hook events as a three-column table. That is the harness's exhaust and not
+its state — it cannot say which accounts exist, which task holds a lock, or
+whether a run died three hours ago.
+
+### The toolchain, and why it is not this spec's to choose
+
+This spec was written with the toolchain left open, because what was being
+committed to was maintenance — a lockfile, a build step and a CVE surface in a
+repo that is otherwise Python and Docker — and that is a human's call, not a
+phase's. It was exactly the shape of block the arquitecto was given in
+[`docs/charter.md`](../charter.md) and in its role prompt: a decision nobody
+has made, in front of a task that cannot be implemented two ways at once.
+Dispatched before it was answered, this phase would have blocked on its first
+phase.
+
+**[C-7](../charter.md) answers it: Flask and Jinja.** Node is revisited at
+Phase 5, where a live execution timeline is what a client framework buys;
+Phase 4's actions are a form post and a queue. Either way the trigger is after
+Phase 3, and nothing after Phase 3 starts before Phase 3 has run against a real
+dispatch.
+
+The ruling reaches this spec in two paragraphs and nowhere else. The screens,
+the states, the warnings and the exclusions never depended on it; only *Where
+it runs* and *Configuration* name a toolchain at all. That is the property that
+makes C-7 cheap to reverse, and it is why the section is still here instead of
+deleted — a ruling is reversible, and the reasoning has to outlive it.
+
+### Where it runs
+
+`observability/board/`, beside `observability/api/`, on the same
+`python:3.11-slim` base: Jinja templates, no `package.json` and no lockfile.
+
+Its own service in `docker/compose/docker-compose.yml`, published on
+`127.0.0.1:8790` and joined to `ia_harness_net`, where it reaches Phase 1 as
+`http://api:8789`. The browser never talks to the api: every fetch is
+server-side, which is the property that keeps the api's credential inside a
+container instead of in a page the operator can view-source. The human
+authenticates to the board; the board authenticates to the api.
+
+The board is an HTTP client of the api and nothing else — no volumes, no
+`.hive/`, no events database, no socket. If C-7 is ever reversed, what moves is
+this paragraph: a Node app goes in a new top-level `board/` rather than under
+`observability/`, which is Python, and a `package.json` buried inside it would
+muddle that border for every tool and every role that walks the repo.
+
+### The screens, verbatim
+
+```
+GET /                  the pool and the work: an accounts strip over a tasks table
+GET /tasks/<task_id>   one task: its fields, its card, and the events around it
+GET /debt              the debt index for the configured project
+GET /events            the event log, newest first, filterable by source_app
+```
+
+Four screens over five endpoints. `/` calls `/api/accounts` and `/api/tasks`;
+`/tasks/<id>` calls `/api/tasks/<id>`, and `/api/accounts` and `/api/events`
+for the events half. No other route exists — no settings, no login page beyond
+the basic-auth prompt, no "about".
+
+`/` is the screen a human leaves open. It answers, without scrolling: which
+accounts exist and what state each is in, which tasks are in flight and who
+owns them, and whether any lock is stale. Anything that answers none of those
+three does not go above the fold.
+
+**`/tasks/<id>` cannot show a task's events, and says so.** The collector
+records per agent, not per task: an event carries `source_app`, which is the
+account's *container* (`agent-cuenta1`), while a task's `owner` is the account
+*name* (`cuenta1`). The board maps one to the other through `/api/accounts`
+and labels the list for what it is — the events from the account that owns
+this task, in the window it has held it, not the events of this task. A
+per-task timeline is Phase 5's, and inventing one here out of a field that
+does not exist is the kind of thing a screen spec is written to prevent.
+
+### The four states, verbatim
+
+Every region of every screen is in exactly one of these. The region is the
+unit and not the page: `/` calls two endpoints and they fail independently.
+
+| State | The region is in it when | What it renders |
+|---|---|---|
+| **Loading** | its fetch has not resolved | Its heading, and a skeleton the height of the table that is coming. Never a spinner over the whole page: one slow endpoint must not blank the regions that already answered. |
+| **Empty** | a 200 whose `data` is `[]` | A sentence naming what would put a row there — "no tasks yet; `dispatch run-task` creates one" — in the region's normal type. Empty is never styled as a failure. Phase 1 deliberately answers a harness that has never run with `[]`, and a board that paints that red teaches the operator to distrust the colour for the case that matters. |
+| **Stale** | always, one second after it rendered | Two different facts, both shown. See below. |
+| **Error** | the fetch raised, the status is not 200, or the body is not the envelope | Which endpoint failed and with what status — `GET /api/accounts → 503` — plus the api's own `{"error": …}` string when there is one, and a retry that re-navigates. Every other region stays. A page that fails because one of its calls did is a page that hides three working answers. |
+
+A fifth case that is not a state: a **partial** region, a 200 whose `data` has
+rows and whose `warnings` is not empty. It renders as data, with the warnings
+above it — see *Where warnings go*.
+
+### Two kinds of stale
+
+The board must not conflate them: on one screen they look alike and mean
+opposite things.
+
+**The page is stale** the moment it renders. Phase 2 has no push and no poll,
+so every screen is a snapshot. Every page therefore carries `as of <HH:MM:SS>`
+in a fixed place, next to a control that re-navigates. Without it a
+five-minute-old page and a dead harness are the same picture.
+
+**A lock is stale** when a task is `in_progress` and its `heartbeat` is older
+than the dispatcher's `heartbeat_ttl_seconds` — a run that died holding the
+file. That is the most useful single thing this board can show, and it is the
+one derived fact the board must not derive:
+`dispatcher/context_transfer.py:is_lock_expired` already computes it, tested,
+and the TTL is config the api holds and the browser does not. **The api gains
+`lock_expired: bool | null` on the task row** — null when `heartbeat` is null —
+and the board renders the flag. One parser per fact applies to derived facts
+too.
+
+A page stamped 14:02 showing a heartbeat from 13:57 is a healthy harness. The
+same screen with no page stamp is indistinguishable from a crashed one, which
+is why the first line of this section is a requirement and not a nicety.
+
+### Where warnings go
+
+**Once per region, above its rows, never per row and never as a toast.** A
+Phase 1 warning names a *file*, and the file it names is precisely the row
+that is missing — an unreadable task file, a card whose JSON is truncated, an
+events database that is not there. There is by construction no row to hang it
+on.
+
+They render verbatim. Phase 1's strings are already operator-grade
+(`<path>: unreadable task file: <exc>`), and a board that prettifies a path it
+cannot verify makes the one artifact the operator needs to paste into a shell
+harder to paste.
+
+`warnings: []` renders nothing at all: no empty container, no green tick, no
+reserved space that makes the table jump when one appears. The absence of a
+warning is not worth a pixel. Its arrival should be a change in the page, not
+a change in a badge.
+
+A screen calling three endpoints has three possible places for one, each
+attached to the region whose data it qualifies. `/tasks/<id>` puts the events
+warning over the events list and the task warning over the task fields, never
+merged into one list at the top — merging loses which call came back short.
+
+### Where a UI decision lives
+
+This spec answers the questions the arquitecto would otherwise block this
+phase on. The ones it does not answer need somewhere to land, or the block has
+no exit:
+
+- A **ruling** — the toolchain question C-7 answered, or anything a human wants
+  settled and not re-argued — goes in [`docs/charter.md`](../charter.md),
+  which no role may edit.
+- A **decision an agent makes while building** — a component boundary, a date
+  format, whether the accounts strip wraps — is an ADR in
+  [`docs/decisions.md`](../decisions.md): numbered, appended, supersedable.
+- A **screen and its states** go in the phase that builds it, here.
+
+There is no separate `docs/ui.md` and there should not be one until a second
+surface exists. A third file whose border with those two is "it is about
+pixels" is a file every role has to guess about.
+
+### Required behaviour
+
+- **Every fetch is server-side.** The api credential lives in the board's
+  environment and never reaches a browser. A client component that calls the
+  api directly is a review finding, not a style preference.
+- **Guard the content type before parsing.** ADR 5 pins that Flask's own 404
+  and 405 are HTML and bypass the envelope. A client that assumes JSON on
+  every response crashes on a mistyped path instead of showing its Error
+  state. Anything that is not `application/json` is the Error state, with the
+  status.
+- **Validate the envelope shallowly, once, at the boundary.** `data` and
+  `warnings` present, `warnings` a list of strings, each row carrying the keys
+  the screen reads. A shape that fails is that region's Error state and not an
+  exception inside a component.
+- **Render, do not re-derive.** No frontmatter parser, no markdown-table
+  parser, no status vocabulary restated in TypeScript. There are two
+  vocabularies and the api owns both: a card is `pending`/`done`/`blocked`, a
+  task file is `pending`/`in_progress`. The board maps them to labels and
+  stops.
+- **A null `card` is three facts and the board separates two of them.** No
+  `kanban_issue_id` means the task was dispatched without a board — say that
+  plainly. A `kanban_issue_id` with a null `card` means the board does not
+  hold it, which is an inconsistency worth a visible mark: it is the symptom
+  [`T-008-D2`](../debt/T-008-D2.md) describes.
+- **Timestamps are relative in the cell, absolute in the `title`.** `4m ago`
+  answers the question the operator has; the ISO string answers the one they
+  have next, in a log.
+- **Nothing on the page writes.** No control that does not navigate, no
+  disabled button previewing Phase 4. A greyed-out "retry" is a lie about what
+  exists.
+- **It is a table, so use a table.** Real `<table>`, real headers, focus order
+  following reading order, `prefers-color-scheme` respected and nothing else
+  themed. This gets opened at 2am on a laptop: the floor is legible,
+  keyboard-navigable, and readable at 320px with no horizontal scrollbar.
+- **Every events call sets `limit` explicitly.** The board asks for what it
+  renders rather than relying on `DEFAULT_EVENT_LIMIT` staying 100.
+  [`T-009-D2`](../debt/T-009-D2.md) stays open: a hand-typed `?limit=` against
+  the api is still unbounded, and Phase 3 picks the clamp alongside the tail
+  window.
+
+### Configuration
+
+One service, added to `docker/compose/docker-compose.yml`:
+
+```yaml
+  board:
+    build:
+      context: ../..
+      dockerfile: observability/board/Dockerfile
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      API_BASE_URL: http://api:8789
+      API_TOKEN: ${API_TOKEN}
+      BOARD_USERNAME: ${DASHBOARD_USERNAME}
+      BOARD_PASSWORD_HASH: ${DASHBOARD_PASSWORD_HASH}
+    networks:
+      - ia_harness_net
+```
+
+**No volumes.** The board reads nothing from disk: no `.hive/`, no
+`dispatcher_state/`, no events database, no docker socket. That is the whole
+reason this phase is cheap to reason about, so it is what the
+compose-invariants test pins.
+
+`API_TOKEN` is the one thing this phase adds to Phase 1's auth surface, and it
+exists because every alternative is worse. The api checks
+`DASHBOARD_PASSWORD_HASH`; a service authenticating with basic auth needs the
+plaintext, and putting the plaintext in `.env` beside the hash makes the hash
+decorative. So `observability/auth.py` gains a second accepted credential — a
+token read from the environment and compared with `secrets.compare_digest`,
+alongside the existing basic-auth path — and `.data/verify/` grows a generated
+`api-token` the way it already holds the dashboard credential. The human's
+path is unchanged: basic auth, same username, same hash.
+
+### What this closes
+
+[`T-009-D3`](../debt/T-009-D3.md), whose stated trigger is "Phase 2 rendering
+`/api/debt`". `dispatcher/debt.py:_rows` strips one backtick from each end of
+a cell rather than a matched pair, so a cell that ends in inline code renders
+with its closing backtick eaten. `/debt` is the first screen that shows those
+cells to a human. Fix it here — matched pair only — and re-run
+`tests/dispatcher/test_debt.py` to confirm no fingerprint moved.
+
+It also deletes `observability/dashboard/` and its compose service: `/events`
+supersedes it, and Phase 1 already said Phase 2 gets to remove it once there
+is something better to look at. Its auth tests do not go with it — they moved
+to the shared `observability/auth.py` in Phase 1, and now cover the token path
+as well.
+
+It closes neither [`T-008-D1`](../debt/T-008-D1.md) — a reader cannot fix a
+writer's race — nor [`T-009-D2`](../debt/T-009-D2.md) nor
+[`T-009-D4`](../debt/T-009-D4.md).
+
+### Out of scope for Phase 2
+
+No push of any kind: no SSE, no websocket, no polling interval. A refresh is a
+navigation a human asks for, and Phase 3 is what makes the page move on its
+own — a poll built here is a poll deleted there. No write, no action, no form:
+Phase 4. No execution timeline and no diff view: Phases 5 and 6. No chart — a
+harness with two accounts and one task at a time has nothing to plot. No
+state-management library, no component library, no design system, no
+dark-mode toggle. No change to what the collector stores and no schema
+migration. No auth change beyond `API_TOKEN`.
+
+### Done when
+
+`python3 -m pytest` is green, including new tests that cover: the board
+service mounting nothing and getting no docker socket, in
+`tests/integration/test_compose_invariants.py`; `lock_expired` on
+`/api/tasks` and `/api/tasks/<id>`, with a live heartbeat, an expired one and
+a null one; the token path in `observability/auth.py`, accepted, rejected, and
+not accepted in place of the password; and `tests/dispatcher/test_debt.py`
+unchanged in its fingerprints after the T-009-D3 fix.
+
+The board's own tests run under `node --test` against recorded fixtures of
+each endpoint rather than a live api, and cover the four states per screen: a
+200 with rows, a 200 with `[]`, a 200 with rows and a warning, and a non-200 —
+plus one HTML 404 body, which is the case the content-type guard exists for.
+
+The image builds from a clean checkout with a committed lockfile, and the
+build and the type check both pass inside it.
+
+And, by hand once against the running stack: open `http://127.0.0.1:8790`, see
+both accounts with their state and T-009 in the tasks table with its card;
+then stop the api container and reload, and see the Error state name the
+endpoint while the page keeps everything else.

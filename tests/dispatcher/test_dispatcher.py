@@ -120,6 +120,7 @@ class _FakeGit:
 
     def commit_worktree(
         self, container, workdir, message, author_name, author_email, paths=None,
+        excludes=None,
     ):
         self.commits.append(
             dict(
@@ -129,6 +130,7 @@ class _FakeGit:
                 author_name=author_name,
                 author_email=author_email,
                 paths=paths,
+                excludes=excludes,
             )
         )
         return True
@@ -2918,6 +2920,24 @@ def test_dispatch_phase_leaves_the_other_writers_unscoped(tmp_path, monkeypatch,
     dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
 
     assert fake_git.commits[0]["paths"] is None
+
+
+@pytest.mark.parametrize("role", ["auditor", "implementador"])
+def test_dispatch_phase_keeps_the_charter_out_of_every_commit(
+    tmp_path, monkeypatch, fake_git, role
+) -> None:
+    """The scope differs per role; the exclusion does not. The auditor is the
+    interesting one, because docs/ is its scope and the charter lives there."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", role, "do it")
+
+    assert fake_git.commits[0]["excludes"] == (project_docs.CHARTER,)
 
 
 def test_dispatch_phase_does_not_commit_a_reviewing_phase(tmp_path, monkeypatch, fake_git) -> None:

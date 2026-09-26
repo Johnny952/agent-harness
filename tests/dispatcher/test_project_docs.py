@@ -37,6 +37,19 @@ def test_every_other_role_commits_whatever_it_produced(role: str) -> None:
     assert project_docs.commit_scope(role) is None
 
 
+def test_no_role_commits_the_charter() -> None:
+    """The exclusion takes no role, unlike the scope: a mapping invites an
+    exception, and the charter's whole premise is that there is none."""
+    assert project_docs.commit_excludes() == (project_docs.CHARTER,)
+
+
+def test_the_charter_is_inside_the_scope_the_auditor_was_given() -> None:
+    """Which is why the exclusion has to exist at all: the one role whose duty
+    is writing docs is the one role whose scope already covers the charter."""
+    assert project_docs.CHARTER.startswith(f"{project_docs.DOCS_DIR}/")
+    assert project_docs.commit_scope("auditor") == (project_docs.DOCS_DIR,)
+
+
 def test_implementation_doc_is_one_file_per_task() -> None:
     assert project_docs.implementation_doc("task-7") == "docs/implementations/task-7.md"
 

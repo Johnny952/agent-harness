@@ -562,6 +562,7 @@ def commit_worktree(
     author_name: str,
     author_email: str,
     paths: Sequence[str] | None = None,
+    excludes: Sequence[str] | None = None,
 ) -> bool:
     """Commit a worktree's work. False when there was nothing to commit.
 
@@ -575,9 +576,21 @@ def commit_worktree(
     worktree and is named in a warning: a phase writing where it was not asked
     to is worth seeing, and dropping it silently is the bug this whole
     argument exists to keep from coming back somewhere else.
+
+    `excludes` subtracts paths from whatever `paths` allowed, for the files no
+    role commits whoever it is — see project_docs.commit_excludes. It is a
+    subtraction rather than a refusal on purpose: a phase that edited the
+    charter still did the rest of its work, and throwing the branch away to
+    punish one file would cost more than the file does. The edit stays in the
+    worktree, named in a warning of its own.
     """
+    excluded = list(excludes or ())
+    exclude_specs = [f":(exclude){path}" for path in excluded]
     if paths is None:
-        add = run_docker_exec(container, workdir, ["git", "add", "-A"], env=_GIT_ENV)
+        # `git add -A` takes no pathspec, and the exclusions need one to be
+        # subtracted from. `.` is the pathspec `-A` already implies: every
+        # caller's workdir is a worktree root, which is where this runs.
+        scope = ["."] if exclude_specs else []
     else:
         # A pathspec matching nothing is a hard error in git, not an empty
         # commit: `git add -A -- docs` exits 128 on a tree with no docs/, and
@@ -586,9 +599,12 @@ def commit_worktree(
         if not present:
             return False
         _warn_changes_outside(container, workdir, present)
-        add = run_docker_exec(
-            container, workdir, ["git", "add", "-A", "--", *present], env=_GIT_ENV,
-        )
+        scope = present
+    _warn_excluded_changes(container, workdir, excluded)
+    add_cmd = ["git", "add", "-A"]
+    if scope or exclude_specs:
+        add_cmd += ["--", *scope, *exclude_specs]
+    add = run_docker_exec(container, workdir, add_cmd, env=_GIT_ENV)
     if add.returncode != 0:
         raise RuntimeError(f"git add failed: {add.stderr}")
 
@@ -647,6 +663,24 @@ def _warn_changes_outside(container: str, workdir: str, scope: Sequence[str]) ->
         logger.warning(
             "%s: left uncommitted, outside this phase's scope (%s): %s",
             workdir, ", ".join(scope), ", ".join(outside[:10]),
+        )
+
+
+def _warn_excluded_changes(container: str, workdir: str, excludes: Sequence[str]) -> None:
+    """Name an excluded path this phase changed, and leave the change behind.
+
+    Louder than `_warn_changes_outside`, and worth keeping separate from it:
+    that one reports an untidy phase, this one reports a rule broken. A phase
+    that edited the charter was told not to, so the commit does not carry it
+    and a human finds the edit in the worktree.
+    """
+    if not excludes:
+        return
+    touched = sorted(set(dirty_paths(container, workdir)) & set(excludes))
+    if touched:
+        logger.warning(
+            "%s: NOT committed, and no role may change it: %s",
+            workdir, ", ".join(touched),
         )
 
 
