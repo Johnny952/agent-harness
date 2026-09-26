@@ -79,6 +79,8 @@ externally-managed.
 | `docs/plans/board.md` | The phased plan for replacing the dashboard with a real board, and the spec for each phase. Phase 0 is the first task dispatched against this repo. |
 | `docs/decisions.md` | Before changing how something here behaves, to find out whether it was decided rather than incidental. One ADR per decision, appended, never rewritten. |
 | `docs/implementations/<task-id>.md` | Before changing something a past task built here, to find out why it is the way it is. One file per task, written by that task. |
+| `docs/learnings/README.md` | Before you start, and again before you debug: things true of this project that cost an earlier task time. Read the table whole, open the entries whose "when it applies" matches your task. |
+| `docs/debt/README.md` | Before you start: work earlier tasks deliberately left undone, one row each with the condition that says whether it bites your task. Also where your own accepted debt is filed. |
 
 `docs/superpowers/` is vendored upstream material, not this project's
 documentation. Do not treat it as a contract and do not edit it; the pointer
