@@ -1160,13 +1160,47 @@ def _needs_mapping(cfg: Config, slug: str) -> bool:
     return True
 
 
-def run_task_cycle(
+
+
+@dataclasses.dataclass
+class CycleContext:
+    """What a run settles once, ahead of its first phase, and every phase reads.
+
+    `run-task` and `run-phase` disagree about how many phases follow and about
+    almost nothing else: both reap the same stale locks, want the same scratch
+    directory, prompt against the same harness fingerprint and the same board
+    card before their first phase, and have to put the learnings back the same
+    way after their last one. Until this was an object that bookkeeping lived
+    in `run_task_cycle`'s locals, which is why a phase was not a thing the CLI
+    could run one of.
+    """
+
+    cfg: Config
+    task_id: str
+    slug: str
+    kanban: KanbanClient
+    description: str
+    task_file: str
+    scratch_dir: str
+    harness: str
+    issue_id: str | None = None
+    # Set when a phase bounced off another owner's lock: that run's worktrees
+    # are in use, so close_cycle has to keep its hands off them.
+    foreign_lock: bool = False
+
+
+def open_cycle(
     cfg: Config,
     task_id: str,
     slug: str,
     kanban: KanbanClient,
     description: str | None = None,
-) -> None:
+) -> CycleContext | None:
+    """Get a run to the point where a phase can be dispatched.
+
+    Returns None when it cannot get there, having already said why and moved
+    the card. Today the only such case is a task nobody described.
+    """
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
     # Made by the dispatcher, not by the roles: a phase told to write its
@@ -1201,9 +1235,9 @@ def run_task_cycle(
         # the ask on disk; nothing to write.
         description = context_transfer.read_description(cfg.hive_tasks_dir, task_id)
     if not (description or "").strip():
-        # Dispatching here would burn four phases of quota on roles that
-        # were told a task id and nothing else. The CLI rejects this case
-        # before it gets here; this is the backstop for library callers.
+        # Dispatching here would burn quota on a role that was told a task id
+        # and nothing else. The CLI rejects this case before it gets here;
+        # this is the backstop for library callers.
         logger.error(
             "task %s has no description: pass --description/--description-file to run-task, "
             "or add a `description:` key to %s",
@@ -1211,7 +1245,7 @@ def run_task_cycle(
             task_file,
         )
         _update_task_status(kanban, issue_id, "blocked")
-        return
+        return None
 
     if kanban.enabled and issue_id is None:
         # First run of this task against a board nobody pointed at a card:
@@ -1219,80 +1253,192 @@ def run_task_cycle(
         # a uuid — every id in Vibe Kanban's schema is server-assigned.
         issue_id = _open_kanban_issue(cfg, kanban, task_id, description)
 
-    # Set when a phase bounced off another owner's lock: that run's worktrees
-    # are in use, so the cleanup below has to keep its hands off them.
-    foreign_lock = False
-    # Set once the auditor has filed what this task learned. Every other way
-    # out of the cycle — blocked, bounced, crashed — leaves entries nobody
-    # filed, and those have to go back to being unowned.
-    completed = False
+    return CycleContext(
+        cfg=cfg,
+        task_id=task_id,
+        slug=slug,
+        kanban=kanban,
+        description=description,
+        task_file=task_file,
+        scratch_dir=scratch_dir,
+        harness=harness,
+        issue_id=issue_id,
+    )
 
-    def run_phase(
-        role: str,
-        round_num: int | None = None,
-        final: bool = False,
-        fatal: bool = True,
-        model: str | None = None,
-        max_turns: int | None = None,
-        note: str = "",
-    ) -> DispatchResult | None:
-        nonlocal foreign_lock
-        _update_task_status(kanban, issue_id, f"in_progress:{role}")
-        effort = (
-            cfg.escalated_effort
-            if round_num is not None and round_num > cfg.escalate_effort_after_round
-            else None
+
+def run_phase(
+    ctx: CycleContext,
+    role: str,
+    round_num: int | None = None,
+    final: bool = False,
+    fatal: bool = True,
+    model: str | None = None,
+    max_turns: int | None = None,
+    note: str = "",
+) -> DispatchResult | None:
+    """One role's turn, with everything that has to happen around it.
+
+    The status block, the account and card locks, the worktree, the commit,
+    the gates and the handoff the next phase reads — all of it per phase, none
+    of it per cycle, which is what lets `run-phase` exist at all.
+    """
+    cfg = ctx.cfg
+    _update_task_status(ctx.kanban, ctx.issue_id, f"in_progress:{role}")
+    effort = (
+        cfg.escalated_effort
+        if round_num is not None and round_num > cfg.escalate_effort_after_round
+        else None
+    )
+    try:
+        result = dispatch_phase(
+            cfg, ctx.task_id, ctx.slug, role,
+            prompt=_role_prompt(
+                role, ctx.task_id, ctx.slug, ctx.task_file, ctx.description,
+                ctx.scratch_dir, cfg.hive_tasks_dir,
+                harness=ctx.harness,
+                round_num=round_num, max_turns=max_turns, note=note,
+            ),
+            model=model or cfg.default_model,
+            effort=effort,
+            round_num=round_num,
+            max_turns=max_turns,
         )
-        try:
-            result = dispatch_phase(
-                cfg, task_id, slug, role,
-                prompt=_role_prompt(
-                    role, task_id, slug, task_file, description, scratch_dir, cfg.hive_tasks_dir,
-                    harness=harness,
-                    round_num=round_num, max_turns=max_turns, note=note,
-                ),
-                model=model or cfg.default_model,
-                effort=effort,
-                round_num=round_num,
-                max_turns=max_turns,
-            )
-        except context_transfer.LockHeldError as exc:
-            # A re-run within the TTL after a Ctrl+C, or a second dispatcher
-            # process, hits this on every phase. Block the task instead of
-            # letting the LockHeldError climb out as a CLI traceback and
-            # leave Kanban stuck at in_progress. The foreign lock is left
-            # alone: after a Ctrl+C the in-container claude keeps running
-            # until its own timeout, so the heartbeat TTL, not this run,
-            # decides when the task can be taken over.
-            logger.warning("task %s is locked by another owner: %s", task_id, exc)
-            _update_task_status(kanban, issue_id, "blocked")
-            foreign_lock = True
+    except context_transfer.LockHeldError as exc:
+        # A re-run within the TTL after a Ctrl+C, or a second dispatcher
+        # process, hits this on every phase. Block the task instead of
+        # letting the LockHeldError climb out as a CLI traceback and
+        # leave Kanban stuck at in_progress. The foreign lock is left
+        # alone: after a Ctrl+C the in-container claude keeps running
+        # until its own timeout, so the heartbeat TTL, not this run,
+        # decides when the task can be taken over.
+        logger.warning("task %s is locked by another owner: %s", ctx.task_id, exc)
+        _update_task_status(ctx.kanban, ctx.issue_id, "blocked")
+        ctx.foreign_lock = True
+        return None
+    if not result.success:
+        if fatal:
+            _update_task_status(ctx.kanban, ctx.issue_id, "blocked")
             return None
-        if not result.success:
-            if fatal:
-                _update_task_status(kanban, issue_id, "blocked")
-                return None
-            # A phase the task does not depend on. It still hands off what it
-            # managed — a partial map is worth having, and the next phase
-            # should know it is partial — but it does not block the card.
-            logger.warning(
-                "optional phase %s did not finish for task %s: %s",
-                role, task_id, result.result_text,
-            )
-        label = role if round_num is None else f"{role} (round {round_num})"
-        body = handoff.body(label, result.result_text, result.handoff)
-        # Under the phase's own return, not instead of it: the role says what
-        # it did and the dispatcher says what it found, and the next phase to
-        # read this file can tell the two apart.
-        gate_section = result.gates.render() if result.gates is not None else ""
-        if gate_section:
-            body = f"{body}\n\n{gate_section}"
-        context_transfer.handoff(
-            cfg.hive_tasks_dir, task_id,
-            new_status="done" if final else "pending",
-            body=body,
+        # A phase the task does not depend on. It still hands off what it
+        # managed — a partial map is worth having, and the next phase
+        # should know it is partial — but it does not block the card.
+        logger.warning(
+            "optional phase %s did not finish for task %s: %s",
+            role, ctx.task_id, result.result_text,
         )
+    label = role if round_num is None else f"{role} (round {round_num})"
+    body = handoff.body(label, result.result_text, result.handoff)
+    # Under the phase's own return, not instead of it: the role says what
+    # it did and the dispatcher says what it found, and the next phase to
+    # read this file can tell the two apart.
+    gate_section = result.gates.render() if result.gates is not None else ""
+    if gate_section:
+        body = f"{body}\n\n{gate_section}"
+    context_transfer.handoff(
+        cfg.hive_tasks_dir, ctx.task_id,
+        new_status="done" if final else "pending",
+        body=body,
+    )
+    return result
+
+
+def close_cycle(ctx: CycleContext, completed: bool) -> None:
+    """Put back what the run borrowed, whichever way it ended.
+
+    `completed` means the auditor filed what this task learned. Every other
+    way out — done-but-not-audited, blocked, bounced, crashed — leaves entries
+    nobody filed, and those have to go back to being unowned.
+    """
+    # Every way into here is terminal for this run — done, blocked, or a
+    # crash — and the reviewing checkouts are rebuilt on demand, so they can
+    # go now rather than pile up per task. The exception is a task this run
+    # never owned: another dispatcher is still working in those worktrees.
+    if ctx.foreign_lock:
+        return
+    _drop_review_worktrees(ctx.cfg, ctx.task_id, ctx.slug)
+    # Whether or not it finished: what a phase was allowed to do while
+    # it wrote these is settled, and stamping it here is the only way
+    # a later run can tell an entry that aged out from one that holds.
+    learnings.stamp(ctx.cfg.hive_tasks_dir, ctx.task_id, ctx.harness)
+    if not completed:
+        # The entries stay — this task is the reason nobody has
+        # filed them yet — but they stop claiming a carrier that is
+        # gone, and a status this task alone vouched for goes back
+        # to being one phase's word.
+        learnings.mark_orphaned(ctx.cfg.hive_tasks_dir, ctx.task_id)
+
+
+def run_single_phase(
+    cfg: Config,
+    task_id: str,
+    slug: str,
+    kanban: KanbanClient,
+    role: str,
+    round_num: int | None = None,
+    final: bool = False,
+    description: str | None = None,
+    note: str = "",
+) -> DispatchResult | None:
+    """Dispatch exactly the phase named, on a task that is already under way.
+
+    The repair path. `run_task_cycle` always begins at the arquitecto, so a
+    run interrupted in the revisor's second round could only be continued by
+    paying for every phase again — which is what a host reboot did to T-008 on
+    2026-09-25. This runs the one phase that is missing.
+
+    What it deliberately does not do is the cycle's own judgement: it reads no
+    verdict, runs no further round, files no debt card and merges nothing,
+    because each of those needs handoffs from phases this call did not run.
+    Those stay `run-task`'s, and the operator is told so rather than left to
+    assume. `final=True` is the operator saying this phase closes the task —
+    in the role set, the auditor — and buys exactly what the full cycle gives
+    its last phase: the learnings carried in beforehand, `status: done` in the
+    task file and on the board, and no orphaning on the way out.
+    """
+    ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
+    if ctx is None:
+        return None
+    result: DispatchResult | None = None
+    try:
+        if final:
+            # Stamped before the phase that files them, exactly as the full
+            # cycle does it, so the auditor's prompt can name the entries it
+            # owns and a later run can tell an entry that was handed to a task
+            # from one nobody has picked up yet.
+            learnings.carry(cfg.hive_tasks_dir, slug, task_id)
+        result = run_phase(ctx, role, round_num=round_num, final=final, note=note)
+        if result is None:
+            return None
+        if final:
+            _update_task_status(kanban, ctx.issue_id, "done")
+            # Said out loud because the difference is invisible from the task
+            # file: a card closed this way was closed by a phase, not by a
+            # cycle that read a verdict, and the three steps a finished
+            # `run-task` also does have not happened.
+            logger.info(
+                "task %s: closed by a single %s phase. Resolved debt was not recorded, "
+                "no debt card was filed and no merge was attempted — those need the "
+                "implementador's and revisor's handoffs from the same run. Use "
+                "`merge-task` when the branch is ready.",
+                task_id, role,
+            )
         return result
+    finally:
+        close_cycle(ctx, completed=final and result is not None)
+
+
+def run_task_cycle(
+    cfg: Config,
+    task_id: str,
+    slug: str,
+    kanban: KanbanClient,
+    description: str | None = None,
+) -> None:
+    ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
+    if ctx is None:
+        return
+    # Set once the auditor has filed what this task learned.
+    completed = False
 
     try:
         if _needs_mapping(cfg, slug):
@@ -1301,15 +1447,16 @@ def run_task_cycle(
             # to turn it on, and if it fails the task runs anyway on a project
             # that stays unmapped.
             run_phase(
+                ctx,
                 project_docs.MAPPER_ROLE,
                 fatal=False,
                 model=cfg.mapping_model,
                 max_turns=cfg.mapping_max_turns,
             )
-            if foreign_lock:
+            if ctx.foreign_lock:
                 return
 
-        if run_phase("arquitecto") is None:
+        if run_phase(ctx, "arquitecto") is None:
             return
 
         approved = False
@@ -1320,7 +1467,7 @@ def run_task_cycle(
         rounds_run = 0
         for round_num in range(1, cfg.max_revision_rounds + 1):
             rounds_run = round_num
-            implemented = run_phase("implementador", round_num=round_num)
+            implemented = run_phase(ctx, "implementador", round_num=round_num)
             if implemented is None:
                 return
             if implemented.gates is not None and implemented.gates.blocking:
@@ -1333,7 +1480,7 @@ def run_task_cycle(
                     "task %s: the gates blocked round %d before review", task_id, round_num,
                 )
                 continue
-            revisor_result = run_phase("revisor", round_num=round_num)
+            revisor_result = run_phase(ctx, "revisor", round_num=round_num)
             if revisor_result is None:
                 return
             disguised = debt.blocking(revisor_result.handoff)
@@ -1371,7 +1518,7 @@ def run_task_cycle(
                 "task %s: blocked after %d of %d revision round(s) without an approval",
                 task_id, rounds_run, cfg.max_revision_rounds,
             )
-            _update_task_status(kanban, issue_id, "blocked")
+            _update_task_status(kanban, ctx.issue_id, "blocked")
             return
 
         # Stamped before the phase that files them, so the auditor's prompt
@@ -1387,11 +1534,11 @@ def run_task_cycle(
         # Before the auditor, because the auditor writes the rows that point
         # at these cards.
         filed = _file_accepted_debt(cfg, kanban, task_id, slug, implemented, revisor_result)
-        if run_phase("auditor", final=True, note=debt.filing_note(filed)) is None:
+        if run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed)) is None:
             return
         completed = True
 
-        _update_task_status(kanban, issue_id, "done")
+        _update_task_status(kanban, ctx.issue_id, "done")
         if cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug):
             # Only now: the entries are in the project's docs on the branch
             # that just landed, so the inbox copy would charge every later
@@ -1402,19 +1549,4 @@ def run_task_cycle(
             # just landed, so the card it mirrors has stopped being work.
             close_resolved_debt(cfg, kanban, task_id, slug)
     finally:
-        # Every way out of here is terminal for this run — done, blocked, or a
-        # crash — and the reviewing checkouts are rebuilt on demand, so they can
-        # go now rather than pile up per task. The exception is a task this run
-        # never owned: another dispatcher is still working in those worktrees.
-        if not foreign_lock:
-            _drop_review_worktrees(cfg, task_id, slug)
-            # Whether or not it finished: what a phase was allowed to do while
-            # it wrote these is settled, and stamping it here is the only way
-            # a later run can tell an entry that aged out from one that holds.
-            learnings.stamp(cfg.hive_tasks_dir, task_id, harness)
-            if not completed:
-                # The entries stay — this task is the reason nobody has
-                # filed them yet — but they stop claiming a carrier that is
-                # gone, and a status this task alone vouched for goes back
-                # to being one phase's word.
-                learnings.mark_orphaned(cfg.hive_tasks_dir, task_id)
+        close_cycle(ctx, completed=completed)

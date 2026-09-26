@@ -586,3 +586,170 @@ def test_an_unusable_log_level_falls_back_instead_of_killing_the_run(
     assert captured["level"] == logging.INFO
     assert cycle["task_id"] == "task-1"
     assert any("verbose" in r.getMessage() for r in caplog.records)
+
+
+# --- run-phase ---
+
+
+def _capture_single_phase(monkeypatch, result: object = object()) -> dict:
+    """Stand in for the one phase, and record what the parser decided."""
+    captured: dict = {}
+
+    def fake_run_single_phase(cfg, task_id, slug, kanban, role, round_num=None, final=False, description=None, note=""):
+        captured.update(
+            task_id=task_id, slug=slug, role=role,
+            round_num=round_num, final=final, description=description, note=note,
+        )
+        captured["kanban"] = kanban
+        return result
+
+    monkeypatch.setattr(cli_mod, "run_single_phase", fake_run_single_phase)
+    return captured
+
+
+def _described(tmp_path: Path, board: bool = False) -> Path:
+    """A config whose task-1 is already under way, which is the only kind of
+    task this verb runs on."""
+    config_path = _write_config(tmp_path, board=board)
+    set_description(tmp_path / "hive", "task-1", "Add a /healthz endpoint that returns 200.")
+    return config_path
+
+
+def test_cli_run_phase_passes_the_phase_it_was_given_through(tmp_path: Path, monkeypatch, capsys) -> None:
+    captured = _capture_single_phase(monkeypatch)
+
+    _run_command(
+        monkeypatch, _described(tmp_path),
+        "run-phase", "--task-id", "task-1", "--project", "myproj",
+        "--role", "revisor", "--round", "2", "--note", "the host rebooted",
+    )
+
+    assert captured["task_id"] == "task-1"
+    assert captured["slug"] == "myproj"
+    assert captured["role"] == "revisor"
+    assert captured["round_num"] == 2
+    assert captured["final"] is False
+    assert captured["note"] == "the host rebooted"
+    # The verb never rewrites the ask: the task on disk already carries it.
+    assert captured["description"] is None
+    assert "task-1.md" in capsys.readouterr().out
+
+
+def test_cli_run_phase_defaults_to_a_phase_that_does_not_close_the_task(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """--final is the destructive half of this verb — it moves the card to
+    done. Leaving it out has to mean the ordinary middle-of-a-cycle phase."""
+    captured = _capture_single_phase(monkeypatch)
+
+    _run_command(
+        monkeypatch, _described(tmp_path),
+        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
+    )
+
+    assert captured["final"] is False
+    assert captured["round_num"] is None
+    assert captured["note"] == ""
+
+
+def test_cli_run_phase_final_is_passed_along(tmp_path: Path, monkeypatch) -> None:
+    captured = _capture_single_phase(monkeypatch)
+
+    _run_command(
+        monkeypatch, _described(tmp_path),
+        "run-phase", "--task-id", "task-1", "--project", "myproj",
+        "--role", "auditor", "--final",
+    )
+
+    assert captured["final"] is True
+
+
+def test_cli_run_phase_gives_the_cycle_a_board_when_the_config_has_one(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Same rule as run-task: no vibe_kanban block, no board — and a phase
+    run by hand still has to move whatever card the task already has."""
+    captured = _capture_single_phase(monkeypatch)
+    _run_command(
+        monkeypatch, _described(tmp_path),
+        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
+    )
+    assert isinstance(captured["kanban"], NullKanbanClient)
+
+    captured = _capture_single_phase(monkeypatch)
+    _run_command(
+        monkeypatch, _described(tmp_path, board=True),
+        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
+    )
+    assert isinstance(captured["kanban"], VibeKanbanClient)
+
+
+def test_cli_run_phase_rejects_a_role_nothing_knows_how_to_prompt(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """A typo in --role should be a usage error, not a full-price run of a
+    role the prompt builder has no case for."""
+    captured = _capture_single_phase(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, _described(tmp_path),
+            "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "revisorr",
+        )
+
+    assert excinfo.value.code == 2
+    assert captured == {}
+
+
+def test_cli_run_phase_rejects_a_round_below_one(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Rounds count from 1, and 0 would read as "no round at all" the moment
+    it reached the prompt — which is exactly the bug this verb exists to fix."""
+    captured = _capture_single_phase(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, _described(tmp_path),
+            "run-phase", "--task-id", "task-1", "--project", "myproj",
+            "--role", "revisor", "--round", "0",
+        )
+
+    assert excinfo.value.code == 2
+    assert "--round" in capsys.readouterr().err
+    assert captured == {}
+
+
+def test_cli_run_phase_refuses_a_task_that_was_never_started(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """This verb resumes; it does not start. A task with no description on
+    disk was never run, so there is no phase to resume and nothing to pay for."""
+    captured = _capture_single_phase(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, _write_config(tmp_path),
+            "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "revisor",
+        )
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "run-task" in err
+    assert captured == {}
+
+
+def test_cli_run_phase_exits_nonzero_when_the_phase_did_not_land(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The operator is driving the cycle by hand, one command per phase: a
+    failure has to stop the shell loop rather than let the next phase run over
+    the top of a task that is now blocked."""
+    _capture_single_phase(monkeypatch, result=None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, _described(tmp_path),
+            "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
+        )
+
+    assert excinfo.value.code == 1
+    assert "blocked" in capsys.readouterr().err

@@ -78,15 +78,19 @@ the only case where the primary's reserve should be touched at all.
 
 | Verb | Why it is needed |
 |---|---|
-| `run-phase --task-id --role [--round] [--account]` | Runs one phase and returns control. The whole point. |
+| `run-phase --task-id --project --role [--round] [--final] [--note]` | Runs one phase and returns control. The whole point. **Built 2026-09-25**, without `--account`: which account takes the phase is still the pool's call, and pinning one belongs with the picker in Phase 2. |
 | `status [--probe]` | Prints the cached state files and the card. Probes `/usage` only when asked, because each probe is itself a `claude -p`. **Built 2026-09-25.** |
 | `release-account --name <n>` | The reaper that did not exist. Closes G2 below. **Built 2026-09-25.** |
 
-`run-phase` is the only one with real work behind it: `run_task_cycle`
-(`dispatcher/dispatcher.py:1163`) keeps its per-phase bookkeeping — status
-block, heartbeat, worktree, commit, learnings, handoff budget — inside the
-cycle, and a per-phase verb needs that as a callable unit. The other two are an
-afternoon each.
+`run-phase` was the only one with real work behind it, and the work was where
+this plan expected it: `run_task_cycle` kept its per-phase bookkeeping —
+status block, heartbeat, worktree, commit, learnings, handoff budget — in
+closures over its own locals, so a phase was not a thing anything could run
+one of. That
+is now four module-level pieces — `CycleContext`, `open_cycle`, `run_phase`,
+`close_cycle` — with `run_task_cycle` rebuilt on them, unchanged in signature
+and behaviour, and `run_single_phase` the second caller the split was for. The
+other two were an afternoon each, as estimated.
 
 ## Gaps this closes
 
@@ -96,15 +100,28 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   arquitecto. The `--resume` in the codebase is an internal re-prompt
   (`_with_resume_notes`, `dispatcher.py:470`), not a CLI verb. A run
   interrupted in the revisor's second round can only be continued by paying
-  for all four phases again. `run-phase` is the fix.
+  for all four phases again. **Closed 2026-09-25** by `run-phase`, which runs
+  the one phase that is missing with everything a phase needs around it — the
+  locks, the worktree, the commit, the gates, the handoff the next phase reads
+  — and none of the cycle's own judgement: no verdict read, no further round,
+  no resolved debt, no debt card, no merge, each of those needing handoffs
+  from phases the call did not run. It resumes and does not start: a task with
+  no stored description is a usage error naming `run-task`. `docs/ROADMAP.md`,
+  Stage 1 item 2, has the rest.
 - **G2 — an account left `BUSY` by a crashed dispatcher is stuck forever.**
   `list_idle_accounts` returns only `IDLE`; `_recheck_cooling_accounts`
   skips any state that is not `PRE_COOLDOWN`/`COOLING_DOWN`; and
   `reap_expired_locks` (`dispatcher.py:394`) releases the *card* lock by
   heartbeat TTL, never the account. There is no reaper and no verb.
   **Closed 2026-09-25** by `release-account` (`dispatcher/operator.py`). A TTL
-  on the account lock, mirroring the card's, is still the better fix and
-  belongs with Phase 1, where the per-phase bookkeeping is being moved anyway.
+  on the account lock, mirroring the card's, is still the better fix, and it
+  was *not* built with Phase 1 — the per-phase bookkeeping moved out of the
+  cycle without it, so it now belongs with Phase 2 and the picker that would
+  honour it. Its design is settled, though: `AccountState` carries no
+  timestamp on `BUSY`, and a wall-clock one would expire a phase that is
+  legitimately long, so the TTL should read the *card's* heartbeat
+  (`heartbeat_ttl_seconds`), which a running phase refreshes, and fall back to
+  a `busy_since` only for an account holding no card.
   Building the verb turned up a bug nobody was looking for: a hand-edited card
   whose `heartbeat` is an unquoted YAML timestamp parses as a `datetime`, not
   the `str` `TaskFile` declares, and crashed every reader of that field with
@@ -119,7 +136,13 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   end-to-end smoke test against a scratch config. Closes G2. It went first
   because it is the only thing that can unstick the pool after a crash — which
   is the state the pool was in on the day this plan was written.
-- **Phase 1 — `run-phase`.** Closes G1. The refactor is the cost, not the verb.
+- **Phase 1 — `run-phase`. Done 2026-09-25.** Closes G1. The refactor was the
+  cost, as predicted: the cycle's per-phase bookkeeping is now four
+  module-level pieces and `run_task_cycle` is one of two callers of them. 20
+  unit tests, the suite at 800 passing and 10 skipped, and no quota spent —
+  nothing here needs a model to be tested, only a dispatched run to be
+  exercised, which T-008 is waiting to be. The account-lock TTL that G2 left
+  owing was not built here; see G2.
 - **Phase 2 — ordering, reserve and `fallback_roles`.** The scheduling policy
   above, on `AccountConfig` and the picker.
 - **Phase 3 — the operator's loop.** Largely docs: how a conversational thread

@@ -531,6 +531,52 @@ refused merge there is logged and the task still ends `done` — the work is
 already committed on its own branch, and `merge-task` is the way back to
 it.
 
+**Resuming a run that died mid-cycle.** `run-task` always begins at the
+arquitecto, so a run interrupted late — a Ctrl+C, a container that went
+away, a host that rebooted — could once only be continued by paying for
+every phase again. `run-phase` runs the one phase that is missing:
+
+```bash
+python -m dispatcher.cli --config config.yaml run-phase \
+  --task-id T-001 --project my-project --role revisor --round 2 \
+  --note "the reboot took the revisor's turn with it; round 2 is commit 1d4ca62"
+python -m dispatcher.cli --config config.yaml run-phase \
+  --task-id T-001 --project my-project --role auditor --final
+```
+
+Everything a phase needs around it still happens — the account and card
+locks, the worktree, the commit, the gates, and the handoff appended to the
+task file that the next phase reads. What does not happen is the cycle's own
+judgement: it reads no verdict, starts no further round, records no resolved
+debt, files no debt card and merges nothing, because each of those needs
+handoffs from phases this call did not run. Those stay `run-task`'s, and the
+log says so rather than leaving it to be assumed; `merge-task` is still the
+way to offer the branch back.
+
+`--round` is not cosmetic. It is what the phase is told it is on, what
+labels its section in the task file (`## revisor (round 2)`), and what
+decides whether `escalated_effort` applies — so a resumed second round that
+does not say `2` is dispatched as though the first had never happened. It
+counts from 1, and 0 is a usage error. `--role` is checked against the roles
+the prompt builder has a case for, so a typo costs a usage error rather than
+a full-price run. `--note` is the operator's only channel into a resumed
+phase: what the dead process took with it is, by definition, not in the task
+file.
+
+`--final` is the operator saying this phase closes the task — in the role
+set, the auditor. It buys exactly what the full cycle gives its last phase:
+the learnings carried in beforehand, `status: done` in the task file and on
+the board, and no orphaning of the entries on the way out. Without it the
+task stays `pending` and the entries this run wrote go back to being
+unowned, which is what every phase before the last one should do. A phase
+that did not land exits non-zero and blocks the card, so a hand-driven cycle
+stops rather than running the next phase over the top of it.
+
+The verb only resumes; it does not start. A task with no stored description
+is a usage error naming `run-task`, and there is no `--description`: a task
+already under way has its ask on disk, and rewriting it underneath a phase
+that is picking up somebody else's work is not a thing to make easy.
+
 **Looking at the pool, and unsticking it.** Two verbs answer the question
 "why is nothing running", and neither costs a turn:
 
@@ -1025,17 +1071,6 @@ either.
     [`docs/plans/board.md`](docs/plans/board.md), whose Phase 0 puts a
     local implementation behind it so the two prioritized items that
     wait on `create_issue` stop waiting. (V2.1–V2.6)
-
-- **A cycle cannot be resumed from the phase it stopped at.**
-  `run_task_cycle` (`dispatcher/dispatcher.py`) always begins at
-  arquitecto, and the `--resume` in the codebase is an internal re-prompt
-  (`_with_resume_notes`), not a CLI verb. So an interrupted run can only
-  be continued by paying for every phase again, however late it got. Found
-  2026-09-25 when a host reboot killed the T-008 run between the
-  implementador's second round and the revisor's: two commits on the task
-  branch and a green working tree survived, and nothing could pick them
-  up. The fix is a per-phase verb — see
-  [`docs/plans/balancer.md`](docs/plans/balancer.md), Phase 1.
 
 - **The handoff budgets are sized on a toy repo.** `_BUDGET_BYTES` in
   `dispatcher/handoff.py` was tuned on four runs against the toy project,

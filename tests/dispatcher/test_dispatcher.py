@@ -3920,3 +3920,274 @@ def test_close_resolved_debt_does_not_read_the_index_for_a_project_with_no_board
 
     assert dispatcher_mod.close_resolved_debt(cfg, NullKanbanClient(), "task-1", "myproj") == []
     assert debt_index.reads == []
+
+
+# --- run_single_phase -------------------------------------------------------
+#
+# The repair path: one phase of a task that is already under way, instead of a
+# cycle that always restarts at the arquitecto. What these pin down is as much
+# what it refuses to do as what it does — every step it skips is a step that
+# needs a handoff from a phase this call did not run.
+
+
+def _spy_learnings(monkeypatch) -> dict:
+    """Watch the two calls that decide who owns the entries when a run ends."""
+    seen: dict = {"carried": [], "orphaned": []}
+    monkeypatch.setattr(
+        dispatcher_mod.learnings, "carry",
+        lambda hive_dir, project, task_id: seen["carried"].append((project, task_id)) or [],
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.learnings, "mark_orphaned",
+        lambda hive_dir, task_id: seen["orphaned"].append(task_id) or [],
+    )
+    return seen
+
+
+def test_run_single_phase_dispatches_that_phase_and_no_other(tmp_path, monkeypatch) -> None:
+    """The whole point: the arquitecto and the implementador already ran and
+    were already paid for, so resuming at the revisor costs one phase."""
+    cfg = _make_config(tmp_path)
+    calls = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        calls.append(role)
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    assert calls == ["revisor"]
+    assert result is not None and result.success
+
+
+def test_run_single_phase_runs_the_round_it_was_told_it_is_on(tmp_path, monkeypatch) -> None:
+    """A resumed round has to name itself. The number labels the section in
+    the task file, goes into the prompt, and decides the effort — so a round 2
+    dispatched without it is dispatched as though round 1 never happened."""
+    cfg = _make_config(tmp_path, escalate_effort_after_round=1)
+    seen: dict = {}
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        seen.update(prompt=prompt, effort=effort, round_num=round_num)
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="looked at it", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    assert seen["round_num"] == 2
+    assert "revision round 2" in seen["prompt"]
+    assert seen["effort"] == cfg.escalated_effort
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert "## revisor (round 2)" in task.body
+
+
+def test_run_single_phase_hands_the_note_to_the_prompt(tmp_path, monkeypatch) -> None:
+    """The operator's only channel into a resumed phase: what the dead process
+    took with it, which is nowhere in the task file precisely because it died."""
+    cfg = _make_config(tmp_path)
+    prompts = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        prompts.append(prompt)
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2,
+        description=_DESCRIPTION, note="The host rebooted mid-round.",
+    )
+
+    assert "The host rebooted mid-round." in prompts[0]
+
+
+def test_run_single_phase_leaves_the_task_pending_and_orphans_its_entries(
+    tmp_path, monkeypatch,
+) -> None:
+    """Every phase but the last one. The task is still going, so the card is
+    not closed — and nobody filed these entries, so they stop naming a carrier
+    that is no longer running."""
+    cfg = _make_config(tmp_path)
+    seen = _spy_learnings(monkeypatch)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == "pending"
+    assert (_ISSUE_ID, "done") not in kanban.statuses
+    assert seen["carried"] == []
+    assert seen["orphaned"] == ["task-1"]
+
+
+def test_run_single_phase_final_closes_the_task_the_way_a_cycle_does(
+    tmp_path, monkeypatch,
+) -> None:
+    """--final is the operator saying this phase is the last one. It buys what
+    the cycle gives its auditor: the entries carried in beforehand, done in the
+    task file and on the board, and no orphaning on the way out."""
+    cfg = _make_config(tmp_path)
+    seen = _spy_learnings(monkeypatch)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+    )
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == "done"
+    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert seen["carried"] == [("myproj", "task-1")]
+    assert seen["orphaned"] == []
+
+
+def test_run_single_phase_does_not_act_on_the_verdict_it_got_back(tmp_path, monkeypatch) -> None:
+    """A refusing revisor is what starts another implementador round in a
+    cycle. Here there is nothing to start it from, so the refusal is handed
+    back to the operator and the run stops at one phase."""
+    cfg = _make_config(tmp_path)
+    calls = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        calls.append(role)
+        return _rejecting_dispatch_phase(cfg_arg, task_id, slug, role, prompt, round_num=round_num)
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    assert calls == ["revisor"]
+    assert result is not None and result.success
+
+
+def test_run_single_phase_never_merges_even_when_the_config_says_to(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """merge_on_done fires on a cycle that watched a revisor approve. A phase
+    run by hand watched nothing, so the branch is the operator's to merge."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
+    )
+
+    assert fake_git.merges == []
+
+
+def test_run_single_phase_says_what_closing_by_hand_did_not_do(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """Invisible from the task file otherwise: a card closed this way was
+    closed by a phase, not by a cycle that read a verdict."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_single_phase(
+            cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
+        )
+
+    assert any(
+        "closed by a single auditor phase" in r.getMessage() and "merge-task" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_run_single_phase_that_did_not_land_blocks_the_card_and_returns_none(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The operator is driving the cycle by hand now, so a phase that failed
+    has to be an answer and not a silence: the next one would run over it."""
+    cfg = _make_config(tmp_path)
+    seen = _spy_learnings(monkeypatch)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        lambda *a, **kw: dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account=""),
+    )
+
+    kanban = _FakeKanban()
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+    )
+
+    assert result is None
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "done") not in kanban.statuses
+    # --final asked for the entries, the phase did not file them: they go back.
+    assert seen["orphaned"] == ["task-1"]
+    assert len(fake_git.review_cleanups) == 1
+
+
+def test_run_single_phase_refuses_a_task_nobody_described(tmp_path, monkeypatch) -> None:
+    """Same preamble as the cycle, same refusal: a role told a task id and
+    nothing else costs a phase of quota to learn nothing."""
+    cfg = _make_config(tmp_path)
+    set_kanban_issue_id(cfg.hive_tasks_dir, "task-1", _ISSUE_ID)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(1))
+
+    kanban = _FakeKanban()
+    assert dispatcher_mod.run_single_phase(cfg, "task-1", "myproj", kanban, "auditor") is None
+    assert calls == []
+    assert kanban.statuses == [(_ISSUE_ID, "blocked")]
+
+
+def test_run_single_phase_leaves_another_owners_worktrees_alone(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The reason the operator is resuming by hand is usually that something
+    else died — but if it did not, its checkouts are still in use."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="otro")
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 10% used · resets later\n"
+                "Current week (all models): 10% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    kanban = _FakeKanban()
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    assert result is None
+    assert fake_git.review_cleanups == []
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).owner == "otro"
+
+
+def test_run_single_phase_cleanup_does_not_swallow_a_real_failure(tmp_path, monkeypatch) -> None:
+    """`result` is bound before the try for exactly this: close_cycle runs on
+    the way out of a crash too, and must not turn it into its own error."""
+    cfg = _make_config(tmp_path)
+
+    def exploding_dispatch_phase(*args, **kwargs):
+        raise RuntimeError("phase blew up")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", exploding_dispatch_phase)
+
+    with pytest.raises(RuntimeError, match="phase blew up"):
+        dispatcher_mod.run_single_phase(
+            cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
+        )

@@ -7,15 +7,23 @@ import sys
 import uuid
 from pathlib import Path
 
-from dispatcher import context_transfer, docker_exec, learnings, operator
+from dispatcher import context_transfer, docker_exec, learnings, operator, project_docs, role_skills
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     cleanup_container,
     close_resolved_debt,
     container_for,
+    run_single_phase,
     run_task_cycle,
 )
 from dispatcher.vibe_kanban_client import NullKanbanClient, VibeKanbanClient
+
+
+#: The roles `run-phase` will dispatch. Held here rather than derived from
+#: ROLE_SKILLS because the cartografo has no skills and is still a phase, and
+#: because a typo in --role should be a usage error and not a full-price run
+#: of a role nothing knows how to prompt.
+_PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
 
 
 def _resolve_description(
@@ -218,6 +226,49 @@ def main() -> None:
         "the run simply has no board.",
     )
 
+    phase_parser = sub.add_parser(
+        "run-phase",
+        help="Run one role's phase on a task that is already under way, instead of "
+        "the whole cycle. The repair path: run-task always begins at the "
+        "arquitecto, so an interrupted run could otherwise only be continued by "
+        "paying for every phase again. It runs the phase and nothing else — no "
+        "further round, no verdict read, no debt card filed, no merge.",
+    )
+    phase_parser.add_argument("--task-id", required=True)
+    phase_parser.add_argument("--project", required=True, help="Project slug")
+    phase_parser.add_argument(
+        "--role",
+        required=True,
+        choices=sorted(_PHASE_ROLES),
+        help="Which role's turn to run.",
+    )
+    phase_parser.add_argument(
+        "--round",
+        type=int,
+        dest="round_num",
+        help="The revision round this phase belongs to, for the roles that have "
+        "rounds (implementador, revisor). It is what the phase is told it is "
+        "on, what labels its section in the task file, and what decides "
+        "whether the escalated effort applies — so a resumed round 2 has to "
+        "say 2, or it is dispatched as though the first round never happened.",
+    )
+    phase_parser.add_argument(
+        "--final",
+        action="store_true",
+        help="This phase closes the task: the learnings are carried to it "
+        "beforehand, the task file and the board are moved to done, and the "
+        "entries are not orphaned on the way out. In the role set that is the "
+        "auditor. Without it the handoff leaves the task pending, which is "
+        "what every phase before the last one should do.",
+    )
+    phase_parser.add_argument(
+        "--note",
+        default="",
+        help="Extra context appended to this one phase's prompt. The cycle uses "
+        "it to hand the auditor the debt cards it just filed; an operator "
+        "resuming a run uses it to say what the dead process took with it.",
+    )
+
     bootstrap_parser = sub.add_parser(
         "bootstrap-project",
         help="Create the per-project directory (projects_root/<slug>) on one account's container",
@@ -334,6 +385,34 @@ def main() -> None:
         # says nothing about a board it was never given.
         kanban = _kanban(cfg)
         run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
+    elif args.command == "run-phase":
+        if args.round_num is not None and args.round_num < 1:
+            parser.error("--round counts from 1")
+        # No --description: this verb only ever runs on a task some earlier
+        # run already described, and rewriting the ask underneath a phase
+        # that is resuming somebody else's work is not a thing to make easy.
+        if not (context_transfer.read_description(cfg.hive_tasks_dir, args.task_id) or "").strip():
+            parser.error(
+                f"task {args.task_id} has no description: run-phase resumes a task that "
+                "is already under way. Start it with run-task."
+            )
+        result = run_single_phase(
+            cfg,
+            args.task_id,
+            args.project,
+            _kanban(cfg),
+            args.role,
+            round_num=args.round_num,
+            final=args.final,
+            note=args.note,
+        )
+        if result is None:
+            # Same contract as merge-task and release-account: a phase that did
+            # not land is an exit code, so the operator driving a cycle by hand
+            # does not run the next one over the top of it.
+            print(f"phase {args.role} did not finish; task {args.task_id} is blocked", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"phase {args.role} finished; {context_transfer.task_file_path(cfg.hive_tasks_dir, args.task_id)} has its handoff")
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
         # config schema has no repo-source field, so cloning the actual
