@@ -301,6 +301,24 @@ def test_a_card_that_will_not_parse_is_named_in_warnings(tmp_path: Path) -> None
     assert str(broken) in body["warnings"][0]
 
 
+def test_a_board_directory_that_is_a_file_is_a_warning_and_not_a_500(tmp_path: Path) -> None:
+    # LocalBoardClient._scan catches FileNotFoundError only — for the dispatcher
+    # a missing board is an empty board, but a `local_board.dir` that is a file
+    # must raise rather than mint cards nobody can list. Here the contract is
+    # the other one: never 500, say which path could not be read.
+    harness = _harness(tmp_path)
+    harness.board_dir.write_text("this is a file, not a board directory")
+    _task(harness.tasks_dir, "T-1", kanban_issue_id="11111111-2222-3333-4444-555555555555")
+
+    resp = _get(harness, "/api/tasks")
+
+    assert resp.status_code == 200
+    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
+    assert resp.get_json()["data"][0]["card"] is None
+    assert str(harness.board_dir) in resp.get_json()["warnings"][0]
+    assert "unreadable board directory" in resp.get_json()["warnings"][0]
+
+
 def test_a_remote_board_is_a_warning_rather_than_a_dialled_subprocess(tmp_path: Path) -> None:
     # docs/decisions.md ADR 3: this service does not spawn Vibe Kanban's MCP
     # server per request. The caller is told, rather than left reading nulls.
@@ -502,6 +520,24 @@ def test_a_parameter_that_is_not_an_integer_answers_400(tmp_path: Path, query: s
     resp = _get(harness, f"/api/events?{query}")
 
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("name", ["limit", "since"])
+def test_an_integer_sqlite_cannot_bind_answers_400_and_not_a_500(
+    tmp_path: Path, name: str
+) -> None:
+    # SQLite integers are signed 64-bit and `WHERE id > ?` / `LIMIT ?` bind
+    # these straight in, so one past the boundary raises OverflowError — which
+    # is not sqlite3.Error, not OSError and not ValueError, so no except in the
+    # view catches it. Both ends are pinned, so this cannot pass by rejecting
+    # every large number: the boundary itself is a legal request.
+    harness = _harness(tmp_path)
+
+    assert _get(harness, f"/api/events?{name}=9223372036854775807").status_code == 200
+    resp = _get(harness, f"/api/events?{name}=9223372036854775808")
+
+    assert resp.status_code == 400
+    assert "64-bit" in resp.get_json()["error"]
 
 
 def test_a_missing_events_database_is_an_empty_list_and_a_warning(tmp_path: Path) -> None:

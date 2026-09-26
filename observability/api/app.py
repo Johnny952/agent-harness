@@ -65,6 +65,15 @@ REALM = "ia-harness api"
 #: gets the same answer whichever of the two services it asked.
 DEFAULT_EVENT_LIMIT = 100
 
+#: What SQLite can hold in an INTEGER column, and therefore what `limit` and
+#: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not a cap on
+#: how much a caller may ask for — that is a policy needing a config key this
+#: phase was not given, and it is declared as debt in `docs/debt/README.md` —
+#: only the range outside which binding raises rather than answering. See
+#: `_int_parameter`.
+_SQLITE_INT_MAX = 2**63 - 1
+_SQLITE_INT_MIN = -(2**63)
+
 #: What a task file can fail with. `yaml.YAMLError` is in here and is not a
 #: `ValueError`: a task file whose frontmatter does not scan raises it out of
 #: `read_task_file`, and without it one hand-edited card would 500 the endpoint
@@ -271,6 +280,15 @@ def _int_parameter(name: str, default: int | None, positive: bool = False):
     plan writes out is a legal request. Anything else that is not an integer is
     a 400 rather than a silent fallback to the default: a caller who sent
     `limit=lots` is owed the news.
+
+    Validating one of these is two checks and not one: `int()` parsing the text
+    does not mean SQLite can bind the result. `limit` and `since` go into
+    `LIMIT ?` and `WHERE id > ?`, and a Python int outside the signed 64-bit
+    range raises `OverflowError` there — not a `sqlite3.Error`, not an `OSError`
+    and not a `ValueError`, so nothing in the events view catches it. Range is a
+    fact about the request, so it answers 400 like every other bad parameter;
+    widening the `except` instead would report a database that could not be read
+    when the database was never the problem.
     """
     raw = request.args.get(name)
     if not raw:
@@ -281,6 +299,8 @@ def _int_parameter(name: str, default: int | None, positive: bool = False):
         return None, _error(f"{name} must be an integer, not {raw!r}", 400)
     if positive and value <= 0:
         return None, _error(f"{name} must be a positive integer, not {value}", 400)
+    if not _SQLITE_INT_MIN <= value <= _SQLITE_INT_MAX:
+        return None, _error(f"{name} must fit a 64-bit integer, not {value}", 400)
     return value, None
 
 
@@ -315,17 +335,26 @@ def _read_cards(cfg: Config) -> tuple[dict[str, dict], list[str]]:
     method by design (`docs/decisions.md` ADR 3 and ADR 4), and it is what
     turns a board that is quietly short — `docs/debt/T-008-D2.md` — into a
     warning a reader can see.
+
+    The `except OSError` is on this side of the seam on purpose.
+    `LocalBoardClient._scan` catches `FileNotFoundError` only, because for the
+    dispatcher a missing directory is a board with no issues while a
+    `local_board.dir` that is a regular file must raise — `create_issue` would
+    otherwise mint cards nobody can list. Here the contract is the other one:
+    no read answers 500, and every path it could not read is named.
     """
     if cfg.local_board is None:
         return {}, [_REMOTE_BOARD_WARNING] if cfg.vibe_kanban is not None else []
     board = LocalBoardClient(cfg.local_board)
-    warnings = [
-        f"{path}: unreadable board card; it is on no task's `card`"
-        for path in board.unreadable()
-    ]
-    return {
-        issue.issue_id: dataclasses.asdict(issue) for issue in board.list_issues()
-    }, warnings
+    try:
+        warnings = [
+            f"{path}: unreadable board card; it is on no task's `card`"
+            for path in board.unreadable()
+        ]
+        cards = {issue.issue_id: dataclasses.asdict(issue) for issue in board.list_issues()}
+    except OSError as exc:
+        return {}, [f"{cfg.local_board.dir}: unreadable board directory: {exc}"]
+    return cards, warnings
 
 
 def _no_events_warning(db_path: str, exc: Exception) -> str:

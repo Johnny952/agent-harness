@@ -164,9 +164,14 @@ unreadable one — and Phase 2 is written against whatever this phase did.
   `errorhandler` per status would make the promise true at the cost of hiding
   a typo'd path behind the same envelope shape a real endpoint answers with.
 - 400 for an unknown query parameter, for a non-integer `limit`/`since`, for a
-  non-positive `limit`, and for an absent `project` where `projects_root` holds
+  non-positive `limit`, for a `limit`/`since` outside the signed 64-bit range
+  SQLite can bind, and for an absent `project` where `projects_root` holds
   more than one checkout. An empty value (`?limit=&since=`) reads as absent, so
-  the URL the plan writes out is a legal request.
+  the URL the plan writes out is a legal request. The range check is a 400 and
+  not a caught exception because it is a fact about the request: `int()` parsing
+  the text does not mean `LIMIT ?` can bind the result, and `OverflowError` there
+  is neither a `sqlite3.Error` nor a `ValueError`. It is not the cap on how much
+  a caller may ask for; that is debt this phase declared and did not take.
 - 404 for a task id with no file, a task id that is not a bare filename, a
   project slug with no checkout, and a `projects_root` with no checkouts at all.
 - A file that exists and will not parse is never a 404: `/api/tasks/<id>`
@@ -179,6 +184,12 @@ unreadable one — and Phase 2 is written against whatever this phase did.
 - A missing or unopenable events database, and a missing debt index, are `[]`
   plus a warning. Neither is an error: a harness that has never run has no
   events, and a project that has filed no debt has no index.
+- A `local_board.dir` that cannot be listed at all — it is a regular file, or
+  the mount is gone — is every `card` null plus one warning naming the
+  directory, not a 500. `LocalBoardClient._scan` raises for anything but a
+  missing directory, and correctly so: for the dispatcher a board that reads as
+  empty would let `create_issue` mint cards nobody can list. The widening
+  belongs on this side of the seam, where never-500 is the contract.
 
 **Consequences.** A Phase 2 client can treat `data === null` and `data === []`
 as "nothing to show, read `warnings`" and reserve its error path for non-200s.
