@@ -119,8 +119,14 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   bytes those entries buy (`handoff.lines_for` derives the first from the
   second, so they can't drift): nothing can count its own bytes while it
   writes, which is why every run before 2026-09-24 overran one. The bytes are
-  what the dispatcher measures, and they were tuned from those runs —
-  `handoff.py` carries the numbers with the evidence for each. An overage
+  what the dispatcher measures, and the numbers come from measuring what
+  phases file: every accepted return on record was inverted back into the
+  canonical JSON the dispatcher counted and priced per entry, and an entry is
+  charged at the p90 of that density rather than the mean, so a role that
+  spends the entries it was given fits its budget about nine times in ten
+  instead of about one in two. The one entry that is not a line is a debt
+  declaration, which carries several fields and is stated to the role as
+  three. `handoff.py` carries each number with the evidence for it. An overage
   inside a 10% margin (floor 256 bytes) is taken as it came rather than spent
   on a model call, and the size is logged at INFO either way, which is the
   data the next tuning uses. A WARNING means a handoff went into the task
@@ -1093,23 +1099,6 @@ either.
     client does is covered by the suite and has not yet run in a real
     dispatch; V2.6 is the check that would say otherwise. (V2.1–V2.6)
 
-- **The handoff budgets are sized on a toy repo.** `_BUDGET_BYTES` in
-  `dispatcher/handoff.py` was tuned on four runs against the toy project,
-  where each role overran by tens of percent at worst and the shrink
-  retry brought it back. T-008, the first dispatch against this repo,
-  broke that: all three roles that ran blew the budget on the first
-  attempt — arquitecto 6540/4096 (+60%), implementador 8905/5120 (+74%),
-  revisor 5226/4096 (+28%) — and two of the three were still over after
-  the rewrite, which the dispatcher accepts as is by design. Three roles
-  failing the same way in one run is a sizing problem, not three
-  incidents, and the likely driver is the target: a real repo has more
-  paths worth citing than the toy one. `lines_for` is suspect for the
-  same reason, since it derives its entry count from the same budget.
-  Raising the numbers is not the whole fix — the point of the budget is
-  that detail goes to files and the handoff cites paths — so the sizing
-  has to be re-derived from what the over-budget returns actually
-  contained. The four-run history is in
-  [`docs/ROADMAP.md`](docs/ROADMAP.md), Stage 1 item 2.
 
 ### Prioritized
 
@@ -1272,16 +1261,18 @@ either.
      some number of lines. The answer the harness's own machinery already
      gives is to cap what a phase is handed, in bytes, and to leave alone
      what merely sits on disk. Three caps exist and all three are of the
-     first kind: `_BUDGET_BYTES` in `dispatcher/handoff.py` (2048–5120 per
+     first kind: `_BUDGET_BYTES` in `dispatcher/handoff.py` (2560–7168 per
      role), `MAX_ROWS = 40` with `_CELL_CHARS = 160` in
      `dispatcher/learnings.py`, and the `wc -c` threshold in *Indexes and
      pointers* below that decides inline against by-path. Every byte there
      is paid again by every phase of every task, which is what makes a
      number defensible; a file nobody opens costs nothing. The cautionary
-     half is *The handoff budgets are sized on a toy repo* under *Known
-     gaps* above: T-008 had three roles blow the byte budget in one run,
-     so the mechanism is right and the constants are not, which is what
-     happens to a limit chosen without data.
+     half is in Stage 1 item 2 of [`docs/ROADMAP.md`](docs/ROADMAP.md):
+     T-008 had all five of its phases blow the byte budget in one run, and
+     re-deriving them showed the mechanism was right and the constants
+     wrong twice over — sized off a toy repo, and divided by a mean
+     density rather than a p90 — which is what happens to a limit chosen
+     without data and then checked against the wrong statistic.
      A line cap on the docs a human reads is rejected. This README is past
      1900 lines and [`docs/ROADMAP.md`](docs/ROADMAP.md) past 1600, and
      that length is an index of decisions doing its job; a cap would not

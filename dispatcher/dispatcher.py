@@ -364,10 +364,20 @@ def _role_prompt(
         # fields hold anyway. The bytes stay because that is what the
         # dispatcher measures, and a limit you are checked against should be
         # a limit you were told.
+        #
+        # This used to say the entries were a line each, which is true of the
+        # flat lists and wrong by a factor of three for a debt declaration:
+        # measured across eight tasks, a flat entry runs 92 bytes and a debt
+        # 465. That is the one exception worth naming. Pricing every field
+        # separately was measured too and did not pay: the spread in what an
+        # entry costs is inside each field, not between them, so a per-field
+        # tariff predicts the total no better than one number does and costs
+        # a paragraph of prompt to state.
         prompt += (
             f"\n\nReturn the structured handoff your schema describes: about "
             f"{handoff.lines_for(role)} entries in all, counting every list together, one line "
-            f"each — {handoff.budget_for(role)} bytes of JSON. Every later phase reads it, so it "
+            "each — a debt declaration carries several fields and counts as three — "
+            f"{handoff.budget_for(role)} bytes of JSON. Every later phase reads it, so it "
             "carries the summary and not the detail: anything longer than a line goes in a file "
             "that you cite under `paths`, by path plus heading or symbol name, never by line "
             f"number. Detail worth keeping (an ADR, a learning, docs/implementations/{task_id}.md) "

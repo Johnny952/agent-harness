@@ -1148,7 +1148,8 @@ logins.
      prompt offers it is unmeasured, and the two entries this harness
      already knows to be false are still in its own inbox.
    - **The handoff budgets were sized before a phase could write
-     anything.** Fixed 2026-09-24, from the eleven overages four
+     anything.** Fixed 2026-09-24 — the constants re-derived 2026-09-26,
+     at the end of this entry — from the eleven overages four
      dispatched runs logged rather than by raising every limit until the
      warning went quiet. The first finding was that the retry is not
      overhead: every over-budget draft came back materially shorter and
@@ -1217,25 +1218,57 @@ logins.
      needed neither a retry nor the margin for the first time.
      T-008 (2026-09-25) is the fourth and it breaks the pattern the
      first three set, because it is the first dispatch against a real
-     repo instead of the toy project. All three roles that got to run
+     repo instead of the toy project. Every one of its five phases
      blew the budget on the first attempt — arquitecto 6540 against
-     4096 (+60%), implementador 8905 against 5120 (+74%), revisor 5226
-     against 4096 (+28%) — and two of the three were still over after
-     the rewrite, so the margin could not absorb them and the retries
-     were accepted as they came. Three roles failing the same way in
-     one run is a sizing problem and not three incidents. The
-     arquitecto's 6540 sits above the 5374–5911 band the toy runs
-     established for that role, which points at the target and not at
-     the role: a real repo offers more paths worth citing. That makes
-     the toy-project numbers the wrong baseline for the next tuning,
-     and it makes `lines_for` suspect too, since it derives its entry
-     count from the same budget. The fix is not just larger numbers:
-     the budget exists so the detail goes to files and the handoff
-     cites their paths, so the re-derivation has to start from what
-     those over-budget returns actually carried. Carried as a *Known
-     gaps* bullet in the README rather than closed here, because this
-     entry's fix — the budget, the margin, the retry, the logging — is
-     still the right machinery; it is the constants that are wrong.
+     4096, implementador 8905 against 5120, revisor 5226 and then
+     6254 against 4096, auditor 4443 against 3584 — and three of the
+     five were still over after the one rewrite the dispatcher
+     allows: 4732, 6313 and 4280. Five phases failing the same way in
+     one run is a sizing problem and not five incidents.
+     Re-derived 2026-09-26, from measurement rather than from the
+     logged totals. Every accepted return in `.data/verify/` was
+     inverted back into the canonical JSON `handoff.measure` counts —
+     the render mapping is invertible, and the inverse reproduces all
+     five logged T-008 sizes byte for byte — which prices a handoff
+     field by field across the 32 phases of eight tasks. Three
+     findings. First, the roles hit the target they were told and
+     missed the target that was checked: the median phase delivered
+     two entries *fewer* than `lines_for` allowed, and eight of the
+     thirty-two still went over the bytes. `_LINE_BYTES = 128` was the
+     mean density, and a budget divided by a mean is overrun half the
+     time by construction; measured net of envelope an entry costs a
+     median of 130 bytes, a mean of 132 and a p90 of 161, so the
+     constant is now 160, the p90, and a role that spends its entries
+     fits its budget about nine times in ten. `_ENVELOPE_BYTES` moves
+     the other way, 256 down to 160: with every field empty the
+     envelope measures 123 bytes for the roles carrying the common
+     fields alone, 142 for the implementador and 162 for the revisor.
+     Second, the diagnosis above was wrong about the cause. T-008 is
+     busier, not wordier: it ran 144 bytes an entry against the toy
+     tasks' 114 to 158, and filed 169 entries against their 60 to
+     135. The detail did go to files — some 30 KB of notes under the
+     task's scratch dir, with the `paths` counts unchanged — so
+     telling the roles again to cite rather than quote would have
+     fixed nothing. A real repo has more to report per phase, and the
+     budgets are now sized off what each role actually filed on T-008
+     at its own p90 density plus the envelope: cartografo 2560,
+     arquitecto 5120, implementador 7168, revisor 5120, auditor 4608,
+     which turns 18944 bytes of budget into 24576. The entry counts
+     follow: 15, 31, 43, 31 and 27. Third, pricing the fields
+     separately was measured and rejected. The spread between them is
+     real — a flat entry runs 92 bytes, a `paths` pair 151, a debt
+     declaration 465, and debt, paths and rulings together are 41% of
+     all handoff bytes — but weighting them predicts a handoff no
+     better than one number does, because the variance is inside each
+     field and not between them: the coefficient of variation per
+     handoff stays near 18% under every weighting tried. So the
+     prompt keeps one number and names the one exception, that a debt
+     declaration carries several fields and counts as three entries.
+     Deliberately not done, again: `maxItems`/`maxLength` in the
+     schema, for the reason above. One new unit test pins each budget
+     to the size its role actually filed on T-008; 784 passing, and
+     no existing assertion had to move. Not yet exercised — the next
+     dispatch against this repo is the check.
    - **A reviewing phase's edits are silently discarded.** Fixed
      2026-09-25. Measured on T-005 (`.data/verify/t005-acceptance.txt`):
      the revisor said it had closed a `pointers` gate by editing

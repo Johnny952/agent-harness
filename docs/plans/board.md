@@ -1,10 +1,18 @@
 # Plan: a board for this harness
 
-Status: Phase 0 is specified below and was dispatched as T-008 on
-2026-09-25. That run was cut off by a host reboot partway through the
-revisor's second round; the arquitecto and the implementador's first round
-are committed on `agent/task/T-008`, and round 2 is green but uncommitted
-in that task's `work` worktree. See the T-008 row in `docs/ROADMAP.md`.
+Status: Phase 0 is built and merged. It was specified below, dispatched as
+T-008 on 2026-09-25, and landed as `LocalBoardClient` in
+`dispatcher/vibe_kanban_client.py` behind a `local_board` block in
+`config.yaml` — `docs/decisions.md` ADR 1 and
+[`docs/implementations/T-008.md`](../implementations/T-008.md) are the record.
+The run was cut off by a host reboot partway through the revisor's second
+round and was resumed a phase at a time with `dispatch run-phase`: round 2
+was committed as `1d4ca62` and APPROVED, the auditor closed the task, and
+`agent/task/T-008` is merged. Two Phase 0 items stay open as debt —
+[`T-008-D1`](../debt/T-008-D1.md), no lock around `set_status`'s
+read-modify-write, and [`T-008-D2`](../debt/T-008-D2.md), a card that will
+not parse is skipped without telling a caller the board is short. Phase 1
+owns the second of those. See the T-008 rows in `docs/ROADMAP.md`.
 Phases 1–6 are unstarted.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has

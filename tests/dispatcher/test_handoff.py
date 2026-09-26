@@ -107,6 +107,18 @@ def test_every_budget_buys_enough_lines_to_report_with() -> None:
     assert handoff.lines_for("auditor") >= 22
 
 
+def test_every_budget_covers_what_its_role_filed_on_a_real_repo() -> None:
+    """T-008 is the first task run against a repo that is not the toy one, and
+    every one of its five phases went over the budget it had then. These are
+    the sizes the accepted returns measured — what the next phase actually
+    read, after the one rewrite a role gets — so a budget under them is one
+    that will be missed again. The revisor is its round two, the larger of the
+    two it filed."""
+    filed = {"arquitecto": 4732, "implementador": 6313, "revisor": 4280, "auditor": 2964}
+    for role, measured in filed.items():
+        assert handoff.budget_for(role) >= measured, role
+
+
 def test_an_unknown_role_gets_countable_lines_too() -> None:
     assert handoff.lines_for("becario") > 0
 
@@ -127,13 +139,14 @@ def test_a_handoff_that_fits_is_never_worth_shrinking() -> None:
 
 
 def test_a_small_overage_is_not_worth_a_model_call() -> None:
-    """Four of the eleven overages on record were under 300 bytes — a line and
-    a half in a file nobody was struggling to read, for the price of a
+    """Five of the nineteen overages on record were under 300 bytes — a line
+    and a half in a file nobody was struggling to read, for the price of a
     `--resume`."""
     assert not handoff.worth_shrinking("arquitecto", 46)
     assert not handoff.worth_shrinking("revisor", 67)
     assert not handoff.worth_shrinking("arquitecto", 170)
     assert not handoff.worth_shrinking("implementador", 280)
+    assert not handoff.worth_shrinking("revisor", 184)
 
 
 def test_a_page_of_prose_over_is_worth_a_model_call() -> None:

@@ -201,44 +201,60 @@ _ROLE_EXTRAS: dict[str, dict] = {
 }
 
 #: What one entry costs: a line a later phase reads, plus the quoting and the
-#: comma the JSON puts around it. Measured off the returns in `.data/verify/`,
-#: where the phases that were asked to shorten came back at 100-120 characters
-#: a line. Deliberately a little over that, so a role told it has N lines can
-#: spend them all without going over the bytes.
-_LINE_BYTES = 128
+#: comma the JSON puts around it. Was 128, the mean. Every accepted return in
+#: `.data/verify/` was measured back into the JSON the dispatcher counted, and
+#: an entry costs a median of 130 bytes net of the envelope, a mean of 132 and
+#: a p90 of 161. A budget divided by the mean is one half the handoffs are
+#: over by construction, which is what the runs show: the roles came in a
+#: median of two entries *under* the count they were given and eight of the
+#: thirty-two still went over the bytes. This is the p90, so a role that
+#: spends its entries fits its budget about nine times in ten.
+_LINE_BYTES = 160
 
 #: The JSON around the lines: every key, every empty array, the status string.
-_ENVELOPE_BYTES = 256
+#: Was 256. Measured with every field empty it is 123 bytes for the roles with
+#: the common fields alone, 142 for the implementador and 162 for the revisor,
+#: which pays for a verdict and a ruling list.
+_ENVELOPE_BYTES = 160
 
-#: Bytes of JSON a role's handoff may spend. No longer guesses: four dispatched
-#: runs logged every overage with the role and the size, and these are those
-#: numbers. The rule applied to them was to leave a budget alone when a return
-#: has met it at least once — a budget the returns straddle is a budget doing
-#: its job — and to move one nothing has ever met, because four sessions
-#: missing the same number is evidence about the number.
+#: Bytes of JSON a role's handoff may spend. Sized off what a phase delivers,
+#: not off what it was asked for: every accepted return across eight tasks was
+#: parsed back into its canonical JSON and priced per entry, and each budget
+#: below is the entries that role actually filed on T-008 at the p90 density
+#: plus the envelope. T-008 is the first task against a repo that is not the
+#: toy one, and it is the evidence these numbers are for: five phases out of
+#: five went over on the first attempt and three were still over after the one
+#: rewrite they are allowed.
+#:
+#: What made them go over is volume, not prose. T-008 ran 144 bytes an entry,
+#: mid-range for the toy tasks' 114 to 158, and filed 169 entries against
+#: their 60 to 135. The detail did go to files — some 30 KB of notes under the
+#: task's scratch dir, with the `paths` counts unchanged — and a real repo
+#: still has more to report per phase than a toy one does.
 _BUDGET_BYTES: dict[str, int] = {
     # The mapper's output is the docs it wrote, not its handoff: what the next
     # phase needs from it is a pointer to the index and how far it got. No run
-    # has exercised it yet, so this one is still a guess and stays put.
-    "cartografo": 2048,
-    # Met once in four, missed three times by 1%, 4% and 18%. That is what a
-    # budget set right looks like from the inside; the small misses are the
-    # margin's problem, not the number's.
-    "arquitecto": 4096,
+    # has exercised it yet, so this one is still a guess; it moves only to keep
+    # the entry count it derives worth stating.
+    "cartografo": 2560,
+    # Filed 32 entries on T-008 against the 30 it was given, and measured 4732
+    # against a 4096 budget. Its entries run to a p90 of 161 bytes.
+    "arquitecto": 5120,
     # The one role that pays for two structured lists on top of the common
-    # fields: a debt declaration is six fields, and several of them fit in a
-    # round. Met in half the runs.
-    "implementador": 5120,
-    # Was 3072, which nothing ever met: 3139, 4010, 4149 and 4386 bytes in four
-    # runs. It carries a verdict and a ruling per declaration on top of the
-    # common fields, which is the same argument that bought the implementador
-    # its extra room, and after being asked to shorten it lands near 2600.
-    "revisor": 4096,
-    # Was 2048, which nothing ever met either: 4602 and 5209. It is the phase
-    # that reports on the whole task and now commits the docs it files, and
-    # its shortened returns measure about 2600 — so it gets room for those and
-    # keeps a limit its first drafts still have to be edited down to.
-    "auditor": 3584,
+    # fields, and the densest of them at 185 bytes an entry on the p90: a debt
+    # declaration alone measures a median of 465, nearly three of these lines.
+    # Filed 40 entries on T-008 and measured 6294 against 5120.
+    "implementador": 7168,
+    # It carries a verdict and a ruling per declaration on top of the common
+    # fields, and ran the only phase that went over twice: 4028 on the first
+    # round and 4280 on the second, both against 4096. Its entries are the
+    # cheapest of the structured roles at a p90 of 137.
+    "revisor": 5120,
+    # The phase that reports on the whole task and commits the docs it files.
+    # Its first draft on T-008 measured 4443 against 3584; what it kept after
+    # the rewrite was 27 entries, which is what this pays for at its p90 of
+    # 126 bytes an entry.
+    "auditor": 4608,
 }
 
 _DEFAULT_BUDGET_BYTES = 4096
