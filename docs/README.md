@@ -85,6 +85,7 @@ externally-managed.
 | `docs/implementations/<task-id>.md` | Before changing something a past task built here, to find out why it is the way it is. One file per task, written by that task. |
 | `docs/learnings/README.md` | Before you start, and again before you debug: things true of this project that cost an earlier task time. Read the table whole, open the entries whose "when it applies" matches your task. |
 | `docs/debt/README.md` | Before you start: work earlier tasks deliberately left undone, one row each with the condition that says whether it bites your task. Also where your own accepted debt is filed. |
+| `docs/business.md` | Before changing what the harness *decides* — which accounts are eligible, what counts as a project, what a reader is allowed to treat as absent. Partial by construction: it holds the rules a task inferred from the code and marked unconfirmed, waiting on a human, alongside the confirmed ones it cites. |
 
 `docs/superpowers/` is vendored upstream material, not this project's
 documentation. Do not treat it as a contract and do not edit it; the pointer
