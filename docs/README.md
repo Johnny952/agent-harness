@@ -67,6 +67,8 @@ externally-managed.
 | `dispatcher/vibe_kanban_client.py` | The `KanbanClient` seam: `list_issues`, `get_issue`, `create_issue`, `set_status`. `NullKanbanClient` is what a harness with no board configured gets, and is what every run has used so far. `LocalBoardClient` is the board that is a directory of JSON cards (`local_board` in config), added by Phase 0 of the board plan. |
 | `observability/collector/` | A Flask endpoint and one SQLite table, `events`, fed by the agents' hooks. |
 | `observability/dashboard/` | 67 lines of Flask behind Basic auth that render the last 200 events as a table. The board plan below replaces this. |
+| `observability/api/` | The read API: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`, `/api/events`, `/api/debt`, every one `{"data", "warnings"}` behind the dashboard's auth. Writes nothing and parses nothing itself — it reads through the dispatcher's own readers. Phase 1 of the board plan; `docs/decisions.md` ADR 3–5. |
+| `observability/auth.py` | The Basic auth the dashboard and the API share, one copy of the timing-safe comparison. |
 | `hooks/emit_event.py` | The Claude Code hook the agent containers POST from. |
 | `skills/` | The vendored role skills, trimmed from three MIT upstreams. `skills/README.md` says which and why. |
 | `docker/` | One Dockerfile per image and three compose files. `docker/agent/Dockerfile` is where the agent toolchain is pinned. |

@@ -58,6 +58,44 @@ services:
     networks:
       - ia_harness_net
 
+  # The read API (docs/plans/board.md "Phase 1 — a read API in Python"): GETs
+  # over the task files, the account state, the events and the debt index, so
+  # an operator — and Phase 2's UI — stops reading root-owned
+  # dispatcher_state/*.json through a throwaway container.
+  #
+  # Every mount is :ro and nothing here writes, which is why it can be handed
+  # the dispatcher's own directories at the dispatcher's own container paths:
+  # `state_dir: /state`, `hive_tasks_dir: /data/.hive/tasks` and
+  # `projects_root: /data/projects` are true in this container too, so
+  # config.yaml needs no key for this service. It gets no docker socket: the
+  # dispatcher's readers arrive with it, docker_exec included, and none of the
+  # latter is ever called.
+  api:
+    build:
+      context: ../..
+      dockerfile: observability/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8789:8789"
+    volumes:
+      # Not under /data: that is where the two bind mounts below live in the
+      # dispatcher's and the agents' layout, and nesting the volume under them
+      # to keep COLLECTOR_DB_PATH byte-identical with the dashboard's would
+      # trade a legible mount list for an environment variable.
+      - observability_data:/events:ro
+      - ../../dispatcher_state:/state:ro
+      - ../../.hive:/data/.hive:ro
+      - ../../.data/projects:/data/projects:ro
+      - ../../config.yaml:/app/config.yaml:ro
+    environment:
+      - COLLECTOR_DB_PATH=/events/events.db
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+    depends_on:
+      - collector
+    networks:
+      - ia_harness_net
+
   registry-mirror:
     image: registry:2
     restart: unless-stopped

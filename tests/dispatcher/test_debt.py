@@ -216,6 +216,83 @@ def test_a_project_with_no_debt_index_reads_as_empty(monkeypatch) -> None:
     assert debt.read_index("agent-cuenta1", "/data/projects/myproj") == ""
 
 
+def test_index_rows_reads_every_row_by_column_name() -> None:
+    """The path-based way in, for a reader that already has the text: the read
+    API mounts a checkout and cannot go out through `docker exec`."""
+    rows = debt.index_rows(_INDEX)
+
+    assert rows == [
+        {
+            "id": "task-3-D1",
+            "what": "The retry loop is untested",
+            # `_rows` strips a backtick from each end of every cell, which is
+            # what unwraps `` `task-3-D1` `` into an id — a cell that only ends
+            # in one loses it. Pinned as it is rather than fixed: the same
+            # stripping feeds `index_fingerprints`, and a dedupe that changed
+            # shape would re-file debt every project already carries.
+            "where": "a task touching `cli.py",
+            "fix": "a fake clock",
+            "card": "card-aaa",
+            "resolved": False,
+        },
+        {
+            "id": "task-4-D1",
+            "what": "The config loader guesses",
+            "where": "a task adding a config key",
+            "fix": "read the schema",
+            "card": "-",
+            "resolved": False,
+        },
+    ]
+
+
+def test_index_rows_falls_back_to_the_column_order_like_its_two_readers() -> None:
+    renamed = (
+        "| entry | debt | trigger | remedy | issue |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-3-D1` | The retry loop is untested | anywhere | a fake clock | `card-aaa` |\n"
+    )
+
+    [row] = debt.index_rows(renamed)
+
+    assert row["id"] == "task-3-D1"
+    assert row["where"] == "anywhere"
+    assert row["card"] == "card-aaa"
+
+
+def test_index_rows_offers_the_resolved_flag_without_hiding_the_row() -> None:
+    """The index marks an entry resolved in place, by opening its **what**
+    cell with a bolded `Resolved`. That is a convention in prose, so the flag
+    is best-effort and the row is never dropped on the strength of it."""
+    text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-3-D1` | **Resolved 2026-09-26.** The retry loop was untested | x | y | none |\n"
+        "| `task-4-D1` | **Not** resolved at all | x | y | none |\n"
+    )
+
+    rows = debt.index_rows(text)
+
+    assert [row["resolved"] for row in rows] == [True, False]
+    assert [row["id"] for row in rows] == ["task-3-D1", "task-4-D1"]
+
+
+def test_index_rows_of_no_index_is_no_rows() -> None:
+    assert debt.index_rows("") == []
+    assert debt.index_rows("# Debt\n\nNothing filed yet.\n") == []
+
+
+def test_index_rows_of_a_short_row_reads_the_cells_that_are_there() -> None:
+    """The auditor writes the table by hand; a row missing its last cell is a
+    row with no card, not a read that throws the index away."""
+    text = "| id | what | where | fix | card |\n|---|---|---|---|---|\n| `task-3-D1` | Untested |\n"
+
+    [row] = debt.index_rows(text)
+
+    assert row["what"] == "Untested"
+    assert row["where"] == ""
+
+
 def test_the_index_says_what_it_already_carries() -> None:
     assert debt.index_fingerprints(_INDEX) == {
         debt.fingerprint("The retry loop is untested"),

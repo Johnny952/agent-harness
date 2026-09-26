@@ -79,3 +79,103 @@ a board nothing moves. Phase 2 is where the local board's default is meant to
 flip on (`docs/plans/board.md` "Configuration"); doing that means deciding what
 an existing `vibe_kanban` block then means, and this ADR is why that cannot be
 "the local one wins quietly".
+
+## ADR 3 — The read API reads cards from a local board only, and never dials a remote one
+
+**Status:** accepted (T-009, 2026-09-26).
+
+**Context.** `docs/plans/board.md` "Phase 1 — a read API in Python" makes a
+task's `card` the board document its `kanban_issue_id` points at, and the
+harness has two board implementations. `VibeKanbanClient` reaches its board by
+spawning `vibe_kanban.command` as an MCP subprocess per call, over stdio, with
+no timeout — and `observability/api/Dockerfile` is `python:3.11-slim`, which has
+no node and no `npx`.
+
+**Decision.** `observability/api/app.py:_read_cards` builds
+`LocalBoardClient(cfg.local_board)` when `local_board` is configured and reads
+no board otherwise. A harness configured with `vibe_kanban` gets `card: null`
+on every task plus one warning in the envelope saying so, per request that
+would have read a card. It is not an error, and it is not silence either.
+
+**Consequences.** A read endpoint that promises never to 500 also never blocks
+on a subprocess it cannot kill, and the image stays a Python image. The cost is
+that a `vibe_kanban` harness sees no cards through this API; the way to change
+that is a board client that speaks HTTP to something, not a socket or a
+toolchain in this image. Phase 2 reads `warnings`, so the reason arrives with
+the nulls. This is also why the API builds its own client instead of taking
+`dispatcher/cli.py:_kanban()`: that factory is for a dispatcher that must not
+know which board it got, and this service is the one caller that has to.
+
+## ADR 4 — `unreadable()` is the one name the board seam does not carry, and `card` is a `KanbanIssue`
+
+**Status:** accepted (T-009, 2026-09-26).
+
+**Context.** `docs/debt/T-008-D2.md`: a card that will not parse is skipped by
+`list_issues` with a log line, so a reader gets a board that is quietly short.
+Phase 1's envelope is where that shortfall was meant to surface, and surfacing
+it needs a method only the local board can have — every other client's skips
+happen on a server. `docs/learnings/the-kanban-seam-is-a-closed-surface.md`
+says the seam is closed at five public names.
+
+**Decision.** `LocalBoardClient.unreadable() -> list[str]` returns the paths
+`list_issues` skipped, over the same single directory scan (`_scan`).
+`dispatcher/dispatcher.py` must never call it — it does not know which
+implementation it holds — and
+`tests/dispatcher/test_vibe_kanban_client.py:LOCAL_BOARD_ONLY` names it as the
+one exception, so the parity test still fails on the next local-only addition.
+That test was also rewritten: it compared `LocalBoardClient`'s public names
+against the union of both clients', which contains them by construction, so it
+had never failed a superset at all.
+
+A task's `card` is `dataclasses.asdict` of the `KanbanIssue` the seam answers
+with — `issue_id`, `title`, `status`, `simple_id` — and not the stored JSON
+document. The document's other two fields, `description` and `created_at`, are
+reachable only through `_read_card`, and a read API is not the place to reach
+past a seam this project keeps deliberately narrow.
+
+**Consequences.** Phase 2 can render a card's title and its
+`in_progress:<role>` status, and cannot render its description or order cards
+by `created_at` — the two things ADR 1 says a UI would want `created_at` for.
+Getting them means widening the seam for every client in one change, with its
+own ADR, which is exactly the cost the learning above says it should carry.
+`unreadable()` costs one extra directory scan per request that reads cards,
+because `list_issues` and `unreadable` are two calls; the scan is shared code,
+not a second parser.
+
+## ADR 5 — The envelope's other half: what a read API answers when the read fails
+
+**Status:** accepted (T-009, 2026-09-26).
+
+**Context.** `docs/plans/board.md` pins every 200 as
+`{"data": …, "warnings": […]}` and says one unreadable file must never empty
+`data` or 500. It does not say what a non-200 body looks like, nor what a
+single-object endpoint answers when the one file it was asked for is the
+unreadable one — and Phase 2 is written against whatever this phase did.
+
+**Decision.** In `observability/api/app.py`:
+
+- Every non-200 but the 401 is `{"error": "<one sentence naming what was
+  wrong>"}`. There is no `warnings` key on an error: nothing was read.
+- 400 for an unknown query parameter, for a non-integer `limit`/`since`, for a
+  non-positive `limit`, and for an absent `project` where `projects_root` holds
+  more than one checkout. An empty value (`?limit=&since=`) reads as absent, so
+  the URL the plan writes out is a legal request.
+- 404 for a task id with no file, a task id that is not a bare filename, a
+  project slug with no checkout, and a `projects_root` with no checkouts at all.
+- A file that exists and will not parse is never a 404: `/api/tasks/<id>`
+  answers 200 with `data: null` and a warning naming the file, because a 404
+  there would deny a file the operator is looking at.
+- An account whose state file will not parse stays in `data` with `state`,
+  `current_task` and `rate_limited_at` null, plus a warning naming the file: the
+  account is configured whatever its state file says, and dropping it would
+  hide an account from the page that watches the pool.
+- A missing or unopenable events database, and a missing debt index, are `[]`
+  plus a warning. Neither is an error: a harness that has never run has no
+  events, and a project that has filed no debt has no index.
+
+**Consequences.** A Phase 2 client can treat `data === null` and `data === []`
+as "nothing to show, read `warnings`" and reserve its error path for non-200s.
+A later endpoint added here inherits all of it, including the rule that
+`warnings` names files rather than describing states. `warnings` is unbounded in
+length, and so is `limit`: neither has a cap, which is a cost this phase chose
+to leave — see `docs/debt/`.
