@@ -275,6 +275,37 @@ def _column(cells: list[str], header: list[str], name: str, fallback: int) -> st
         return ""
 
 
+#: How the index marks an entry resolved: the **what** cell opens with a bolded
+#: `Resolved`, per that index's own rule. A convention in prose and not a
+#: schema, which is why the flag it produces is offered and never used to hide
+#: a row.
+_RESOLVED_RE = re.compile(r"^\*\*\s*resolved\b", re.IGNORECASE)
+
+
+def index_rows(text: str) -> list[dict]:
+    """Every row of the index, by column name, in the order it is written.
+
+    The path-based way in. `read_index` reaches a project's index through
+    `docker exec` and the row parsing behind it was private, so anything that
+    already has the text — Phase 1's read API, reading a mounted checkout —
+    had no way to it but a second parser. This is that way, and the two readers
+    below go through it so there is still only one.
+
+    `resolved` is best-effort by construction: see `_RESOLVED_RE`.
+    """
+    return [
+        {
+            "id": _column(cells, header, "id", 0),
+            "what": (what := _column(cells, header, "what", 1)),
+            "where": _column(cells, header, "where", 2),
+            "fix": _column(cells, header, "fix", 3),
+            "card": _column(cells, header, "card", -1),
+            "resolved": bool(_RESOLVED_RE.match(what)),
+        }
+        for cells, header in _rows(text)
+    ]
+
+
 def index_fingerprints(text: str) -> set[str]:
     """What the index already holds, for deciding what is new.
 
@@ -282,11 +313,7 @@ def index_fingerprints(text: str) -> set[str]:
     describe: a project whose board fills with the same entry once per task is
     a board nobody reads.
     """
-    return {
-        fingerprint(what)
-        for cells, header in _rows(text)
-        if (what := _column(cells, header, "what", 1))
-    }
+    return {fingerprint(row["what"]) for row in index_rows(text) if row["what"]}
 
 
 def card_ids(text: str, entries: list[str]) -> dict[str, str]:
@@ -297,9 +324,8 @@ def card_ids(text: str, entries: list[str]) -> dict[str, str]:
     """
     wanted = set(entries)
     found = {}
-    for cells, header in _rows(text):
-        entry = _column(cells, header, "id", 0)
-        card = _column(cells, header, "card", -1)
+    for row in index_rows(text):
+        entry, card = row["id"], row["card"]
         if entry in wanted and card and card.lower() not in ("-", "none", "n/a"):
             found[entry] = card
     return found

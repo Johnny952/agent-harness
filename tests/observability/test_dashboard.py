@@ -102,3 +102,18 @@ def test_index_works_before_the_collector_has_created_the_database(tmp_path: Pat
     resp = client.get("/", headers=_auth_header("admin", "password"))
 
     assert resp.status_code == 200
+
+
+def test_the_401_still_names_this_services_own_realm(tmp_path: Path) -> None:
+    # The auth check moved to observability/auth.py when the read API arrived,
+    # and the realm is the one string the two services do not share. Pinned so
+    # the extraction cannot quietly rename this one.
+    db_path = str(tmp_path / "events.db")
+    collector_db.init_db(db_path)
+    app = create_app(db_path, "admin", "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8")
+    client = app.test_client()
+
+    resp = client.get("/")
+
+    assert resp.headers["WWW-Authenticate"] == 'Basic realm="ia-harness dashboard"'
+    assert resp.data == b"Authentication required"

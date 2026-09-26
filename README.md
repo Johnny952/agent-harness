@@ -249,7 +249,13 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
   container start) POST events to a collector (`observability/collector`,
   Flask + SQLite/WAL), rendered by an authenticated dashboard
   (`observability/dashboard`), meant to be reached over Tailscale rather than
-  exposed publicly.
+  exposed publicly. A third service (`observability/api`) serves read-only
+  JSON over the same state the dispatcher keeps on disk — task files, account
+  state, events, the debt index, board cards — behind the same credentials, on
+  `127.0.0.1:8789`: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`,
+  `/api/events`, `/api/debt`. It is Phase 1 of
+  [`docs/plans/board.md`](docs/plans/board.md); see `docs/decisions.md` ADR 3–5
+  for the envelope, the card it reports and the error half.
 
 Full design rationale, decisions, and open caveats live in
 [`docs/superpowers/specs/2026-09-13-ia-harness-design.md`](docs/superpowers/specs/2026-09-13-ia-harness-design.md);
@@ -260,7 +266,7 @@ the implementation task breakdown is in
 
 ```
 dispatcher/       Smart Dispatcher: config, state machine, docker exec, CLI
-observability/    Event collector (Flask/SQLite) + dashboard
+observability/    Event collector (Flask/SQLite) + dashboard + read API
 hooks/            Claude Code hooks that emit events to the collector
 docker/           Dockerfiles + compose files (control-plane and agents)
 scripts/          Volume setup, dind image pruning
@@ -435,8 +441,8 @@ docker compose -f docker/compose/docker-compose.agents.yml up -d
 `docker/compose/docker-compose.yml` reads `DASHBOARD_USERNAME`/
 `DASHBOARD_PASSWORD_HASH` from `docker/compose/.env` automatically if
 `scripts/configure.sh` wrote one; otherwise pass them inline. This step
-brings up three **persistent** control-plane services (`collector`,
-`dashboard`, `registry-mirror`) plus, from the second file, one persistent
+brings up four **persistent** control-plane services (`collector`,
+`dashboard`, `api`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account.
 
 Two services in those files are deliberately kept out of that default
@@ -981,8 +987,8 @@ want them to outlive a resource deletion), import the split files instead
 of the merged one, as two separate Coolify Compose resources:
 
 1. `docker/compose/docker-compose.yml` (control plane: `collector`,
-   `dashboard`, `registry-mirror`, plus `vibe-kanban` behind the `kanban`
-   profile).
+   `dashboard`, `api`, `registry-mirror`, plus `vibe-kanban` behind the
+   `kanban` profile).
 2. `docker/compose/docker-compose.agents.yml` (one `agent-<name>`/
    `dind-<name>` pair per account — scale this file, not individual
    services, when adding accounts).
@@ -1869,12 +1875,16 @@ either.
    - Hook payloads include tool inputs and outputs (file contents, env
      files, tokens) and land in SQLite as-is. Redact them in
      `hooks/emit_event.py`.
-   - The dashboard compares in constant time (`hmac.compare_digest`), but
-     the stored digest is still an unsalted SHA-256 of the password. A
-     salted digest (e.g. `salt$sha256(salt + password)`) keeps
+   - The dashboard and the read API compare in constant time
+     (`hmac.compare_digest`, shared in `observability/auth.py`), but the
+     stored digest both check against is still an unsalted SHA-256 of the
+     password. A salted digest (e.g. `salt$sha256(salt + password)`) keeps
      `scripts/configure.sh` Python-free; mind that compose interpolates
-     `$` in `.env` values. The collector and dashboard also run Flask's
-     development server rather than a production WSGI server.
+     `$` in `.env` values. That one digest now guards the read API too, which
+     serves the task files and root-owned `dispatcher_state/` rather than an
+     events table — the widest thing behind it. The collector, the dashboard
+     and the read API also run Flask's development server rather than a
+     production WSGI server.
    - The dashboard shows only the last 200 raw events. A per-task view
      (phase, account, duration, rounds, verdict, cost) would answer "what
      happened to this task" directly.

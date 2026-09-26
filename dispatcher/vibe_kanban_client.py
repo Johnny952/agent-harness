@@ -223,6 +223,25 @@ class LocalBoardClient:
         self._write_card(card)
         return card["issue_id"]
 
+    def unreadable(self) -> list[str]:
+        """The card documents a read of this board skips, as paths.
+
+        The one public name this client has and the seam does not carry, and
+        the only one `dispatcher.py` must never call: it does not know which
+        implementation it got, so a method one board has is a method nothing
+        shared can use. `tests/dispatcher/test_vibe_kanban_client.py::
+        test_the_local_board_adds_nothing_to_the_shared_surface` names it as
+        that single exception so the next addition still has to argue for
+        itself.
+
+        It exists for `observability/api/app.py`, which builds its own client
+        from the config and therefore does know: `list_issues` hands back a
+        board that is quietly short whenever a document will not parse
+        (`docs/debt/T-008-D2.md`), and the read API's envelope has a
+        `warnings` list precisely so that shortfall has somewhere to be said.
+        """
+        return self._scan()[1]
+
     def set_status(self, issue_id: str, status: str) -> None:
         """Move a stored card to a dispatcher status, verbatim."""
         card = self._read_card(issue_id)
@@ -277,7 +296,15 @@ class LocalBoardClient:
         return None
 
     def _cards(self) -> list[dict]:
-        """Every readable card, oldest first.
+        """Every readable card, oldest first."""
+        return self._scan()[0]
+
+    def _scan(self) -> tuple[list[dict], list[str]]:
+        """Every readable card, oldest first, and the paths of the skipped ones.
+
+        One scan behind both public answers, so `list_issues` and `unreadable`
+        are two views of the same pass over the directory rather than two
+        parsers that could disagree about what "readable" means.
 
         A missing directory is a board with no issues, not an error: the
         directory is created by the first write.
@@ -285,15 +312,19 @@ class LocalBoardClient:
         try:
             names = sorted(os.listdir(self.config.dir))
         except FileNotFoundError:
-            return []
-        cards = [
-            card
-            for name in names
-            if name.endswith(_CARD_SUFFIX) and not name.startswith(".")
-            if (card := self._read_path(os.path.join(self.config.dir, name))) is not None
-        ]
+            return [], []
+        cards, skipped = [], []
+        for name in names:
+            if not name.endswith(_CARD_SUFFIX) or name.startswith("."):
+                continue
+            path = os.path.join(self.config.dir, name)
+            card = self._read_path(path)
+            if card is None:
+                skipped.append(path)
+            else:
+                cards.append(card)
         cards.sort(key=lambda card: (card.get("created_at") or "", card["issue_id"]))
-        return cards
+        return cards, skipped
 
     def _write_card(self, card: dict) -> None:
         """Replace one card's document, atomically.

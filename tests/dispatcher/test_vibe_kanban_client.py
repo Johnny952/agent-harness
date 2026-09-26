@@ -242,17 +242,24 @@ def test_every_board_offers_what_the_real_one_does(client) -> None:
     assert surface <= set(dir(client))
 
 
+#: The one public name `LocalBoardClient` has that the shared seam does not
+#: carry, and therefore the one `dispatcher/dispatcher.py` must never call: it
+#: does not know which implementation it got. `unreadable()` is read by
+#: `observability/api/app.py`, which builds its own client from the config and
+#: does know — see `docs/decisions.md` ADR 4. Anything else added to one board
+#: alone has to argue for itself here first.
+LOCAL_BOARD_ONLY = {"unreadable"}
+
+
 def test_the_local_board_adds_nothing_to_the_shared_surface() -> None:
-    # Held to the *same* surface, not a superset: a public method only one
-    # board has is one `dispatcher.py` cannot call, because it does not know
-    # which implementation it got.
-    public = {
-        name
-        for client in (VibeKanbanClient, LocalBoardClient)
-        for name in vars(client)
-        if not name.startswith("_")
-    }
-    assert {name for name in vars(LocalBoardClient) if not name.startswith("_")} == public
+    # Held to the *same* surface plus the named exception above, not to a free
+    # superset. Compared against `VibeKanbanClient`'s names and not against the
+    # union of both clients': the union contains whatever `LocalBoardClient`
+    # exposes, so that assertion passed for any local-only addition at all.
+    shared = {name for name in vars(VibeKanbanClient) if not name.startswith("_")}
+    local = {name for name in vars(LocalBoardClient) if not name.startswith("_")}
+
+    assert local == shared | LOCAL_BOARD_ONLY
 
 
 def test_a_failed_tool_call_raises_with_the_reason() -> None:
@@ -475,3 +482,42 @@ def test_local_board_get_issue_does_not_raise_on_an_id_no_path_can_hold(tmp_path
     assert board.get_issue("nul\x00byte") is None
     with pytest.raises(LookupError):
         board.set_status("nul\x00byte", "done")
+
+
+# --- what a read of the board had to skip ---------------------------------
+
+
+def test_unreadable_names_the_documents_list_issues_skipped(tmp_path: Path) -> None:
+    # T-008-D2: a card that will not parse is dropped from list_issues with
+    # nothing but a log line, so a reader counting cards sees a shorter board
+    # and no reason why. This is the answer to "why is it shorter".
+    board = local_board(tmp_path)
+    issue_id = board.create_issue("Add a /healthz")
+    directory = Path(board.config.dir)
+    (directory / "broken.json").write_text("{ not json")
+    (directory / "listy.json").write_text(json.dumps(["not", "a", "card"]))
+
+    assert [i.issue_id for i in board.list_issues()] == [issue_id]
+    assert board.unreadable() == [
+        str(directory / "broken.json"),
+        str(directory / "listy.json"),
+    ]
+
+
+def test_unreadable_ignores_what_a_board_directory_may_legitimately_hold(
+    tmp_path: Path,
+) -> None:
+    # The same two exclusions `list_issues` makes: a half-written card is a
+    # `.card-*.tmp` that `os.replace` has not landed yet, and a file that is
+    # not a `.json` was never claimed to be a card.
+    board = local_board(tmp_path)
+    board.create_issue("Add a /healthz")
+    directory = Path(board.config.dir)
+    (directory / "notes.txt").write_text("not a card")
+    (directory / ".card-half.tmp").write_text("{")
+
+    assert board.unreadable() == []
+
+
+def test_unreadable_on_a_board_with_no_directory_is_empty(tmp_path: Path) -> None:
+    assert local_board(tmp_path, "never-written").unreadable() == []
