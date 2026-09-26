@@ -531,6 +531,57 @@ refused merge there is logged and the task still ends `done` — the work is
 already committed on its own branch, and `merge-task` is the way back to
 it.
 
+**Looking at the pool, and unsticking it.** Two verbs answer the question
+"why is nothing running", and neither costs a turn:
+
+```bash
+python -m dispatcher.cli --config config.yaml status
+python -m dispatcher.cli --config config.yaml status --probe
+python -m dispatcher.cli --config config.yaml release-account --name cuenta2
+```
+
+`status` reads and prints: every account with its state, the task it is on,
+how much of `quota_cooldown_seconds` a recorded refusal has left to run, and
+every task card that is in progress or owned, with the age of its heartbeat
+and whether that is still a live lock against `heartbeat_ttl_seconds`. It
+writes nothing — deliberately, because the gate's own probe (`check_quota_ok`)
+parks accounts and records refusals as it goes, and a look at the pool must
+not change it. `--probe` adds each container's `/usage` numbers on the same
+terms: the result goes through the same refusal detection a phase's does, so
+a probe the service turns down is reported as `probe REFUSED`, but nothing is
+written to the state files either way. A container that is down becomes a
+`probe failed:` note on that one account rather than an error for the run.
+
+`release-account` is the way out of the state a crash leaves behind: an
+account `BUSY` on a task whose dispatcher is gone. Nothing else can reach it
+— `list_idle_accounts` only returns `IDLE`, and the recheck that revives a
+parked account skips any state that is not `PRE_COOLDOWN`/`COOLING_DOWN` — so
+before this verb the only remedy was editing a root-owned JSON file by hand.
+It sets the account back to `IDLE` and clears the lock on whatever card it
+holds, dropping `owner` and `heartbeat` and leaving `status` alone: whether
+the task is still in progress is the task's business, not the account's. It
+finds that card by the union of what the state file names and what the cards
+themselves say they are owned by, so a card the state file never knew about
+still comes back.
+
+It refuses, printing why and exiting non-zero, in the two cases where
+releasing would be the wrong thing:
+
+- **The lock is live.** A heartbeat refreshed inside the TTL means a
+  dispatcher is still running that phase, and releasing would let a second
+  phase start in the same container. Wait for the TTL to lapse, or pass
+  `--force` if you know that process is gone.
+- **A refusal is still inside its cooldown.** The account was turned down by
+  the service less than `quota_cooldown_seconds` ago; handing it out now
+  spends the next phase on an account known to refuse. `--force` overrides
+  this too and keeps the mark, so the gate still honours it; `--clear-rate-limit`
+  is the one thing that erases it, for when the refusal is known to be stale.
+
+An account that is already `IDLE` is a no-op and exits zero — but its
+orphaned card, if it has one, is still released, because that is the other
+half of the same crash. An account name the config does not have is a usage
+error naming the ones it does.
+
 **The map, if the project has none.** A target repo the agents have never
 seen has nothing written down for them, and every task rediscovers it from
 the source. Set `mapping_enabled: true` and a `run-task` on a project with
@@ -899,7 +950,7 @@ covered stack plumbing and the Vibe Kanban MCP surface; the checks that
 needed quota came later, on 2026-09-23 — a first end-to-end task (V3),
 with headless permissions and the `/usage` probe answered for free inside
 that same run (V1.2, V1.3), plus cross-account resume (V5.1) and a real
-rate-limit result (V5.4). The same cycle has been dispatched seven times
+rate-limit result (V5.4). The same cycle has been dispatched eight times
 in all — three V3 runs, one config change apiece, the third being the
 first to reach `done`; a fourth on 2026-09-24 that changed no config and
 measured the fixes that run forced; then Stage 1's two-account acceptance
@@ -907,7 +958,12 @@ measured the fixes that run forced; then Stage 1's two-account acceptance
 the same day; and a seventh on 2026-09-25 (T-007) that re-ran that
 failover against the two fixes it forced and, the 429 now spent once
 rather than for good, caught an account coming back from `COOLING_DOWN`
-mid-task (V5.3). The bullets below are what those runs left open. Still
+mid-task (V5.3); and an eighth, also on 2026-09-25, the first aimed at
+this repo rather than the toy project, which a host reboot cut off
+mid-cycle — no defect of its own, but the only run so far to show what
+the harness does when it is killed rather than finished, which is where
+the last two known gaps below come from. The bullets below are what those
+runs left open. Still
 unverified: V1.1, the failure paths, and a failover on a phase whose
 predecessor had already committed — see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full results log and
@@ -970,13 +1026,42 @@ either.
     local implementation behind it so the two prioritized items that
     wait on `create_issue` stop waiting. (V2.1–V2.6)
 
+- **A cycle cannot be resumed from the phase it stopped at.**
+  `run_task_cycle` (`dispatcher/dispatcher.py`) always begins at
+  arquitecto, and the `--resume` in the codebase is an internal re-prompt
+  (`_with_resume_notes`), not a CLI verb. So an interrupted run can only
+  be continued by paying for every phase again, however late it got. Found
+  2026-09-25 when a host reboot killed the T-008 run between the
+  implementador's second round and the revisor's: two commits on the task
+  branch and a green working tree survived, and nothing could pick them
+  up. The fix is a per-phase verb — see
+  [`docs/plans/balancer.md`](docs/plans/balancer.md), Phase 1.
+
+- **The handoff budgets are sized on a toy repo.** `_BUDGET_BYTES` in
+  `dispatcher/handoff.py` was tuned on four runs against the toy project,
+  where each role overran by tens of percent at worst and the shrink
+  retry brought it back. T-008, the first dispatch against this repo,
+  broke that: all three roles that ran blew the budget on the first
+  attempt — arquitecto 6540/4096 (+60%), implementador 8905/5120 (+74%),
+  revisor 5226/4096 (+28%) — and two of the three were still over after
+  the rewrite, which the dispatcher accepts as is by design. Three roles
+  failing the same way in one run is a sizing problem, not three
+  incidents, and the likely driver is the target: a real repo has more
+  paths worth citing than the toy one. `lines_for` is suspect for the
+  same reason, since it derives its entry count from the same budget.
+  Raising the numbers is not the whole fix — the point of the budget is
+  that detail goes to files and the handoff cites paths — so the sizing
+  has to be re-derived from what the over-budget returns actually
+  contained. The four-run history is in
+  [`docs/ROADMAP.md`](docs/ROADMAP.md), Stage 1 item 2.
+
 ### Prioritized
 
 1. **Project memory: role skills, per-project docs, and a pointer-based
    handoff.** Highest leverage for the least code. Every phase is a fresh
    `claude -p` session that starts cold: a role is only a name in the
    prompt, it rediscovers the target repo from scratch, and what it leaves
-   the next role is truncated freeform prose. Eight pieces, which pay off
+   the next role is truncated freeform prose. Nine pieces, which pay off
    together:
    - *Role skills (method).* Give Claude in each agent container
      (arquitecto, implementador, revisor, auditor) a small set of skills
@@ -1092,6 +1177,26 @@ either.
      logged back to ia-harness and staged for human review, never
      installed automatically; traps in the code go to the project's
      `learnings/`.
+   - *Documenting is a method, and this repo is now a target too.* The
+     bullets above say what the docs are and who writes them; nothing
+     says how to write one. `skills/` holds eight vendored skills and all
+     eight are about code — plans, TDD, debugging, review, scope — so a
+     role told to record an ADR, open a `learnings/` entry or keep an
+     index current is improvising the form every time. That half is
+     method and belongs in a ninth skill: what an entry contains, how to
+     phrase a trigger column, when to supersede instead of rewrite, and
+     when a change is too small to document. The other half is not a
+     skill at all, by this item's own rule above — conventions belong in
+     the project's docs — and ia-harness has never written its own,
+     because until T-008 it was only ever the dispatcher, never a
+     dispatch target. Its conventions live in this README and in the
+     history of the conversations that set them: a fixed gap is deleted
+     from *Known gaps* rather than annotated, its record goes to Stage 1
+     item 2 of [`docs/ROADMAP.md`](docs/ROADMAP.md), operational prose
+     goes to the relevant body section here, and the spec bullets under a
+     *Prioritized* item are never trimmed when a piece of it lands.
+     T-008's roles could read neither half, which is the first evidence
+     that this piece is load-bearing and not just tidy.
    - *Indexes and pointers.* What keeps that memory cheap to read as it
      grows:
      - Every index has a trigger column ("when it applies" for learnings,
@@ -1348,7 +1453,17 @@ either.
      settings bounds how much context a long phase rereads per turn (that
      setup simulated 120K as ~12% cheaper than 150K). It only matters for
      long single phases, since each role already starts fresh; this is the
-     cheap version of item 8.
+     cheap version of item 8. Not set today, and the image is not where it
+     would go: the agent image ships no `settings.json` of its own, because
+     the `claude_shared` volume mounts over `/root/.claude` and shadows
+     anything baked in. `hooks/install_settings.py` is the only writer —
+     it runs from `docker/agent/entrypoint.sh` at container start and
+     merges in the hook registration plus `syncClaudeAiSkills` and
+     `syncClaudeAiPlugins`, so a window belongs in that same merge. The
+     merge is additive and never rewrites a key the operator already set,
+     which means a default there stays overridable by hand in the volume.
+     The window is per-account only in appearance: every account symlinks
+     the one shared `settings.json`, so setting it sets it for all of them.
    - *caveman, piece by piece.*
      [caveman](https://github.com/JuliusBrussee/caveman) bundles several
      token savers with very different evidence behind them; judged for
@@ -1764,6 +1879,14 @@ either.
    merge conflicts between concurrent branches. Revisit with more
    accounts, and prefer parallelism across independent tasks (via
    `depends_on`) over splitting one task.
+
+   Not to be confused with the steppable cycle in
+   [`docs/plans/balancer.md`](docs/plans/balancer.md), which shares the
+   word "balancer" and none of the mechanism: that plan is about
+   *sequencing one task under a human* — a conversational account that
+   dispatches one phase at a time and ranks the pool behind itself — and
+   it stays single-active-account throughout. This item is concurrency,
+   and is still low priority for the reason above.
 10. **Multi-provider agent containers.** Lowest priority: the most work,
     and if the goal is more capacity, adding another Claude account is
     config-only (see "Run a task" above). Everything under

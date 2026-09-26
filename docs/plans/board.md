@@ -1,7 +1,11 @@
 # Plan: a board for this harness
 
-Status: Phase 0 is specified below and queued as T-008, to be built by
-this harness's own role cycle. Phases 1–6 are unstarted.
+Status: Phase 0 is specified below and was dispatched as T-008 on
+2026-09-25. That run was cut off by a host reboot partway through the
+revisor's second round; the arquitecto and the implementador's first round
+are committed on `agent/task/T-008`, and round 2 is green but uncommitted
+in that task's `work` worktree. See the T-008 row in `docs/ROADMAP.md`.
+Phases 1–6 are unstarted.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
 used, and the only surface a human gets is `observability/dashboard/`: 67 lines

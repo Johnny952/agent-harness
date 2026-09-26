@@ -7,7 +7,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from dispatcher import context_transfer, docker_exec, learnings
+from dispatcher import context_transfer, docker_exec, learnings, operator
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     cleanup_container,
@@ -284,6 +284,46 @@ def main() -> None:
         "--drop", metavar="REF", help="Delete one entry. For a trap that was wrong, or one that no longer bites."
     )
 
+    status_parser = sub.add_parser(
+        "status",
+        help="What every account and every locked task is doing right now. "
+        "Reads the state directory and the task cards and writes nothing, so "
+        "it is safe to run against a harness mid-cycle. This is the command "
+        "that tells you whether a run can start at all.",
+    )
+    status_parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Also run /usage in each account's container. Unlike the quota gate "
+        "inside a cycle, this only reports: it never parks an account and never "
+        "records a refusal. Costs no quota (a local slash command) but does need "
+        "every container to be up.",
+    )
+
+    release_parser = sub.add_parser(
+        "release-account",
+        help="Hand one account back to the pool after a cycle died without "
+        "returning it. Nothing else can: list_idle_accounts only ever answers "
+        "IDLE, and the lock reaper runs inside run_task_cycle, which is the "
+        "thing that can no longer start. Refuses while the lock is live or a "
+        "refusal is still inside its cooldown.",
+    )
+    release_parser.add_argument("--name", required=True, help="Account name from config.yaml's accounts list")
+    release_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Release over every guard, including a live heartbeat. Only when you "
+        "know the process that took the lock is gone: two dispatchers on one "
+        "account means two writers in one container.",
+    )
+    release_parser.add_argument(
+        "--clear-rate-limit",
+        action="store_true",
+        help="Also forget the recorded refusal. Separate from --force because it "
+        "destroys the only evidence the harness has that the service turned this "
+        "account away; /usage cannot see that.",
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -350,6 +390,27 @@ def main() -> None:
             # Named by entry, not by card: the entry id is the one a human can
             # look the work up by, on the board and in the index both.
             print(f"closed the card of {len(closed)} resolved debt entr(y/ies): {', '.join(closed)}")
+    elif args.command == "status":
+        print(
+            operator.format_status(
+                cfg,
+                operator.account_reports(cfg, probe=args.probe),
+                operator.task_reports(cfg),
+            )
+        )
+    elif args.command == "release-account":
+        try:
+            outcome = operator.release_account(
+                cfg, args.name, force=args.force, clear_rate_limit=args.clear_rate_limit
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if outcome.refused:
+            # Same contract as merge-task: a refusal is an exit code, not just
+            # wording, so a script that chains this can tell the two apart.
+            print(outcome.detail, file=sys.stderr)
+            raise SystemExit(1)
+        print(outcome.detail)
     elif args.command == "learnings":
         _run_learnings(args, cfg)
 

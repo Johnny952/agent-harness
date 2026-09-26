@@ -113,6 +113,32 @@ def list_task_ids(hive_dir: str) -> list[str]:
     return [Path(f).stem for f in os.listdir(hive_dir) if f.endswith(".md")]
 
 
+def _as_heartbeat_str(value: object) -> str | None:
+    """The heartbeat as the dataclass declares it, whatever YAML made of it.
+
+    `write_task_file` quotes the timestamp, so a card this harness wrote reads
+    back as a `str`. A hand-edited card does not, and PyYAML resolves an
+    unquoted ISO timestamp to a `datetime` — which then reaches
+    `is_lock_expired` as `fromisoformat: argument must be str`. A hand-edited
+    card is exactly what somebody is holding when they go looking at locks, so
+    the coercion happens here, once, rather than at every reader.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, dt.datetime):
+        # No offset means UTC: every heartbeat this harness writes is, and a
+        # naive one compared against an aware `now` raises rather than expires.
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=dt.timezone.utc)
+        return value.isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    # Anything else is not a timestamp, and a field that cannot be compared is
+    # worth less than no field: an unheld card is takeable, a card held by
+    # garbage would be held forever.
+    return None
+
+
 def read_task_file(path: str) -> TaskFile:
     text = Path(path).read_text()
     _, fm_text, body = text.split(_FRONTMATTER_DELIM, 2)
@@ -122,7 +148,7 @@ def read_task_file(path: str) -> TaskFile:
         status=fm["status"],
         owner=fm.get("owner"),
         depends_on=fm.get("depends_on", []),
-        heartbeat=fm.get("heartbeat"),
+        heartbeat=_as_heartbeat_str(fm.get("heartbeat")),
         body=body.lstrip("\n"),
         # .get, not [...]: task files written before descriptions existed
         # have no such key and must stay readable.

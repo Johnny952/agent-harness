@@ -50,11 +50,12 @@ externally-managed.
 | Path | What it is |
 |---|---|
 | `dispatcher/dispatcher.py` | The role cycle. Owns the phase loop, the revision rounds, failover between accounts, and what a phase is told when it resumes. The largest module and the one to read first. |
-| `dispatcher/cli.py` | The verbs: `run-task`, `bootstrap-project`, `merge-task`, `cleanup-task`, `learnings`. |
+| `dispatcher/cli.py` | The verbs: `run-task`, `bootstrap-project`, `merge-task`, `cleanup-task`, `learnings`, `status`, `release-account`. |
 | `dispatcher/config.py` | `config.yaml` into dataclasses. `config.example.yaml` is the commented copy and the place a new key gets explained. |
 | `dispatcher/docker_exec.py` | Every command that leaves the dispatcher process. Builds the `claude` argv, wraps it in an in-container `timeout`, and owns the worktree checkouts each role gets. |
 | `dispatcher/state_machine.py` | One JSON file per account: `IDLE`/`BUSY`/`PRE_COOLDOWN`/`COOLING_DOWN`, plus `rate_limited_at`, the only record of a refusal the harness can observe. |
 | `dispatcher/quota.py` | The `/usage` probe and the threshold that parks an account before a phase spends into a wall. |
+| `dispatcher/operator.py` | What the two read-and-repair verbs do: `status` reports the pool without writing to it, and `release-account` is the only way back from an account left `BUSY` by a crashed dispatcher. |
 | `dispatcher/gates.py` | The four checks that run between implementador and revisor with no model in the loop. Only the test gate blocks; the rest ride along as notes. |
 | `dispatcher/context_transfer.py` | `TaskFile`: the `.hive/tasks/<id>.md` card, its frontmatter, and the status block a resumed phase reads. |
 | `dispatcher/handoff.py` | What one role leaves the next, as pointers rather than prose, and the budgets that hold it to a size. |
@@ -77,6 +78,7 @@ externally-managed.
 | `README.md` (repo root) | The operator's manual: what the stack is, how to bring it up, the known gaps and the prioritized work. Long. Read the section you need, not the file. |
 | `docs/ROADMAP.md` | The verification log. Every check that has been run against the real stack, its result and its evidence file. Open it before claiming something is or is not verified. |
 | `docs/plans/board.md` | The phased plan for replacing the dashboard with a real board, and the spec for each phase. Phase 0 is the first task dispatched against this repo. |
+| `docs/plans/balancer.md` | Before changing how accounts are picked, or how a cycle is driven. The plan for a steppable cycle under a conversational account, the two gaps the 2026-09-25 reboot exposed, which account the conversational thread runs under, and how a front-end reaches the pool. Phase 0 done; 1–3 unstarted. |
 | `docs/implementations/<task-id>.md` | Before changing something a past task built here, to find out why it is the way it is. One file per task, written by that task. |
 
 `docs/superpowers/` is vendored upstream material, not this project's

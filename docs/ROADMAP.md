@@ -1215,6 +1215,27 @@ logins.
      and the drafts are growing — 5387, 6051, 6589 against 5120 — so its
      budget is the second one set too low. The revisor, by contrast,
      needed neither a retry nor the margin for the first time.
+     T-008 (2026-09-25) is the fourth and it breaks the pattern the
+     first three set, because it is the first dispatch against a real
+     repo instead of the toy project. All three roles that got to run
+     blew the budget on the first attempt — arquitecto 6540 against
+     4096 (+60%), implementador 8905 against 5120 (+74%), revisor 5226
+     against 4096 (+28%) — and two of the three were still over after
+     the rewrite, so the margin could not absorb them and the retries
+     were accepted as they came. Three roles failing the same way in
+     one run is a sizing problem and not three incidents. The
+     arquitecto's 6540 sits above the 5374–5911 band the toy runs
+     established for that role, which points at the target and not at
+     the role: a real repo offers more paths worth citing. That makes
+     the toy-project numbers the wrong baseline for the next tuning,
+     and it makes `lines_for` suspect too, since it derives its entry
+     count from the same budget. The fix is not just larger numbers:
+     the budget exists so the detail goes to files and the handoff
+     cites their paths, so the re-derivation has to start from what
+     those over-budget returns actually carried. Carried as a *Known
+     gaps* bullet in the README rather than closed here, because this
+     entry's fix — the budget, the margin, the retry, the logging — is
+     still the right machinery; it is the constants that are wrong.
    - **A reviewing phase's edits are silently discarded.** Fixed
      2026-09-25. Measured on T-005 (`.data/verify/t005-acceptance.txt`):
      the revisor said it had closed a `pointers` gate by editing
@@ -1297,6 +1318,64 @@ logins.
      passing and 10 skipped. Not yet exercised by a dispatched run: the
      cool-down, both probe-refusal paths and the fail-open WARNING have
      only been seen against fakes.
+   - **An account left `BUSY` by a crashed dispatcher stays `BUSY`
+     forever.** Fixed 2026-09-25 with `release-account`, plus `status` as
+     the verb that shows you the state you are about to repair
+     (`dispatcher/operator.py`, Phase 0 of `docs/plans/balancer.md`). The
+     gap was three functions agreeing by omission: `list_idle_accounts`
+     returns only `IDLE`, `_recheck_cooling_accounts` skips any state that
+     is not `PRE_COOLDOWN`/`COOLING_DOWN`, and `reap_expired_locks`
+     releases the card's lock on its heartbeat TTL and never the account
+     holding it — and it is called from exactly one place, inside
+     `run_task_cycle`, which needs an idle account to be reached at all.
+     The 2026-09-25 reboot left `cuenta2` there with `cuenta1` parked over
+     threshold, so the pool had nothing dispatchable and no way to say so.
+     `release-account` sets the account `IDLE` and clears the lock on
+     whatever card it holds — `owner` and `heartbeat` dropped, `status`
+     untouched, because whether the task is still in progress is the
+     task's business — finding that card by the union of what the state
+     file names and what the cards claim as their owner, so a card the
+     state file never knew about still comes back. It refuses, non-zero,
+     on a heartbeat refreshed inside the TTL (a phase is still running,
+     and releasing would put a second one in the same container) and
+     inside `quota_cooldown_seconds` of a recorded refusal (handing the
+     account out spends the next phase on one known to refuse); `--force`
+     overrides both and deliberately *keeps* `rate_limited_at`, so the
+     gate still honours it, while `--clear-rate-limit` is the only thing
+     that erases it. An expired refusal is not cleared on release either:
+     `_recheck_cooling_accounts` only honours a mark inside the window, so
+     an old one is history rather than a debt. An already-`IDLE` account
+     is a no-op and exits zero, but still gets its orphaned card back,
+     that being the other half of the same crash. `status` reads and
+     writes nothing at all, which is why it does not reuse
+     `check_quota_ok`: the gate's probe parks accounts and records
+     refusals as a side effect, and a look at the pool must not change it.
+     `--probe` asks each container `/usage` on the same terms — the result
+     goes through `is_rate_limit_error` before anything parses percentages
+     out of it, so a refused probe is reported and not recorded, and a
+     container that is down becomes a note on one account rather than an
+     error for the listing. **A second, unplanned fix came out of the
+     smoke test:** a hand-edited task card crashed every lock reader with
+     `fromisoformat: argument must be str`, because PyYAML resolves an
+     unquoted ISO timestamp to a `datetime` while `TaskFile` declares
+     `heartbeat: str | None`. Cards this harness writes round-trip fine —
+     `yaml.safe_dump` quotes a timestamp-shaped string — so the unit
+     tests, which build their fixtures through `write_task_file`, could
+     not see it, and a hand-edited card is exactly what somebody is
+     holding when they go looking at locks. Coerced once in
+     `read_task_file` (`_as_heartbeat_str`: a naive datetime is read as
+     UTC, anything that is not a timestamp becomes `None`, on the grounds
+     that an unheld card is takeable while a card held by garbage would be
+     held forever), which fixes `is_lock_expired`, `reap_expired_locks`
+     and `acquire_lock` by the same line; the operator's two heartbeat
+     helpers also swallow a bad stamp, because `status` is the command you
+     run when the harness is already wrong and must not be killed by one
+     unreadable card. 24 new unit tests, 780 passing and 10 skipped. Not
+     yet exercised against the real pool: both verbs were smoke-tested
+     end to end against a scratch config — the live-lock refusal, the
+     `--force` release, the repeat no-op and the unknown-account usage
+     error all produced the intended output and exit code — but nothing
+     has yet been released in `dispatcher_state/`.
 3. Acceptance: **passed 2026-09-24** (T-005, `.data/verify/t005-acceptance.txt`).
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.
@@ -1562,3 +1641,4 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-09-25 | V5.3 (recovery) + V5.2 re-run | PASS | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image `sha256:478699bd3c319` | The recovery path nothing had ever entered, plus a re-run of the row above against the two gaps it opened. Task `T-007`, 00:17:17Z→00:36:49Z (19m32s wall, launched 21:17 local on the 24th), exit 0, launched with `--description`. Two changes to V5.2's fault make this a different check: the 429 wrapper is **one-shot** — a `/tmp/.429-spent` marker, so the second call through it is the real binary — and **cuenta2 was seeded `COOLING_DOWN`** before the run. So when the arquitecto's result came back a 429 at 00:20:30 there was no idle account left, `pick_idle_account` returned `None`, and **`_recheck_cooling_accounts` ran for the first time in a real task**: two `/usage` probes, both accounts back to `IDLE` at 00:20:31 and 00:20:34, and the phase resumed on cuenta2 at 00:20:36 in session `f6c2f310` and the same worktree. One shot is what makes the recovery testable — an account re-probed four seconds later is genuinely healthy — and it is also what saved the run: a recovered cuenta1 is first in config order, so phases 2-4 ran on it, which is the whole point of recovering an account rather than parking it. **The two T-006 gaps re-checked in the same run and hold.** The log now carries four lines where T-006 carried none — the account picked, the refusal with the session id it is handed on, and one line per recovery — so the hand-over is legible without reading state files. And the resumed prompt is 9659 bytes against the first call's 9090: the 569-byte difference is `_STALE_CONTEXT_NOTE`, while the 347-byte handoff-shrink retry in the same session correctly carries none of it. The note was acted on, not just delivered: the resumed phase's first two commands, at 00:20:41 and 00:20:42, were the `git status --short` and `git log --oneline -3` the note names; it then re-read both sources, re-ran `node --test`, wrote a mutation check under `.hive/tasks/T-007/mutation/` to confirm the assertions fail on a broken divide, and **never re-edited `sum.js` or `sum.test.js`**. Outcome as on T-006: one `## arquitecto` section, and one commit `66eb8cd` authored `arquitecto (cuenta2)` carrying both accounts' work (5 files, +102/−4); then `863f71c` implementador and `4208960` auditor, both `(cuenta1)`, `node --test` green on the tip (2 pass, 0 fail), both state files `IDLE` at the end. Handoff budgets four for four inside for the third run running (arquitecto 5374→3961, implementador 6589→4614, revisor no line at all, auditor 4203→3032) — though the first two overran by 31% and 29%, a third data point that those two budgets are set below what the roles naturally write. 4 learnings filed and stamped. **Not covered, and now the only clause of acceptance item 4 still open:** the 429 fired on the *first* real call again, so a failover on a phase whose predecessor had already committed remains untested — forcing it needs a wrapper that lets the first phase through and refuses the second. Of the five new log lines the over-threshold park `WARNING` and the exhausted-pool `ERROR` need real quota exhaustion and stay unit-tested only. Wrapper and marker removed immediately after the run; `claude` is the original symlink, `claude.real` is gone, `claude --version` answers 2.1.273. Evidence: `.data/verify/v53-recovery.txt`, `.data/verify/v53-recovery-run.log`. |
 | 2026-09-25 | V2.3, V2.4, V2.5 (re-run) | NOT VERIFIABLE | npm vibe-kanban@0.1.44 in a disposable container off the agent image | Re-measured nine days after the 2026-09-16 rows above, to settle whether the block was a missing credential or a retired service. It is the service. `api.vibekanban.com` answers `HTTP 200 ct=text/html` — the same `Vibe Kanban Remote` SPA shell — on `/`, on `/api/organizations` and on `/health`, so there is no API left behind the 401 that `list_organizations` reports. `list_issues{}` fails with `project_id is required (not available from workspace context)`, and no `project_id` is obtainable: `list_projects{}` demands an `organization_id` that `list_organizations` (401) cannot supply, and projects are exactly what PR #3387 ("Sunset project routes to an export-only page", shipped in 0.1.44) retired. So V2.3 has no issue to read an id off, V2.4 has no issue to carry a status, and V2.5 has no created issue to round-trip a description through. The 0.1.45 prerelease said to restore local projects is uninstallable: `npx vibe-kanban@0.1.45` gives `ETARGET`, the registry keeps both 0.1.45 entries in `time` and neither in `versions` — the signature of an unpublish, roughly two hours after publication — and `latest` is still 0.1.44, the build that removed the feature. **Decision: closed as not verifiable and retired as checks.** No credential changes any of it; `docs/plans/board.md` replaces the dependency with a local client rather than waiting on a dead one. Evidence: `.data/verify/v2-rerun-2026-09-25.txt`. |
 | 2026-09-25 | V2.6 (re-run) | FAIL | npm vibe-kanban@0.1.44 in a disposable container off the agent image | `create_issue{title, description}` over MCP stdio returned `{"success": false, "error": "project_id is required (not available from workspace context)"}` — the same answer as 2026-09-16, now attributable: the parameter is unobtainable by construction, not withheld from this machine. This is the one V2 check that fails outright rather than going unmeasured, and it fails for everyone. The two calls that do succeed, `list_repos` and `list_workspaces`, are the local half of the surface and return empty-but-successful, which splits the 33 advertised tools cleanly into local (works) and remote (dead); the server registers all 33 unconditionally, so advertising is not capability. **Decision: `create_issue` is not coming back**, so the two prioritized items that waited on it — 1. Project memory and 5. Task profiles — now depend on Phase 0 of `docs/plans/board.md` instead. Evidence: `.data/verify/v2-rerun-2026-09-25.txt`. |
+| 2026-09-25 | T-008 (board Phase 0, first dispatch against this repo) | INTERRUPTED | Claude Code CLI 2.1.273; agent-cuenta1 + agent-cuenta2; dispatcher image `8a2da0d13b8c` | The eighth dispatch of the cycle, and the first whose target was this repo rather than the toy project. Launched 20:27:46-03:00 with `--description-file -`; last dispatcher line 21:06:30-03:00, `Error waiting for container: Canceled: grpc: the client connection is closing: context canceled`, exit 125, 38m44s wall. **Not a harness defect: the host shut down under it.** `last -x` records `shutdown system down 21:08` and `reboot system boot 21:11`, `who -b` agrees, and every container reports the same 11-minute uptime afterwards — docker's CLI lost the daemon while waiting on the agent container. What survived: `agent/task/T-008` carries `e3b12f4 agent(arquitecto)` and `22c7301 agent(implementador): T-008 round 1` (12 files, +832/-48), and the implementador's round-2 edits are intact but uncommitted in `worktrees/T-008/work` (5 files, +82/-17), where `python3 -m pytest -q` reports 785 passed, 10 skipped. That diff already answers all three of the revisor's round-1 CHANGES_REQUESTED findings. Missing: the round-2 commit, its handoff, revisor round 2, and the auditor. Two gaps this exposed and nothing else would have: no resume-from-phase, and an account stuck `BUSY` — `cuenta2` was left `{"state": "BUSY", "current_task_id": "T-008"}` with `cuenta1` at `PRE_COOLDOWN`, i.e. no dispatchable account, and no code path that would ever release it. Both are now README known gaps, with the fix planned in `docs/plans/balancer.md`. One pattern worth keeping separately: all three roles blew their handoff budget on the first attempt (6540/4096, 8905/5120, 5226/4096) and two of three were still over after the rewrite — a sizing problem, not three incidents. Do not run `cleanup-task` on T-008 until the round-2 work is committed; it deletes `work` too. Evidence: `.data/verify/t008-run.log`, `.data/verify/t008-run.start`, `.data/verify/t008-run.end`. |
