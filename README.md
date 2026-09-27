@@ -464,6 +464,16 @@ This step brings up four **persistent** control-plane services (`collector`,
 `api`, `board`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account.
 
+`BOARD_PROJECT` is optional, read only by `board`, and worth setting on a host
+that holds more than one checkout. It names the slug under the dispatcher's
+`projects_root` whose debt the board shows — `ia-harness` on a host that only
+works on this repo. Where `projects_root` holds several checkouts `/api/debt`
+has no default to fall back on and answers `400 project is required`, listing
+what it found, so `/debt` is an Error state until the variable is set; `/`,
+`/tasks` and `/events` are unaffected. Both compose files default it to empty
+rather than guessing, and `?project=<slug>` overrides it for one navigation.
+`docs/decisions.md` ADR 9 says why `scripts/configure.sh` does not prompt for it.
+
 Two services in those files are deliberately kept out of that default
 set, each behind a Compose profile. Stage-0 verification found both by
 running the two-liner above:
