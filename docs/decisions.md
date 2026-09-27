@@ -214,3 +214,164 @@ A later endpoint added here inherits all of it, including the rule that
 `warnings` names files rather than describing states. `warnings` is unbounded in
 length, and so is `limit`: neither has a cap, which is a cost this phase chose
 to leave — see `docs/debt/`.
+
+## ADR 6 — A server-rendered board has three states per region and a partial, not four
+
+**Status:** accepted (T-010, 2026-09-27).
+
+**Context.** `docs/plans/board.md` "Phase 2" fixes four states per region —
+Loading, Empty, Stale, Error — and says the region and not the page is the unit.
+It wrote that table before the toolchain was ruled, and `Loading` is the one row
+that depends on it: it is defined as "its fetch has not resolved", a state only
+a client that resolves fetches after paint can be in. [`charter.md`](charter.md)
+C-7 rules the board server-rendered Flask and Jinja, and the same spec's
+*Required behaviour* forbids the alternative in as many words — "every fetch is
+server-side", "the page ships no `fetch` of the api". A Jinja template is
+rendered after every call the request made has already returned or failed, so
+there is no instant at which a region has an unresolved fetch and a reader to
+see it.
+
+**Decision.** The board renders **Empty**, **Stale** and **Error** per region,
+plus the **partial** case (rows and a non-empty `warnings`). `Loading` is not
+rendered, no skeleton markup exists, and no template carries a placeholder row.
+A slow endpoint is paid for in time-to-first-byte, not in a state: the `as of`
+stamp and the per-region Error state still hold, so a page that took nine
+seconds because `/api/events` was slow says when it was true and names the call
+that failed if one did. The spec's own *Done when* confirms the reading — the
+four cases it asks the tests to cover are a 200 with rows, a 200 with `[]`, a
+200 with rows and a warning, and a non-200. Loading is not among them.
+
+**Consequences.** The state table in `docs/plans/board.md` is one row wider than
+this implementation, deliberately, and the plan is not edited to match: a ruling
+is reversible and C-7 says so. If C-7 is reversed at Phase 5, the Loading row
+comes back with the client that can be in it, and the skeleton is written then
+against the same table. Until then, "the board has no Loading state" is a
+decision and not an omission, and a reviewer reading the plan against the code
+should find this ADR before filing it as a gap. The independence the table asks
+for survives: each region is one call, one envelope check and one outcome, so
+one endpoint answering 503 costs its own region and nothing else on the page.
+
+## ADR 7 — How the board reaches the api: one bearer token, one timeout, one boundary
+
+**Status:** accepted (T-010, 2026-09-27).
+
+**Context.** The board is an HTTP client of the api and nothing else. Three
+things the spec asks for have no implementation shape yet: how the token is
+presented, what happens when the api does not answer at all, and where the
+envelope is checked. `observability/auth.py` also has to grow the second
+credential without breaking the first, and without breaking a host whose
+`docker/compose/.env` was written before `API_TOKEN` existed.
+
+**Decision.**
+
+- **The token is a bearer token, parsed off the raw header.** The board sends
+  `Authorization: Bearer <API_TOKEN>`. `observability/auth.py` reads
+  `request.headers.get("Authorization")` and splits the scheme itself for this
+  path, rather than reading `request.authorization.token`: the existing
+  `auth.type != "basic"` guard stays exactly as it is, and the bearer branch
+  does not depend on which Werkzeug version populates `.token`. Comparison is
+  `secrets.compare_digest` over `.encode()`d bytes on both sides, the same shape
+  `check_auth` uses and for the same reason — a non-ASCII token answers 401, not
+  500.
+- **No token configured means the bearer path is closed**, not open. A falsy
+  `token` argument rejects every bearer header without comparing. The board's
+  own `requires_auth` passes no token at all, so a human's Basic credential is
+  the only thing the board accepts, and the api's token is not a second way into
+  the board.
+- **`API_TOKEN` is optional on the api** and read with `os.environ.get`, not
+  `os.environ[...]`. An operator upgrading a running host has a `.env` with
+  `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD_HASH` and no `API_TOKEN`; the api
+  must still start there, with Basic auth working and the token path shut.
+  `scripts/configure.sh` writes the variable for a fresh install, and both
+  compose files pass it to the `api` service as well as to `board` — the spec's
+  Phase 1 configuration block predates the token and is not the authority on it.
+- **One boundary function per call.** Every api call goes through one helper
+  that returns a region result — rows, warnings, and either nothing or one error
+  string — and never raises at a template. It sets `timeout=5` on
+  `requests.get` (the timeout `hooks/emit_event.py` already uses for the
+  collector; an unbounded read is how a board with no push becomes a page that
+  never arrives), catches `requests.RequestException`, requires a 200, requires
+  `application/json` before `.json()` (ADR 5 and
+  `docs/learnings/flask-answers-404-and-405-in-html.md`: Flask's own 404 and 405
+  are HTML), and validates the envelope shallowly — `data` present, `warnings` a
+  list of strings, each row a mapping. Anything else is that region's Error state
+  naming the endpoint and the status, which is what keeps a bad shape from
+  becoming a `jinja2.UndefinedError` halfway down a half-rendered page.
+
+**Consequences.** The api has two accepted credentials and one realm; a rotation
+is one line in `docker/compose/.env` and a restart of two services. A test that
+wants the board's Error state monkeypatches `requests.get` in the board module —
+the pattern `tests/hooks/test_emit_event.py` already uses — so no test needs a
+live api and the recorded fixtures the spec asks for are plain dicts. The
+5-second timeout is a number, not a law: a board that starts showing timeouts
+against a healthy api should raise it here with a superseding ADR rather than
+removing the argument, because `timeout=None` is the failure mode this bullet
+exists to prevent.
+
+## ADR 8 — The board's only clock is its own render time
+
+**Status:** accepted (T-010, 2026-09-27).
+
+**Context.** Two requirements in the same spec look like they contradict each
+other. *Two kinds of stale* says the board must not derive whether a lock is
+stale — the api gains `lock_expired` and the board renders it — while *Required
+behaviour* says "timestamps are relative in the cell, absolute in the `title`",
+and `4m ago` is `now - heartbeat`. Read carelessly, the second forbids the
+first, and an implementation that obeys one can be reviewed against the other.
+
+**Decision.** The board computes an **age** and never a **judgement**. It
+subtracts an ISO timestamp the api gave it from its own render time to render
+`4m ago`, with the full ISO string in the cell's `title`, for every timestamp on
+every screen — `heartbeat`, a card's `created_at`, an event's time. It never
+compares any of those against `heartbeat_ttl_seconds`, never loads the
+dispatcher's config, and never imports `dispatcher.context_transfer`: whether a
+lock is expired arrives as `lock_expired` on the task row and is rendered as the
+three values it has — expired, live, and null for a task with no heartbeat,
+which is a task nobody is holding rather than a task whose holder is fine. A
+timestamp the board cannot parse renders verbatim with no relative part, because
+an unparseable heartbeat is the api's news to report and not the board's to
+hide.
+
+**Consequences.** `docker exec`-free answers to "is this run dead" keep coming
+from one place, and the page stamp (`as of <HH:MM:SS>`, every page, next to a
+control that re-navigates) is what makes a relative age honest — a
+five-minute-old page saying `1m ago` is legible only because the page says when
+it was rendered. The rule for a reviewer is mechanical: a `timedelta` against a
+timestamp is allowed in the board, a comparison against a TTL is not, and
+`grep -rni "ttl" observability/board/` returning nothing is the check. If a
+later phase adds a second derived fact — a queue position, a projected cooldown
+— it goes in the api beside `lock_expired`, for the reason this ADR exists
+rather than as a matter of taste.
+
+## ADR 9 — `/debt` reads one project, named in the board's environment
+
+**Status:** accepted (T-010, 2026-09-27).
+
+**Context.** The spec's screen list says `/debt` shows "the debt index for the
+configured project", and its configuration block for the board names four
+environment variables, none of which is a project. `/api/debt` requires
+`project` wherever `projects_root` holds more than one checkout, and the host
+this runs on holds two (`ia-harness` and `scratch`, enumerated by the api's own
+400 in `docs/ROADMAP.md`'s T-009 verification row). So the screen as written
+answers 400 on the only harness there is, and the board has no `config.yaml` to
+read a default from — by design, since it mounts nothing.
+
+**Decision.** `BOARD_PROJECT` is an optional fifth environment variable on the
+board service in both compose files, and the board sends it as `?project=` when
+it is set and omits the parameter when it is not. A board on a harness with one
+checkout therefore needs no configuration and the api picks; a board on a
+harness with several is told which one, in the one place the board's
+configuration lives. The board route also accepts `/debt?project=<slug>`, which
+overrides the variable for one navigation — the api's 400 and 404 both enumerate
+the available slugs, so the Error state renders a usable list and an operator
+can reach the other project without editing compose. This adds a query
+parameter and not a route: the spec's "no other route exists" holds.
+
+**Consequences.** The board's environment is five variables, one more than the
+spec's block writes out, and `README.md` and `scripts/configure.sh` do not
+prompt for it — an unset `BOARD_PROJECT` is the right default for a
+single-project harness and a visible, self-describing error for the other kind.
+A later phase that gives the board more than one project's worth of screens
+should read the project list from a new `/api/projects` rather than widening
+this variable, because a board that shows two projects is a navigation problem
+and not a configuration one.
