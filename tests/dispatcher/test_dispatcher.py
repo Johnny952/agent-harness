@@ -2665,6 +2665,61 @@ def test_the_blocked_line_counts_rounds_that_ran_not_rounds_allowed(tmp_path, mo
     assert any("blocked after 0 of 0" in r.getMessage() for r in caplog.records)
 
 
+def test_a_timed_out_phase_says_so_instead_of_ending_the_run_at_exit_zero(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    """T-010's implementador was killed by `phase_timeout_seconds` a minute
+    after it finished, and this branch threw the diagnosis away: the run ended
+    at exit 0 with its last line being "goes to account cuenta1", and why had
+    to be reconstructed from two timestamps and an uncommitted worktree.
+    docker_exec already writes the sentence; nobody was saying it."""
+    cfg = _make_config(tmp_path)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        if role == "implementador":
+            return dispatcher_mod.DispatchResult(
+                success=False, session_id=None,
+                result_text="claude timed out after 1800s", account="cuenta1",
+            )
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="ok", account="cuenta1",
+            handoff={"status": "complete"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    with caplog.at_level("ERROR"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    logged = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("claude timed out after 1800s" in m for m in logged)
+    # Which of the three attempts died is half the diagnosis.
+    assert any("implementador (round 1)" in m and "task-1" in m for m in logged)
+
+
+def test_a_phase_that_failed_without_a_word_still_logs_that_it_failed(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    """An empty `result_text` is the case that produced the silence to begin
+    with, and interpolating it would log a line ending in a colon and nothing.
+    The line says the output was missing, which is itself the finding."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        lambda *a, **kw: dispatcher_mod.DispatchResult(
+            success=False, session_id=None, result_text="", account="",
+        ),
+    )
+
+    with caplog.at_level("ERROR"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert any(
+        "no diagnosis" in r.getMessage()
+        for r in caplog.records if r.levelname == "ERROR"
+    )
+
+
 @pytest.mark.parametrize(
     "dispatch,status",
     [(_approving_dispatch_phase, "done"), (_rejecting_dispatch_phase, "blocked")],

@@ -1328,6 +1328,21 @@ def run_phase(
         return None
     if not result.success:
         if fatal:
+            # Said out loud because otherwise nothing says it: this return is
+            # the whole of the cycle's failure path, and without a line here a
+            # timed-out or crashed phase ends the run at exit 0 with the last
+            # log entry being "goes to account …". `result_text` already
+            # carries the diagnosis — "claude timed out after 1800s", the
+            # exit code and output tail, or the CLI's own error — and
+            # throwing it away costs an hour of reconstruction from a
+            # worktree. The round belongs in the label: "implementador"
+            # alone does not say which of three attempts died.
+            logger.error(
+                "task %s: %s did not finish, so the cycle stops here: %s",
+                ctx.task_id,
+                role if round_num is None else f"{role} (round {round_num})",
+                result.result_text or "no diagnosis: the phase produced no output",
+            )
             _update_task_status(ctx.kanban, ctx.issue_id, "blocked")
             return None
         # A phase the task does not depend on. It still hands off what it
