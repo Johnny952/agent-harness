@@ -26,7 +26,7 @@ Agent container (per Claude Pro account)
         └── registry mirror + BuildKit cache (shared across sidecars)
         │
         ▼ hooks → HTTP
-Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
+Observability collector (SQLite/WAL) → read API → authenticated board (Tailscale)
 ```
 
 - **Smart Dispatcher** (`dispatcher/`) — for one task, runs the role sequence
@@ -250,15 +250,23 @@ Observability collector (SQLite/WAL) → authenticated dashboard (Tailscale)
 - **Observability** (`observability/`) — Claude Code hooks
   (`hooks/emit_event.py`, registered by `hooks/install_settings.py` on
   container start) POST events to a collector (`observability/collector`,
-  Flask + SQLite/WAL), rendered by an authenticated dashboard
-  (`observability/dashboard`), meant to be reached over Tailscale rather than
-  exposed publicly. A third service (`observability/api`) serves read-only
+  Flask + SQLite/WAL). A second service (`observability/api`) serves read-only
   JSON over the same state the dispatcher keeps on disk — task files, account
-  state, events, the debt index, board cards — behind the same credentials, on
+  state, events, the debt index, board cards — behind Basic auth, on
   `127.0.0.1:8789`: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`,
   `/api/events`, `/api/debt`. It is Phase 1 of
   [`docs/plans/board.md`](docs/plans/board.md); see `docs/decisions.md` ADR 3–5
   for the envelope, the card it reports and the error half.
+  A third (`observability/board`) is what a human opens, on `127.0.0.1:8790`
+  and meant to be reached over Tailscale rather than exposed publicly: four
+  server-rendered screens — the accounts strip over the tasks table, one task,
+  the debt index, the event log — over those five endpoints and no other source
+  of truth. The browser never talks to the api: every fetch is server-side, so
+  the api's credential stays in a container instead of in a page an operator can
+  view-source. Phase 2 of the same plan; Flask and Jinja per
+  [`docs/charter.md`](docs/charter.md) C-7, with `docs/decisions.md` ADR 6–9 for
+  the states, the token, the clock and the project it reads. It replaced a
+  43-line events dashboard on 8788, whose three columns `/events` supersedes.
 
 Full design rationale, decisions, and open caveats live in
 [`docs/superpowers/specs/2026-09-13-ia-harness-design.md`](docs/superpowers/specs/2026-09-13-ia-harness-design.md);
@@ -269,7 +277,7 @@ the implementation task breakdown is in
 
 ```
 dispatcher/       Smart Dispatcher: config, state machine, docker exec, CLI
-observability/    Event collector (Flask/SQLite) + dashboard + read API
+observability/    Event collector (Flask/SQLite) + read API + board (Jinja)
 hooks/            Claude Code hooks that emit events to the collector
 docker/           Dockerfiles + compose files (control-plane and agents)
 scripts/          Volume setup, dind image pruning
@@ -282,8 +290,10 @@ docs/superpowers/ Spec and implementation plan
 Requires Docker with the `sysbox-runc` runtime installed (for the dind
 sidecars) and, per account, an existing Claude Pro OAuth login. Everything
 below runs on the server itself (e.g. right after `git clone`), no Python
-required for the host-level steps — only the `dispatcher`/`collector`/
-`dashboard` containers need Python, and they get it from their own images.
+required for the host-level steps — only the `dispatcher`/`collector`/`api`/
+`board` containers need Python, and they get it from their own images. None of
+them needs Node: the board is Jinja on the same `python:3.11-slim` base, which
+is [`docs/charter.md`](docs/charter.md) C-7.
 
 ### 1. Clone and configure
 
@@ -291,8 +301,9 @@ required for the host-level steps — only the `dispatcher`/`collector`/
 git clone <this-repo> ia-harness && cd ia-harness
 ```
 
-Generate `config.yaml` (and, optionally, `docker/compose/.env` with hashed
-dashboard credentials) with the interactive wizard — pure `bash` +
+Generate `config.yaml` (and, optionally, `docker/compose/.env` with the hashed
+credentials the board and the api check, plus the `API_TOKEN` the board
+authenticates to the api with) using the interactive wizard — pure `bash` +
 coreutils, so it needs nothing beyond a POSIX shell and `sha256sum`:
 
 ```bash
@@ -309,7 +320,7 @@ cp config.example.yaml config.yaml
 
 ### 2. Build the account-specific images
 
-`dispatcher`, `collector` and `dashboard` have `build:` stanzas in
+`dispatcher`, `collector`, `api` and `board` have `build:` stanzas in
 `docker/compose/docker-compose.yml` and build automatically on first
 `docker compose up`. The agent and dind-sidecar images do **not** — they're
 referenced by name only in `docker-compose.agents.yml` and must be built
@@ -442,10 +453,15 @@ docker compose -f docker/compose/docker-compose.agents.yml up -d
 ```
 
 `docker/compose/docker-compose.yml` reads `DASHBOARD_USERNAME`/
-`DASHBOARD_PASSWORD_HASH` from `docker/compose/.env` automatically if
-`scripts/configure.sh` wrote one; otherwise pass them inline. This step
-brings up four **persistent** control-plane services (`collector`,
-`dashboard`, `api`, `registry-mirror`) plus, from the second file, one persistent
+`DASHBOARD_PASSWORD_HASH`/`API_TOKEN` from `docker/compose/.env` automatically
+if `scripts/configure.sh` wrote one; otherwise pass them inline. The two
+credential variables keep their `DASHBOARD_` names although the dashboard they
+were written for is gone — renaming them means editing a `.env` that exists on
+every running host to buy a spelling. An `.env` written before `API_TOKEN`
+existed still starts everything: the api rejects every bearer and keeps
+serving a human's password, and the board says so in each region's Error state.
+This step brings up four **persistent** control-plane services (`collector`,
+`api`, `board`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account.
 
 Two services in those files are deliberately kept out of that default
@@ -992,9 +1008,10 @@ included:
 - **`config.yaml` must exist before first deploy.** It holds no secrets
   (just paths, thresholds, and account names — see `config.example.yaml`),
   so a Coolify pre-deployment command is safe: `test -f config.yaml || cp config.example.yaml config.yaml`.
-  Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH` through Coolify's own
-  environment-variables UI on the resource instead of a `.env` file —
-  Coolify substitutes `${VARS}` into compose the same way.
+  Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, and `API_TOKEN` if the
+  board is to reach the api, through Coolify's own environment-variables UI on
+  the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
+  compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based
   step done once per agent container after it's up (e.g.
   `docker exec -it agent-cuenta1 claude`, then `/login`). No import can do
@@ -1006,9 +1023,9 @@ volumes yourself outside Coolify (e.g. reusing them across a fleet, or you
 want them to outlive a resource deletion), import the split files instead
 of the merged one, as two separate Coolify Compose resources:
 
-1. `docker/compose/docker-compose.yml` (control plane: `collector`,
-   `dashboard`, `api`, `registry-mirror`, plus `vibe-kanban` behind the
-   `kanban` profile).
+1. `docker/compose/docker-compose.yml` (control plane: `collector`, `api`,
+   `board`, `registry-mirror`, plus `vibe-kanban` behind the `kanban`
+   profile).
 2. `docker/compose/docker-compose.agents.yml` (one `agent-<name>`/
    `dind-<name>` pair per account — scale this file, not individual
    services, when adding accounts).
@@ -1895,19 +1912,23 @@ either.
    - Hook payloads include tool inputs and outputs (file contents, env
      files, tokens) and land in SQLite as-is. Redact them in
      `hooks/emit_event.py`.
-   - The dashboard and the read API compare in constant time
+   - The board and the read API compare in constant time
      (`hmac.compare_digest`, shared in `observability/auth.py`), but the
      stored digest both check against is still an unsalted SHA-256 of the
      password. A salted digest (e.g. `salt$sha256(salt + password)`) keeps
      `scripts/configure.sh` Python-free; mind that compose interpolates
-     `$` in `.env` values. That one digest now guards the read API too, which
+     `$` in `.env` values. That one digest also guards the read API, which
      serves the task files and root-owned `dispatcher_state/` rather than an
-     events table — the widest thing behind it. The collector, the dashboard
-     and the read API also run Flask's development server rather than a
-     production WSGI server.
-   - The dashboard shows only the last 200 raw events. A per-task view
-     (phase, account, duration, rounds, verdict, cost) would answer "what
-     happened to this task" directly.
+     events table — the widest thing behind it. The api's second credential,
+     `API_TOKEN`, is compared the same way and is not a password: it exists so
+     the board never holds one. The collector, the board and the read API also
+     run Flask's development server rather than a production WSGI server.
+   - The board's `/events` shows the last 200 raw events, and `/tasks/<id>`
+     shows the owning account's window rather than the task's own: the
+     collector records per agent and no field joins an event to a task. A
+     per-task view (phase, account, duration, rounds, verdict, cost) would
+     answer "what happened to this task" directly, and is Phase 5 of
+     [`docs/plans/board.md`](docs/plans/board.md).
    - The dispatcher mounts the host's `/var/run/docker.sock`, which is root
      on the host. A socket proxy limited to `exec` would narrow that.
 7. **Code-inspection/code-intelligence tooling in agent containers.**

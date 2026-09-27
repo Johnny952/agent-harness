@@ -13,6 +13,7 @@ here as a failure rather than as two files that disagree.
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import json
 import types
 from pathlib import Path
@@ -45,6 +46,8 @@ def _harness(
     board: str | None = "local",
     accounts: tuple[str, ...] = ("cuenta1",),
     with_db: bool = True,
+    heartbeat_ttl_seconds: int | None = None,
+    token: str | None = None,
 ) -> types.SimpleNamespace:
     """The mounts, the config and a test client over them."""
     state_dir = tmp_path / "state"
@@ -68,6 +71,12 @@ def _harness(
         raw["local_board"] = {"dir": str(board_dir)}
     elif board == "vibe":
         raw["vibe_kanban"] = {"command": ["npx", "vibe-kanban", "mcp"]}
+    if heartbeat_ttl_seconds is not None:
+        # Left out by default, so `dispatcher/config.py`'s own default (120s) is
+        # what `lock_expired` is derived against — the same value the dispatcher
+        # runs with. Passed only where a test pins that the ttl comes from config
+        # rather than from a constant in the api.
+        raw["heartbeat_ttl_seconds"] = heartbeat_ttl_seconds
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
@@ -75,7 +84,7 @@ def _harness(
     if with_db:
         collector_db.init_db(db_path)
 
-    app = create_app(str(config_path), db_path, "admin", PASSWORD_HASH)
+    app = create_app(str(config_path), db_path, "admin", PASSWORD_HASH, token)
     return types.SimpleNamespace(
         client=app.test_client(),
         state_dir=str(state_dir),
@@ -189,6 +198,10 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "kanban_issue_id": None,
         "resolved_debt": ["T-008-D2"],
         "card": None,
+        # A fixed timestamp in the past, so against any TTL this is a lock whose
+        # holder stopped writing. The three values of this field have their own
+        # tests below, against heartbeats relative to now.
+        "lock_expired": True,
     }
 
 
@@ -343,10 +356,160 @@ def test_a_harness_with_no_board_is_not_an_error(tmp_path: Path) -> None:
                 "kanban_issue_id": "11111111-2222-3333-4444-555555555555",
                 "resolved_debt": [],
                 "card": None,
+                "lock_expired": None,
             }
         ],
         "warnings": [],
     }
+
+
+# --- lock_expired ---------------------------------------------------------
+
+
+def _ago(seconds: int) -> str:
+    return (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)
+    ).isoformat()
+
+
+@pytest.mark.parametrize("route", ["/api/tasks", "/api/tasks/T-1"])
+def test_a_live_heartbeat_is_not_an_expired_lock(tmp_path: Path, route: str) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", owner="cuenta1", heartbeat=_ago(5))
+
+    body = _get(harness, route).get_json()
+
+    task = body["data"][0] if route == "/api/tasks" else body["data"]
+    assert task["lock_expired"] is False
+
+
+@pytest.mark.parametrize("route", ["/api/tasks", "/api/tasks/T-1"])
+def test_a_heartbeat_older_than_the_ttl_is_an_expired_lock(tmp_path: Path, route: str) -> None:
+    """The most useful single fact the board shows, and the one it must not
+    derive: the TTL is config this service holds and no client does
+    (`docs/plans/board.md` "Two kinds of stale")."""
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", owner="cuenta1", heartbeat=_ago(600))
+
+    body = _get(harness, route).get_json()
+
+    task = body["data"][0] if route == "/api/tasks" else body["data"]
+    assert task["lock_expired"] is True
+
+
+@pytest.mark.parametrize("route", ["/api/tasks", "/api/tasks/T-1"])
+def test_a_task_with_no_heartbeat_has_a_null_lock_rather_than_a_live_one(
+    tmp_path: Path, route: str
+) -> None:
+    """`is_lock_expired` answers `False` here, because for the dispatcher "no
+    lock to release" and "the lock is fine" take the same branch. For a reader
+    they are opposite news, so the null is made here and the dispatcher's
+    function is left alone."""
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="pending", owner=None, heartbeat=None)
+
+    body = _get(harness, route).get_json()
+
+    task = body["data"][0] if route == "/api/tasks" else body["data"]
+    assert task["lock_expired"] is None
+
+
+def test_the_ttl_lock_expired_uses_is_the_one_in_config(tmp_path: Path) -> None:
+    """Pins that the value is read from `config.yaml` rather than defaulted in
+    this module: one heartbeat, two harnesses, two answers."""
+    a_minute_old = _ago(60)
+    generous = _harness(tmp_path / "generous", heartbeat_ttl_seconds=3600)
+    strict = _harness(tmp_path / "strict", heartbeat_ttl_seconds=10)
+    _task(generous.tasks_dir, "T-1", owner="cuenta1", heartbeat=a_minute_old)
+    _task(strict.tasks_dir, "T-1", owner="cuenta1", heartbeat=a_minute_old)
+
+    assert _get(generous, "/api/tasks").get_json()["data"][0]["lock_expired"] is False
+    assert _get(strict, "/api/tasks").get_json()["data"][0]["lock_expired"] is True
+
+
+def test_a_heartbeat_that_will_not_parse_is_a_null_lock_and_keeps_its_row(
+    tmp_path: Path,
+) -> None:
+    """`docs/decisions.md` ADR 10. `is_lock_expired` raises `ValueError` out of
+    `fromisoformat` here, and that exception family is what `/api/tasks` treats
+    as an unreadable task file — so left alone this would drop a task whose file
+    reads perfectly well, and with it the status and owner an operator needs. It
+    is a heartbeat that cannot be judged, which is what `null` already means."""
+    harness = _harness(tmp_path)
+    Path(context_transfer.task_file_path(harness.tasks_dir, "T-1")).write_text(
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: cuenta1\ndepends_on: []\n"
+        "heartbeat: yesterday afternoon\n---\n\nbody\n"
+    )
+
+    body = _get(harness, "/api/tasks").get_json()
+
+    assert body["warnings"] == []
+    [task] = body["data"]
+    assert task["lock_expired"] is None
+    # The string travels on, for a human to read and to paste into a shell.
+    assert task["heartbeat"] == "yesterday afternoon"
+    assert task["status"] == "in_progress"
+
+
+def test_a_naive_heartbeat_is_a_null_lock_too(tmp_path: Path) -> None:
+    """The second way the comparison fails: a timestamp with no offset parses
+    into a naive datetime, and subtracting it from an aware `now` raises
+    `TypeError` rather than `ValueError`. Every writer in `dispatcher/` writes
+    UTC with an offset, so this is a hand-edited file — which is exactly the
+    kind this endpoint exists to report on rather than choke on."""
+    harness = _harness(tmp_path)
+    Path(context_transfer.task_file_path(harness.tasks_dir, "T-1")).write_text(
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: cuenta1\ndepends_on: []\n"
+        "heartbeat: '2026-09-26T18:00:00'\n---\n\nbody\n"
+    )
+
+    body = _get(harness, "/api/tasks").get_json()
+
+    assert body["warnings"] == []
+    [task] = body["data"]
+    assert task["lock_expired"] is None
+
+
+# --- the second way to authenticate ---------------------------------------
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_every_route_accepts_the_configured_bearer_token(tmp_path: Path, route: str) -> None:
+    """How the board reaches this service without holding a human's password
+    (`docs/decisions.md` ADR 7). The realm on the 401 does not change, and the
+    Basic path is unaffected — `tests/observability/test_auth.py` holds the rest."""
+    harness = _harness(tmp_path, token="s3cret-token")
+    _task(harness.tasks_dir, "T-1")
+    _debt_index(harness.projects_root, "ia-harness", _INDEX)
+
+    resp = harness.client.get(route, headers={"Authorization": "Bearer s3cret-token"})
+
+    assert resp.status_code == 200
+    assert set(resp.get_json()) == {"data", "warnings"}
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_a_wrong_bearer_token_is_401(tmp_path: Path, route: str) -> None:
+    harness = _harness(tmp_path, token="s3cret-token")
+    _task(harness.tasks_dir, "T-1")
+
+    resp = harness.client.get(route, headers={"Authorization": "Bearer not-it"})
+
+    assert resp.status_code == 401
+    assert resp.headers["WWW-Authenticate"] == 'Basic realm="ia-harness api"'
+
+
+def test_an_api_with_no_token_configured_accepts_no_bearer_at_all(tmp_path: Path) -> None:
+    """The upgrade case: a host whose `docker/compose/.env` predates `API_TOKEN`
+    starts this service with `token=None`, and Basic auth keeps working while the
+    bearer path stays shut."""
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    assert harness.client.get(
+        "/api/tasks", headers={"Authorization": "Bearer anything"}
+    ).status_code == 401
+    assert _get(harness, "/api/tasks").status_code == 200
 
 
 def test_a_card_that_will_not_parse_is_named_in_warnings(tmp_path: Path) -> None:

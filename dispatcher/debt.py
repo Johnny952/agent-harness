@@ -243,6 +243,24 @@ def read_index(container: str, workdir: str) -> str:
     return proc.stdout if proc.returncode == 0 else ""
 
 
+def _unwrap_code(cell: str) -> str:
+    """One matched pair of backticks off a cell, and never half of one.
+
+    The index writes an id and a card in backticks — `` `T-008-D1` `` — and the
+    readers below want the id. `str.strip("`")` used to do it, which also ate a
+    lone backtick at either end: a **where** cell that ends in inline code
+    (``a task touching `cli.py` ``) lost its closing one, and `/api/debt`
+    rendering those cells to a human is what made it visible
+    (`docs/debt/T-009-D3.md`, fixed by T-010). A pair or nothing, so a cell
+    whose text legitimately opens or closes with a backtick survives intact.
+    No fingerprint moves: the **what** cell of an existing row is wrapped in no
+    backticks at all, so it unwrapped to itself before this and does now.
+    """
+    if len(cell) >= 2 and cell.startswith("`") and cell.endswith("`"):
+        return cell[1:-1]
+    return cell
+
+
 def _rows(text: str) -> list[tuple[list[str], list[str]]]:
     """Every data row of every Markdown table in the text, with its header."""
     header: list[str] = []
@@ -252,7 +270,7 @@ def _rows(text: str) -> list[tuple[list[str], list[str]]]:
         if not stripped.startswith("|"):
             header = []  # a new table below gets its own header
             continue
-        cells = [cell.strip().strip("`").strip() for cell in stripped.strip("|").split("|")]
+        cells = [_unwrap_code(cell.strip()).strip() for cell in stripped.strip("|").split("|")]
         if not header:
             header = [cell.lower() for cell in cells]
             continue

@@ -20,9 +20,11 @@ dispatcher while it runs you**, below.
 ## Stack
 
 Python 3.11, standard library except for `pyyaml` (config, task-file
-frontmatter, the learnings index), `flask` (the collector and the dashboard),
-`requests` (the observability hook), `markupsafe` (dashboard escaping) and
-`mcp` (the Kanban client's stdio transport). Tests are `pytest` with no
+frontmatter, the learnings index), `flask` (the collector, the read API and the
+board, whose templates are the Jinja that arrives with it), `requests` (the
+observability hook and the board's calls to the API), `markupsafe` (the
+autoescaping those templates rely on) and `mcp` (the Kanban client's stdio
+transport). Tests are `pytest` with no
 plugins. Docker Compose runs the stack; the dispatcher reaches the agent
 containers with `docker exec` and nothing else.
 
@@ -66,9 +68,9 @@ externally-managed.
 | `dispatcher/subagents.py` | The subagent definitions a role is given. |
 | `dispatcher/vibe_kanban_client.py` | The `KanbanClient` seam: `list_issues`, `get_issue`, `create_issue`, `set_status`. `NullKanbanClient` is what a harness with no board configured gets, and is what every run has used so far. `LocalBoardClient` is the board that is a directory of JSON cards (`local_board` in config), added by Phase 0 of the board plan. |
 | `observability/collector/` | A Flask endpoint and one SQLite table, `events`, fed by the agents' hooks. |
-| `observability/dashboard/` | 67 lines of Flask behind Basic auth that render the last 200 events as a table. The board plan below replaces this. |
-| `observability/api/` | The read API: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`, `/api/events`, `/api/debt`, every one `{"data", "warnings"}` behind the dashboard's auth. Writes nothing and parses nothing itself — it reads through the dispatcher's own readers. Phase 1 of the board plan; `docs/decisions.md` ADR 3–5. |
-| `observability/auth.py` | The Basic auth the dashboard and the API share, one copy of the timing-safe comparison. |
+| `observability/api/` | The read API: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`, `/api/events`, `/api/debt`, every one `{"data", "warnings"}`. Writes nothing and parses nothing itself — it reads through the dispatcher's own readers, and `lock_expired` is the one fact it derives. Phase 1 of the board plan; `docs/decisions.md` ADR 3–5 and ADR 10. |
+| `observability/board/` | The four screens a human opens: `/`, `/tasks/<id>`, `/debt`, `/events`, server-rendered with Jinja. An HTTP client of the read API and nothing else — no volumes, no database, no `dispatcher` import. Phase 2 of the board plan; `docs/charter.md` C-7 and `docs/decisions.md` ADR 6–9. |
+| `observability/auth.py` | The auth the observability services share: a human's Basic credential, a service's bearer token, one copy of each timing-safe comparison. |
 | `hooks/emit_event.py` | The Claude Code hook the agent containers POST from. |
 | `skills/` | The vendored role skills, trimmed from three MIT upstreams. `skills/README.md` says which and why. |
 | `docker/` | One Dockerfile per image and three compose files. `docker/agent/Dockerfile` is where the agent toolchain is pinned. |
@@ -80,7 +82,7 @@ externally-managed.
 | `README.md` (repo root) | The operator's manual: what the stack is, how to bring it up, the known gaps and the prioritized work. Long. Read the section you need, not the file. |
 | `docs/charter.md` | Before deciding anything the project may already have ruled on: which account is primary, what may spend quota, what a phase owes the docs. The only doc here a human writes and no role may edit — its entries are given, not arguments. |
 | `docs/ROADMAP.md` | The verification log. Every check that has been run against the real stack, its result and its evidence file. Open it before claiming something is or is not verified. |
-| `docs/plans/board.md` | The phased plan for replacing the dashboard with a real board, and the spec for each phase. Phase 0 is the first task dispatched against this repo. |
+| `docs/plans/board.md` | The phased plan for the board, and the spec for each phase. Phases 0–2 are built: the local board client, the read API, and the read-only screens that replaced the old events dashboard. Phase 3 onwards is unstarted. |
 | `docs/plans/balancer.md` | Before changing how accounts are picked, or how a cycle is driven. The plan for a steppable cycle under a conversational account, the two gaps the 2026-09-25 reboot exposed, which account the conversational thread runs under, and how a front-end reaches the pool. Phase 0 done; 1–3 unstarted. |
 | `docs/decisions.md` | Before changing how something here behaves, to find out whether it was decided rather than incidental. One ADR per decision, appended, never rewritten. |
 | `docs/implementations/<task-id>.md` | Before changing something a past task built here, to find out why it is the way it is. One file per task, written by that task. |

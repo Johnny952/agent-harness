@@ -1,0 +1,37 @@
+{#
+  The three states every region of every screen is in, plus the partial.
+
+  The region and not the page is the unit: `/` calls two endpoints and they fail
+  independently, so one 503 costs its own table and leaves the rest of the page
+  standing. There is no Loading state — a Jinja template renders after every call
+  the request made has already returned or failed, so there is no instant at
+  which a region has an unresolved fetch and a reader to see it
+  (docs/decisions.md ADR 6).
+
+  Used as a call block, so the rows stay in the screen's own template:
+
+    {% call region(tasks, EMPTY_TASKS) %} ...a real <table>... {% endcall %}
+#}
+{% macro region(r, empty) %}
+  {#- Warnings: once per region, above its rows, verbatim, never per row and
+      never merged across regions. A Phase 1 warning names the file that is the
+      missing row, so there is by construction no row to hang it on. An empty
+      list renders nothing at all — no container, no reserved space: the absence
+      of a warning is not worth a pixel. -#}
+  {% if r.warnings %}
+  <ul class="warnings">
+    {% for warning in r.warnings %}<li>{{ warning }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if not r.ok %}
+  <p class="error">{{ r.error }} <a href="{{ request.full_path.rstrip('?') }}">retry</a></p>
+  {% elif r.empty %}
+  <p>{{ empty }}</p>
+  {% else %}
+  {{ caller() }}
+  {% endif %}
+{% endmacro %}
+
+{#- A timestamp: relative in the cell, absolute in the title. One answers the
+    question the operator has, the other the one they have next, in a log. -#}
+{% macro when(iso) %}<span title="{{ iso or '' }}">{{ iso | age }}</span>{% endmacro %}

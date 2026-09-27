@@ -39,7 +39,13 @@
 #   - DASHBOARD_USERNAME / DASHBOARD_PASSWORD_HASH set as Coolify environment
 #     variables on this resource (Coolify substitutes ${VARS} into compose
 #     the same way a .env file would — no need to run scripts/configure.sh's
-#     dashboard wizard for a Coolify deploy).
+#     credentials wizard for a Coolify deploy). They keep their DASHBOARD_
+#     names although the dashboard is gone: renaming them means editing the
+#     environment of every running deploy to buy a spelling.
+#   - API_TOKEN, likewise, if the board is to reach the api: any long random
+#     string, the same value on both services. Without it the api still starts
+#     and still serves a human's basic auth, and the board's every region shows
+#     its Error state saying so.
 #   - Per-account Claude Pro OAuth login, done once per agent container after
 #     it's up (`docker exec -it agent-cuenta1 claude login` or equivalent) —
 #     inherently a manual, interactive step no compose file can automate.
@@ -74,24 +80,6 @@ services:
     networks:
       - ia_harness_net
 
-  dashboard:
-    build:
-      context: ../..
-      dockerfile: observability/dashboard/Dockerfile
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8788:8788"
-    volumes:
-      - observability_data:/data
-    environment:
-      - COLLECTOR_DB_PATH=/data/events.db
-      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
-      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
-    depends_on:
-      - collector
-    networks:
-      - ia_harness_net
-
   # The read API (docs/plans/board.md Phase 1), mirrored from
   # docker-compose.yml: this file is the one-resource deploy path, so a service
   # only the split files carry is a service a Coolify deployment silently does
@@ -108,7 +96,7 @@ services:
     volumes:
       # Not under /data: that is where the two bind mounts below live in the
       # dispatcher's and the agents' layout, and nesting the volume under them
-      # to keep COLLECTOR_DB_PATH byte-identical with the dashboard's would
+      # to keep COLLECTOR_DB_PATH byte-identical with the collector's would
       # trade a legible mount list for an environment variable.
       #
       # The one mount here that is not :ro, and the only one that cannot be
@@ -127,8 +115,40 @@ services:
       - COLLECTOR_DB_PATH=/events/events.db
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
       - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+      # The board's credential, not a human's, and optional: an api started
+      # without it rejects every bearer and keeps basic auth working. See
+      # docker-compose.yml and docs/decisions.md ADR 7.
+      - API_TOKEN=${API_TOKEN}
     depends_on:
       - collector
+    networks:
+      - ia_harness_net
+
+  # The board (docs/plans/board.md Phase 2), mirrored from docker-compose.yml
+  # like the api above: this file is the one-resource deploy path, so a service
+  # only the split files carry is a service a Coolify deployment silently does
+  # not have. It replaces the `dashboard` service this file used to define —
+  # /events supersedes those three columns and adds the states they never had.
+  #
+  # No volumes, which the invariants test pins on this file too: the board reads
+  # nothing from disk and is an HTTP client of the api and nothing else.
+  board:
+    build:
+      context: ../..
+      dockerfile: observability/board/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      - API_BASE_URL=http://api:8789
+      - API_TOKEN=${API_TOKEN}
+      - BOARD_USERNAME=${DASHBOARD_USERNAME}
+      - BOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+      # Optional; unset is right for a harness with one project checkout. See
+      # docs/decisions.md ADR 9.
+      - BOARD_PROJECT=${BOARD_PROJECT:-}
+    depends_on:
+      - api
     networks:
       - ia_harness_net
 

@@ -11,8 +11,10 @@ dependencies = [
     "flask>=3.0",
     "requests>=2.31",
     "mcp>=1.0.0",
-    # Imported directly by observability/dashboard/app.py; do not rely on
-    # Flask pulling it in transitively.
+    # Jinja's autoescaping is MarkupSafe, and the board's templates rely on it
+    # for every cell of every table. Pinned rather than left to Flask's
+    # transitive resolution, which is how it arrived here when a service imported
+    # `escape` directly.
     "markupsafe>=2.0",
 ]
 
@@ -25,6 +27,10 @@ include = ["dispatcher*", "observability*", "hooks*"]
 [tool.setuptools.package-data]
 # db.py reads this next to itself at runtime, so it has to ship in the wheel.
 "observability.collector" = ["schema.sql"]
+# Same reason: Flask loads these from beside the module, and `pip install .`
+# would otherwise build a wheel whose board has no screens. Not caught by
+# running from a checkout, where /app resolves first.
+"observability.board" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

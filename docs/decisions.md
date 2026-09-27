@@ -375,3 +375,39 @@ A later phase that gives the board more than one project's worth of screens
 should read the project list from a new `/api/projects` rather than widening
 this variable, because a board that shows two projects is a navigation problem
 and not a configuration one.
+
+## ADR 10 — A heartbeat the api cannot parse is `lock_expired: null`, not a warning
+
+**Status:** accepted (T-010, 2026-09-27).
+
+**Context.** `lock_expired` is specified as `true`, `false`, or `null` when there
+is no heartbeat to judge, and `dispatcher/context_transfer.py:is_lock_expired`
+computes it by `datetime.fromisoformat(task.heartbeat)`. A third case exists on
+disk that neither the spec nor the task names: a heartbeat that is a string and
+not a timestamp. `fromisoformat` raises `ValueError` on `yesterday afternoon`,
+and a timestamp with no UTC offset parses into a naive datetime that raises
+`TypeError` when subtracted from an aware `now`. Both exception families are in
+`observability/api/app.py:_UNREADABLE`, so the default behaviour — deriving the
+field inside the guard that wraps `_task` — is that the whole task row vanishes
+from `/api/tasks` and is replaced by `<path>: unreadable task file`. Every
+writer in `dispatcher/` writes UTC with an offset, so this only happens to a
+hand-edited file, which is precisely the file an operator is looking at the board
+to understand.
+
+**Decision.** `_lock_expired` catches `TypeError` and `ValueError` around the
+call and answers `null`, the value the field already has for "there is nothing to
+judge". The row survives with its `status`, its `owner` and the unparseable
+`heartbeat` string verbatim, and no warning is emitted: nothing about the *file*
+is unreadable. `is_lock_expired` is unchanged — the dispatcher's callers want the
+boolean it returns, and a dispatcher that swallowed a malformed heartbeat would
+silently never release a lock.
+
+**Consequences.** Three values mean three things on the board and one of them is
+now two things: `null` is either a task nobody holds or a task whose heartbeat is
+not a timestamp, and the board tells them apart the only way it can — by
+rendering the `heartbeat` field beside the label, which ADR 8 already has it do
+verbatim when the string will not parse. That is the cost, and it is paid to keep
+a legible row instead of a warning about a file that is fine. If a later phase
+wants the two distinguished in the data rather than on the screen, the place for
+it is a separate field on the task row beside `lock_expired`, for the reason
+ADR 8 gives: derived facts are the api's.

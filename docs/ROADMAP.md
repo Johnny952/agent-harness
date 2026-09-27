@@ -176,11 +176,21 @@ login.
 - Pass: the probe event is listed with `source_app` `agent-cuenta1`.
 - Events from a real session are checked in V1.1.
 
-**V0.6 Dashboard auth.**
+**V0.6 Board auth, and the board over the api.**
+- The port moved: T-010 deleted the events dashboard on 8788 and put the board
+  on 8790, which reads the api on 8789. The credentials are the same two
+  `DASHBOARD_*` variables, which kept their names.
 - Run:
-  1. `curl -si 127.0.0.1:8788/ | head -1`
+  1. `curl -si 127.0.0.1:8790/ | head -1`
   2. The same request with `-u <user>:<password>`.
-- Pass: 401 without credentials, 200 with them.
+  3. With the credentials, check the page came from the api rather than from a
+     browser fetch: `curl -s -u <user>:<password> 127.0.0.1:8790/ | grep -c
+     '<script'` is `0`, and the accounts and tasks tables have rows.
+  4. `docker stop compose-api-1`, reload, then `docker start compose-api-1`.
+- Pass: 401 without credentials, 200 with them; both accounts visible with
+  their state and the newest task with its card; with the api stopped, each
+  region shows `GET /api/… → no answer` and the page keeps its stamp, its nav
+  and its other regions rather than 500-ing.
 
 **V0.7 Docker-in-docker.**
 - Run:

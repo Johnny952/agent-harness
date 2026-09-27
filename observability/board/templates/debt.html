@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+{% from "_region.html" import region %}
+{% block title %}debt{% endblock %}
+{#
+  The debt index for the configured project, as `/api/debt` parses it. The rows
+  are the index's own columns and this restates none of them: the index is the
+  source of truth and dispatcher/debt.py is its only parser.
+#}
+{% block main %}
+
+<h2>debt{% if project %} · {{ project }}{% endif %}</h2>
+{% call region(debt, EMPTY_DEBT) %}
+<table>
+  <thead><tr><th>id</th><th>what</th><th>where it bites</th><th>fix</th><th>card</th></tr></thead>
+  <tbody>
+    {% for row in debt.rows %}
+    {# `resolved` is the index's own convention — a **what** cell opening with a
+       bolded Resolved — and the api offers it best-effort. The row is never
+       hidden on the strength of it: an entry outlives its fix, because a fix can
+       be reverted. #}
+    <tr>
+      <td>{{ row.id }}</td>
+      <td>{% if row.resolved %}<span class="muted">[resolved]</span> {% endif %}{{ row.what }}</td>
+      <td>{{ row.where }}</td>
+      <td>{{ row.fix }}</td>
+      <td>{{ row.card }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endcall %}
+
+{% endblock %}

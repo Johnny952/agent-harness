@@ -1,0 +1,39 @@
+{% extends "layout.html" %}
+{% from "_region.html" import region, when %}
+{% block title %}events{% endblock %}
+{#
+  The event log, newest first, filterable by source_app. What the deleted
+  dashboard showed, with the filter it never had and the states it never had.
+#}
+{% block main %}
+
+<h2>events</h2>
+{# The only form on the board, and its method is `get`: a form that navigates is
+   a navigation, not a write. Nothing on this page writes — no action, no
+   disabled control previewing Phase 4, because a greyed-out button is a lie
+   about what exists. #}
+<form method="get" action="{{ url_for('events') }}">
+  <label for="source_app">agent</label>
+  <input id="source_app" name="source_app" value="{{ source_app or '' }}" placeholder="agent-cuenta1">
+  <button type="submit">filter</button>
+  {% if source_app %}<a href="{{ url_for('events') }}">clear</a>{% endif %}
+</form>
+{# An empty region under a filter is not "no events yet": the same sentence the
+   task screen uses for one agent's window says which filter came back empty. #}
+{% call region(events, ("no events from " ~ source_app ~ " yet") if source_app else EMPTY_EVENTS) %}
+<table>
+  <thead><tr><th>when</th><th>agent</th><th>event</th><th>payload</th></tr></thead>
+  <tbody>
+    {% for event in events.rows %}
+    <tr>
+      <td>{{ when(event.created_at) }}</td>
+      <td><a href="{{ url_for('events', source_app=event.source_app) }}">{{ event.source_app }}</a></td>
+      <td>{{ event.event_type }}</td>
+      <td>{{ event.payload | payload }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endcall %}
+
+{% endblock %}
