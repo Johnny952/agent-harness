@@ -47,25 +47,28 @@ from observability.collector import db
 
 #: Where the dispatcher's own config is mounted, matching the path the
 #: dispatcher service is given (`--config /app/config.yaml`). A constant and
-#: not an environment variable: this phase adds no configuration, and the
-#: compose service names only the three variables the dashboard already uses.
+#: not an environment variable: the compose service names only the credentials
+#: and the events database, and a path this service and the dispatcher must
+#: agree on is not a knob worth a fourth.
 CONFIG_PATH = "/app/config.yaml"
 
 #: The events database, under `/events` rather than `/data`: `/data` is where
 #: the task files and the project checkouts land in the dispatcher's and the
 #: agents' layout, and nesting the volume under them to keep this default
-#: byte-identical with the dashboard's would trade a legible mount list for an
+#: byte-identical with the collector's would trade a legible mount list for an
 #: environment variable.
 DEFAULT_DB_PATH = "/events/events.db"
 
 PORT = 8789
 
-#: This service's Basic-Auth realm. The dashboard keeps its own; see
-#: `observability/auth.py:requires_auth` on why neither is a default.
+#: This service's realm, on both the Basic challenge and the bearer path's 401.
+#: Every service keeps its own; see `observability/auth.py:requires_auth` on why
+#: none of them is a default.
 REALM = "ia-harness api"
 
 #: `db.list_events`' own default, restated so a caller that sends no `limit`
-#: gets the same answer whichever of the two services it asked.
+#: gets the same answer whichever way it asked. The board never relies on it
+#: (`docs/plans/board.md`: every events call sets `limit` explicitly).
 DEFAULT_EVENT_LIMIT = 100
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
@@ -95,18 +98,29 @@ _REMOTE_BOARD_WARNING = (
 )
 
 
-def create_app(config_path: str, db_path: str, username: str, password_hash: str) -> Flask:
-    """The read API, shaped like the dashboard's `create_app`.
+def create_app(
+    config_path: str,
+    db_path: str,
+    username: str,
+    password_hash: str,
+    token: str | None = None,
+) -> Flask:
+    """The read API: config loaded once, credentials passed in.
 
     The config is loaded once, here, for the reason the dispatcher loads it at
     startup: a `config.yaml` that does not parse should stop the process, not
     turn every request into a different error. `db_path` is separate from it
     because the events database is not a config key — it is the collector's
     `COLLECTOR_DB_PATH`, and this service mounts that volume somewhere else.
+
+    `token` is last and optional because a host whose `docker/compose/.env`
+    predates it has none: the api must still start there with Basic auth working
+    and the bearer path shut (`docs/decisions.md` ADR 7). It is what lets the
+    board call this service without holding the human's plaintext password.
     """
     cfg = load_config(config_path)
     app = Flask(__name__)
-    requires_auth = auth.requires_auth(username, password_hash, realm=REALM)
+    requires_auth = auth.requires_auth(username, password_hash, realm=REALM, token=token)
 
     @app.get("/api/tasks")
     @requires_auth
@@ -131,7 +145,7 @@ def create_app(config_path: str, db_path: str, username: str, password_hash: str
                 # `except` in the module. It is the provider `jsonify` uses,
                 # not `json.dumps`, so a YAML date still serialises. Narrowing
                 # this `try` back to the parse reopens both.
-                row = _task(task, cards)
+                row = _task(task, cards, cfg.heartbeat_ttl_seconds)
                 app.json.dumps(row)
             except _UNREADABLE as exc:
                 warnings.append(f"{path}: unreadable task file: {exc}")
@@ -155,7 +169,7 @@ def create_app(config_path: str, db_path: str, username: str, password_hash: str
             found = context_transfer.read_task_file(path)
             # Shaping and serialisation inside the guard, as on `/api/tasks`
             # and for the same reason; the comment there says why.
-            row = _task(found, cards)
+            row = _task(found, cards, cfg.heartbeat_ttl_seconds)
             app.json.dumps(row)
         except _UNREADABLE as exc:
             # A 404 here would say the task does not exist, which is a lie
@@ -327,12 +341,44 @@ def _int_parameter(name: str, default: int | None, positive: bool = False):
 # --- what the endpoints read ----------------------------------------------
 
 
-def _task(task: context_transfer.TaskFile, cards: dict[str, dict]) -> dict:
+def _lock_expired(task: context_transfer.TaskFile, ttl_seconds: int) -> bool | None:
+    """Is this task's lock stale — and `null` when there is nothing to judge.
+
+    The one derived fact this service adds to a task row, and it is derived here
+    because the TTL is config this service holds and no client does
+    (`docs/plans/board.md` "Two kinds of stale", `docs/decisions.md` ADR 8: the
+    board renders this field and never recomputes it). The computation itself is
+    `dispatcher/context_transfer.py:is_lock_expired`, unchanged — the
+    dispatcher's callers want the boolean it already returns.
+
+    Which is why the three-valued answer lives on this side. `is_lock_expired`
+    answers `False` for a task with no heartbeat, because for the dispatcher "no
+    lock to release" and "the lock is fine" lead to the same branch; for a reader
+    they are opposite news — nobody is holding this task, versus somebody is and
+    is alive. A heartbeat that will not parse is the same kind of nothing: it
+    cannot be judged, so it is `null` here, and the unparseable string still
+    travels on `heartbeat` for a human to see. `docs/decisions.md` ADR 10 says
+    why that is a null rather than a warning that drops the row.
+    """
+    if task.heartbeat is None:
+        return None
+    try:
+        return context_transfer.is_lock_expired(task, ttl_seconds)
+    except (TypeError, ValueError):
+        return None
+
+
+def _task(task: context_transfer.TaskFile, cards: dict[str, dict], ttl_seconds: int) -> dict:
     """One task as `TaskFile` has it, plus the card it points at.
 
-    The fields are `TaskFile`'s and this invents none. `card` is `null` for a
-    task with no `kanban_issue_id`, for a harness with no board, and for an id
-    the board does not hold — none of the three is an error.
+    The fields are `TaskFile`'s and this invents none but `lock_expired`, which
+    is argued at `_lock_expired`. `card` is `null` for a task with no
+    `kanban_issue_id`, for a harness with no board, and for an id the board does
+    not hold — none of the three is an error.
+
+    `ttl_seconds` is an argument and not a module global: it is
+    `cfg.heartbeat_ttl_seconds`, which `create_app` has already loaded, and a
+    second `load_config` here is a second answer to the same question.
     """
     return {
         "task_id": task.task_id,
@@ -343,6 +389,7 @@ def _task(task: context_transfer.TaskFile, cards: dict[str, dict]) -> dict:
         "kanban_issue_id": task.kanban_issue_id,
         "resolved_debt": task.resolved_debt,
         "card": cards.get(task.kanban_issue_id) if task.kanban_issue_id else None,
+        "lock_expired": _lock_expired(task, ttl_seconds),
     }
 
 
@@ -453,5 +500,11 @@ if __name__ == "__main__":
         os.environ.get("COLLECTOR_DB_PATH", DEFAULT_DB_PATH),
         os.environ["DASHBOARD_USERNAME"],
         os.environ["DASHBOARD_PASSWORD_HASH"],
+        # `.get` and not `[...]`: an operator upgrading a running host has a
+        # `docker/compose/.env` written before `API_TOKEN` existed, and this
+        # service must still start there with the bearer path shut. The two
+        # `DASHBOARD_` names are deliberate and stay — renaming them means
+        # editing a `.env` that exists on a running host to buy a spelling.
+        os.environ.get("API_TOKEN"),
     )
     app.run(host="0.0.0.0", port=PORT)

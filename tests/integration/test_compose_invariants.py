@@ -288,3 +288,67 @@ def test_the_read_api_gets_no_socket_and_only_the_events_volume_is_writable(
         assert options == ["ro"], f"{target} must be mounted :ro, found {volume!r}"
     # Loopback-only like every other published port in these files.
     assert api["ports"] == ["127.0.0.1:8789:8789"]
+
+
+def _environment(service: dict) -> dict[str, str]:
+    """A service's environment as a mapping, from either compose syntax.
+
+    Both files write the list form (`- KEY=value`) throughout; the mapping form
+    is read too so a hand-edit that switches one service over cannot slip the
+    assertions below.
+    """
+    env = service.get("environment", [])
+    if isinstance(env, dict):
+        return {str(key): str(value) for key, value in env.items()}
+    pairs = [entry.split("=", 1) for entry in env if isinstance(entry, str)]
+    return {pair[0]: (pair[1] if len(pair) == 2 else "") for pair in pairs}
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_the_board_mounts_nothing_at_all(compose_file: str) -> None:
+    """The board (docs/plans/board.md Phase 2) is an HTTP client of the api and
+    nothing else: no volumes, no docker socket, no events database, no .hive/.
+    That is the property that makes the phase cheap to reason about — and the one
+    a later hand-edit would undo by "just" mounting the events volume to add a
+    screen, which is how a second parser of the same files gets into the tree.
+
+    Asserted as the *absence of the key*, not as an empty list: `volumes: []` on
+    this service would be a reviewer's invitation to add one. Both files, because
+    the Coolify one is a whole deploy path."""
+    board = _load(compose_file)["services"]["board"]
+
+    assert "volumes" not in board, (
+        f"the board service in {compose_file} must have no volumes key at all: it "
+        "reads nothing from disk and everything over HTTP from the api"
+    )
+    assert board.get("privileged") is not True
+    # Loopback-only like every other published port in these files.
+    assert board["ports"] == ["127.0.0.1:8790:8790"]
+    assert "ia_harness_net" in board["networks"]
+    assert _environment(board)["API_BASE_URL"] == "http://api:8789"
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_the_api_takes_the_token_the_board_authenticates_with(compose_file: str) -> None:
+    """Both services read `API_TOKEN` from the same `docker/compose/.env`
+    (docs/decisions.md ADR 7). A board holding a token the api was never given is
+    a board whose every region shows an Error state, which is a deployment that
+    looks broken rather than misconfigured."""
+    services = _load(compose_file)["services"]
+
+    assert "API_TOKEN" in _environment(services["api"])
+    assert "API_TOKEN" in _environment(services["board"])
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_the_dashboard_service_is_gone_from_both_files(compose_file: str) -> None:
+    """T-010 deleted `observability/dashboard/`, so a compose file still naming it
+    is a build that fails at `up`. `/events` on the board supersedes its three
+    columns."""
+    assert "dashboard" not in _load(compose_file)["services"]

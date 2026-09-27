@@ -22,13 +22,28 @@ clamp on `/api/events?limit=`; [`T-009-D3`](../debt/T-009-D3.md), a debt cell
 ending in inline code loses its closing backtick; and
 [`T-009-D4`](../debt/T-009-D4.md), the events volume had to be mounted
 read-write for a `mode=ro` reader. Phase 2 owns the second of those — it is the
-phase that renders the cell. Phase 2 is specified below and unstarted; phases
-3–6 have a row in the table and no spec.
+phase that renders the cell.
+Phase 2 is built and merged as well. It was dispatched as T-010 on 2026-09-27
+and landed as `observability/board/`, four server-rendered screens over those
+five endpoints — Flask and Jinja per [`docs/charter.md`](../charter.md) C-7, with
+ADRs 6–10 and [`docs/implementations/T-010.md`](../implementations/T-010.md) as
+the record. It closed `T-009-D3` and deleted `observability/dashboard/` and its
+compose service. `T-008-D1` and `T-009-D2` stay open. Two sentences in the Phase
+2 section below are now records of what was true when it was written rather than
+of the present, and are deliberately not rewritten: its state table carries a
+Loading row a server-rendered board cannot enter (ADR 6 argues that), and *What
+this closes* says the dashboard's auth tests had already moved to
+`observability/auth.py` in Phase 1 — they had not, and T-010 rehomed them by
+hand into `tests/observability/test_auth.py`. Phases 3–6 have a row in the table
+and no spec.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
-used, and the only surface a human gets is `observability/dashboard/`: 43 lines
-of Flask rendering the last 200 hook events as one table. This plan says what
-replaces it, in what order, and what each phase is allowed to assume.
+used, and the surface a human gets is the one this plan built: `/`,
+`/tasks/<id>`, `/debt` and `/events` on `127.0.0.1:8790`, over the read API on
+8789. Before Phase 2 it was `observability/dashboard/` — 43 lines of Flask
+rendering the last 200 hook events as one table — which is what the sections
+below mean whenever they speak of the dashboard in the present tense. This plan
+says what replaced it, in what order, and what each phase is allowed to assume.
 
 ## Why not adopt one
 

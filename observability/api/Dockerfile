@@ -12,7 +12,7 @@ COPY observability/ observability/
 COPY dispatcher/ dispatcher/
 RUN pip install --no-cache-dir .
 
-# No USER directive, like the collector and the dashboard, and here it is
+# No USER directive, like the collector and the board, and here it is
 # load-bearing: `dispatcher_state/*.json` are written root-owned mode 600, so a
 # non-root user in this image is a change to who owns that directory first.
 EXPOSE 8789

@@ -1,4 +1,6 @@
+import re
 import subprocess
+from pathlib import Path
 
 from dispatcher import debt, project_docs
 
@@ -225,12 +227,12 @@ def test_index_rows_reads_every_row_by_column_name() -> None:
         {
             "id": "task-3-D1",
             "what": "The retry loop is untested",
-            # `_rows` strips a backtick from each end of every cell, which is
-            # what unwraps `` `task-3-D1` `` into an id — a cell that only ends
-            # in one loses it. Pinned as it is rather than fixed: the same
-            # stripping feeds `index_fingerprints`, and a dedupe that changed
-            # shape would re-file debt every project already carries.
-            "where": "a task touching `cli.py",
+            # `_rows` unwraps one *matched* pair of backticks, which is what
+            # turns `` `task-3-D1` `` into an id and what leaves this cell's
+            # closing backtick alone (`docs/debt/T-009-D3.md`, fixed by T-010).
+            # Before the fix the `where` cell read `a task touching `cli.py`
+            # with its last character eaten.
+            "where": "a task touching `cli.py`",
             "fix": "a fake clock",
             "card": "card-aaa",
             "resolved": False,
@@ -244,6 +246,59 @@ def test_index_rows_reads_every_row_by_column_name() -> None:
             "resolved": False,
         },
     ]
+
+
+def test_a_cell_keeps_the_backtick_it_only_opens_or_only_closes_with() -> None:
+    """T-009-D3: one matched pair comes off a cell and nothing else.
+
+    The three cells the old `cell.strip("`")` got wrong, in one table. A cell
+    ending in inline code kept its opening backtick and lost its closing one; a
+    cell wrapped in double backticks lost both of the inner pair as well; and a
+    cell that opens with inline code lost the opening one.
+    """
+    text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| ``task-3-D1`` | `cli.py` is the one that opens with code | "
+        "a task touching `cli.py` | wrap it in `try` | `card-aaa` |\n"
+    )
+
+    [row] = debt.index_rows(text)
+
+    assert row["id"] == "`task-3-D1`"
+    assert row["what"] == "`cli.py` is the one that opens with code"
+    assert row["where"] == "a task touching `cli.py`"
+    assert row["fix"] == "wrap it in `try`"
+    assert row["card"] == "card-aaa"
+
+
+def test_the_fingerprints_of_the_projects_own_index_did_not_move(monkeypatch) -> None:
+    """The check T-009-D3's fix had to pass, run against the real index.
+
+    Every row already filed has to fingerprint to what it fingerprinted before,
+    or the next auditor re-files the whole backlog it inherited. Asserted by
+    parsing `docs/debt/README.md` twice — once with the matched-pair unwrap and
+    once with the one-backtick-per-end strip it replaced — rather than by
+    restating the fingerprints as literals, which would pin today's rows instead
+    of the property. It holds because `fingerprint` drops punctuation and then
+    strips, so a backtick at either end of a **what** cell never reached it.
+    """
+    index = Path(__file__).parent.parent.parent / "docs" / "debt" / "README.md"
+    text = index.read_text()
+
+    rows = debt.index_rows(text)
+    assert rows, "expected the project's own debt index to hold rows"
+    assert all(re.fullmatch(r"T-\d+-D\d+", row["id"]) for row in rows), [
+        row["id"] for row in rows
+    ]
+    after = debt.index_fingerprints(text)
+
+    monkeypatch.setattr(debt, "_unwrap_code", lambda cell: cell.strip("`"))
+    before = debt.index_fingerprints(text)
+    ids_before = [row["id"] for row in debt.index_rows(text)]
+
+    assert after == before
+    assert [row["id"] for row in rows] == ids_before
 
 
 def test_index_rows_falls_back_to_the_column_order_like_its_two_readers() -> None:

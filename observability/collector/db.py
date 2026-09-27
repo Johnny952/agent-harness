@@ -62,8 +62,9 @@ def list_events(
     events whose id is above `since`.
 
     `read_only` picks `connect_read_only` over `sqlite3.connect`. It is off by
-    default because the collector and the dashboard both write, and neither
-    should change behaviour for a reader that arrived later.
+    default because the collector writes — it is the only writer left — and a
+    writer should not change behaviour for a reader that arrived later. The read
+    API passes it; nothing else does.
     """
     conn = connect_read_only(db_path) if read_only else sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

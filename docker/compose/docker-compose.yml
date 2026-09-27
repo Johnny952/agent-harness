@@ -40,24 +40,6 @@ services:
     networks:
       - ia_harness_net
 
-  dashboard:
-    build:
-      context: ../..
-      dockerfile: observability/dashboard/Dockerfile
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8788:8788"
-    volumes:
-      - observability_data:/data
-    environment:
-      - COLLECTOR_DB_PATH=/data/events.db
-      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
-      - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
-    depends_on:
-      - collector
-    networks:
-      - ia_harness_net
-
   # The read API (docs/plans/board.md "Phase 1 — a read API in Python"): GETs
   # over the task files, the account state, the events and the debt index, so
   # an operator — and Phase 2's UI — stops reading root-owned
@@ -81,7 +63,7 @@ services:
     volumes:
       # Not under /data: that is where the two bind mounts below live in the
       # dispatcher's and the agents' layout, and nesting the volume under them
-      # to keep COLLECTOR_DB_PATH byte-identical with the dashboard's would
+      # to keep COLLECTOR_DB_PATH byte-identical with the collector's would
       # trade a legible mount list for an environment variable.
       #
       # The one mount here that is not :ro, and the only one that cannot be
@@ -100,8 +82,53 @@ services:
       - COLLECTOR_DB_PATH=/events/events.db
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
       - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+      # The board's credential, not a human's: this service checks a hash, so a
+      # service authenticating with basic auth would need the plaintext in .env
+      # beside the hash and make the hash decorative. Optional — an api started
+      # without it rejects every bearer and keeps basic auth working
+      # (docs/decisions.md ADR 7).
+      - API_TOKEN=${API_TOKEN}
     depends_on:
       - collector
+    networks:
+      - ia_harness_net
+
+  # The board (docs/plans/board.md "Phase 2 — a read-only board"): four screens
+  # over the five endpoints above, server-rendered with Jinja — docs/charter.md
+  # C-7 rules the toolchain, so there is no package.json and no build step here.
+  #
+  # NO VOLUMES, deliberately, and this is the one service in this file for which
+  # the absence of a key is the design: the board reads nothing from disk — no
+  # .hive/, no dispatcher_state/, no events database, no docker socket — and is
+  # an HTTP client of the api and nothing else. That is the whole reason Phase 2
+  # is cheap to reason about, so it is what
+  # tests/integration/test_compose_invariants.py pins.
+  #
+  # The browser never talks to the api: every fetch is server-side, which is what
+  # keeps the api's credential inside a container instead of in a page an
+  # operator can view-source. The human authenticates to the board with the same
+  # two DASHBOARD_ variables the api takes (they keep those names on purpose:
+  # renaming them means editing a .env that exists on a running host); the board
+  # authenticates to the api with API_TOKEN.
+  board:
+    build:
+      context: ../..
+      dockerfile: observability/board/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      - API_BASE_URL=http://api:8789
+      - API_TOKEN=${API_TOKEN}
+      - BOARD_USERNAME=${DASHBOARD_USERNAME}
+      - BOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
+      # Which project's debt index /debt shows. Optional: unset is right for a
+      # harness with one checkout, because /api/debt picks when there is nothing
+      # to pick between, and /debt?project=<slug> overrides it for one
+      # navigation. docs/decisions.md ADR 9.
+      - BOARD_PROJECT=${BOARD_PROJECT:-}
+    depends_on:
+      - api
     networks:
       - ia_harness_net
 

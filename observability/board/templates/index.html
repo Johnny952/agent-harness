@@ -1,0 +1,75 @@
+{% extends "layout.html" %}
+{% from "_region.html" import region, when %}
+{% block title %}pool and work{% endblock %}
+{#
+  The screen a human leaves open. It answers three questions without scrolling —
+  which accounts exist and what state each is in, which tasks are in flight and
+  who owns them, and whether any lock is stale — and nothing that answers none of
+  the three goes above the fold.
+#}
+{% block main %}
+
+<h2>accounts</h2>
+{% call region(accounts, EMPTY_ACCOUNTS) %}
+<table>
+  <thead>
+    <tr><th>account</th><th>container</th><th>state</th><th>current task</th><th>rate limited</th></tr>
+  </thead>
+  <tbody>
+    {% for account in accounts.rows %}
+    <tr>
+      <td>{{ account.name }}</td>
+      <td>{{ account.container }}</td>
+      {# The api owns the vocabulary; this renders what it said and restates
+         nothing. A null state is an account whose state file would not read,
+         and the warning above the table names the file. #}
+      <td>{% if account.state is none %}<span class="muted">unknown</span>{% else %}{{ account.state }}{% endif %}</td>
+      <td>
+        {% if account.current_task %}<a href="{{ url_for('task', task_id=account.current_task) }}">{{ account.current_task }}</a>
+        {% else %}<span class="muted">none</span>{% endif %}
+      </td>
+      <td>{% if account.rate_limited_at %}{{ when(account.rate_limited_at) }}{% else %}<span class="muted">no</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endcall %}
+
+<h2>tasks</h2>
+{% call region(tasks, EMPTY_TASKS) %}
+<table>
+  <thead>
+    <tr><th>task</th><th>status</th><th>owner</th><th>lock</th><th>card</th></tr>
+  </thead>
+  <tbody>
+    {% for task in tasks.rows %}
+    <tr>
+      <td><a href="{{ url_for('task', task_id=task.task_id) }}">{{ task.task_id }}</a></td>
+      <td>{{ task.status }}</td>
+      <td>{% if task.owner %}{{ task.owner }}{% else %}<span class="muted">none</span>{% endif %}</td>
+      {# lock_expired is the api's, derived from an expiry window only it holds:
+         rendered here, never recomputed (docs/decisions.md ADR 8). Three values, three
+         different things — a run that died holding the file, a live heartbeat,
+         and a task nobody is holding. #}
+      <td>
+        {% if task.lock_expired %}<span class="bad">lock expired</span> {{ when(task.heartbeat) }}
+        {% elif task.lock_expired is none %}
+          {% if task.heartbeat %}{{ when(task.heartbeat) }}{% else %}<span class="muted">no heartbeat</span>{% endif %}
+        {% else %}{{ when(task.heartbeat) }}{% endif %}
+      </td>
+      {# A null card is three facts and two of them are different news: no
+         kanban_issue_id is a task dispatched without a board, while an id whose
+         card the board does not hold is an inconsistency worth a mark — the
+         symptom docs/debt/T-008-D2.md describes. #}
+      <td>
+        {% if not task.kanban_issue_id %}<span class="muted">dispatched without a board</span>
+        {% elif not task.card %}<span class="mark">board does not hold this card</span>
+        {% else %}{{ task.card.title }} <span class="muted">({{ task.card.status }})</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endcall %}
+
+{% endblock %}
