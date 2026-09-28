@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -107,6 +108,79 @@ def ensure_scratch_dir(hive_dir: str, task_id: str) -> str:
     return path
 
 
+#: Where the dispatcher keeps its own copy of what a phase returned, under the
+#: task's scratch dir. Namespaced into a subdirectory rather than dropped in
+#: beside the roles' notes: the scratch dir is handed to every phase as a
+#: writable directory, and a role that decides to call its own file
+#: `revisor.json` must not be able to overwrite the dispatcher's record of what
+#: the revisor said.
+_HANDOFF_SUBDIR = "handoffs"
+
+
+def handoff_path(hive_dir: str, task_id: str, role: str) -> str:
+    return os.path.join(scratch_dir(hive_dir, task_id), _HANDOFF_SUBDIR, f"{role}.json")
+
+
+def save_handoff(
+    hive_dir: str,
+    task_id: str,
+    role: str,
+    payload: dict | None,
+    round_num: int | None = None,
+) -> str:
+    """Keep the structured return of a phase, not just its prose rendering.
+
+    The handoff a role writes is parsed into a dict, rendered into the task
+    file as prose, and then lost with the process. Everything the cycle does
+    with it afterwards — the debt a task declared, the debt a revisor accepted,
+    the entries a merge has to close — needs the dict and cannot be recovered
+    from the prose. So the cycle could only ever do that work in the one run
+    that held all of it in memory, and a task driven phase by phase, by hand,
+    silently got none of it.
+
+    One file per role, overwritten each round, is enough because of how the
+    cycle terminates: it stops looping when the revisor approves, so the last
+    file a role left is the round that was approved, which is exactly the round
+    whose debt is real. `round` is kept in the envelope anyway — for a reader
+    trying to work out what happened, the round number is the difference
+    between a task that was approved first time and one that took three.
+
+    Written even when `payload` is None, so that a re-run whose handoff failed
+    to parse clears the previous round's file rather than leaving it standing
+    as if it were this round's answer.
+    """
+    path = handoff_path(hive_dir, task_id, role)
+    envelope = {
+        "role": role,
+        "round": round_num,
+        "saved_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "handoff": payload,
+    }
+    _write_atomic(path, json.dumps(envelope, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def read_handoff(hive_dir: str, task_id: str, role: str) -> dict | None:
+    """What that role returned, or None if this task has no record of it.
+
+    Every caller reads a handoff to ask what it declared, and every one of
+    those questions answers "nothing" for a payload that is missing, empty or
+    malformed — `debt.declarations`, `debt.rulings` and `debt.resolved` all
+    take `dict | None` for that reason. So a damaged file is not worth an
+    exception here: the paths that read this are repair paths, and a task
+    whose record is unreadable should still be closeable by hand.
+    """
+    try:
+        with open(handoff_path(hive_dir, task_id, role)) as fh:
+            envelope = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    payload = envelope.get("handoff")
+    return payload if isinstance(payload, dict) else None
+
+
 def list_task_ids(hive_dir: str) -> list[str]:
     if not os.path.isdir(hive_dir):
         return []
@@ -167,30 +241,22 @@ def _read_or_new(hive_dir: str, task_id: str) -> tuple[str, TaskFile]:
     )
 
 
-def write_task_file(path: str, task: TaskFile) -> None:
-    fm = {
-        "task_id": task.task_id,
-        "status": task.status,
-        "owner": task.owner,
-        "depends_on": task.depends_on,
-        "heartbeat": task.heartbeat,
-    }
-    if task.kanban_issue_id is not None:
-        fm["kanban_issue_id"] = task.kanban_issue_id
-    if task.resolved_debt:
-        fm["resolved_debt"] = task.resolved_debt
-    if task.description is not None:
-        # Last key so the (multi-line) description sits next to the body,
-        # with the short bookkeeping fields readable above it.
-        fm["description"] = task.description
-    dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
-    content = f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}"
+def _write_atomic(path: str, content: str) -> None:
+    """Replace a file's contents in one step, readable by whoever reads it.
+
+    Every file under `.hive/` is written while something else may be reading
+    it — the heartbeat thread rewrites the card under the phase that is
+    holding it, a later process reads a handoff the cycle is still adding to —
+    so nothing here is written in place. The temp file goes in the same
+    directory, because `os.replace` is only atomic within one filesystem, and
+    carries a non-".md" suffix so a leftover from a crash is never picked up
+    by `list_task_ids` as a task.
+    """
     parent = Path(path).parent
     parent.mkdir(parents=True, exist_ok=True)
-    # Write to a temp file in the same directory so os.replace is atomic, and
-    # give it a non-".md" suffix so a leftover from a crash is never picked up
-    # by list_task_ids as a task.
-    tmp = tempfile.NamedTemporaryFile(mode="w", dir=parent, prefix=f".{Path(path).stem}.", suffix=".tmp", delete=False)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", dir=parent, prefix=f".{Path(path).stem}.", suffix=".tmp", delete=False
+    )
     try:
         with tmp:
             tmp.write(content)
@@ -208,6 +274,26 @@ def write_task_file(path: str, task: TaskFile) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def write_task_file(path: str, task: TaskFile) -> None:
+    fm = {
+        "task_id": task.task_id,
+        "status": task.status,
+        "owner": task.owner,
+        "depends_on": task.depends_on,
+        "heartbeat": task.heartbeat,
+    }
+    if task.kanban_issue_id is not None:
+        fm["kanban_issue_id"] = task.kanban_issue_id
+    if task.resolved_debt:
+        fm["resolved_debt"] = task.resolved_debt
+    if task.description is not None:
+        # Last key so the (multi-line) description sits next to the body,
+        # with the short bookkeeping fields readable above it.
+        fm["description"] = task.description
+    dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
+    _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 
 
 def set_description(hive_dir: str, task_id: str, description: str) -> None:

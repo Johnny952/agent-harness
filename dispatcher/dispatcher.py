@@ -1165,8 +1165,8 @@ def _file_accepted_debt(
     kanban: KanbanClient,
     task_id: str,
     slug: str,
-    implemented: DispatchResult,
-    reviewed: DispatchResult,
+    implemented: dict | None,
+    reviewed: dict | None,
 ) -> list[tuple[str, str | None, debt.Declaration]]:
     """Put the debt this task declared on the board, and name it for the auditor.
 
@@ -1181,8 +1181,14 @@ def _file_accepted_debt(
 
     A project with no board loses only the cards. The entries are filed either
     way, because the index is the source of truth and the board is the aid.
+
+    Takes the two handoffs rather than the two results, because the caller may
+    not have either result: `run-phase` closes a task out of what previous
+    phases left on disk, and only the handoffs are on disk. Both are
+    `dict | None` all the way down — a handoff that is missing declares
+    nothing, which is the same answer as a handoff that declared nothing.
     """
-    accepted = debt.accepted(implemented.handoff, reviewed.handoff)
+    accepted = debt.accepted(implemented, reviewed)
     if not accepted:
         return []
     # Read from the branch being built, not the project checkout: a re-run of
@@ -1540,6 +1546,15 @@ def run_phase(
         new_status="done" if final else "pending",
         body=body,
     )
+    # The prose above is for whoever reads next; this is for whoever has to
+    # act. `result.handoff` is the parsed return, and the debt a task declares,
+    # accepts and resolves lives in it as structure — none of which survives
+    # the rendering. Written here rather than in the cycle because this is the
+    # one place every phase passes through, whichever entry point dispatched
+    # it, which is what lets a task driven a phase at a time still be closed.
+    context_transfer.save_handoff(
+        cfg.hive_tasks_dir, ctx.task_id, role, result.handoff, round_num=round_num,
+    )
     return result
 
 
@@ -1588,13 +1603,19 @@ def run_single_phase(
     2026-09-25. This runs the one phase that is missing.
 
     What it deliberately does not do is the cycle's own judgement: it reads no
-    verdict, runs no further round, files no debt card and merges nothing,
-    because each of those needs handoffs from phases this call did not run.
-    Those stay `run-task`'s, and the operator is told so rather than left to
-    assume. `final=True` is the operator saying this phase closes the task —
-    in the role set, the auditor — and buys exactly what the full cycle gives
-    its last phase: the learnings carried in beforehand, `status: done` in the
-    task file and on the board, and no orphaning on the way out.
+    verdict, runs no further round and merges nothing. Those stay `run-task`'s,
+    and the operator is told so rather than left to assume. `final=True` is the
+    operator saying this phase closes the task — in the role set, the auditor —
+    and buys what the full cycle gives its last phase: the learnings carried in
+    beforehand, the debt the earlier phases declared recorded and filed,
+    `status: done` in the task file and on the board, and no orphaning on the
+    way out.
+
+    The debt half of that is only possible because `run_phase` persists each
+    phase's structured return, so the implementador's and the revisor's answers
+    are still readable in a later process. A task whose earlier phases ran
+    before that existed has no such record; it closes the way this path always
+    did, with nothing filed, and the log line says which of the two happened.
     """
     ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
     if ctx is None:
@@ -1607,6 +1628,28 @@ def run_single_phase(
             # owns and a later run can tell an entry that was handed to a task
             # from one nobody has picked up yet.
             learnings.carry(cfg.hive_tasks_dir, slug, task_id)
+            # The two steps the full cycle runs between the carry and its last
+            # phase, off what `run_phase` left on disk rather than off results
+            # this call never held. Written before the phase for the same
+            # reason: the cards are opened here so the auditor can write rows
+            # that already point at them.
+            implemented = context_transfer.read_handoff(
+                cfg.hive_tasks_dir, task_id, "implementador"
+            )
+            reviewed = context_transfer.read_handoff(cfg.hive_tasks_dir, task_id, "revisor")
+            # Only when there is a record to write from: set_resolved_debt
+            # replaces, so a task with no persisted implementador handoff would
+            # otherwise have a hand-set list erased by a call that knows
+            # nothing.
+            if implemented is not None:
+                context_transfer.set_resolved_debt(
+                    cfg.hive_tasks_dir, task_id, debt.resolved(implemented)
+                )
+            filed = _file_accepted_debt(cfg, kanban, task_id, slug, implemented, reviewed)
+            # Appended rather than replaced: `--note` is the operator's
+            # instruction to this phase and the filing note is the
+            # dispatcher's, and the phase is owed both.
+            note = "\n\n".join(part for part in (note, debt.filing_note(filed)) if part)
         result = run_phase(ctx, role, round_num=round_num, final=final, note=note)
         if result is None:
             return None
@@ -1614,15 +1657,29 @@ def run_single_phase(
             _update_task_status(kanban, ctx.issue_id, "done")
             # Said out loud because the difference is invisible from the task
             # file: a card closed this way was closed by a phase, not by a
-            # cycle that read a verdict, and the three steps a finished
-            # `run-task` also does have not happened.
-            logger.info(
-                "task %s: closed by a single %s phase. Resolved debt was not recorded, "
-                "no debt card was filed and no merge was attempted — those need the "
-                "implementador's and revisor's handoffs from the same run. Use "
-                "`merge-task` when the branch is ready.",
-                task_id, role,
-            )
+            # cycle that read a verdict, and the merge a finished `run-task`
+            # can do has not happened. Which handoffs were found is part of
+            # that difference — "no debt filed" means something very different
+            # when there was a record to file from.
+            if implemented is None and reviewed is None:
+                logger.info(
+                    "task %s: closed by a single %s phase. No stored handoff was found "
+                    "for the implementador or the revisor, so no resolved debt was "
+                    "recorded and no debt card was filed; phases run before the "
+                    "dispatcher started storing them leave no record to read. No merge "
+                    "was attempted — use `merge-task` when the branch is ready.",
+                    task_id, role,
+                )
+            else:
+                logger.info(
+                    "task %s: closed by a single %s phase, off the stored handoffs "
+                    "(implementador: %s, revisor: %s). %d debt card(s) filed. No merge "
+                    "was attempted — use `merge-task` when the branch is ready.",
+                    task_id, role,
+                    "found" if implemented is not None else "missing",
+                    "found" if reviewed is not None else "missing",
+                    len(filed),
+                )
         return result
     finally:
         close_cycle(ctx, completed=final and result is not None)
@@ -1749,7 +1806,9 @@ def run_task_cycle(
         )
         # Before the auditor, because the auditor writes the rows that point
         # at these cards.
-        filed = _file_accepted_debt(cfg, kanban, task_id, slug, implemented, revisor_result)
+        filed = _file_accepted_debt(
+        cfg, kanban, task_id, slug, implemented.handoff, revisor_result.handoff
+    )
         if run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed)) is None:
             return
         completed = True

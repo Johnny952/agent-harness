@@ -13,10 +13,13 @@ from dispatcher.context_transfer import (
     acquire_lock,
     is_lock_expired,
     list_task_ids,
+    read_handoff,
     read_resolved_debt,
     read_task_file,
+    save_handoff,
     scratch_dir,
     set_kanban_issue_id,
+    set_resolved_debt,
     task_file_path,
     write_task_file,
 )
@@ -3201,8 +3204,11 @@ def test_issue_title_of_an_ask_with_no_line_is_just_the_task_id() -> None:
 # --- the mapping phase, for a project nobody has written down yet ---------
 
 
-def _recording_dispatch_phase(calls, failing=()):
-    """Records every phase's role, model and turn budget, and approves once."""
+def _recording_dispatch_phase(calls, failing=(), handoffs=None):
+    """Records every phase's role, model and turn budget, and approves once.
+
+    `handoffs` maps a role to the structured return its phase hands back, for
+    the tests that care what the dispatcher does with one."""
 
     def fake_dispatch_phase(
         cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None,
@@ -3214,6 +3220,7 @@ def _recording_dispatch_phase(calls, failing=()):
             session_id=None,
             result_text="VERDICT: APPROVED" if role == "revisor" else "ok",
             account="cuenta1",
+            handoff=(handoffs or {}).get(role),
         )
 
     return fake_dispatch_phase
@@ -4062,6 +4069,133 @@ def test_close_resolved_debt_does_not_read_the_index_for_a_project_with_no_board
     assert debt_index.reads == []
 
 
+# --- _file_accepted_debt, off the handoffs rather than the results ----------
+#
+# The cycle calls it holding both results in memory; `run-phase --final` calls
+# it holding only what earlier phases left on disk. These pin down the shape it
+# has to answer for either caller: two `dict | None` and nothing else.
+
+
+def test_filing_accepted_debt_opens_one_card_per_declaration_the_review_kept(
+    tmp_path, debt_index,
+) -> None:
+    """The unit the cycle and the hand-resume share: declarations in, entries
+    and cards out, with the revisor's rulings deciding which survive."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    kanban.create_issue("the task's own card")
+
+    filed = dispatcher_mod._file_accepted_debt(
+        cfg, kanban, "task-1", "myproj",
+        {"debt": [dict(_DEBT), dict(_MIGRATION)]},
+        {"debt_rulings": [{"debt": "The migration has no down step", "ruling": debt.REJECTED}]},
+    )
+
+    assert [entry for entry, _, _ in filed] == ["task-1-D1"]
+    assert [card for _, card, _ in filed] == ["card-1"]
+    assert [title for title, _ in kanban.debt_cards] == ["[debt] The retry loop has no test."]
+
+
+def test_filing_accepted_debt_with_no_review_on_disk_keeps_every_declaration(
+    tmp_path, debt_index,
+) -> None:
+    """Accept-by-default all the way down. A hand-resumed task whose revisor
+    handoff was never stored has no rulings to read, and the answer to "was
+    this accepted?" on a round that reached the auditor is yes."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+    kanban.create_issue("the task's own card")
+
+    filed = dispatcher_mod._file_accepted_debt(
+        cfg, kanban, "task-1", "myproj", {"debt": [dict(_DEBT), dict(_MIGRATION)]}, None,
+    )
+
+    assert [entry for entry, _, _ in filed] == ["task-1-D1", "task-1-D2"]
+    assert len(kanban.debt_cards) == 2
+
+
+def test_filing_accepted_debt_with_nothing_declared_reads_no_index_and_files_nothing(
+    tmp_path, debt_index,
+) -> None:
+    """A missing handoff declares nothing, which is the same answer as a
+    handoff that declared nothing — and neither is worth a docker exec."""
+    cfg = _make_config(tmp_path)
+    kanban = _DebtBoard()
+
+    assert dispatcher_mod._file_accepted_debt(cfg, kanban, "task-1", "myproj", None, None) == []
+    assert dispatcher_mod._file_accepted_debt(
+        cfg, kanban, "task-1", "myproj", {"debt": []}, {"debt_rulings": []},
+    ) == []
+    assert kanban.created == []
+    assert debt_index.reads == []
+
+
+def test_filing_accepted_debt_skips_what_the_branch_index_already_carries(
+    tmp_path, debt_index,
+) -> None:
+    """Read from the branch, not the checkout: a re-run of the closing phase
+    must not card the same entry twice."""
+    cfg = _make_config(tmp_path)
+    debt_index.text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-1-D1` | The retry loop has no test | backoff changes | a fake clock "
+        "| `card-9` |\n"
+    )
+    kanban = _DebtBoard()
+    kanban.create_issue("the task's own card")
+
+    filed = dispatcher_mod._file_accepted_debt(
+        cfg, kanban, "task-1", "myproj", {"debt": [dict(_DEBT), dict(_MIGRATION)]}, None,
+    )
+
+    assert [declaration.what for _, _, declaration in filed] == [_MIGRATION["what"]]
+    # Numbered by what was filed, not by what was declared.
+    assert [entry for entry, _, _ in filed] == ["task-1-D1"]
+
+
+def test_filing_accepted_debt_survives_an_index_it_cannot_read(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """The index is read to avoid a duplicate card. Failing to read it costs a
+    duplicate card, never the entry."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.debt, "read_index",
+        lambda container, workdir: (_ for _ in ()).throw(RuntimeError("no container")),
+    )
+    kanban = _DebtBoard()
+    kanban.create_issue("the task's own card")
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        filed = dispatcher_mod._file_accepted_debt(
+            cfg, kanban, "task-1", "myproj", {"debt": [dict(_DEBT)]}, None,
+        )
+
+    assert [entry for entry, _, _ in filed] == ["task-1-D1"]
+    assert any("no container" in r.getMessage() for r in caplog.records)
+
+
+def test_filing_accepted_debt_files_the_entry_even_when_the_board_refuses(
+    tmp_path, debt_index, caplog,
+) -> None:
+    """The index is the source of truth and the board is the aid: a project
+    whose board is down loses the cards, not the debt."""
+    cfg = _make_config(tmp_path)
+
+    class _BrokenBoard(_FakeKanban):
+        def create_issue(self, title, description=None):
+            raise RuntimeError("board is down")
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        filed = dispatcher_mod._file_accepted_debt(
+            cfg, _BrokenBoard(), "task-1", "myproj", {"debt": [dict(_DEBT)]}, None,
+        )
+
+    assert filed == [("task-1-D1", None, debt.Declaration(**_DEBT))]
+    assert any("task-1-D1" in r.getMessage() for r in caplog.records)
+
+
 # --- run_single_phase -------------------------------------------------------
 #
 # The repair path: one phase of a task that is already under way, instead of a
@@ -4331,6 +4465,141 @@ def test_run_single_phase_cleanup_does_not_swallow_a_real_failure(tmp_path, monk
         dispatcher_mod.run_single_phase(
             cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
         )
+
+
+def test_run_single_phase_stores_what_the_phase_returned(tmp_path, monkeypatch) -> None:
+    """The piece everything below rests on. The prose rendering is for whoever
+    reads next; the structure is for whoever has to act, and until it was
+    written down it died with the process that held it."""
+    cfg = _make_config(tmp_path)
+    payload = {"verdict": "APPROVED", "debt_rulings": [{"debt": "no test", "ruling": debt.ACCEPTED}]}
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _recording_dispatch_phase([], handoffs={"revisor": payload}),
+    )
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    assert read_handoff(cfg.hive_tasks_dir, "task-1", "revisor") == payload
+
+
+def test_run_single_phase_final_files_the_debt_the_stored_handoffs_declared(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """The whole point of storing them: a task driven a phase at a time closes
+    with the same cards, entries and resolved rows a cycle would have left."""
+    cfg = _make_config(tmp_path)
+    save_handoff(
+        cfg.hive_tasks_dir, "task-1", "implementador",
+        {"debt": [dict(_DEBT), dict(_MIGRATION)], "resolved_debt": ["`task-0-D3`"]},
+        round_num=1,
+    )
+    save_handoff(
+        cfg.hive_tasks_dir, "task-1", "revisor",
+        {"verdict": "APPROVED",
+         "debt_rulings": [{"debt": "The migration has no down step", "ruling": debt.REJECTED}]},
+        round_num=1,
+    )
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    kanban = _DebtBoard()
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+    )
+
+    # The revisor's ruling survived the round trip through disk: one card, not two.
+    assert [title for title, _ in kanban.debt_cards] == ["[debt] The retry loop has no test."]
+    # And the auditor is told the entry it owns, so its row points at the card.
+    assert "`task-1-D1`" in calls[0]["prompt"]
+    assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-0-D3"]
+
+
+def test_run_single_phase_final_appends_its_filing_note_to_the_operators(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """`--note` is the operator's instruction to this phase and the filing
+    note is the dispatcher's. The phase is owed both, so neither replaces the
+    other."""
+    cfg = _make_config(tmp_path)
+    save_handoff(cfg.hive_tasks_dir, "task-1", "implementador", {"debt": [dict(_DEBT)]})
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", _DebtBoard(), "auditor", final=True,
+        description=_DESCRIPTION, note="The host rebooted mid-round.",
+    )
+
+    assert "The host rebooted mid-round." in calls[0]["prompt"]
+    assert "`task-1-D1`" in calls[0]["prompt"]
+
+
+def test_run_single_phase_final_without_stored_handoffs_files_nothing_and_says_so(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    """A task whose earlier phases ran before the dispatcher stored anything
+    has no record to read. It closes the way this path always did — and the
+    log says which of the two happened, because "no debt filed" means
+    something very different when there was a record to file from."""
+    cfg = _make_config(tmp_path)
+    set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-0-D3"])
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([]))
+
+    kanban = _DebtBoard()
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_single_phase(
+            cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+        )
+
+    assert kanban.debt_cards == []
+    # set_resolved_debt replaces, so a call that knows nothing must not make it.
+    assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-0-D3"]
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status == "done"
+    assert any("No stored handoff was found" in r.getMessage() for r in caplog.records)
+
+
+def test_run_single_phase_final_names_which_handoffs_it_closed_off(
+    tmp_path, monkeypatch, fake_git, debt_index, caplog,
+) -> None:
+    """The other branch of the same line. Half a record is still a record, and
+    the operator reading the log should not have to guess which half."""
+    cfg = _make_config(tmp_path)
+    save_handoff(cfg.hive_tasks_dir, "task-1", "implementador", {"debt": [dict(_DEBT)]})
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([]))
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_single_phase(
+            cfg, "task-1", "myproj", _DebtBoard(), "auditor", final=True,
+            description=_DESCRIPTION,
+        )
+
+    assert any(
+        "implementador: found" in r.getMessage() and "revisor: missing" in r.getMessage()
+        and "1 debt card(s) filed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_run_single_phase_that_is_not_final_files_no_debt(
+    tmp_path, monkeypatch, debt_index,
+) -> None:
+    """A middle phase has no business closing anything out. The handoffs are
+    on disk from the moment they are returned, so what keeps a revisor round
+    from carding its own task's debt is --final and nothing else."""
+    cfg = _make_config(tmp_path)
+    save_handoff(cfg.hive_tasks_dir, "task-1", "implementador", {"debt": [dict(_DEBT)]})
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([]))
+
+    kanban = _DebtBoard()
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    assert kanban.debt_cards == []
+    assert debt_index.reads == []
 
 
 def _make_pool_config(tmp_path, **overrides):

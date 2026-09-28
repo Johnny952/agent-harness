@@ -243,7 +243,7 @@ def main() -> None:
         "the whole cycle. The repair path: run-task always begins at the "
         "arquitecto, so an interrupted run could otherwise only be continued by "
         "paying for every phase again. It runs the phase and nothing else — no "
-        "further round, no verdict read, no debt card filed, no merge.",
+        "further round, no verdict read, no merge.",
     )
     phase_parser.add_argument("--task-id", required=True)
     phase_parser.add_argument("--project", required=True, help="Project slug")
@@ -267,17 +267,21 @@ def main() -> None:
         "--final",
         action="store_true",
         help="This phase closes the task: the learnings are carried to it "
-        "beforehand, the task file and the board are moved to done, and the "
-        "entries are not orphaned on the way out. In the role set that is the "
-        "auditor. Without it the handoff leaves the task pending, which is "
-        "what every phase before the last one should do.",
+        "beforehand, the debt the earlier phases declared is recorded and "
+        "filed off the handoffs they left on disk, the task file and the "
+        "board are moved to done, and the entries are not orphaned on the "
+        "way out. In the role set that is the auditor. Without it the handoff "
+        "leaves the task pending, which is what every phase before the last "
+        "one should do.",
     )
     phase_parser.add_argument(
         "--note",
         default="",
-        help="Extra context appended to this one phase's prompt. The cycle uses "
-        "it to hand the auditor the debt cards it just filed; an operator "
-        "resuming a run uses it to say what the dead process took with it.",
+        help="Extra context appended to this one phase's prompt. An operator "
+        "resuming a run uses it to say what the dead process took with it. "
+        "Under --final the dispatcher appends its own note to it, naming the "
+        "debt cards it filed, rather than replacing it: the phase is owed "
+        "both.",
     )
 
     bootstrap_parser = sub.add_parser(

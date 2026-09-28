@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import os
 import stat
 import tempfile
@@ -9,14 +10,18 @@ import pytest
 from dispatcher.context_transfer import (
     acquire_lock,
     handoff,
+    handoff_path,
     is_lock_expired,
     list_task_ids,
     LockHeldError,
     read_description,
+    read_handoff,
     read_kanban_issue_id,
     read_task_file,
     refresh_heartbeat,
     release_stale_lock,
+    save_handoff,
+    scratch_dir,
     set_description,
     set_kanban_issue_id,
     task_file_path,
@@ -490,3 +495,146 @@ def test_a_task_with_no_board_writes_no_kanban_key(tmp_path: Path) -> None:
 def test_read_kanban_issue_id_of_an_unseeded_task_is_none(tmp_path: Path) -> None:
     assert read_kanban_issue_id(str(tmp_path), "task-1") is None
     assert list_task_ids(str(tmp_path)) == []
+
+
+def test_save_handoff_round_trips_the_structured_return(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    payload = {
+        "summary": "Added the endpoint.",
+        "debt": [{"what": "The retry loop has no test.", "origin": "found"}],
+        "resolved_debt": ["T-001-D1"],
+    }
+
+    save_handoff(hive_dir, "task-1", "implementador", payload, round_num=2)
+
+    assert read_handoff(hive_dir, "task-1", "implementador") == payload
+
+
+def test_save_handoff_keeps_the_round_it_came_from(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    path = save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"}, round_num=3)
+
+    envelope = json.loads(Path(path).read_text())
+    assert envelope["role"] == "revisor"
+    assert envelope["round"] == 3
+    assert envelope["handoff"] == {"verdict": "APPROVED"}
+    # Parseable as a timestamp, not just present: the field is there so a reader
+    # can tell a record from this run apart from one left by an earlier one.
+    assert dt.datetime.fromisoformat(envelope["saved_at"]).tzinfo is not None
+
+
+def test_save_handoff_lives_under_the_task_scratch_dir_not_beside_the_task_file(
+    tmp_path: Path,
+) -> None:
+    hive_dir = str(tmp_path)
+    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
+
+    path = save_handoff(hive_dir, "task-1", "auditor", {"summary": "ok"})
+
+    assert path == handoff_path(hive_dir, "task-1", "auditor")
+    assert path == os.path.join(scratch_dir(hive_dir, "task-1"), "handoffs", "auditor.json")
+    # The scratch dir is a sibling of the task file, and only ".md" files count
+    # as tasks — so the dispatcher's own record never shows up as one.
+    assert list_task_ids(hive_dir) == ["task-1"]
+
+
+def test_save_handoff_does_not_collide_with_a_role_writing_in_the_scratch_dir(
+    tmp_path: Path,
+) -> None:
+    hive_dir = str(tmp_path)
+    # The scratch dir is handed to every phase as a writable directory, so a role
+    # is free to call its own note `revisor.json`. The dispatcher's copy is
+    # namespaced precisely so that cannot overwrite it.
+    Path(scratch_dir(hive_dir, "task-1")).mkdir(parents=True)
+    Path(scratch_dir(hive_dir, "task-1"), "revisor.json").write_text('{"verdict": "REJECTED"}')
+
+    save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"})
+
+    assert read_handoff(hive_dir, "task-1", "revisor") == {"verdict": "APPROVED"}
+
+
+def test_save_handoff_keeps_one_file_per_role(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    save_handoff(hive_dir, "task-1", "implementador", {"summary": "built it"})
+    save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"})
+
+    assert read_handoff(hive_dir, "task-1", "implementador") == {"summary": "built it"}
+    assert read_handoff(hive_dir, "task-1", "revisor") == {"verdict": "APPROVED"}
+    handoffs = os.path.join(scratch_dir(hive_dir, "task-1"), "handoffs")
+    assert sorted(os.listdir(handoffs)) == ["implementador.json", "revisor.json"]
+
+
+def test_save_handoff_overwrites_the_previous_round(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    save_handoff(hive_dir, "task-1", "revisor", {"verdict": "REJECTED"}, round_num=1)
+    save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"}, round_num=2)
+
+    # The cycle stops looping when the revisor approves, so the last file a role
+    # left is the round that was approved — which is the round whose debt is real.
+    assert read_handoff(hive_dir, "task-1", "revisor") == {"verdict": "APPROVED"}
+    handoffs = os.path.join(scratch_dir(hive_dir, "task-1"), "handoffs")
+    assert os.listdir(handoffs) == ["revisor.json"]
+
+
+def test_save_handoff_of_nothing_clears_the_previous_round(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    save_handoff(hive_dir, "task-1", "implementador", {"debt": [{"what": "no test"}]}, round_num=1)
+
+    # A re-run whose handoff failed to parse must not leave the previous round's
+    # answer standing as if it were this round's.
+    save_handoff(hive_dir, "task-1", "implementador", None, round_num=2)
+
+    assert read_handoff(hive_dir, "task-1", "implementador") is None
+
+
+def test_save_handoff_sets_mode_0644(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    path = save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"})
+
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+
+
+def test_save_handoff_leaves_no_temp_files_behind(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"})
+
+    handoffs = os.path.join(scratch_dir(hive_dir, "task-1"), "handoffs")
+    assert os.listdir(handoffs) == ["revisor.json"]
+
+
+def test_read_handoff_of_a_task_with_no_record_is_none(tmp_path: Path) -> None:
+    assert read_handoff(str(tmp_path), "task-1", "implementador") is None
+
+
+def test_read_handoff_of_a_damaged_file_is_none(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    path = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json at all")
+
+    # A repair path is exactly where this gets read, so an unreadable record
+    # answers "nothing declared" rather than making the task uncloseable.
+    assert read_handoff(hive_dir, "task-1", "revisor") is None
+
+
+def test_read_handoff_of_a_file_that_is_not_an_envelope_is_none(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    path = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    path.parent.mkdir(parents=True)
+    path.write_text('["verdict", "APPROVED"]')
+
+    assert read_handoff(hive_dir, "task-1", "revisor") is None
+
+
+def test_read_handoff_of_an_envelope_holding_no_dict_is_none(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    path = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    path.parent.mkdir(parents=True)
+    path.write_text('{"role": "revisor", "round": 1, "handoff": "APPROVED"}')
+
+    assert read_handoff(hive_dir, "task-1", "revisor") is None

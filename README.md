@@ -609,11 +609,9 @@ python -m dispatcher.cli --config config.yaml run-phase \
 Everything a phase needs around it still happens — the account and card
 locks, the worktree, the commit, the gates, and the handoff appended to the
 task file that the next phase reads. What does not happen is the cycle's own
-judgement: it reads no verdict, starts no further round, records no resolved
-debt, files no debt card and merges nothing, because each of those needs
-handoffs from phases this call did not run. Those stay `run-task`'s, and the
-log says so rather than leaving it to be assumed; `merge-task` is still the
-way to offer the branch back.
+judgement: it reads no verdict, starts no further round and merges nothing.
+Those stay `run-task`'s, and the log says so rather than leaving it to be
+assumed; `merge-task` is still the way to offer the branch back.
 
 `--round` is not cosmetic. It is what the phase is told it is on, what
 labels its section in the task file (`## revisor (round 2)`), and what
@@ -627,8 +625,17 @@ file.
 
 `--final` is the operator saying this phase closes the task — in the role
 set, the auditor. It buys exactly what the full cycle gives its last phase:
-the learnings carried in beforehand, `status: done` in the task file and on
-the board, and no orphaning of the entries on the way out. Without it the
+the learnings carried in beforehand, the debt the earlier phases declared
+recorded and filed, `status: done` in the task file and on the board, and no
+orphaning of the entries on the way out. The debt half is possible because
+every phase leaves its structured return under the task's scratch directory
+(`.hive/tasks/<task-id>/handoffs/<role>.json`): the prose appended to the
+task file is for whoever reads next, the JSON is for whoever has to act, and
+only the second survives the process that produced it. A task whose earlier
+phases ran before the dispatcher stored them has no such record, and closes
+the way this path always did with nothing filed — the closing log names
+which of the two happened, because "no debt filed" means something very
+different when there was a record to file from. Without it the
 task stays `pending` and the entries this run wrote go back to being
 unowned, which is what every phase before the last one should do. A phase
 that did not land exits non-zero and blocks the card, so a hand-driven cycle

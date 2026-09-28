@@ -1483,14 +1483,14 @@ logins.
      `run_task_cycle` rebuilt on them, signature and behaviour unchanged,
      and `run_single_phase` as the second caller the split was for. What
      the verb deliberately does not do is the cycle's own judgement: it
-     reads no verdict, opens no further round, records no resolved debt,
-     files no debt card and merges nothing, because each of those needs
-     handoffs from phases the call did not run — and it logs that rather
-     than leaving it to be assumed, `merge-task` still being the way to
-     offer the branch back. `--final` buys exactly what the cycle gives
-     its last phase: the learnings carried in beforehand, `status: done`
-     in the task file and on the board, and no orphaning of the entries on
-     the way out; without it the task stays `pending` and this run's
+     reads no verdict, opens no further round and merges nothing — and it
+     logs that rather than leaving it to be assumed, `merge-task` still
+     being the way to offer the branch back. `--final` buys exactly what
+     the cycle gives its last phase: the learnings carried in beforehand,
+     the debt the earlier phases declared recorded and filed,
+     `status: done` in the task file and on the board, and no orphaning of
+     the entries on the way out; without it the task stays `pending` and
+     this run's
      entries go back to unowned, which is what every phase before the last
      one should do. `--round` is not cosmetic — it labels the section
      (`## revisor (round 2)`), it is what the phase is told it is on, and
@@ -1511,14 +1511,30 @@ logins.
      both landing on `cuenta2` in a new session, the task closing `done`
      with no lock left behind. The dispatched run showed one thing the
      unit tests could not. The closing log — resolved debt not recorded,
-     no debt card filed, no merge attempted — is not only a caveat for the
-     operator: the auditor had to re-derive the debt ids it filed under,
-     and said so in its own Risks ("if cards do exist, `card` is wrong").
-     So a hand-resumed cycle pays for its last phase with a weaker record
-     than the same phase inside `run_task_cycle`. That is the price of
-     resuming at all rather than a defect in the verb, and the harness
-     wrote it down itself:
-     `T-008-auditor-gets-no-debt-ids-after-a-hand-resume.md`.
+     no debt card filed, no merge attempted — was not only a caveat for
+     the operator: the auditor had to re-derive the debt ids it filed
+     under, and said so in its own Risks ("if cards do exist, `card` is
+     wrong"). So a hand-resumed cycle paid for its last phase with a
+     weaker record than the same phase inside `run_task_cycle`, and the
+     harness wrote that down itself:
+     `T-008-auditor-gets-no-debt-ids-after-a-hand-resume.md`. It was read
+     then as the price of resuming at all rather than a defect in the
+     verb. That reading was wrong, and **closed 2026-09-28**: the cause
+     was not the resume, it was that only the *prose* rendering of a
+     phase's handoff ever reached disk, so the structure the debt work
+     needs — what a task declared, what a revisor accepted, what a commit
+     resolved — existed solely in the memory of the one process that held
+     all of it. `run_phase` now also writes the parsed return to
+     `<hive>/<task-id>/handoffs/<role>.json`, at the single point every
+     phase passes through whichever verb dispatched it, and
+     `run-phase --final` reads the implementador's and the revisor's
+     answers back from there to run the cycle's own three close-out steps:
+     resolved debt recorded, the accepted debt filed as cards, the filing
+     note handed to the auditor so it names the ids it actually owns. Only
+     the merge is still not attempted. A task whose earlier phases predate
+     the storing has no record to read and closes as before; the two cases
+     are different log lines, because "no debt filed" is a different fact
+     when there was something to file from.
 3. Acceptance: **passed 2026-09-24** (T-005, `.data/verify/t005-acceptance.txt`).
    - Re-run V3 with the default config (3 rounds, 2 accounts) and without
      hand-seeding the task file.

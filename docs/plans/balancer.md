@@ -107,8 +107,7 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   the one phase that is missing with everything a phase needs around it — the
   locks, the worktree, the commit, the gates, the handoff the next phase reads
   — and none of the cycle's own judgement: no verdict read, no further round,
-  no resolved debt, no debt card, no merge, each of those needing handoffs
-  from phases the call did not run. It resumes and does not start: a task with
+  no merge. It resumes and does not start: a task with
   no stored description is a usage error naming `run-task`. `docs/ROADMAP.md`,
   Stage 1 item 2, has the rest.
 - **G2 — an account left `BUSY` by a crashed dispatcher is stuck forever.**
