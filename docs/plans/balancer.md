@@ -1,12 +1,13 @@
 # Plan: a conversational balancer over the account pool
 
-Status: Phases 0–2 have landed. `status`, `release-account` and `run-phase`
-are real verbs; G2 is closed including the account-lock TTL it left owing; and
-the picker now ranks the pool, holds the primary to a reserve and asks what
-role the phase is for before spending the operator's own console on it. Phase 3
-is the one that was only ever worth writing once 0–2 were real, and as of
-2026-09-28 they are. Written 2026-09-25, after a host reboot cut the T-008 run
-mid-phase and left two gaps in plain sight that this plan closes.
+Status: complete. `status`, `release-account` and `run-phase` are real verbs;
+G2 is closed including the account-lock TTL it left owing; the picker ranks the
+pool, holds the primary to a reserve and asks what role the phase is for before
+spending the operator's own console on it; and the operator's loop those three
+were built for is written down, as of 2026-09-28. What the loop does not close
+is named where it belongs: it resumes a task and cannot yet open one. Written
+2026-09-25, after a host reboot cut the T-008 run mid-phase and left two gaps
+in plain sight that this plan closes.
 
 The dispatcher already balances load across accounts. `dispatch_phase` picks an
 account, probes `/usage`, parks it over the threshold, transitions its state,
@@ -143,6 +144,118 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   and round-trip fine, so no test built through `write_task_file` could see it.
   Coerced at the source in `read_task_file` — `docs/ROADMAP.md`, Stage 1 item 2.
 
+## The operator's loop
+
+Phase 3, and the only one that was always going to be prose. The verbs exist;
+what was missing was the order to run them in and, more to the point, the
+readings that decide which one comes next. `dispatch` below stands for the
+compose invocation the README spells out in full.
+
+**Read the pool before spending it.** `status` costs nothing — it reads the
+state directory and the cards and writes nothing, which is why it is not built
+on `check_quota_ok`: that function parks accounts and records refusals as a
+side effect of being asked a question, and an operator looking at the pool must
+not change it by looking. Three readings carry the decision. The state column
+says who could take a phase; the note beside it says why one of them cannot;
+and the `lock` column under the cards says whether a phase is still running
+somewhere — `LIVE`, `STALE`, or `free` for a card nobody holds, which is
+deliberately not the same word as a stale lock, because `STALE` sends an
+operator looking for a process that was already released. `--probe` is the
+opt-in half: one `docker exec` and one `/usage` per container, printed next to
+the threshold that account is actually judged against — the primary's
+`reserve_pct`, not the workers' `quota_threshold_pct` — and still writing
+nothing, so a refusal the probe runs into is reported as `probe REFUSED by the
+service` rather than recorded.
+
+**Wait or fall back, off that reading.** This is the counter/refusal
+distinction made operational, and `status` prints the two differently on
+purpose. A worker parked `PRE_COOLDOWN` with no note beside it is parked on a
+counter: it self-heals, `_recheck_cooling_accounts` re-probes it the next time
+nothing is `IDLE`, the picker holds rather than falling back while any such
+worker is waitable, and waiting costs nothing. A worker showing `refused, Nm
+of cooldown left` will not come back on a probe, because the probe cannot see
+what the service did. That is the one case where the primary's reserve is the
+honest answer, and `run-phase` reaches for it by itself — for the roles
+`fallback_roles` names, under `reserve_pct`. When it refuses instead and says
+the pool is dry for this phase, the fix is in `config.yaml`, not at the call
+site: the ranking is the policy, and `run-phase` has no `--account` precisely
+so there is no way to argue with it one command at a time.
+
+**One role, then read what it wrote.** `run-phase --role <role>` runs exactly
+the phase named, with everything a phase needs around it — the lock, the
+worktree, the commit, the gates, the learnings, the handoff — and none of the
+cycle's own judgement: it reads no verdict, starts no further round and merges
+nothing. The prose it leaves is appended to the task card,
+`.hive/tasks/<task-id>.md`, under a heading naming the role and its round; the
+structured return is written beside it, since 2026-09-28, as
+`.hive/tasks/<task-id>/handoffs/<role>.json`. Reading that card before paying
+for the next role is the whole reason this plan exists. A loop that dispatches
+the next phase without reading it is `run-task` with extra typing, and
+`run-task` is the better verb for that — one lock, one worktree, one pass, and
+the verdict read for you. The exit code is part of the loop too: a phase that
+did not land exits 1 and says the task is blocked, so an operator driving by
+hand never runs the next role over the top of a failure, and `&&` is a safe
+join for the pair you were always going to run together.
+
+**A round is a number you pass, not state the harness keeps.** When the revisor
+sends work back, the next implementador call is `--round 2`. Nothing infers it:
+the number is what the phase is told it is on, what labels its section in the
+card, and what decides whether the escalated effort applies — so a resumed
+round 2 that forgets to say 2 is dispatched as though the first round never
+happened. Re-running a role does not undo the previous attempt either: the
+branch keeps both commits and the stored handoff is overwritten by the later
+one. `--note` carries a sentence of human instruction into that one phase's
+prompt, which is the supported way to tell a resumed phase what the dead
+process took with it.
+
+**`--final` closes the task; `merge-task` moves the code.** On the auditor,
+`--final` buys what the full cycle gives its last phase: the learnings carried
+in beforehand, the debt the earlier phases declared recorded and filed off the
+handoffs they left on disk, the card and the board moved to `done`, and no
+entries orphaned on the way out. It appends its own note to `--note` rather
+than replacing it, because the phase is owed both. Then it stops. The merge is
+a separate verb because it has a separate failure mode: a `--no-ff` merge that
+refuses on a dirty tree or a detached HEAD and rolls back on conflict is
+something to run when the branch is ready and somebody is watching, not
+something a phase should trip over on its way out. `merge_on_done` automates it
+for `run-task`; the hand-driven loop leaves it to the operator on purpose.
+
+**`release-account` is for what the TTL must not touch.** Since
+`reap_stale_busy_accounts` landed, an account left `BUSY` by a dead dispatcher
+is reclaimed at the next pick, so the case that made this verb urgent is no
+longer the case that needs it. What is left is the two things the reaper will
+not do: `--force`, over a lock whose heartbeat says a phase is genuinely alive,
+when you know that process is gone; and `--clear-rate-limit`, over a recorded
+refusal, which is the harness forgetting the one piece of evidence `/usage`
+cannot reproduce. Both guards refuse out loud and name what they are refusing
+and what would override them, so the way to find out whether you need a flag is
+to run the verb without it and read the answer.
+
+One pass, with the readings left out:
+
+```bash
+dispatch status
+dispatch run-phase --task-id T-011 --project ia-harness \
+  --role implementador --round 2 \
+  --note "round 1 is committed; the revisor's three findings are in the card"
+# read .hive/tasks/T-011.md, then handoffs/implementador.json, then decide
+dispatch run-phase --task-id T-011 --project ia-harness --role revisor --round 2
+dispatch run-phase --task-id T-011 --project ia-harness --role auditor --final
+dispatch merge-task --task-id T-011 --project ia-harness
+```
+
+**What the loop still cannot do: open a task.** `run-phase` resumes and does
+not start — a task with no stored description is rejected as a usage error
+naming `run-task` — and the only verb that writes a description is `run-task`,
+which then runs all four phases. So the loop as built joins a task in flight,
+which is what it was designed for: it is the repair path, and both tasks that
+have driven it, T-008 and T-010, were started by a full cycle and resumed by
+hand. Driving a task phase by phase from its first role needs a verb that
+writes the card and stops. `set_description` already exists in
+`context_transfer` with no CLI in front of it, so what is missing is an
+argument parser and a decision about what the verb is called, not a mechanism.
+Left unbuilt rather than smuggled into a docs phase.
+
 ## Phases
 
 - **Phase 0 — `release-account` and `status`. Done 2026-09-25.** No model in
@@ -176,9 +289,13 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   spent: nothing here needs a model, only a dispatched run to be exercised.
   The ordering was mutation-checked rather than taken on a green run: dropping
   the sort key from `list_idle_accounts` fails four tests and no others.
-- **Phase 3 — the operator's loop.** Largely docs: how a conversational thread
-  is meant to drive the three verbs. Worth writing only once 0–2 are real —
-  which, since 2026-09-28, they are.
+- **Phase 3 — the operator's loop. Done 2026-09-28.** The section above: the
+  order the three verbs go in, the reading of `status` that decides between
+  waiting and falling back, what `--round` and `--note` are for, and what
+  `--final` does and does not close. Docs only, as planned — no code and no
+  tests, because every mechanism it describes was built in Phases 0–2 and is
+  pinned by their 86 unit tests. It names the one thing it does not close: the
+  loop can resume a task and cannot yet open one.
 
 ## Out of scope
 
