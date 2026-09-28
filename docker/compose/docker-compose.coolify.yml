@@ -118,7 +118,7 @@ services:
       # The board's credential, not a human's, and optional: an api started
       # without it rejects every bearer and keeps basic auth working. See
       # docker-compose.yml and docs/decisions.md ADR 7.
-      - API_TOKEN=${API_TOKEN}
+      - API_TOKEN=${API_TOKEN:-}
     depends_on:
       - collector
     networks:
@@ -141,7 +141,7 @@ services:
       - "127.0.0.1:8790:8790"
     environment:
       - API_BASE_URL=http://api:8789
-      - API_TOKEN=${API_TOKEN}
+      - API_TOKEN=${API_TOKEN:-}
       - BOARD_USERNAME=${DASHBOARD_USERNAME}
       - BOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
       # Optional; unset is right for a harness with one project checkout. See

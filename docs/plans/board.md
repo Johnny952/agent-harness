@@ -28,11 +28,14 @@ and landed as `observability/board/`, four server-rendered screens over those
 five endpoints — Flask and Jinja per [`docs/charter.md`](../charter.md) C-7, with
 ADRs 6–10 and [`docs/implementations/T-010.md`](../implementations/T-010.md) as
 the record. It closed `T-009-D3` and deleted `observability/dashboard/` and its
-compose service. `T-008-D1` and `T-009-D2` stay open. Two sentences in the Phase
-2 section below are now records of what was true when it was written rather than
-of the present, and are deliberately not rewritten: its state table carries a
-Loading row a server-rendered board cannot enter (ADR 6 argues that), and *What
-this closes* says the dashboard's auth tests had already moved to
+compose service. `T-008-D1` and `T-009-D2` were both closed by hand afterwards,
+out of cycle, because both were small: a per-card `flock` around `set_status`,
+and the `limit`/`warnings` caps of ADR 11 — whose number did not have to wait
+for Phase 3 after all, since that tail is `since`-bounded. Two sentences in the
+Phase 2 section below are now records of what was true when it was written
+rather than of the present, and are deliberately not rewritten: its state table
+carries a Loading row a server-rendered board cannot enter (ADR 6 argues that),
+and *What this closes* says the dashboard's auth tests had already moved to
 `observability/auth.py` in Phase 1 — they had not, and T-010 rehomed them by
 hand into `tests/observability/test_auth.py`. Phases 3–6 have a row in the table
 and no spec.

@@ -25,6 +25,7 @@ from dispatcher import context_transfer, state_machine
 from dispatcher.config import LocalBoardConfig
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import LocalBoardClient
+from observability.api import app as api_app
 from observability.api.app import _is_bare_task_id, create_app
 from observability.collector import db as collector_db
 
@@ -171,6 +172,38 @@ def test_every_route_answers_the_same_envelope(tmp_path: Path, route: str) -> No
     assert set(resp.get_json()) == {"data", "warnings"}
     assert isinstance(resp.get_json()["warnings"], list)
 
+
+
+def test_warnings_are_capped_and_the_last_one_tallies_what_was_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T-009-D2: one document that will not parse is one warning, so a tasks
+    # directory full of them built a list with no ceiling and serialised it
+    # whole. The cap is on what the caller receives, never on what was found,
+    # which is what the last line is for.
+    monkeypatch.setattr(api_app, "MAX_WARNINGS", 4)
+    harness = _harness(tmp_path)
+    for index in range(6):
+        Path(context_transfer.task_file_path(harness.tasks_dir, f"T-{index}")).write_text(
+            "no frontmatter here at all\n"
+        )
+
+    warnings = _get(harness, "/api/tasks").get_json()["warnings"]
+
+    assert len(warnings) == 4
+    assert warnings[-1] == "and 3 more warnings, not listed"
+
+
+def test_a_warnings_list_under_the_cap_is_the_list_itself(tmp_path: Path) -> None:
+    # The cap must not cost a truthful short list its last entry.
+    harness = _harness(tmp_path)
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-2"))
+    broken.write_text("no frontmatter here at all\n")
+
+    warnings = _get(harness, "/api/tasks").get_json()["warnings"]
+
+    assert len(warnings) == 1
+    assert str(broken) in warnings[0]
 
 # --- tasks ----------------------------------------------------------------
 
@@ -832,6 +865,63 @@ def test_an_integer_sqlite_cannot_bind_answers_400_and_not_a_500(
 
     assert resp.status_code == 400
     assert "64-bit" in resp.get_json()["error"]
+
+
+def test_a_limit_above_the_maximum_is_clamped_and_the_clamp_is_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T-009-D2. The clamp reaches the query and not only the envelope: three
+    # rows exist, the caller asks for three, and gets the two this service
+    # answers with.
+    monkeypatch.setattr(api_app, "MAX_EVENT_LIMIT", 2)
+    harness = _harness(tmp_path)
+    for index in range(3):
+        collector_db.insert_event(harness.db_path, "agent-cuenta1", f"E{index}", {})
+
+    body = _get(harness, "/api/events?limit=3").get_json()
+
+    assert len(body["data"]) == 2
+    assert len(body["warnings"]) == 1
+    assert "limit=3" in body["warnings"][0]
+    assert "maximum of 2" in body["warnings"][0]
+    assert "?since=" in body["warnings"][0]
+
+
+def test_the_maximum_itself_is_answered_whole_and_silently(tmp_path: Path) -> None:
+    # The cap is not a nudge: asking for exactly what is allowed is not clamped
+    # and says nothing.
+    harness = _harness(tmp_path)
+    collector_db.insert_event(harness.db_path, "agent-cuenta1", "Stop", {})
+
+    body = _get(harness, f"/api/events?limit={api_app.MAX_EVENT_LIMIT}").get_json()
+
+    assert len(body["data"]) == 1
+    assert body["warnings"] == []
+
+
+def test_the_largest_integer_sqlite_can_bind_is_clamped_and_not_rejected(
+    tmp_path: Path,
+) -> None:
+    # The 400 above is for an integer SQLite cannot bind, which is a malformed
+    # parameter. This is one it can bind and no caller wants, which is a legal
+    # request for more than one answer carries: 200, clamped, and told so.
+    resp = _get(_harness(tmp_path), "/api/events?limit=9223372036854775807")
+
+    assert resp.status_code == 200
+    assert str(api_app.MAX_EVENT_LIMIT) in resp.get_json()["warnings"][0]
+
+
+def test_the_clamp_outlives_a_missing_events_database(tmp_path: Path) -> None:
+    # A database that is not there does not make it untrue that the caller
+    # asked for more rows than it could have had. Both warnings, in order.
+    harness = _harness(tmp_path, with_db=False)
+
+    body = _get(harness, "/api/events?limit=9223372036854775807").get_json()
+
+    assert body["data"] == []
+    assert len(body["warnings"]) == 2
+    assert "maximum" in body["warnings"][0]
+    assert str(harness.db_path) in body["warnings"][1]
 
 
 def test_a_missing_events_database_is_an_empty_list_and_a_warning(tmp_path: Path) -> None:

@@ -411,3 +411,50 @@ a legible row instead of a warning about a file that is fine. If a later phase
 wants the two distinguished in the data rather than on the screen, the place for
 it is a separate field on the task row beside `lock_expired`, for the reason
 ADR 8 gives: derived facts are the api's.
+
+## ADR 11 — `limit` above the maximum is clamped and reported, not rejected
+
+**Status:** accepted (out of cycle, 2026-09-28).
+
+**Context.** ADR 5 shipped `/api/events` with an explicit "no cap" and said so in
+its own Consequences: "`warnings` is unbounded in length, and so is `limit`:
+neither has a cap". T-009 round 3 then added a range check that rejects an
+integer SQLite cannot bind, which is a different thing — it rejects a *malformed*
+parameter, and `9223372036854775806` is not malformed. `docs/debt/T-009-D2.md`
+was opened for the rest, and asked for the number to be decided "together with
+Phase 3's tail window in `docs/plans/board.md`". Phase 3 is not written, so this
+takes the second half of that instruction seriously and not the first.
+
+**Decision.** `MAX_EVENT_LIMIT = 1000` clamps `limit`, and the clamp appends a
+warning that names the number asked for, the number answered, and `?since=` as
+the way to walk the rest. It is a 200: the request is legal, it just asked for
+more than one answer carries. The range check stays in front of it and keeps
+answering 400, so the rule is two-sided and says which side a caller is on — out
+of range is a malformed parameter, in range but large is a legal request that was
+trimmed. The clamp is also carried into the missing-database return, because a
+database that is not there does not make it untrue that the caller asked for more
+than it could have had. `MAX_WARNINGS = 100` caps the list the same envelope
+carries, spending its last slot on a tally of what was left out, so nothing is
+dropped silently. Both live in `_envelope`'s funnel rather than in the four views
+that build warning lists.
+
+1000 comes from the board, which is the only client: `EVENTS_LIMIT = 200` in
+`observability/board/app.py` is the largest window it opens, and five times it
+leaves room for a client that has not been written without leaving the number
+meaningless. Nothing in this harness is clamped today, which is the point — a cap
+that bites on first contact was chosen wrong. Phase 3's tail is not constrained
+by it either: that tail is bounded by `since` (`id > last`), so its `limit` is a
+burst ceiling and not a page size, and the number Phase 3 eventually picks for its
+window is a different number from this one.
+
+**Consequences.** This widens ADR 5's rule that `warnings` names files rather
+than describing states: a clamp warning names a *request parameter*, which is
+neither a file nor a state, and it is the first warning in this service that is
+about the caller rather than about the harness. The rule that survives is the one
+underneath — a warning says what the caller did not get and where to look — and
+that is what the widening is for. The cost ADR 5 left is now paid, and its
+Consequences paragraph is false as written; it stays, because this file is
+append-only and a superseded sentence with a number pointing past it is worth
+more than a rewritten one. Two numbers now need revisiting when Phase 3 lands: if
+its tail wants more than 1000 rows in one burst it must raise this constant or
+page with `since`, and the second is the honest answer.

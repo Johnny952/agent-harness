@@ -304,6 +304,26 @@ def _environment(service: dict) -> dict[str, str]:
     return {pair[0]: (pair[1] if len(pair) == 2 else "") for pair in pairs}
 
 
+def _substitutions_of(variable: str, services: dict) -> set[str]:
+    """Every way one `.env` variable is spelt across a file's services.
+
+    Read off the values and not the keys, because a service may take a variable
+    under another name — the board reads `DASHBOARD_PASSWORD_HASH` into
+    `BOARD_PASSWORD_HASH` — and it is the substitution that decides whether
+    compose warns, not the name it lands under. A set, so a file that spells the
+    same variable two ways fails on the comparison rather than on whichever
+    service happened to be read last.
+    """
+    found = {
+        value
+        for service in services.values()
+        for value in _environment(service).values()
+        if variable in value
+    }
+    assert found, f"no service reads {variable}"
+    return found
+
+
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
@@ -342,6 +362,44 @@ def test_the_api_takes_the_token_the_board_authenticates_with(compose_file: str)
 
     assert "API_TOKEN" in _environment(services["api"])
     assert "API_TOKEN" in _environment(services["board"])
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+@pytest.mark.parametrize("variable", ["API_TOKEN", "BOARD_PROJECT"])
+def test_an_optional_variable_carries_an_empty_default(
+    compose_file: str, variable: str
+) -> None:
+    """A variable the services are documented to run without is spelt `${VAR:-}`
+    and not `${VAR}`, in every file that reads it.
+
+    `${VAR}` with nothing in `.env` makes compose warn on every command, and a
+    warning an operator is told to ignore is one they will also ignore on the
+    day it means something. The two required credentials below keep the bare
+    form for the same reason read the other way.
+    """
+    services = _load(compose_file)["services"]
+
+    assert _substitutions_of(variable, services) == {f"${{{variable}:-}}"}
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+@pytest.mark.parametrize(
+    "variable", ["DASHBOARD_USERNAME", "DASHBOARD_PASSWORD_HASH"]
+)
+def test_a_required_credential_stays_bare_so_compose_says_it_is_missing(
+    compose_file: str, variable: str
+) -> None:
+    """The other half of the rule above: there is no sensible empty default for
+    a credential, so the warning is the feature. A service started with an empty
+    password hash is a service nobody can log in to, reported as a runtime
+    mystery instead of a line compose printed before it started."""
+    services = _load(compose_file)["services"]
+
+    assert _substitutions_of(variable, services) == {f"${{{variable}}}"}
 
 
 @pytest.mark.parametrize(

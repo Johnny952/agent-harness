@@ -71,12 +71,24 @@ REALM = "ia-harness api"
 #: (`docs/plans/board.md`: every events call sets `limit` explicitly).
 DEFAULT_EVENT_LIMIT = 100
 
+#: The most rows one `/api/events` answer carries, whatever `limit` asked for.
+#: Five times the largest window the board opens (`EVENTS_LIMIT = 200` in
+#: `observability/board/app.py`), so nothing in this harness is clamped today,
+#: and Phase 3's tail is not constrained by it either: that tail is bounded by
+#: `since` (`id > last`), which makes its `limit` a burst ceiling rather than a
+#: page size. The clamp reports itself in `warnings`. `docs/decisions.md` ADR 11.
+MAX_EVENT_LIMIT = 1000
+
+#: The most strings one envelope's `warnings` may carry. The last slot is spent
+#: tallying what was left out, so a caller is never told there were fewer than
+#: there were. `docs/decisions.md` ADR 11.
+MAX_WARNINGS = 100
+
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
-#: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not a cap on
-#: how much a caller may ask for — that is a policy needing a config key this
-#: phase was not given, and it is declared as debt in `docs/debt/README.md` —
-#: only the range outside which binding raises rather than answering. See
-#: `_int_parameter`.
+#: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
+#: on how much a caller may ask for — `MAX_EVENT_LIMIT` is that, and it clamps
+#: rather than rejects — only the range outside which an integer is malformed,
+#: because binding it raises rather than answering. See `_int_parameter`.
 _SQLITE_INT_MAX = 2**63 - 1
 _SQLITE_INT_MIN = -(2**63)
 
@@ -222,6 +234,17 @@ def create_app(
         since, rejected = _int_parameter("since", None)
         if rejected is not None:
             return rejected
+        warnings: list[str] = []
+        if limit > MAX_EVENT_LIMIT:
+            # Not a 400: the request is legal, it just asked for more than one
+            # answer carries. Telling the caller it got fewer rows than it asked
+            # for is the envelope's job — `docs/decisions.md` ADR 5 and ADR 11.
+            warnings.append(
+                f"limit={limit} is above this service's maximum of {MAX_EVENT_LIMIT}: "
+                f"answering {MAX_EVENT_LIMIT} rows. Walk the rest with "
+                f"?since=<last id> rather than one large limit."
+            )
+            limit = MAX_EVENT_LIMIT
         try:
             rows = db.list_events(
                 db_path,
@@ -233,9 +256,11 @@ def create_app(
         except (sqlite3.Error, OSError, ValueError) as exc:
             # A harness that has never run has no events database, and this
             # service may not create one: the volume is `:ro` and `init_db`
-            # would run `CREATE TABLE`. No events is not an error.
-            return _envelope([], [_no_events_warning(db_path, exc)])
-        return _envelope(rows, [])
+            # would run `CREATE TABLE`. No events is not an error. The clamp
+            # above stays in the envelope: a missing database does not make it
+            # untrue that the caller asked for more than it could have had.
+            return _envelope([], warnings + [_no_events_warning(db_path, exc)])
+        return _envelope(rows, warnings)
 
     @app.get("/api/debt")
     @requires_auth
@@ -265,8 +290,28 @@ def create_app(
 
 
 def _envelope(data, warnings: list[str]):
-    """Every 200 this service answers. `warnings` names files, never states."""
-    return jsonify({"data": data, "warnings": warnings})
+    """Every 200 this service answers.
+
+    `warnings` names files and the caller's own parameters, never states —
+    `docs/decisions.md` ADR 5, widened by ADR 11 to admit the `limit` clamp.
+    Every 200 funnels through here, which is why the cap lives here and not in
+    the four views that build the lists.
+    """
+    return jsonify({"data": data, "warnings": _capped(warnings)})
+
+
+def _capped(warnings: list[str]) -> list[str]:
+    """At most `MAX_WARNINGS` strings, the last of them a tally of the rest.
+
+    A `local_board.dir` holding many documents that will not parse produces one
+    warning each, and the envelope is materialised whole before `jsonify`
+    serialises it. The cap is on what the caller receives, not on what was
+    found, so nothing is silently dropped: the last slot says how many were.
+    """
+    if len(warnings) <= MAX_WARNINGS:
+        return warnings
+    kept = warnings[: MAX_WARNINGS - 1]
+    return kept + [f"and {len(warnings) - len(kept)} more warnings, not listed"]
 
 
 def _error(message: str, status: int):

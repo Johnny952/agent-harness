@@ -63,8 +63,10 @@ REALM = "ia-harness board"
 TIMEOUT_SECONDS = 5
 
 #: Every events call sets `limit` explicitly rather than relying on the api's
-#: `DEFAULT_EVENT_LIMIT` staying 100. `docs/debt/T-009-D2.md` stays open: the
-#: api still does not clamp a hand-typed `?limit=`, and this is not that fix.
+#: `DEFAULT_EVENT_LIMIT` staying 100. Both windows are below the api's
+#: `MAX_EVENT_LIMIT` (`docs/decisions.md` ADR 11), which is five times the
+#: larger of them — so nothing here is clamped, and raising one past 1000 would
+#: silently be answered short with a warning rather than refused.
 EVENTS_LIMIT = 200
 TASK_EVENTS_LIMIT = 50
 
@@ -103,7 +105,14 @@ TASK_KEYS = (
     "kanban_issue_id",
     "card",
 )
-EVENT_KEYS = ("id", "created_at", "source_app", "event_type")
+#: The index reads a task row for its table; `/tasks/<id>` reads the same row
+#: and two fields more. They are a separate tuple and not appended to
+#: `TASK_KEYS` because the rule above is per screen: the api serialises both
+#: routes through one function today, and folding that into the allowlist would
+#: mean a day it stops emitting `description` on the list route takes the index
+#: page down over a field the index never renders.
+TASK_DETAIL_KEYS = TASK_KEYS + ("description", "resolved_debt")
+EVENT_KEYS = ("id", "created_at", "source_app", "event_type", "payload")
 DEBT_KEYS = ("id", "what", "where", "fix", "card", "resolved")
 
 
@@ -195,7 +204,7 @@ def create_app(
         # so a `/` cannot escape the route either — Werkzeug's converter already
         # refuses one, and this is the second lock, the same pair
         # `observability/api/app.py:_is_bare_task_id` is the other half of.
-        found = fetch(f"/api/tasks/{quote(task_id, safe='')}", keys=TASK_KEYS, many=False)
+        found = fetch(f"/api/tasks/{quote(task_id, safe='')}", keys=TASK_DETAIL_KEYS, many=False)
         accounts = fetch("/api/accounts", keys=ACCOUNT_KEYS)
         owner = found.rows.get("owner") if isinstance(found.rows, dict) else None
         container, no_events_because = _owner_container(owner, accounts)

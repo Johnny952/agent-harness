@@ -376,6 +376,36 @@ def test_a_row_missing_a_key_the_screen_reads_is_the_error_state(monkeypatch) ->
     assert "lock_expired" in html
 
 
+def test_only_the_task_page_needs_the_two_fields_only_it_renders(monkeypatch) -> None:
+    """`description` and `resolved_debt` are read by `/tasks/<id>` and by no
+    other screen, so `TASK_DETAIL_KEYS` checks them and `TASK_KEYS` does not.
+    Folded into one tuple, an api that stopped serialising `description` on the
+    list route would take the index down over a field the index never renders.
+    """
+    row = _task_row()
+    del row["description"], row["resolved_debt"]
+    api = _Api(task=_envelope(row), tasks=_envelope([row]), accounts=_envelope([]))
+
+    detail = _page(monkeypatch, api, "/tasks/T-1")
+    index = _page(monkeypatch, api)
+
+    assert "is missing description, resolved_debt" in detail
+    assert "is missing" not in index
+
+
+def test_an_event_row_missing_its_payload_is_the_error_state(monkeypatch) -> None:
+    """Both events tables render `payload` through a filter, and a filter is not
+    a place a missing key announces itself: `payload` is in `EVENT_KEYS` so the
+    shape is caught at the boundary instead."""
+    row = _event_row()
+    del row["payload"]
+    api = _Api(events=_envelope([row]))
+
+    html = _page(monkeypatch, api, "/events")
+
+    assert "is missing payload" in html
+
+
 # --- the one derived fact the board renders and never derives -------------
 
 
@@ -713,7 +743,8 @@ def test_the_event_log_renders_newest_first_as_the_api_ordered_them(monkeypatch)
 
 def test_every_events_call_sets_limit_explicitly(monkeypatch) -> None:
     """The board asks for what it renders rather than relying on the api's
-    `DEFAULT_EVENT_LIMIT` staying 100. `docs/debt/T-009-D2.md` stays open."""
+    `DEFAULT_EVENT_LIMIT` staying 100, and asks for less than the api's
+    `MAX_EVENT_LIMIT` will answer — `docs/decisions.md` ADR 11."""
     api = _Api(events=_envelope([_event_row()]))
 
     _page(monkeypatch, api, "/events")

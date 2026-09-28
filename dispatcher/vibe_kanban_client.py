@@ -5,11 +5,13 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime
+import fcntl
 import json
 import logging
 import os
 import tempfile
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -159,6 +161,10 @@ CARD_FIELDS = frozenset({"issue_id", "title", "description", "status", "created_
 INITIAL_CARD_STATUS = "pending"
 
 _CARD_SUFFIX = ".json"
+#: One lock file per card, beside it. Dotted so a read of the board skips it
+#: twice over: `_scan` takes only names that end in `_CARD_SUFFIX` and do not
+#: start with a dot.
+_LOCK_SUFFIX = ".lock"
 
 
 class LocalBoardClient:
@@ -243,13 +249,22 @@ class LocalBoardClient:
         return self._scan()[1]
 
     def set_status(self, issue_id: str, status: str) -> None:
-        """Move a stored card to a dispatcher status, verbatim."""
-        card = self._read_card(issue_id)
-        if card is None:
-            raise LookupError(
-                f"no issue {issue_id} on the local board at {self.config.dir}"
-            )
-        self._write_card({**card, "status": status})
+        """Move a stored card to a dispatcher status, verbatim.
+
+        The read, the merge and the write are one critical section, held under
+        the card's own lock. Two dispatch processes against one
+        `local_board.dir` — a `run-task` cycle and the `run-phase` repair path
+        are today's two — must not both read the same document and both merge
+        onto what they read, because the later write carries the earlier
+        writer's status back (`docs/debt/T-008-D1.md`).
+        """
+        with self._card_lock(issue_id):
+            card = self._read_card(issue_id)
+            if card is None:
+                raise LookupError(
+                    f"no issue {issue_id} on the local board at {self.config.dir}"
+                )
+            self._write_card({**card, "status": status})
 
     # --- storage ----------------------------------------------------------
 
@@ -268,6 +283,51 @@ class LocalBoardClient:
             logger.warning("local board: %r cannot name a card in this board", issue_id)
             return None
         return os.path.join(self.config.dir, name)
+
+    @contextlib.contextmanager
+    def _card_lock(self, issue_id: str) -> Iterator[None]:
+        """Hold one card's write lock for the length of a read-modify-write.
+
+        `flock` on a lock file per card, rather than the `O_EXCL` create
+        `docs/debt/T-008-D1.md` named as the narrow option: both serialise
+        writers, but an `O_EXCL` lock outlives the process that took it, so a
+        dispatcher killed mid-phase — the accident `run-phase` exists to repair
+        — would leave a card nothing could move again, which is a worse board
+        than the one the entry was written about. The kernel drops a flock when
+        its holder dies, so the worst case stays a writer that waited.
+
+        The lock file is created once and never removed: unlinking it is what
+        makes flock racy, because one writer can hold an inode a second has
+        already replaced. An empty dotfile per card is the cheaper half of that
+        trade, and no read of the board sees it.
+        """
+        path = self._card_path(issue_id)
+        fd = None
+        if path is not None:
+            # A status move is a write, and the directory is the first write's
+            # job here as it is in `_write_card`.
+            Path(self.config.dir).mkdir(parents=True, exist_ok=True)
+            name = f".{os.path.basename(path)}{_LOCK_SUFFIX}"
+            try:
+                fd = os.open(
+                    os.path.join(self.config.dir, name), os.O_CREAT | os.O_RDWR, 0o600
+                )
+            except ValueError:
+                # An id no filesystem call accepts — the embedded null a task
+                # file's YAML escape can carry — names no lock file, exactly as
+                # it names no card. `_read_card` answers None for the same
+                # reason a moment later and the caller raises `LookupError`.
+                fd = None
+        if fd is None:
+            yield
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            # Closing the descriptor releases the lock. An explicit LOCK_UN
+            # first would only add a window where the file is open and free.
+            os.close(fd)
 
     def _read_card(self, issue_id: str) -> dict | None:
         path = self._card_path(issue_id)

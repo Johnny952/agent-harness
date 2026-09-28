@@ -1,6 +1,7 @@
 # tests/dispatcher/test_vibe_kanban_client.py
 import dataclasses
 import json
+import threading
 import uuid
 from pathlib import Path
 
@@ -431,6 +432,70 @@ def test_two_local_boards_share_one_directory(tmp_path: Path) -> None:
     issue = writer.get_issue(issue_id)
     assert issue is not None
     assert issue.status == "done"
+
+
+def test_two_writers_on_one_card_do_not_read_the_same_document(tmp_path: Path, monkeypatch) -> None:
+    """The lock covers the read-modify-write, not only the write.
+
+    Two dispatch processes can reach one `local_board.dir` — a `run-task`
+    cycle and the `run-phase` repair path are today's two — and unlocked they
+    would both read a card and both merge onto what they read, so the later
+    write carries the earlier writer's status back (`docs/debt/T-008-D1.md`).
+    The thread stands in for the second process; what is asserted is that its
+    read saw the first write and not the document that preceded it.
+
+    `join(timeout=...)` is how "it was blocked meanwhile" is asserted, and it
+    is one-sided on purpose: a machine slow enough that the thread had not
+    reached the lock yet makes this pass without proving anything, never fail.
+    A test that guards concurrency must not itself be the flaky one.
+    """
+    board = local_board(tmp_path)
+    issue_id = board.create_issue("Add a /healthz", "why")
+    # A second client on the same directory, which is all a second process is:
+    # nothing is cached in either, so only the lock can order them.
+    other = local_board(tmp_path)
+    second_writer = threading.Thread(target=other.set_status, args=(issue_id, "done"))
+
+    read_card = LocalBoardClient._read_card
+    seen: list[str | None] = []
+
+    def recording_read(self: LocalBoardClient, wanted: str) -> dict | None:
+        card = read_card(self, wanted)
+        seen.append(card.get("status") if card else None)
+        if self is board:
+            # Inside the first writer's lock, between its read and its write.
+            second_writer.start()
+            second_writer.join(timeout=0.5)
+            assert second_writer.is_alive(), "the second writer read a card mid-move"
+        return card
+
+    monkeypatch.setattr(LocalBoardClient, "_read_card", recording_read)
+    board.set_status(issue_id, "in_progress:implementador")
+    second_writer.join(timeout=5)
+    monkeypatch.undo()
+
+    assert not second_writer.is_alive()
+    # The second writer's read is the second entry, and it is the status the
+    # first writer had just stored: its merge carried the new card forward
+    # rather than the one both would have read at once.
+    assert seen == [INITIAL_CARD_STATUS, "in_progress:implementador"]
+    issue = board.get_issue(issue_id)
+    assert issue is not None
+    assert issue.status == "done"
+
+
+def test_a_cards_lock_file_is_not_a_card(tmp_path: Path) -> None:
+    board = local_board(tmp_path)
+    issue_id = board.create_issue("Add a /healthz", "why")
+    board.set_status(issue_id, "done")
+
+    # The lock lives beside the card and stays there — unlinking it is what
+    # makes flock racy — so the board has to read past it. It is skipped twice
+    # over: `_scan` takes only names ending in .json that do not start with a
+    # dot.
+    assert (Path(board.config.dir) / f".{issue_id}.json.lock").exists()
+    assert [issue.issue_id for issue in board.list_issues()] == [issue_id]
+    assert board.unreadable() == []
 
 
 def test_local_board_ignores_what_it_did_not_write(tmp_path: Path, caplog) -> None:

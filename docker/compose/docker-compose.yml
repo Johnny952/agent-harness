@@ -86,8 +86,10 @@ services:
       # service authenticating with basic auth would need the plaintext in .env
       # beside the hash and make the hash decorative. Optional — an api started
       # without it rejects every bearer and keeps basic auth working
-      # (docs/decisions.md ADR 7).
-      - API_TOKEN=${API_TOKEN}
+      # (docs/decisions.md ADR 7) — so it is spelt `:-` like BOARD_PROJECT
+      # below: a variable that is allowed to be unset should not be announced
+      # as a missing one every time compose reads this file.
+      - API_TOKEN=${API_TOKEN:-}
     depends_on:
       - collector
     networks:
@@ -119,7 +121,7 @@ services:
       - "127.0.0.1:8790:8790"
     environment:
       - API_BASE_URL=http://api:8789
-      - API_TOKEN=${API_TOKEN}
+      - API_TOKEN=${API_TOKEN:-}
       - BOARD_USERNAME=${DASHBOARD_USERNAME}
       - BOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
       # Which project's debt index /debt shows. Optional: unset is right for a
