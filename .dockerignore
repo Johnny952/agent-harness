@@ -1,0 +1,9 @@
+# Repo root. Every image in docker/compose/*.yml builds from this context, so
+# one file covers all of them.
+
+# Byte-compiled files. `COPY observability/ observability/` takes whatever the
+# host happens to have next to the source, which is how a deleted
+# `observability/dashboard/` was still present inside a freshly built api
+# image: the directory was gone from git but its __pycache__ was still on disk.
+__pycache__/
+*.pyc
