@@ -68,6 +68,12 @@ def set_state(
     data = {"state": state.value, "current_task_id": current_task_id}
     if existing.get("rate_limited_at") is not None:
         data["rate_limited_at"] = existing["rate_limited_at"]
+    # `busy_since` is the opposite case: it belongs to this transition and not
+    # to the account, so it is stamped on the way into BUSY and dropped on the
+    # way out rather than carried. Nothing re-enters BUSY without a new phase
+    # behind it, so a fresh stamp each time is the clock the reaper wants.
+    if state == AccountState.BUSY:
+        data["busy_since"] = time.time()
     _write_state(state_dir, account_name, data)
 
 
@@ -109,5 +115,28 @@ def clear_rate_limit(state_dir: str, account_name: str) -> None:
     _write_state(state_dir, account_name, data)
 
 
+def get_busy_since(state_dir: str, account_name: str) -> float | None:
+    """When this account entered BUSY, or None if it is not BUSY.
+
+    Only a fallback for the account-lock TTL: a phase that holds a card is
+    judged by that card's heartbeat, which a running phase refreshes, because
+    a wall-clock reading would expire a phase that is legitimately long. This
+    is what is left to judge an account that holds no card at all.
+    """
+    data = _read_state(state_dir, account_name)
+    if data is None:
+        return None
+    return data.get("busy_since")
+
+
 def list_idle_accounts(state_dir: str, accounts: list[AccountConfig]) -> list[str]:
-    return [a.name for a in accounts if get_state(state_dir, a.name) == AccountState.IDLE]
+    """Every IDLE account, in the order the picker should try them.
+
+    The pool is ordered, not partitioned. The primary is in it like any other
+    account and simply ranks last, which is what lets "every secondary is out
+    of quota" need no special case at all — it is the ordering running off its
+    end. With no primary configured every account sorts equal and this is
+    config.yaml's own order, exactly as it was before ranking existed.
+    """
+    idle = [a for a in accounts if get_state(state_dir, a.name) == AccountState.IDLE]
+    return [a.name for a in sorted(idle, key=lambda a: a.is_primary)]

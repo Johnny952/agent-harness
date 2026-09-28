@@ -33,6 +33,24 @@ Observability collector (SQLite/WAL) → read API → authenticated board (Tails
   `arquitecto → implementador → revisor → auditor`. Before each phase it
   picks an IDLE account, probes `/usage` to keep it under
   `quota_threshold_pct`, and rechecks cooling accounts when none are IDLE.
+  The pool it picks from is ordered, not partitioned. The account the
+  operator talks to — `primary_account` — is in it like any other and simply
+  ranks last, which is what lets "every worker is out of quota" need no
+  special case at all: it is the ordering running off its end. What keeps
+  that from eating the console is three limits rather than an exclusion.
+  `reserve_pct` (60) is the primary's own ceiling, stricter than the workers'
+  `quota_threshold_pct` (90) and a config error if it is ever set looser.
+  `fallback_roles` (`revisor` and `auditor` by default) is the list of phases
+  it will take at all: a revisor or an auditor reads a diff and writes a
+  verdict, bounded and cheap, while an implementador writes code across up to
+  `max_revision_rounds` rounds and is the phase most likely to drain the
+  reserve it was just handed — so a phase outside the list is told the pool is
+  dry instead. And a worker parked on a *local counter* is waited for rather
+  than fallen back from: waiting out a counter costs nothing, and the reserve
+  exists for the case where a worker was actually refused and cannot come back
+  on its own. A one-account pool is none of these decisions — with no worker
+  to fall back *from*, the single account takes every role, since the
+  alternative is a harness that takes itself out of service.
   That probe reads free text, so it takes only what it decides on: both
   percentages are required and a missing one fails the probe loudly, while
   the `· resets <when>` clause beside each is optional, because the CLI
@@ -631,20 +649,23 @@ python -m dispatcher.cli --config config.yaml release-account --name cuenta2
 ```
 
 `status` reads and prints: every account with its state, the task it is on,
-how much of `quota_cooldown_seconds` a recorded refusal has left to run, and
-every task card that is in progress or owned, with the age of its heartbeat
-and whether that is still a live lock against `heartbeat_ttl_seconds`. It
-writes nothing — deliberately, because the gate's own probe (`check_quota_ok`)
-parks accounts and records refusals as it goes, and a look at the pool must
-not change it. `--probe` adds each container's `/usage` numbers on the same
-terms: the result goes through the same refusal detection a phase's does, so
-a probe the service turns down is reported as `probe REFUSED`, but nothing is
-written to the state files either way. A container that is down becomes a
-`probe failed:` note on that one account rather than an error for the run.
+the ceiling it answers to — `reserve_pct` for the one marked `primary`,
+`quota_threshold_pct` for the rest, so the two numbers are read off the pool
+rather than off the config — how much of `quota_cooldown_seconds` a recorded
+refusal has left to run, and every task card that is in progress or owned,
+with the age of its heartbeat and whether that is still a live lock against
+`heartbeat_ttl_seconds`. It writes nothing — deliberately, because the gate's
+own probe (`check_quota_ok`) parks accounts and records refusals as it goes,
+and a look at the pool must not change it. `--probe` adds each container's
+`/usage` numbers on the same terms: the result goes through the same refusal
+detection a phase's does, so a probe the service turns down is reported as
+`probe REFUSED`, but nothing is written to the state files either way. A
+container that is down becomes a `probe failed:` note on that one account
+rather than an error for the run.
 
 `release-account` is the way out of the state a crash leaves behind: an
-account `BUSY` on a task whose dispatcher is gone. Nothing else can reach it
-— `list_idle_accounts` only returns `IDLE`, and the recheck that revives a
+account `BUSY` on a task whose dispatcher is gone. Nothing else could reach
+it — `list_idle_accounts` only returns `IDLE`, and the recheck that revives a
 parked account skips any state that is not `PRE_COOLDOWN`/`COOLING_DOWN` — so
 before this verb the only remedy was editing a root-owned JSON file by hand.
 It sets the account back to `IDLE` and clears the lock on whatever card it
@@ -671,6 +692,21 @@ An account that is already `IDLE` is a no-op and exits zero — but its
 orphaned card, if it has one, is still released, because that is the other
 half of the same crash. An account name the config does not have is a usage
 error naming the ones it does.
+
+Most of the time you will not have to run it. The picker reaps the same state
+on its own before every pick, on a TTL that reads the card's heartbeat rather
+than the clock: a phase still beating is left alone however long it runs, and
+one whose heartbeat is older than `heartbeat_ttl_seconds` gives its account
+back. An account holding no card — or a card nobody ever beat on — has no
+heartbeat to read and is judged against `phase_timeout_seconds` instead, the
+longest a phase is allowed to live at all. Under both sits a floor: an
+account that went `BUSY` more recently than the TTL is never reaped, so a
+phase that has just started cannot be taken from it by a second dispatcher
+that looked before the first heartbeat landed. Each release says in the log
+which of the two clocks decided it. What is left for the verb is the case the
+TTL must not touch — a phase that is genuinely alive and has to be stopped
+anyway, which is `--force` — and not waiting out the TTL when you already
+know the process is gone.
 
 **The map, if the project has none.** A target repo the agents have never
 seen has nothing written down for them, and every task rediscovers it from

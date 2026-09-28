@@ -1445,6 +1445,25 @@ logins.
      `--force` release, the repeat no-op and the unknown-account usage
      error all produced the intended output and exit code — but nothing
      has yet been released in `dispatcher_state/`.
+     **The TTL that entry left owing was built 2026-09-28**, with Phase 2
+     of `docs/plans/balancer.md`: `reap_stale_busy_accounts`, called from
+     `pick_idle_account`, so the stuck account is now reached by the code
+     that needs it every time the pool is walked, and not only by an
+     operator who noticed. Built as the design said — the card's heartbeat
+     first, since a running phase refreshes it and a wall-clock reading
+     would expire a phase that is legitimately long; `busy_since`, stamped
+     by `set_state` on the way into `BUSY` and dropped on the way out,
+     only for an account holding no card, judged there against
+     `phase_timeout_seconds`. Two edges the design had not named. A
+     `busy_since` newer than the TTL is a floor under the heartbeat test,
+     so one dispatcher cannot reap the phase another has just started,
+     before its first heartbeat lands. And a card whose `heartbeat` is
+     `None` reads as *not* expired through `is_lock_expired` — right for
+     the lock, since an unheld card is takeable, but a trap here, where it
+     would pin the account forever — so that card takes the `busy_since`
+     path too, with a test that asserts the premise before the behaviour.
+     `release-account` keeps the case the TTL must not touch: a phase that
+     is genuinely alive and has to be stopped anyway (`--force`).
    - **A cycle cannot be resumed from the phase it stopped at.** Fixed
      2026-09-25 with `run-phase`, the first piece of real work in Phase 1
      of `docs/plans/balancer.md`. Found the same day: the reboot that

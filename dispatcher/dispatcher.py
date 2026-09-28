@@ -114,11 +114,185 @@ def container_for(cfg: Config, account: str) -> str:
     raise ValueError(f"Unknown account: {account}")
 
 
-def pick_idle_account(cfg: Config, exclude: set[str] | None = None) -> str | None:
+def reap_stale_busy_accounts(cfg: Config) -> list[str]:
+    """Free accounts left BUSY by a phase that is no longer running.
+
+    BUSY carries no expiry of its own, so a dispatcher that dies mid-phase — a
+    Ctrl+C, a host reboot, an OOM — leaves its account BUSY for the life of the
+    state file, and the pool is an account short with nothing running on it. A
+    wall clock would be the wrong instrument on its own: a phase that is
+    legitimately long is what `phase_timeout_seconds` is hours wide for, and
+    expiring one would hand a second phase an account that is still working. So
+    the judge is the card's heartbeat, which a running phase refreshes and a
+    dead one stops refreshing — the same evidence `reap_expired_locks` reads,
+    one level up. `busy_since` is only consulted for an account holding no card
+    at all, or a card nothing ever beat on, where there is nothing else to read.
+    """
+    reaped = []
+    now = time.time()
+    for acc in cfg.accounts:
+        if state_machine.get_state(cfg.state_dir, acc.name) != AccountState.BUSY:
+            continue
+        busy_since = state_machine.get_busy_since(cfg.state_dir, acc.name)
+        if busy_since is None:
+            # BUSY written before this stamp existed, or by hand. Start the
+            # clock instead of reaping on no evidence: one TTL of patience
+            # costs a dispatch, reaping a live phase costs the phase.
+            task_id = state_machine.get_current_task(cfg.state_dir, acc.name)
+            state_machine.set_state(
+                cfg.state_dir, acc.name, AccountState.BUSY, current_task_id=task_id,
+            )
+            continue
+        # A floor under the heartbeat test, not a second opinion on it. A phase
+        # stamps BUSY before it takes its card, and the card it is about to
+        # take may still carry the previous phase's heartbeat, so the TTL alone
+        # would let one dispatcher reap another's phase inside that window.
+        if now - busy_since <= cfg.heartbeat_ttl_seconds:
+            continue
+        task_id = state_machine.get_current_task(cfg.state_dir, acc.name)
+        task = None
+        if task_id:
+            path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+            if os.path.exists(path):
+                task = context_transfer.read_task_file(path)
+        if task is not None and task.heartbeat is not None:
+            if not context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
+                continue
+            why = (
+                f"the heartbeat on card {task_id} is more than "
+                f"{cfg.heartbeat_ttl_seconds}s old"
+            )
+        else:
+            # Nothing to read but the wall clock, so it is given the whole
+            # phase timeout rather than the heartbeat TTL: past that the phase
+            # is over one way or the other, since `timeout` kills it in the
+            # container.
+            if now - busy_since <= cfg.phase_timeout_seconds:
+                continue
+            why = (
+                f"it has been BUSY for {int(now - busy_since)}s with no card to heartbeat, "
+                f"past the {cfg.phase_timeout_seconds}s phase timeout"
+            )
+        logger.warning(
+            "account %s is BUSY but %s; releasing it back to the pool", acc.name, why,
+        )
+        state_machine.set_state(cfg.state_dir, acc.name, AccountState.IDLE)
+        reaped.append(acc.name)
+    return reaped
+
+
+def _waitable_workers(
+    cfg: Config, exclude: set[str] | None = None, now: float | None = None,
+) -> list[str]:
+    """The workers that will come back on their own, one phrase each.
+
+    Parked by a counter and parked by a refusal are different, and this is the
+    distinction that decides whether to fall back or simply wait. An account
+    over the local threshold self-heals: `_recheck_cooling_accounts` re-probes
+    every parked account whenever none is IDLE and flips it back the moment the
+    numbers clear. An account the service itself refused inside
+    `quota_cooldown_seconds` will not come back on a probe at all — /usage
+    reads counters this machine wrote and cannot see a refusal — so there is
+    nothing to wait for there. Waiting out a counter is free; falling back on a
+    refusal is the real spend, and it is the only case the primary's reserve
+    exists for.
+
+    An aged-out COOLING_DOWN counts as waitable on purpose. Holding here
+    returns None, which is what sends dispatch_phase into that very recheck,
+    and recovering a worker is strictly better than spending the primary.
+    """
+    now = time.time() if now is None else now
+    excluded = exclude or set()
+    waitable = []
+    for acc in cfg.accounts:
+        # A worker in `exclude` has already been tried and failed within this
+        # call; it is not something this call can wait for.
+        if acc.is_primary or acc.name in excluded:
+            continue
+        state = state_machine.get_state(cfg.state_dir, acc.name)
+        if state == AccountState.BUSY:
+            waitable.append(f"{acc.name} is running a phase")
+            continue
+        if state not in (AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN):
+            continue
+        refused_at = state_machine.get_rate_limited_at(cfg.state_dir, acc.name)
+        if refused_at is not None and now - refused_at < cfg.quota_cooldown_seconds:
+            continue
+        waitable.append(f"{acc.name} is {state.value} on a counter, not on a refusal")
+    return waitable
+
+
+def pick_idle_account(
+    cfg: Config, exclude: set[str] | None = None, role: str | None = None,
+) -> str | None:
+    """The next account to try for a phase: workers first, the primary last.
+
+    The pool is ordered, not partitioned. The primary is in it like any other
+    account and simply ranks last, which is what lets "every worker is out of
+    quota" need no special case — it is the ordering running off its end. What
+    the gates below add is that running off the end is not free: the primary is
+    the account the operator's own console runs on, and a fallback that spends
+    it to the wall does not just stall the queue, it takes the thread that was
+    supposed to decide what to do about the stall with it. So the last step
+    asks two questions the earlier ones never have to: is this phase worth the
+    console (`fallback_roles`), and is there a worker that comes back on its
+    own if we simply wait (`_waitable_workers`).
+
+    With no `primary_account` configured, or with no worker accounts to fall
+    back from, none of that applies and this is the one-liner it used to be.
+    """
+    # Every path that wants an account comes through here, which is what makes
+    # this the place the account-lock TTL is honoured. The reaper only reads
+    # state files and is idempotent, so a pick costs a stat per account and a
+    # dispatcher killed mid-phase no longer retires its account for good.
+    reap_stale_busy_accounts(cfg)
     idle = state_machine.list_idle_accounts(cfg.state_dir, cfg.accounts)
     if exclude:
         idle = [a for a in idle if a not in exclude]
-    return idle[0] if idle else None
+    if not idle:
+        return None
+    primary = cfg.primary_account
+    has_workers = any(not acc.is_primary for acc in cfg.accounts)
+    # `idle` is primary-last, so anything else in front of it means a worker
+    # takes the phase and no fallback decision arises at all.
+    if primary is None or not has_workers or idle[0] != primary:
+        return idle[0]
+    if role is not None and role not in cfg.fallback_roles:
+        logger.warning(
+            "only the primary account %s is left and a %s phase is not in fallback_roles (%s); "
+            "the pool is dry for this phase rather than spending the operator's own console on it",
+            primary, role, ", ".join(cfg.fallback_roles) or "none",
+        )
+        return None
+    waiting = _waitable_workers(cfg, exclude=exclude)
+    if waiting:
+        logger.warning(
+            "only the primary account %s is left, but %s; holding instead of falling back, "
+            "because waiting out a counter is free and the reserve is for refusals",
+            primary, "; ".join(waiting),
+        )
+        return None
+    logger.warning(
+        "no worker account can come back on its own, so the %s phase falls back to the primary "
+        "account %s, held to its %d%% reserve rather than the %d%% worker threshold",
+        role or "requested", primary, cfg.reserve_pct, cfg.quota_threshold_pct,
+    )
+    return primary
+
+
+def _threshold_for(cfg: Config, account: str) -> int:
+    """The quota ceiling this account is held to.
+
+    The primary's is stricter than a worker's, and every reader of it has to
+    agree. The gate that parks an account above the line and the recheck that
+    un-parks it below one are the same decision seen twice, so a recheck on the
+    worker threshold would wave the primary straight back to IDLE the moment
+    the gate parked it on the reserve, and the two would loop.
+    """
+    for acc in cfg.accounts:
+        if acc.name == account:
+            return cfg.reserve_pct if acc.is_primary else cfg.quota_threshold_pct
+    return cfg.quota_threshold_pct
 
 
 def check_quota_ok(cfg: Config, account: str) -> bool:
@@ -158,11 +332,12 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             "waving it through unverified", account, exc,
         )
         return True
-    if quota.exceeds_threshold(usage, cfg.quota_threshold_pct):
+    threshold = _threshold_for(cfg, account)
+    if quota.exceeds_threshold(usage, threshold):
         logger.warning(
             "account %s is at %d%% of its session and %d%% of its week, over the %d%% threshold; "
             "parking it PRE_COOLDOWN and looking for another",
-            account, usage.session_pct, usage.week_pct, cfg.quota_threshold_pct,
+            account, usage.session_pct, usage.week_pct, threshold,
         )
         state_machine.set_state(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
         return False
@@ -225,7 +400,7 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
                 state_machine.record_rate_limit(cfg.state_dir, acc.name)
                 continue
             usage = quota.parse_usage_output(result.result_text)
-            exceeds = quota.exceeds_threshold(usage, cfg.quota_threshold_pct)
+            exceeds = quota.exceeds_threshold(usage, _threshold_for(cfg, acc.name))
         except Exception as exc:
             logger.warning("quota recheck failed for account %s: %s", acc.name, exc)
             exceeds = False
@@ -803,7 +978,7 @@ def dispatch_phase(
         # account this call just rate-limited (it's IDLE again) alongside
         # others that were cooling before this call started, and those
         # never-tried accounts are still worth a shot.
-        account = pick_idle_account(cfg, exclude=tried)
+        account = pick_idle_account(cfg, exclude=tried, role=role)
         if account is None:
             # Only loop back if the recheck freed an account this call hasn't
             # tried: recovering just the one that rate-limited a moment ago

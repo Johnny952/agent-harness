@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import os
 import time
 
@@ -22,6 +23,8 @@ from dispatcher.context_transfer import (
 from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import (
     AccountState,
+    get_busy_since,
+    get_current_task,
     get_rate_limited_at,
     get_state,
     record_rate_limit,
@@ -4328,3 +4331,319 @@ def test_run_single_phase_cleanup_does_not_swallow_a_real_failure(tmp_path, monk
         dispatcher_mod.run_single_phase(
             cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
         )
+
+
+def _make_pool_config(tmp_path, **overrides):
+    """The two-account pool Phase 2 is about: the operator's own console first
+    in the config order and last in the picker's."""
+    defaults = dict(
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1", is_primary=True),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+        primary_account="cuenta1",
+        reserve_pct=60,
+        fallback_roles=["revisor", "auditor"],
+    )
+    defaults.update(overrides)
+    return _make_config(tmp_path, **defaults)
+
+
+def _age_busy_since(cfg, account_name, seconds) -> None:
+    """Backdate an account's BUSY stamp.
+
+    `set_state` always stamps `time.time()`, which is the whole point of it, so
+    an aged stamp can only be written from outside — the same way the lock
+    tests backdate a heartbeat by rewriting the card.
+    """
+    path = os.path.join(cfg.state_dir, f"{account_name}.json")
+    with open(path) as fh:
+        data = json.load(fh)
+    data["busy_since"] = time.time() - seconds
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+
+
+def _age_heartbeat(cfg, task_id, seconds) -> None:
+    path = task_file_path(cfg.hive_tasks_dir, task_id)
+    task = read_task_file(path)
+    task.heartbeat = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)
+    ).isoformat()
+    write_task_file(path, task)
+
+
+def test_the_picker_spends_a_worker_before_the_primary(tmp_path) -> None:
+    """Both idle and the primary listed first: config order alone would spend
+    the console the operator is talking to while a worker sat idle."""
+    cfg = _make_pool_config(tmp_path)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta2"
+
+
+def test_a_pool_with_no_primary_keeps_the_config_order(tmp_path) -> None:
+    """Every config written before this key existed is one of these, and it
+    has to behave exactly as it did."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+    )
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta1"
+
+
+def test_a_one_account_pool_is_not_a_fallback_decision(tmp_path) -> None:
+    """With no worker to be out of quota there is nothing to fall back *from*.
+    The account is simply the pool, so the role gate does not apply to it and
+    an implementador runs on it like anything else — otherwise naming the only
+    account as primary would take the harness out of service."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[AccountConfig(name="cuenta1", container="agent-cuenta1", is_primary=True)],
+        primary_account="cuenta1",
+        fallback_roles=["revisor"],
+    )
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta1"
+
+
+def test_the_primary_takes_a_phase_its_roles_list_names(tmp_path, caplog) -> None:
+    """A refusal is the one case the reserve exists for: cuenta2 was turned
+    away by the service, so no amount of waiting brings it back inside the
+    cooldown."""
+    cfg = _make_pool_config(tmp_path)
+    record_rate_limit(cfg.state_dir, "cuenta2")
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        account = dispatcher_mod.pick_idle_account(cfg, role="revisor")
+
+    assert account == "cuenta1"
+    assert any("falls back to the primary account cuenta1" in r.getMessage() for r in caplog.records)
+
+
+def test_the_primary_refuses_a_phase_outside_fallback_roles(tmp_path, caplog) -> None:
+    """An implementador writes code across up to max_revision_rounds rounds and
+    is the phase most likely to drain the reserve it was just handed. The pool
+    is dry for it, and saying so is the answer the operator needs."""
+    cfg = _make_pool_config(tmp_path)
+    record_rate_limit(cfg.state_dir, "cuenta2")
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        account = dispatcher_mod.pick_idle_account(cfg, role="implementador")
+
+    assert account is None
+    assert any("not in fallback_roles" in r.getMessage() for r in caplog.records)
+
+
+def test_an_empty_fallback_roles_keeps_the_primary_out_of_everything(tmp_path) -> None:
+    cfg = _make_pool_config(tmp_path, fallback_roles=[])
+    record_rate_limit(cfg.state_dir, "cuenta2")
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="revisor") is None
+
+
+def test_a_caller_that_names_no_role_is_not_held_to_the_roles_list(tmp_path) -> None:
+    """`role` is optional on the picker and the gate is about the phase, not
+    about the account: a caller with no phase in hand has nothing to check."""
+    cfg = _make_pool_config(tmp_path)
+    record_rate_limit(cfg.state_dir, "cuenta2")
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+
+    assert dispatcher_mod.pick_idle_account(cfg) == "cuenta1"
+
+
+def test_the_picker_waits_out_a_worker_parked_on_a_counter(tmp_path, caplog) -> None:
+    """Parked by a counter and parked by a refusal are different. cuenta2 went
+    over the local threshold and `_recheck_cooling_accounts` re-probes it the
+    moment nothing is IDLE, so waiting costs nothing while falling back spends
+    the console."""
+    cfg = _make_pool_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta2", AccountState.PRE_COOLDOWN)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        account = dispatcher_mod.pick_idle_account(cfg, role="revisor")
+
+    assert account is None
+    assert any("on a counter, not on a refusal" in r.getMessage() for r in caplog.records)
+
+
+def test_a_refusal_older_than_the_cooldown_is_worth_waiting_for_again(tmp_path) -> None:
+    """The refusal stops being a reason to spend the reserve the moment
+    quota_cooldown_seconds is up — past that the account is one probe away from
+    coming back, which is the free option again."""
+    cfg = _make_pool_config(tmp_path)
+    record_rate_limit(
+        cfg.state_dir, "cuenta2", at=time.time() - cfg.quota_cooldown_seconds - 1,
+    )
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="revisor") is None
+
+
+def test_the_picker_waits_for_a_worker_that_is_running_a_phase(tmp_path, caplog) -> None:
+    """The commonest reason the pool is short, and the one that always ends by
+    itself."""
+    cfg = _make_pool_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta2", AccountState.BUSY, current_task_id="task-1")
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        account = dispatcher_mod.pick_idle_account(cfg, role="revisor")
+
+    assert account is None
+    assert any("cuenta2 is running a phase" in r.getMessage() for r in caplog.records)
+
+
+def test_a_worker_already_tried_this_dispatch_is_not_worth_waiting_for(tmp_path) -> None:
+    """`exclude` is the dispatch's own list of accounts that just failed it, so
+    a worker on it is not a worker that will come back — it is one that already
+    did and was no use."""
+    cfg = _make_pool_config(tmp_path)
+
+    assert dispatcher_mod.pick_idle_account(cfg, exclude={"cuenta2"}, role="revisor") == "cuenta1"
+
+
+def test_the_picker_returns_none_when_the_primary_is_out_too(tmp_path) -> None:
+    cfg = _make_pool_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="revisor") is None
+
+
+def test_the_primary_is_held_to_the_reserve_and_a_worker_to_the_threshold(tmp_path) -> None:
+    cfg = _make_pool_config(tmp_path)
+
+    assert dispatcher_mod._threshold_for(cfg, "cuenta1") == cfg.reserve_pct
+    assert dispatcher_mod._threshold_for(cfg, "cuenta2") == cfg.quota_threshold_pct
+
+
+def test_an_unknown_account_answers_to_the_worker_threshold(tmp_path) -> None:
+    """There is exactly one primary and it is named in config, so anything the
+    pool cannot identify is not it."""
+    cfg = _make_pool_config(tmp_path)
+
+    assert dispatcher_mod._threshold_for(cfg, "cuenta9") == cfg.quota_threshold_pct
+
+
+def test_the_primary_parks_at_its_reserve_rather_than_the_worker_threshold(tmp_path, monkeypatch) -> None:
+    """The reserve is a ceiling and not only an admission test: 70% is fine for
+    a worker and past the line for the console."""
+    cfg = _make_pool_config(tmp_path)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 70% used · resets later\n"
+                "Current week (all models): 20% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
+
+
+def test_a_phase_with_a_live_heartbeat_is_left_alone_however_long_it_runs(tmp_path) -> None:
+    """The card is the judge precisely so that a long phase is not a stale one:
+    this account has been BUSY for hours and is still beating."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", 9999)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+
+
+def test_a_phase_whose_heartbeat_died_gives_its_account_back(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", 9999)
+    _age_heartbeat(cfg, "task-1", 999)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+
+
+def test_a_fresh_busy_stamp_is_a_floor_under_the_heartbeat_test(tmp_path) -> None:
+    """A phase stamps BUSY before it takes its card, and the card it is about
+    to take still carries the previous phase's heartbeat. Without the floor a
+    second dispatcher would reap a phase that started seconds ago."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", 999)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+
+
+def test_an_account_holding_no_card_is_judged_by_the_phase_timeout(tmp_path) -> None:
+    """Nothing to read but the wall clock, so it gets the whole timeout rather
+    than the heartbeat TTL — `timeout` kills the phase in the container at
+    exactly that point, so past it there is nothing left to protect."""
+    cfg = _make_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY)
+    _age_busy_since(cfg, "cuenta1", cfg.heartbeat_ttl_seconds + 1)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+
+    _age_busy_since(cfg, "cuenta1", cfg.phase_timeout_seconds + 1)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
+
+
+def test_a_card_nobody_ever_beat_on_is_judged_by_the_phase_timeout_too(tmp_path) -> None:
+    """`is_lock_expired` answers False for a card with no heartbeat, which is
+    right for the lock — nothing there has gone stale — and would be a trap
+    here, pinning the account BUSY for the life of the state file. The reaper
+    treats a card with no heartbeat as no card at all."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    path = task_file_path(cfg.hive_tasks_dir, "task-1")
+    task = read_task_file(path)
+    task.heartbeat = None
+    write_task_file(path, task)
+    assert not is_lock_expired(task, cfg.heartbeat_ttl_seconds), "the premise of this test"
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", cfg.phase_timeout_seconds + 1)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
+
+
+def test_a_busy_account_with_no_stamp_gets_the_clock_started(tmp_path) -> None:
+    """BUSY written by hand, or by a dispatcher from before the stamp existed.
+    One TTL of patience costs a dispatch; reaping on no evidence costs the
+    phase. The card has to survive the restamp or the reap that follows would
+    lose the account's task."""
+    cfg = _make_config(tmp_path)
+    path = os.path.join(cfg.state_dir, "cuenta1.json")
+    os.makedirs(cfg.state_dir, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump({"state": "BUSY", "current_task_id": "task-1"}, fh)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+    assert get_busy_since(cfg.state_dir, "cuenta1") is not None
+    assert get_current_task(cfg.state_dir, "cuenta1") == "task-1"
+
+
+def test_the_picker_hands_out_an_account_the_reaper_just_freed(tmp_path) -> None:
+    """The reaper runs inside the picker rather than on a timer, because the
+    moment anyone wants an account is the moment it is worth finding out that
+    one of them is only nominally busy."""
+    cfg = _make_pool_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta2", AccountState.BUSY)
+    _age_busy_since(cfg, "cuenta2", cfg.phase_timeout_seconds + 1)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta2"

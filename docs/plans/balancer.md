@@ -1,8 +1,11 @@
 # Plan: a conversational balancer over the account pool
 
-Status: Phase 0 landed 2026-09-25 — `status` and `release-account` are real
-verbs and G2 is closed. Phases 1–3 are unstarted, and still queued behind the
-board's Phase 0. Written 2026-09-25, after a host reboot cut the T-008 run
+Status: Phases 0–2 have landed. `status`, `release-account` and `run-phase`
+are real verbs; G2 is closed including the account-lock TTL it left owing; and
+the picker now ranks the pool, holds the primary to a reserve and asks what
+role the phase is for before spending the operator's own console on it. Phase 3
+is the one that was only ever worth writing once 0–2 were real, and as of
+2026-09-28 they are. Written 2026-09-25, after a host reboot cut the T-008 run
 mid-phase and left two gaps in plain sight that this plan closes.
 
 The dispatcher already balances load across accounts. `dispatch_phase` picks an
@@ -78,7 +81,7 @@ the only case where the primary's reserve should be touched at all.
 
 | Verb | Why it is needed |
 |---|---|
-| `run-phase --task-id --project --role [--round] [--final] [--note]` | Runs one phase and returns control. The whole point. **Built 2026-09-25**, without `--account`: which account takes the phase is still the pool's call, and pinning one belongs with the picker in Phase 2. |
+| `run-phase --task-id --project --role [--round] [--final] [--note]` | Runs one phase and returns control. The whole point. **Built 2026-09-25**, and still without `--account`: Phase 2 answered that question the other way round, by making the pool's call worth trusting — the picker ranks the workers ahead of the primary, holds the primary to `reserve_pct`, and refuses a role `fallback_roles` does not name. A flag that pinned an account by hand would be a way around that policy rather than a use of it, so it stays unbuilt until something actually wants one. |
 | `status [--probe]` | Prints the cached state files and the card. Probes `/usage` only when asked, because each probe is itself a `claude -p`. **Built 2026-09-25.** |
 | `release-account --name <n>` | The reaper that did not exist. Closes G2 below. **Built 2026-09-25.** |
 
@@ -113,15 +116,27 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   skips any state that is not `PRE_COOLDOWN`/`COOLING_DOWN`; and
   `reap_expired_locks` (`dispatcher.py:394`) releases the *card* lock by
   heartbeat TTL, never the account. There is no reaper and no verb.
-  **Closed 2026-09-25** by `release-account` (`dispatcher/operator.py`). A TTL
-  on the account lock, mirroring the card's, is still the better fix, and it
-  was *not* built with Phase 1 — the per-phase bookkeeping moved out of the
-  cycle without it, so it now belongs with Phase 2 and the picker that would
-  honour it. Its design is settled, though: `AccountState` carries no
-  timestamp on `BUSY`, and a wall-clock one would expire a phase that is
-  legitimately long, so the TTL should read the *card's* heartbeat
-  (`heartbeat_ttl_seconds`), which a running phase refreshes, and fall back to
-  a `busy_since` only for an account holding no card.
+  **Closed 2026-09-25** by `release-account` (`dispatcher/operator.py`), and
+  **closed for good 2026-09-28** by the TTL it left owing, built with Phase 2
+  as `reap_stale_busy_accounts` and called from `pick_idle_account` — so the
+  stuck account is now reached by the code that needs it, every time the pool
+  is walked, rather than only by an operator who noticed. It was built as the
+  design here said it should be: `AccountState` carries no timestamp on
+  `BUSY`, and a wall-clock one would expire a phase that is legitimately long,
+  so the TTL reads the *card's* heartbeat (`heartbeat_ttl_seconds`), which a
+  running phase refreshes, and falls back to a `busy_since` — stamped by
+  `set_state` on the way into `BUSY`, dropped on the way out, so it is the
+  clock of this phase and not of the last one — only for an account holding no
+  card, judged there against `phase_timeout_seconds` because that is the
+  longest a phase is allowed to live at all. Two edges the design did not name
+  and the tests now pin. A `busy_since` newer than the TTL is a floor under
+  the heartbeat test, so a phase that has just started is never reaped by a
+  second dispatcher that happened to look before the first heartbeat landed.
+  And a card whose `heartbeat` is `None` reads as *not* expired through
+  `is_lock_expired` — right for the lock, a trap here, because it would pin
+  the account forever — so it takes the `busy_since` path too. What is left
+  for the verb is the case the TTL must not touch: an account whose phase is
+  genuinely alive and has to be taken from it anyway (`--force`).
   Building the verb turned up a bug nobody was looking for: a hand-edited card
   whose `heartbeat` is an unquoted YAML timestamp parses as a `datetime`, not
   the `str` `TaskFile` declares, and crashed every reader of that field with
@@ -143,10 +158,28 @@ Both found 2026-09-25, neither pre-existing in the README's list:
   nothing here needs a model to be tested, only a dispatched run to be
   exercised, which T-008 is waiting to be. The account-lock TTL that G2 left
   owing was not built here; see G2.
-- **Phase 2 — ordering, reserve and `fallback_roles`.** The scheduling policy
-  above, on `AccountConfig` and the picker.
+- **Phase 2 — ordering, reserve and `fallback_roles`. Done 2026-09-28.** The
+  scheduling policy above, all five pieces of it, on `AccountConfig` and the
+  picker. `is_primary` and `primary_account` make the pool ordered rather than
+  partitioned — `list_idle_accounts` sorts on the flag, a stable sort, so the
+  workers keep config.yaml's own order and a config with no primary behaves
+  exactly as it did before ranking existed. `reserve_pct` is the primary's own
+  ceiling, applied by `_threshold_for` in place of `quota_threshold_pct` and
+  refused at config load if it is ever set looser than the workers'.
+  `fallback_roles` decides which phases the primary will take at all; a role
+  outside it gets `None` and a log line saying the pool is dry for this phase,
+  rather than a silent spend. `_waitable_workers` separates parked-on-a-counter
+  from parked-on-a-refusal, so the picker holds instead of falling back
+  whenever a worker can still come back on its own. And
+  `reap_stale_busy_accounts` is G2's account-lock TTL, above. 42 unit tests —
+  22 on the picker and the reaper, 13 on the config, 7 on the ordering and the
+  `busy_since` stamp — the suite at 1091 passing and 10 skipped, and no quota
+  spent: nothing here needs a model, only a dispatched run to be exercised.
+  The ordering was mutation-checked rather than taken on a green run: dropping
+  the sort key from `list_idle_accounts` fails four tests and no others.
 - **Phase 3 — the operator's loop.** Largely docs: how a conversational thread
-  is meant to drive the three verbs. Worth writing only once 0–2 are real.
+  is meant to drive the three verbs. Worth writing only once 0–2 are real —
+  which, since 2026-09-28, they are.
 
 ## Out of scope
 

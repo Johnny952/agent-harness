@@ -394,3 +394,134 @@ def test_load_config_rejects_an_invalid_refusal_cooldown(tmp_path: Path, bad_val
 
     with pytest.raises(ValueError, match="quota_cooldown_seconds must be a positive integer"):
         load_config(str(config_path))
+
+
+def test_the_scheduling_policy_defaults_to_a_flat_pool(tmp_path: Path) -> None:
+    """All three Phase 2 keys are optional, and a config written before they
+    existed still loads and still behaves the way it used to: no account is
+    ranked above another, and nothing is held back for a fallback the pool does
+    not know how to ask for."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.primary_account is None
+    assert [a.is_primary for a in cfg.accounts] == [False, False]
+    assert cfg.reserve_pct == 60
+    assert cfg.fallback_roles == ["revisor", "auditor"]
+
+
+def test_the_primary_is_marked_on_the_account_it_names(tmp_path: Path) -> None:
+    """The key is a name and the ranking is a flag on the entry, so the picker
+    never has to compare strings: one account carries is_primary and the rest
+    do not."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta2\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.primary_account == "cuenta2"
+    assert [(a.name, a.is_primary) for a in cfg.accounts] == [
+        ("cuenta1", False),
+        ("cuenta2", True),
+    ]
+
+
+def test_load_config_rejects_a_primary_that_is_not_an_account(tmp_path: Path) -> None:
+    """A typo here would silently produce a pool with no primary in it — the
+    one shape where "every worker is out of quota" has nothing to fall back
+    to — so it is a config error, the way an unknown --name is a usage error."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta3\n")
+
+    with pytest.raises(ValueError, match="is not a configured account"):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize("bad_value", ["44", '""', "true"])
+def test_load_config_rejects_a_primary_that_is_not_a_name(tmp_path: Path, bad_value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nprimary_account: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="primary_account must be the name of a configured account"):
+        load_config(str(config_path))
+
+
+def test_load_config_reads_the_reserve(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nreserve_pct: 40\n")
+
+    assert load_config(str(config_path)).reserve_pct == 40
+
+
+def test_load_config_rejects_a_reserve_looser_than_the_worker_threshold(tmp_path: Path) -> None:
+    """Above the worker threshold the primary would be the account still taking
+    work after the pool had parked, which inverts the ordering the reserve
+    exists to enforce. It is refused rather than clamped: the two numbers
+    together are a policy, and repairing half of one hides the disagreement."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nreserve_pct: 95\n")
+
+    with pytest.raises(ValueError, match="must not exceed quota_threshold_pct"):
+        load_config(str(config_path))
+
+
+def test_the_reserve_default_tightens_to_a_stricter_threshold(tmp_path: Path) -> None:
+    """The default is the one thing that bends. A config with a worker
+    threshold under 60 and no reserve_pct never stated a policy to disagree
+    with, and failing it over a key it does not mention would break a config
+    that loaded fine before the key existed."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML.replace("quota_threshold_pct: 90", "quota_threshold_pct: 50"))
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.quota_threshold_pct == 50
+    assert cfg.reserve_pct == 50
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "60%", "true"])
+def test_load_config_rejects_an_invalid_reserve(tmp_path: Path, bad_value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nreserve_pct: {bad_value}\n")
+
+    with pytest.raises(ValueError, match="reserve_pct must be a positive integer"):
+        load_config(str(config_path))
+
+
+def test_load_config_reads_fallback_roles(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nfallback_roles:\n  - revisor\n")
+
+    assert load_config(str(config_path)).fallback_roles == ["revisor"]
+
+
+def test_an_empty_fallback_roles_keeps_the_primary_out_of_every_phase(tmp_path: Path) -> None:
+    """Distinct from omitting the key, which takes the default two. An operator
+    who writes the list empty is saying the console never runs a phase, and
+    that has to survive the loader rather than fall through to the default."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nfallback_roles: []\n")
+
+    assert load_config(str(config_path)).fallback_roles == []
+
+
+def test_load_config_rejects_fallback_roles_written_as_one_string(tmp_path: Path) -> None:
+    """`fallback_roles: revisor` is the plausible typo, and a string is
+    iterable, so without this it would load as five single-character roles that
+    match nothing — the primary silently out of every phase."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nfallback_roles: revisor\n")
+
+    with pytest.raises(ValueError, match="fallback_roles must be a list of role names"):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize("bad_entry", ['""', '"   "', "44"])
+def test_load_config_rejects_a_blank_fallback_role(tmp_path: Path, bad_entry: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nfallback_roles:\n  - {bad_entry}\n")
+
+    with pytest.raises(ValueError, match="fallback_roles entries must be non-empty strings"):
+        load_config(str(config_path))

@@ -29,7 +29,11 @@ from dispatcher.state_machine import AccountState
 # One probe budget for the harness, not two: `status --probe` runs the same
 # command the quota gate runs, so it inherits the gate's timeout rather than
 # growing a second number that can drift away from it.
-from dispatcher.dispatcher import _USAGE_PROBE_TIMEOUT_SECONDS, is_rate_limit_error
+from dispatcher.dispatcher import (
+    _USAGE_PROBE_TIMEOUT_SECONDS,
+    _threshold_for,
+    is_rate_limit_error,
+)
 
 
 @dataclasses.dataclass
@@ -49,6 +53,11 @@ class AccountReport:
     usage: quota.UsageInfo | None = None
     probe_error: str | None = None
     probe_refused: bool = False
+    #: The account `primary_account` names, held to `reserve_pct` instead of
+    #: `quota_threshold_pct` and tried last. Reported because the listing
+    #: otherwise shows one account measured against a different number than
+    #: the rest with nothing to say why.
+    is_primary: bool = False
 
 
 @dataclasses.dataclass
@@ -168,6 +177,7 @@ def account_reports(cfg: Config, probe: bool = False, now: float | None = None) 
             cooldown_remaining=_cooldown_remaining(
                 rate_limited_at, cfg.quota_cooldown_seconds, now
             ),
+            is_primary=acc.is_primary,
         )
         if probe:
             _probe_into(cfg, report)
@@ -326,6 +336,8 @@ def format_status(cfg: Config, accounts: list[AccountReport], tasks: list[TaskRe
     width = max((len(a.name) for a in accounts), default=0)
     for acc in accounts:
         notes = []
+        if acc.is_primary:
+            notes.append("primary")
         if acc.current_task_id:
             notes.append(f"on {acc.current_task_id}")
         if acc.cooldown_remaining > 0:
@@ -335,9 +347,11 @@ def format_status(cfg: Config, accounts: list[AccountReport], tasks: list[TaskRe
         if acc.probe_refused:
             notes.append("probe REFUSED by the service")
         elif acc.usage is not None:
+            # The primary answers to its reserve, so printing the worker
+            # threshold next to it would misreport when it is about to park.
             notes.append(
                 f"session {acc.usage.session_pct}% · week {acc.usage.week_pct}% "
-                f"(threshold {cfg.quota_threshold_pct}%)"
+                f"(threshold {_threshold_for(cfg, acc.name)}%)"
             )
         elif acc.probe_error is not None:
             notes.append(f"probe failed: {acc.probe_error}")

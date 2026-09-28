@@ -17,9 +17,33 @@ accounts:
   - name: cuenta2
     container: agent-cuenta2
 
+# Which of the accounts above is the operator's own console. It is not kept
+# out of the pool, it ranks last in it, so "every worker is out of quota" is
+# just the ordering running off its end. Omit the key for a flat pool in the
+# order listed above; an unknown name is a config error. Optional; no default,
+# because the primary is named here and never guessed in code.
+primary_account: cuenta1
+
 # Percentage of an account's quota usage at which the dispatcher stops
-# assigning it new work and lets it cool down. Optional; defaults to 90.
+# assigning it new work and lets it cool down. Applies to the workers; the
+# primary answers to reserve_pct below. Optional; defaults to 90.
 quota_threshold_pct: 90
+
+# The line below which the primary accepts fallback work at all, and the
+# ceiling it is parked on in place of quota_threshold_pct. Above it the pool
+# reports itself dry rather than spending the operator's own console to the
+# wall. An explicit value above quota_threshold_pct is a config error, not a
+# clamp. Optional; defaults to 60, or to quota_threshold_pct when that is
+# stricter.
+reserve_pct: 60
+
+# The phases the primary will take as fallback. A revisor or an auditor reads
+# a diff and writes a verdict; an implementador writes code across up to
+# max_revision_rounds rounds, so the primary will not start one unless this
+# list says so. Optional; defaults to [revisor, auditor].
+fallback_roles:
+  - revisor
+  - auditor
 
 # How long an account that the service actually refused (a 429 on a real
 # phase, or on the quota probe itself) is held out of the pool. The probe the

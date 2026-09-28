@@ -9,6 +9,13 @@ import yaml
 class AccountConfig:
     name: str
     container: str
+    #: Whether this is the account the conversational thread runs under. It is
+    #: a sort key, not a kind of account: the pool is ordered, not partitioned,
+    #: and the primary is simply the one the picker reaches last. Set by
+    #: `load_config` from the top-level `primary_account` and never from the
+    #: account's own block — see `_load_primary_account` for why there is only
+    #: one place to name it.
+    is_primary: bool = False
 
 
 #: What the dispatcher's own status strings become on the board. The left side
@@ -57,6 +64,20 @@ class LocalBoardConfig:
     dir: str
 
 
+#: The phases the primary will take on as fallback when no worker can. The
+#: four roles do not cost the same: a revisor or an auditor reads a diff and
+#: writes a verdict, while an implementador writes code across up to three
+#: revision rounds and is the phase that blows a handoff budget. Spending the
+#: operator's own console on a fresh implementador round is the worst trade
+#: available, so it is off by default and an operator who wants it says so.
+#: The primary's default ceiling, tightened to the worker threshold when that
+#: is stricter. Named rather than inlined because the docstring below argues
+#: about it and config.example.yaml quotes it.
+DEFAULT_RESERVE_PCT = 60
+
+DEFAULT_FALLBACK_ROLES = ("revisor", "auditor")
+
+
 #: The permission modes the CLI accepts (`claude --help`, 2.1.280). Checked at
 #: load time for the same reason the integer caps are: a typo is otherwise
 #: only caught by the CLI itself, which exits on an unknown choice after the
@@ -92,6 +113,23 @@ class Config:
     mapping_max_turns: int
     gates_enabled: bool
     gates_test_timeout_seconds: int
+    #: Which account the conversational thread runs under, or None for a flat
+    #: pool. None is the shape every config had before this existed, and it
+    #: keeps the picker's old behaviour exactly: no account is ranked last, no
+    #: reserve applies and `fallback_roles` never gates anything.
+    primary_account: str | None = None
+    #: The stricter ceiling the primary is held to. The conversation and any
+    #: fallback phase draw on one budget, so a fallback that spends the primary
+    #: to the wall does not just stall the queue — it takes the console with
+    #: it, and the operator loses the thread that was supposed to decide what
+    #: to do about an exhausted pool. Above this line the primary refuses
+    #: fallback work out loud and says the pool is dry, which is the answer the
+    #: operator actually needs; idleness is recoverable by waiting, a dead
+    #: console is not.
+    reserve_pct: int = 60
+    fallback_roles: list[str] = dataclasses.field(
+        default_factory=lambda: list(DEFAULT_FALLBACK_ROLES)
+    )
 
 
 def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
@@ -239,10 +277,108 @@ def _load_allowed_tools(raw: dict) -> list[str]:
     return [tool.strip() for tool in tools]
 
 
+def _load_primary_account(raw: dict, accounts: list[AccountConfig]) -> str | None:
+    """Read the optional `primary_account` and mark it on the pool.
+
+    The name has to resolve to an account that exists, the same way an unknown
+    `--name` is a usage error for `release-account`: a typo here would
+    otherwise load fine and quietly produce a flat pool, which is the failure
+    this key exists to prevent.
+
+    Absent, it returns None and nothing is marked. That is deliberate and not
+    a missing default: the plan asks for the primary to be named in
+    `config.yaml` and not in code, so a config that does not name one gets the
+    behaviour it had before the key existed rather than one this function
+    guessed.
+    """
+    name = raw.get("primary_account")
+    if name is None:
+        return None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("primary_account must be the name of a configured account")
+    name = name.strip()
+    for account in accounts:
+        if account.name == name:
+            account.is_primary = True
+            return name
+    known = ", ".join(a.name for a in accounts) or "none"
+    raise ValueError(f"primary_account {name!r} is not a configured account (have: {known})")
+
+
+def _load_reserve_pct(raw: dict, quota_threshold_pct: int) -> int:
+    """Read the optional `reserve_pct`, checked against the worker threshold.
+
+    A reserve above `quota_threshold_pct` would make the primary *more*
+    permissive than a worker — the account that is supposed to be spent last
+    would be the one still accepting work after the pool has parked — which
+    inverts the whole point of the reserve. An explicit value that does that is
+    a config error rather than a clamp, because the two numbers together are a
+    policy and silently repairing half of it would hide the disagreement.
+
+    The default is the only thing that bends: a config with a worker threshold
+    under 60 and no `reserve_pct` never stated a policy to disagree with, and
+    failing it over a key it does not use would break a config that loaded
+    fine before this one existed.
+    """
+    reserve_pct = raw.get("reserve_pct", min(DEFAULT_RESERVE_PCT, quota_threshold_pct))
+    if isinstance(reserve_pct, bool) or not isinstance(reserve_pct, int) or reserve_pct <= 0:
+        raise ValueError("reserve_pct must be a positive integer")
+    if reserve_pct > quota_threshold_pct:
+        raise ValueError(
+            f"reserve_pct ({reserve_pct}) must not exceed quota_threshold_pct "
+            f"({quota_threshold_pct}): the primary is held to a stricter ceiling "
+            "than a worker, not a looser one"
+        )
+    return reserve_pct
+
+
+def _load_fallback_roles(raw: dict) -> list[str]:
+    """Read the optional `fallback_roles`, or the cheap two by default.
+
+    Not validated against the role vocabulary on purpose: the roles are the
+    dispatcher's own (`dispatcher/learnings.py`), and importing that here to
+    check a list of strings would tie config loading to the phase code it
+    configures. An unknown name here costs nothing — it simply never matches a
+    role the picker is asked about, so the primary stays out of that phase,
+    which is the safe direction to be wrong in.
+    """
+    roles = raw.get("fallback_roles", None)
+    if roles is None:
+        return list(DEFAULT_FALLBACK_ROLES)
+    if isinstance(roles, str) or not isinstance(roles, list):
+        raise ValueError("fallback_roles must be a list of role names")
+    for role in roles:
+        if not isinstance(role, str) or not role.strip():
+            raise ValueError("fallback_roles entries must be non-empty strings")
+    return [role.strip() for role in roles]
+
+
 def load_config(path: str) -> Config:
     with open(path) as f:
         raw = yaml.safe_load(f)
-    accounts = [AccountConfig(**a) for a in raw["accounts"]]
+    accounts = []
+    for entry in raw["accounts"]:
+        # `AccountConfig(**entry)` would accept `is_primary` here now that the
+        # field exists, and two places to name the primary can disagree. One
+        # key, at the top level, is the whole design.
+        if "is_primary" in entry:
+            raise ValueError(
+                "accounts entries must not set is_primary: name the primary "
+                "once, in the top-level primary_account"
+            )
+        accounts.append(AccountConfig(**entry))
+    primary_account = _load_primary_account(raw, accounts)
+    quota_threshold_pct = raw.get("quota_threshold_pct", 90)
+    # Checked now that reserve_pct is compared against it: an unvalidated
+    # threshold would turn a typo into a TypeError inside _load_reserve_pct
+    # rather than a config error with a name on it.
+    if (
+        isinstance(quota_threshold_pct, bool)
+        or not isinstance(quota_threshold_pct, int)
+        or quota_threshold_pct <= 0
+    ):
+        raise ValueError("quota_threshold_pct must be a positive integer")
+    reserve_pct = _load_reserve_pct(raw, quota_threshold_pct)
     phase_timeout_seconds = raw.get("phase_timeout_seconds", 7200)
     # A bad value here (0, negative, or the wrong type) previously loaded
     # fine and only surfaced inside exec_claude, after a quota probe, BUSY,
@@ -270,7 +406,7 @@ def load_config(path: str) -> Config:
     vibe_kanban, local_board = _load_boards(raw)
     return Config(
         accounts=accounts,
-        quota_threshold_pct=raw.get("quota_threshold_pct", 90),
+        quota_threshold_pct=quota_threshold_pct,
         # How long a refusal outranks the /usage numbers. The probe is local
         # and cannot see a refusal at all, so without a floor an account that
         # was just turned away is recovered on healthy local counters and sent
@@ -318,4 +454,7 @@ def load_config(path: str) -> Config:
         # gate something else, and the gate says so and lets review proceed
         # rather than holding the task open for the rest of the afternoon.
         gates_test_timeout_seconds=gates_test_timeout_seconds,
+        primary_account=primary_account,
+        reserve_pct=reserve_pct,
+        fallback_roles=_load_fallback_roles(raw),
     )
