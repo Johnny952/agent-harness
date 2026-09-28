@@ -37,8 +37,15 @@ rather than of the present, and are deliberately not rewritten: its state table
 carries a Loading row a server-rendered board cannot enter (ADR 6 argues that),
 and *What this closes* says the dashboard's auth tests had already moved to
 `observability/auth.py` in Phase 1 — they had not, and T-010 rehomed them by
-hand into `tests/observability/test_auth.py`. Phases 3–6 have a row in the table
-and no spec.
+hand into `tests/observability/test_auth.py`. Phase 3 is specified below and
+built, both by hand and out of cycle rather than dispatched, so there is no
+`docs/implementations/` record for it: the spec section was written first, then
+`/events/stream` and the page's one inline script, with ADRs 12 and 13 as the
+record of what it decided. Its *Done when* is met on the tests and on neither
+of its two by-hand checks: the cheap one has not been run, and the gate — one
+real dispatch watched end to end from `/events` — is by C-4 a human's to
+authorize, not this plan's to schedule, and is what the table above makes a
+precondition for Phases 4–6. Phases 4–6 have a row in the table and no spec.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
 used, and the surface a human gets is the one this plan built: `/`,
@@ -745,3 +752,366 @@ And, by hand once against the running stack: open `http://127.0.0.1:8790`, see
 both accounts with their state and T-009 in the tasks table with its card;
 then stop the api container and reload, and see the Error state name the
 endpoint while the page keeps everything else.
+
+## Phase 3 — a live tail
+
+### Why it comes next
+
+Phase 2 shipped a board that tells the truth at one instant and stamps that
+instant on every page. Three of its four screens are fine that way: accounts,
+tasks and debt change on the scale of a dispatch, and a human who wants the
+newer answer asks for it. `/events` is the exception. Its value is not the
+state it holds but the change — the harness's exhaust arrives while you are
+looking at it, and a page that shows the last 200 rows as of 14:07:31 is
+already answering a question about the past.
+
+So an operator watching a run reloads `/events` on a timer with their hand.
+That is a poll with a human as the interval, and Phase 2's *Out of scope*
+already named this phase as the one that deletes it: "a poll built here is a
+poll deleted there."
+
+There is a second reason, and it is the load-bearing one. This plan says
+nothing after Phase 3 starts before Phase 3 has run against a real dispatch,
+and `docs/charter.md` C-7 repeats it. Phase 3 is the first time a human sits
+in front of a live run through this surface rather than through
+`docker logs`. Everything Phase 4 proposes to build — buttons that queue
+actions — is a guess until someone has watched a dispatch go by on this page
+and found out which of them they reached for.
+
+### Where the stream terminates
+
+On the board. Not on the api. This is the decision the rest of the phase
+falls out of, and it has three independent reasons, any one of which would be
+enough.
+
+**The browser holds the wrong credential.** The board is behind Basic auth in
+the `ia-harness board` realm; the api is behind a bearer token the board
+sends server-side (`docs/decisions.md` ADR 7). `EventSource` cannot set an
+`Authorization` header — it sends the origin's cached credentials and nothing
+else. A stream on the api is therefore either unauthenticated or has the
+token written into the page for anyone with the board's password to read.
+Phase 2 already decided this in one sentence: every fetch is server-side, the
+browser never talks to the api. A tail does not get an exemption.
+
+**The api's shape is one bounded read per call.** Five `GET` endpoints, each
+of which opens the database, answers and closes; `TIMEOUT_SECONDS = 5` at the
+only client. A long-lived connection there is a different service — held
+threads, a cap on concurrent readers, a client that may vanish without
+closing — in the one process that also holds the `:ro` mounts to `.hive/` and
+`dispatcher_state/`. That process is small and reads privileged paths; it
+should stay small.
+
+**It needs nothing new.** `GET /api/events?since=<id>&limit=<n>&source_app=`
+is already the query a tail wants. `since` is an id and not a clock, and
+`collector/db.py:list_events` says why in its docstring: the tail remembers
+the last id it saw rather than a time it would have to trust. So:
+
+> **Phase 3 changes no file under `observability/api/`.** If it does, the
+> stream terminated in the wrong place.
+
+The poll does not disappear, then. It moves — out of the human's hand, out of
+the browser, into one named loop inside the board, one per open connection,
+with an interval that is a constant in source rather than a habit in someone's
+wrist.
+
+### Where it runs
+
+`observability/board/`. Same service, same port, same image, same two
+dependencies: Flask streams a generator response and `requests` already does
+the fetching. No new dependency to pin, which is C-7's saving taken a second
+time.
+
+No compose change. No new port, no new volume, no new environment variable, no
+new mount — the board still mounts nothing and still gets no docker socket, and
+`tests/integration/test_compose_invariants.py` is untouched and stays green.
+
+One thing here is genuinely new: this is the board's first `<script>`. It is
+inline in the events template, beside the one inline `<style>` in
+`layout.html`, and it stays small enough to read in one screen. There is still
+no `static/` directory, no bundler, no build step. C-7 rules on Node for this
+repo; a phase that adds a `package.json` to make the tail work has broken the
+ruling it was supposed to be testing.
+
+Threading matters and should be said out loud: the board runs on Werkzeug's
+development server, which Flask starts threaded, so one open tail is one held
+thread for as long as it is open. That is fine for a single-operator surface
+bound to loopback and it is exactly why the number of concurrent streams is
+capped below.
+
+### The endpoint, verbatim
+
+```
+GET /events/stream?since=<id>&source_app=<container>   text/event-stream
+```
+
+One route added to the board, and nothing else about `/events` changes. The
+page still renders its table server-side from `/api/events` exactly as Phase 2
+built it; the stream is what happens afterwards.
+
+`source_app` exists on the stream because it exists on the page — the tail
+inherits the filter the operator is already looking through, and does not
+acquire one the page does not have.
+
+### The frames, verbatim
+
+```
+retry: 3000
+
+id: 4213
+event: row
+data: <tr><td title="2026-09-28T14:07:31">2m ago</td>…</tr>
+
+: keepalive
+
+id: 4218
+event: gap
+data: 37 events arrived at once and this tail skipped some. Reload for the
+data: full window.
+```
+
+Three things are being decided there.
+
+**A `row` frame carries HTML, not JSON.** The `data:` is the `<tr>` the events
+template already knows how to draw, rendered by the same Jinja macro the page
+uses, one `data:` line per line of it. A JSON frame would need a second
+renderer in the browser for a row the server has already drawn once, and
+"render, do not re-derive" is not suspended because the transport changed. It
+also means escaping stays where it is — Jinja autoescapes a payload, and the
+browser inserts a string the board produced rather than one it assembled.
+
+**`id:` is the event's own id.** The same integer `?since=` takes. That is
+the entire resume mechanism and the reason this phase is specified as
+`id > last`: the browser stores the last `id:` it saw and sends it back as
+`Last-Event-ID` when it reconnects, and the board hands it straight to
+`?since=`. No clock is consulted on either side, so a reconnect across a
+restart, a suspend or a clock change resumes exactly where it stopped.
+
+**`retry:` is sent once, at the top.** The reconnect delay is the server's to
+set, not the script's to implement — `EventSource` already has the loop.
+
+### The states of a stream
+
+Phase 2's four states are states of a *region*, and they do not change: the
+events region still resolves to rows, empty, warning or error before the page
+is sent. What is new is a fifth thing layered over a region that already
+resolved, and it belongs to the connection rather than to the data.
+
+| State | When | What the page shows |
+|---|---|---|
+| Connecting | the `EventSource` is open, no frame yet | a mark beside the region's heading; the table below is the server-rendered snapshot |
+| Live | a frame or a keepalive arrived within the window | a mark saying so, and rows appearing at the top |
+| Retrying | the connection dropped and the browser is reconnecting | says so, and names the `as of` time the table below is good to |
+| Off | no script ran | nothing at all — the page is Phase 2's page, unchanged |
+
+ADR 6 argued a server-rendered board has three states and no Loading, because
+Jinja renders after every call has resolved. That argument still holds and is
+not being reopened: Connecting is not a Loading state for the region's data,
+which is already on the screen. It is the state of a connection that has not
+yet delivered its first row, over a table that is fully rendered underneath.
+
+### A third kind of stale
+
+Phase 2 named two — the page is stale, and a lock is stale — and this phase
+adds the one that is actually dangerous:
+
+> **A dead tail and a quiet harness are the same picture.**
+
+An events table that stopped moving because the connection dropped looks
+exactly like one that stopped moving because nothing happened, and the second
+is the thing an operator is watching for. It is the same failure Phase 2 named
+about the dashboard — a five-minute-old page and a dead harness look alike —
+arriving through a different door.
+
+Three consequences, and they are requirements:
+
+  - The stream's state is on the page at all times, not only when it breaks.
+  - The keepalive exists so that Live is a fact and not an assumption. A
+    connection that has said nothing for two intervals is not Live.
+  - The `as of` stamp stays, on every page including this one. It is now the
+    stamp of everything the tail does not move — which is every other region
+    on every other screen, plus this table itself whenever the stream is
+    Connecting, Retrying or Off. ADR 8 said the board's only clock is its own
+    render time; a live region does not get a second clock, it gets rows with
+    ids.
+
+And the corollary, which is why the next section is short: **the tail moves
+rows, never judgements.** `lock_expired`, account state and heartbeat ages are
+computed per request by the api. None of them is tailed.
+
+### Where warnings go
+
+Unchanged for the page: a warning the initial render's `/api/events` call
+returns is displayed by the region macro exactly as Phase 2 built it.
+
+The polls behind the stream are a new case, because they repeat. A warning
+that arrives on every poll would paint the same sentence down the screen
+forever, and the poll is the board's, not the operator's. The rule:
+
+  - A warning the tail's own poll returns is forwarded once, as its own
+    frame, and then suppressed for as long as that connection lives.
+    Suppression is by the warning's exact text; a different warning is a
+    different warning.
+  - A poll that fails is not a warning. It is the stream's Retrying state,
+    and it names the endpoint and the status the way `_fetch` already does —
+    the stream does not get its own vocabulary for a failure the board
+    already has words for.
+  - A `gap` frame is not a warning either. It is a statement about this
+    tail's own continuity, and it exists because of the next section.
+
+### Required behaviour
+
+  - **The tail is bounded by `since` and never by a clock.** `Last-Event-ID`
+    wins when the browser sends it; `?since=` from the query string is the
+    fallback for a first connection; the page passes the highest id it
+    rendered so the tail starts where the table ends.
+
+  - **Frames go out oldest-first.** `list_events` answers `id DESC`, and a
+    tail that prepends in that order shows a burst backwards. The batch is
+    reversed before it is emitted. This is one line and it is the kind of one
+    line that is invisible until a burst arrives.
+
+  - **A burst above the poll's limit is announced, not swallowed.**
+    `ORDER BY id DESC LIMIT n` drops the *oldest* of the window, so a poll
+    that comes back exactly full may have skipped rows between `since` and
+    what it returned. The board emits a `gap` frame, advances `since` to the
+    newest id it got, and keeps going. Silently jumping is the defect this
+    phase would be blamed for a month later, when someone asks why an event
+    they know happened is not in the tail.
+
+  - **One poll per open connection, and a hard cap on open connections.**
+    Over the cap answers 503 with a sentence saying so; the page stays on its
+    server-rendered snapshot and says it is not Live. A cap that fails open is
+    a thread leak on a dev server.
+
+  - **The generator stops when the client goes away.** A tail that keeps
+    polling into a closed socket holds a thread and a database read for a tab
+    that was closed an hour ago.
+
+  - **The script inserts HTML the board rendered and never HTML it built**,
+    does no fetch of the api, and makes no request of the board other than the
+    `EventSource`. It caps the DOM at `EVENTS_LIMIT` rows: a tail left open
+    overnight must not grow a table until the tab dies.
+
+  - **Nothing on the page writes.** A tail is a read that does not end. The
+    first byte the browser sends that changes something is Phase 4's, through
+    a queue, and it is not this phase's to sneak in.
+
+  - **No script is a working page.** With the `<script>` removed, `/events` is
+    Phase 2's screen in full. This is a test, not a promise.
+
+  - **The stream carries the same `@requires_auth` as every other route**,
+    which works precisely because it is same-origin — the browser replays the
+    realm's credentials on the `EventSource`. That is the first reason from
+    *Where the stream terminates*, showing up as one decorator.
+
+### Configuration
+
+No new environment variable. No new key in `config.yaml` — the board mounts
+nothing and reads no config file, which is the same shape ADR 9 works in. No
+compose change at all. What the phase adds is module constants beside
+`EVENTS_LIMIT` in `observability/board/app.py`:
+
+```python
+TAIL_INTERVAL_SECONDS = 2      # between polls of /api/events
+TAIL_LIMIT = 200               # rows per poll; a burst ceiling
+TAIL_KEEPALIVE_SECONDS = 15    # comment frame on an idle connection
+TAIL_RETRY_MS = 3000           # what the browser is told to wait
+MAX_TAIL_CLIENTS = 4           # concurrent streams before 503
+```
+
+Constants and not keys, for ADR 11's reason restated: an operator who wants a
+different ceiling edits source, and a service that mounts no config file has
+nowhere else to put one. Each number is a decision with a reason, and the
+reasons belong in ADRs the way Phase 2's did — `docs/decisions.md` continues
+from ADR 11.
+
+`TAIL_LIMIT` sits at the board's existing window and well under the api's
+`MAX_EVENT_LIMIT = 1000`, so nothing the tail asks for is ever clamped. That
+relationship is deliberate: the clamp exists to stop a hand-typed `?limit=`,
+not to shape this phase's traffic.
+
+### What this closes
+
+No debt row. `T-010-D1` and `T-010-D2` are both `dispatcher/debt.py` and no
+concern of the tail; this phase resolves nothing on that index and should not
+pretend otherwise.
+
+What it closes is a workflow and a gate. The workflow is the human as the
+polling interval, for the one screen where that was the actual practice. The
+gate is this plan's own sentence — nothing after Phase 3 starts before Phase 3
+has run against a real dispatch — which cannot be satisfied until there is
+something to watch a dispatch on.
+
+It also settles a prediction Phase 2 and `T-009-D2` both made in writing: that
+the number in ADR 11 would come from Phase 3's tail window. It did not, and
+this phase is the confirmation of why rather than the correction — a
+`since`-bounded tail has no page size, so its `limit` is a burst ceiling and
+the two numbers were never the same number. The Phase 2 bullet that says
+Phase 3 picks the clamp is a record of its moment and stays as written, per
+this plan's convention.
+
+### Out of scope for Phase 3
+
+No websocket and nothing bidirectional. The tail is one-way by construction,
+and a socket is a second protocol in a service that has one.
+
+No tail on `/`, `/tasks/<id>` or `/debt`. Accounts, heartbeats and
+`lock_expired` are judgements the api computes per request over `.hive/` and
+`dispatcher_state/`, and a live one means streaming a thing that is recomputed
+rather than appended. `/events` is tailable because `events` has an
+autoincrementing id and nothing else in this system does. A per-task timeline
+is Phase 5's, and the task screen already carries the note saying why its
+events list is the account's window rather than the task's.
+
+No write, no action, no button, no form beyond the filter that already
+navigates: Phase 4.
+
+No change to the collector, the schema or `db.py`. The query already exists,
+and `id` rides the primary key, so the index the tail needs is the one SQLite
+made.
+
+No fan-out broadcaster, no shared subscriber registry, no message queue, no
+pub/sub between the connections. Each stream polls for itself. Two operators
+is the load, and a registry to save one SELECT every two seconds is a
+concurrency bug waiting for a quiet afternoon.
+
+No new dependency and no new server: no `gevent`, no ASGI, no
+`sse-starlette`, no reverse proxy. Werkzeug's threaded dev server holds the
+connections, and if that stops being enough, the answer is a real server for
+the whole board rather than a second one for this route.
+
+No reconnect logic in the script. `EventSource` has it, `retry:` tunes it, and
+`Last-Event-ID` resumes it; a hand-written reconnect loop is three of this
+phase's guarantees re-implemented worse.
+
+### Done when
+
+`python3 -m pytest` is green, including new tests that drive the stream's
+generator directly — no live server, no real sleeping, with the poll and the
+clock injected — and cover: a frame carries `id:` and a rendered `<tr>`; a
+batch is emitted oldest-first; `Last-Event-ID` beats `?since=` and `?since=`
+is used when the header is absent; a poll that comes back exactly full emits a
+`gap` frame and advances past it; a warning is forwarded once and not on the
+next poll; a keepalive is emitted on an idle interval; the cap answers 503;
+and a client that goes away stops the loop.
+
+Plus one test with the `<script>` removed, asserting `/events` still renders
+its table — the no-JS case is checked, not promised.
+
+And, by hand against the running stack, twice, because the two checks answer
+different questions:
+
+  - **The cheap one, which spends no quota.** With `/events` open in a
+    browser, `curl` a handful of events into the collector and watch them
+    arrive in order without a reload. Then stop the api container and watch
+    the region say it is Retrying and name the `as of` time it is good to,
+    rather than sitting there looking quiet. Then start it again and watch
+    the tail resume without repeating a row — which is `Last-Event-ID`
+    working, and is the one behaviour the unit tests can only simulate.
+
+  - **The gate, which spends quota.** One real dispatch — `dispatch run-task`
+    or `run-phase` against an agent container — watched end to end from
+    `/events`. This is what this plan and `docs/charter.md` C-7 mean by
+    "nothing after Phase 3 starts before Phase 3 has run against a real
+    dispatch", and by C-4 it is a human's to authorize, not this phase's to
+    schedule.

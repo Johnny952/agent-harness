@@ -39,10 +39,19 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import threading
+import time
 from urllib.parse import quote, urlencode
 
 import requests
-from flask import Flask, render_template, request
+from flask import (
+    Flask,
+    Response,
+    get_template_attribute,
+    render_template,
+    request,
+    stream_with_context,
+)
 
 from observability import auth
 
@@ -69,6 +78,24 @@ TIMEOUT_SECONDS = 5
 #: silently be answered short with a warning rather than refused.
 EVENTS_LIMIT = 200
 TASK_EVENTS_LIMIT = 50
+
+#: The live tail, `docs/plans/board.md` "Phase 3". Five numbers and no
+#: configuration: this service mounts no `config.yaml` (ADR 9), so an operator
+#: who wants a different cadence edits source — the same trade `MAX_EVENT_LIMIT`
+#: took in ADR 11.
+#:
+#: `TAIL_LIMIT` is a burst ceiling and not a page size, because a tail bounded
+#: by `since` has no pages: it is the number above which one poll may have
+#: skipped rows, which is what `GAP_SENTENCE` announces.
+TAIL_INTERVAL_SECONDS = 2
+TAIL_LIMIT = 200
+TAIL_KEEPALIVE_SECONDS = 15
+TAIL_RETRY_MS = 3000
+
+#: Werkzeug's dev server is threaded, so one open tail is one held thread for as
+#: long as the tab is open. The cap therefore fails closed — over it, 503 and a
+#: sentence. A cap that fails open is a thread leak on a dev server.
+MAX_TAIL_CLIENTS = 4
 
 #: What would put a row where there is none, one sentence each, in the region's
 #: normal type. Empty is never styled as a failure: Phase 1 deliberately answers
@@ -114,6 +141,28 @@ TASK_KEYS = (
 TASK_DETAIL_KEYS = TASK_KEYS + ("description", "resolved_debt")
 EVENT_KEYS = ("id", "created_at", "source_app", "event_type", "payload")
 DEBT_KEYS = ("id", "what", "where", "fix", "card", "resolved")
+
+#: A poll that comes back exactly full may have skipped rows: `list_events`
+#: answers `ORDER BY id DESC LIMIT n`, which drops the *oldest* of the window,
+#: and the tail then advances past them. Announced rather than swallowed — a
+#: tail that silently loses the middle of a burst is worse than one that says so.
+GAP_SENTENCE = (
+    "{count} events arrived at once and this tail skipped some. "
+    "Reload for the full window."
+)
+
+#: Over `MAX_TAIL_CLIENTS`. Plain text and not an envelope (ADR 5 governs the
+#: api, not this service) and not HTML either: the only reader is an
+#: `EventSource`, which will not render either one.
+OVER_CAP_SENTENCE = (
+    f"this board tails at most {MAX_TAIL_CLIENTS} connections at once and they "
+    "are all taken; the page is still the server-rendered snapshot it always was"
+)
+
+#: An SSE comment. `EventSource` fires no JavaScript event for one, and that is
+#: not what it is for: the periodic write is what makes a vanished client's
+#: socket fail, which is what ends the generator and frees its slot.
+KEEPALIVE = ": keepalive\n\n"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -176,7 +225,12 @@ def create_app(
         EMPTY_EVENTS=EMPTY_EVENTS,
         EMPTY_DEBT=EMPTY_DEBT,
         TASK_EVENTS_NOTE=TASK_EVENTS_NOTE,
+        EVENTS_LIMIT=EVENTS_LIMIT,
     )
+    # One counter per app, not per module: two boards in one test process are
+    # two independent caps, and a test can fill this one without holding four
+    # sockets open.
+    app.tails = _Tails(MAX_TAIL_CLIENTS)
 
     def fetch(
         path: str,
@@ -253,6 +307,50 @@ def create_app(
             source_app=source_app,
         )
 
+    @app.get("/events/stream")
+    @requires_auth
+    def events_stream():
+        """The same rows as `/events`, one frame at a time, as they arrive.
+
+        It terminates here and not in the api for three reasons, and the first
+        alone decides it: `EventSource` cannot set an `Authorization` header, so
+        a browser dialling the api directly would have to be handed the api's
+        bearer token — the one thing `test_the_token_travels_to_the_api_and_
+        never_to_the_page` exists to prevent. The api's contract is also one
+        bounded read per call (ADR 7), and it already answers the query this
+        loop needs.
+        """
+        source_app = request.args.get("source_app") or None
+        since = _since(request.headers.get("Last-Event-ID"), request.args.get("since"))
+        if not app.tails.take():
+            return OVER_CAP_SENTENCE, 503, {"Content-Type": "text/plain; charset=utf-8"}
+        # The page's own row macro, so a tailed row and a rendered row are the
+        # same HTML by construction and not by agreement: "render, do not
+        # re-derive" (ADR 8) is not suspended because the transport changed.
+        row = get_template_attribute("_region.html", "event_row")
+
+        def poll(cursor: int) -> Region:
+            return fetch(
+                "/api/events",
+                params={"since": cursor, "source_app": source_app, "limit": TAIL_LIMIT},
+                keys=EVENT_KEYS,
+            )
+
+        def body():
+            try:
+                yield from _stream(poll, lambda event: str(row(event)).strip(), since, time.sleep)
+            finally:
+                app.tails.give_back()
+
+        return Response(
+            # `stream_with_context` and not a bare generator: the row macro calls
+            # `url_for`, which needs the request context this response would
+            # otherwise have torn down before the first frame.
+            stream_with_context(body()),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     return app
 
 
@@ -268,6 +366,146 @@ def _render(template: str, **context):
 
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+# --- the tail -------------------------------------------------------------
+
+
+class _Tails:
+    """How many streams are open, and whether one more may be.
+
+    A lock and not a bare integer because Werkzeug serves each connection on its
+    own thread, so `take` is a read-modify-write two tabs can reach at once.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._open = 0
+        self._lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self._open >= self._limit:
+                return False
+            self._open += 1
+            return True
+
+    def give_back(self) -> None:
+        with self._lock:
+            self._open = max(self._open - 1, 0)
+
+    @property
+    def open(self) -> int:
+        with self._lock:
+            return self._open
+
+
+def _frame(data, event: str | None = None, event_id=None) -> str:
+    """One SSE frame: an optional `id:`, an optional `event:`, then `data:`.
+
+    One `data:` line per line of the value, which is the protocol and not
+    formatting — a bare newline inside a `data:` value ends the frame, so every
+    line carries its own prefix and the browser joins them back with a newline.
+
+    `id:` is the event's own id, the same integer `?since=` takes, so a browser
+    that reconnects sends it back as `Last-Event-ID` and resumes exactly where
+    it stopped. No clock on either side, which is what makes a resume across a
+    restart, a suspend or a clock change correct rather than approximately
+    correct.
+    """
+    lines = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    if event is not None:
+        lines.append(f"event: {event}")
+    lines.extend(f"data: {line}" for line in str(data).splitlines() or [""])
+    return "\n".join(lines) + "\n\n"
+
+
+def _since(*candidates) -> int:
+    """The cursor to start from: `Last-Event-ID` first, then `?since=`, then 0.
+
+    The header wins because the browser sets it from the last frame it actually
+    received, which is later than whatever the page was rendered with. A
+    candidate that will not parse falls through to the next rather than failing
+    the request: a reconnect carrying a mangled header should resume from the
+    page's own cursor, not 400.
+    """
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            return max(int(raw), 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _stream(
+    poll,
+    render,
+    since: int,
+    sleep,
+    interval: float = TAIL_INTERVAL_SECONDS,
+    keepalive: float = TAIL_KEEPALIVE_SECONDS,
+    limit: int = TAIL_LIMIT,
+    retry_ms: int = TAIL_RETRY_MS,
+):
+    """The loop: poll, frame what is new, sleep, repeat — one per connection.
+
+    Everything it needs is an argument, which is what lets a test drive it with
+    no server, no socket and no real waiting: `poll` takes a cursor and answers
+    a `Region`, `render` turns one row into the `<tr>` the page already draws,
+    and `sleep` is the clock. Nothing in here reaches for `requests`, for `time`
+    or for a request context.
+
+    Two departures from the sketch in `docs/plans/board.md`, both deliberate and
+    both recorded in `docs/decisions.md` ADR 13:
+
+      - The `gap` frame carries no `id:` and is emitted *before* the batch it
+        describes. An `id:` on a frame that is not a row would commit
+        `Last-Event-ID` past rows this connection has not sent yet, so a drop
+        immediately after it loses them.
+      - A failed poll ends the stream with one `stalled` frame carrying
+        `Region.error` verbatim, rather than retrying in here. The browser's own
+        reconnect is the Retrying state, and the stream gets no second
+        vocabulary for a failure the board already has words for.
+    """
+    yield f"retry: {retry_ms}\n\n"
+    forwarded: set[str] = set()
+    quiet = 0.0
+    while True:
+        region = poll(since)
+        if not region.ok:
+            yield _frame(region.error, event="stalled")
+            return
+        rows = list(region.rows or [])
+        spoke = False
+        for warning in region.warnings:
+            # Once per connection, by exact text: the api repeats a standing
+            # warning on every answer, and a tail that forwards it every two
+            # seconds is the one that teaches an operator to stop reading them.
+            if warning not in forwarded:
+                forwarded.add(warning)
+                yield _frame(warning, event="warning")
+                spoke = True
+        if len(rows) >= limit:
+            yield _frame(GAP_SENTENCE.format(count=len(rows)), event="gap")
+            spoke = True
+        for row in reversed(rows):
+            # `list_events` answers `id DESC`; a page that prepends would show a
+            # burst backwards. Oldest first, so prepending replays the order.
+            yield _frame(render(row), event="row", event_id=row["id"])
+            spoke = True
+        if rows:
+            since = rows[0]["id"]
+        if spoke:
+            quiet = 0.0
+        elif quiet >= keepalive:
+            yield KEEPALIVE
+            quiet = 0.0
+        sleep(interval)
+        quiet += interval
 
 
 # --- the one boundary -----------------------------------------------------

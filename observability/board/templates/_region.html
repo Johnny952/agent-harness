@@ -35,3 +35,15 @@
 {#- A timestamp: relative in the cell, absolute in the title. One answers the
     question the operator has, the other the one they have next, in a log. -#}
 {% macro when(iso) %}<span title="{{ iso or '' }}">{{ iso | age }}</span>{% endmacro %}
+
+{# One row of the events table, and the only HTML the tail's script inserts.
+   Here and not in events.html because `/events/stream` renders it too, one
+   frame at a time: a tailed row and a rendered row are the same markup by
+   construction. Escaping stays where it already was — Jinja's autoescape —
+   because the transport changed and the rule did not. #}
+{% macro event_row(event) %}<tr>
+  <td>{{ when(event.created_at) }}</td>
+  <td><a href="{{ url_for('events', source_app=event.source_app) }}">{{ event.source_app }}</a></td>
+  <td>{{ event.event_type }}</td>
+  <td>{{ event.payload | payload }}</td>
+</tr>{% endmacro %}

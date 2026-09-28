@@ -1,39 +1,107 @@
 {% extends "layout.html" %}
-{% from "_region.html" import region, when %}
+{% from "_region.html" import region, when, event_row %}
 {% block title %}events{% endblock %}
-{#
-  The event log, newest first, filterable by source_app. What the deleted
-  dashboard showed, with the filter it never had and the states it never had.
-#}
 {% block main %}
 
-<h2>events</h2>
-{# The only form on the board, and its method is `get`: a form that navigates is
-   a navigation, not a write. Nothing on this page writes — no action, no
-   disabled control previewing Phase 4, because a greyed-out button is a lie
-   about what exists. #}
+<h2 id="tail-heading">events</h2>
 <form method="get" action="{{ url_for('events') }}">
   <label for="source_app">agent</label>
   <input id="source_app" name="source_app" value="{{ source_app or '' }}" placeholder="agent-cuenta1">
   <button type="submit">filter</button>
   {% if source_app %}<a href="{{ url_for('events') }}">clear</a>{% endif %}
 </form>
-{# An empty region under a filter is not "no events yet": the same sentence the
-   task screen uses for one agent's window says which filter came back empty. #}
 {% call region(events, ("no events from " ~ source_app ~ " yet") if source_app else EMPTY_EVENTS) %}
 <table>
   <thead><tr><th>when</th><th>agent</th><th>event</th><th>payload</th></tr></thead>
-  <tbody>
+  {#- The id is on the tbody and not on the table: the tail prepends rows and
+      has no business with the header, and every screen's table stays the same
+      bare `<table>` the rest of the board renders. -#}
+  <tbody id="tail-rows">
     {% for event in events.rows %}
-    <tr>
-      <td>{{ when(event.created_at) }}</td>
-      <td><a href="{{ url_for('events', source_app=event.source_app) }}">{{ event.source_app }}</a></td>
-      <td>{{ event.event_type }}</td>
-      <td>{{ event.payload | payload }}</td>
-    </tr>
+    {{ event_row(event) }}
     {% endfor %}
   </tbody>
 </table>
 {% endcall %}
+
+{#- The board's first script, and it stays here: inline, no static/, no build
+    step, because a package.json on this service is the thing `docs/charter.md`
+    C-7 rules out. It adds rows the server rendered and reads nothing of the
+    api — the only network it opens is the EventSource below.
+
+    With this element deleted the page above is Phase 2's page in full, which
+    `tests/observability/test_board.py` asserts rather than promises. -#}
+{% set tail_since = events.rows[0].id if events.ok and events.rows else 0 %}
+<script>
+(function () {
+  var rows = document.getElementById("tail-rows");
+  var heading = document.getElementById("tail-heading");
+  // No table means an empty or failed region: there is nothing to tail onto,
+  // and the region already says why in its own words.
+  if (!rows || !heading) { return; }
+
+  var asOf = {{ as_of | tojson }};
+  var cap = {{ EVENTS_LIMIT | tojson }};
+  var url = {{ url_for('events_stream', since=tail_since, source_app=source_app) | tojson }};
+  var added = 0;
+  var notices = null;
+
+  // The mark is built here rather than served in the HTML so that a browser
+  // that never runs this shows no stream state at all, which is the truth.
+  var mark = document.createElement("span");
+  heading.appendChild(document.createTextNode(" "));
+  heading.appendChild(mark);
+
+  function say(text, stale) {
+    mark.textContent = text;
+    mark.className = stale ? "bad" : "stamp";
+  }
+
+  // No second clock in the browser (docs/decisions.md ADR 8): what the page can
+  // say for itself is the stamp the server rendered plus how many rows this
+  // connection has added since.
+  function tailed() { return added ? " + " + added + " tailed" : ""; }
+
+  function notice(text) {
+    if (!notices) {
+      notices = document.createElement("ul");
+      notices.className = "warnings";
+      rows.parentNode.parentNode.insertBefore(notices, rows.parentNode);
+    }
+    var item = document.createElement("li");
+    // textContent and never innerHTML: the only markup this script inserts is
+    // a row the board itself rendered and escaped.
+    item.textContent = text;
+    notices.appendChild(item);
+  }
+
+  say("connecting");
+  var stream = new EventSource(url);
+
+  stream.onopen = function () { say("live" + tailed()); };
+
+  stream.addEventListener("row", function (e) {
+    rows.insertAdjacentHTML("afterbegin", e.data);
+    added += 1;
+    while (rows.rows.length > cap) { rows.deleteRow(-1); }
+    say("live" + tailed());
+  });
+
+  stream.addEventListener("gap", function (e) { notice(e.data); });
+  stream.addEventListener("warning", function (e) { notice(e.data); });
+  stream.addEventListener("stalled", function (e) { notice(e.data); });
+
+  // EventSource owns the reconnect loop, so there is no reconnect written here
+  // — only a state to report. CONNECTING after an error is the browser already
+  // waiting out its retry; CLOSED is a stream that will not come back.
+  stream.onerror = function () {
+    if (stream.readyState === EventSource.CONNECTING) {
+      say("retrying · as of " + asOf + " UTC" + tailed(), true);
+    } else {
+      say("not live · as of " + asOf + " UTC" + tailed(), true);
+    }
+  };
+})();
+</script>
 
 {% endblock %}

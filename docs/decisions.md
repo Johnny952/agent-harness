@@ -458,3 +458,137 @@ append-only and a superseded sentence with a number pointing past it is worth
 more than a rewritten one. Two numbers now need revisiting when Phase 3 lands: if
 its tail wants more than 1000 rows in one burst it must raise this constant or
 page with `since`, and the second is the honest answer.
+
+## ADR 12 — The live tail terminates on the board, and its frames carry rendered HTML
+
+**Status:** accepted (Phase 3, 2026-09-28).
+
+**Context.** `docs/plans/board.md` "Phase 3" asks for a `/events` page that
+updates itself instead of waiting to be reloaded. Two things about this harness
+decide most of the shape before any code is written. `charter.md` C-7 says the
+board is Flask and Jinja, not Next.js, so there is no bundler, no `static/` and
+no component to hydrate. ADR 7 says the api's bearer token lives in the board's
+environment and reaches no template, and
+`test_the_token_travels_to_the_api_and_never_to_the_page` enforces it.
+
+**Decision.** The stream terminates on the board — `GET /events/stream`, same
+Basic realm as every other route — and not on the api. Three reasons, and the
+first alone decides it:
+
+- `EventSource` cannot set an `Authorization` header. A browser dialling the api
+  directly would have to be handed the api's bearer token, which is the one
+  thing ADR 7's boundary exists to prevent. Same-origin, the browser replays the
+  board's own credentials and holds nothing new.
+- The api's contract is one bounded read per call (ADR 7). A long-lived response
+  is a different contract, and adopting it for one endpoint would make "every
+  api call is bounded" a sentence with an exception in it.
+- `GET /api/events?since=&limit=&source_app=` already *is* the query the loop
+  needs. Nothing had to be added to the api, which is the checkable form of this
+  decision: **Phase 3 changes no file under `observability/api/`.**
+
+What a frame carries follows from ADR 8's "render, do not re-derive": the `data:`
+is the `<tr>` produced by the same Jinja macro `/events` renders its table with,
+one `data:` line per line of it, because a bare newline inside a `data:` value
+ends the frame. A row that arrived on the stream and a row that arrived in the
+page are therefore the same markup by construction rather than by agreement, and
+the escaping is the template's, not a second implementation of it in JavaScript.
+The only markup the script writes is `insertAdjacentHTML("afterbegin", e.data)`
+with the table trimmed back to `EVENTS_LIMIT`; everything else it puts on the
+page goes in through `textContent`.
+
+`id:` is the event's own id — the same integer `?since=` takes — so the browser
+returns it as `Last-Event-ID` and a reconnect resumes exactly where it stopped,
+with no clock on either side. `retry:` is sent once at the top and `EventSource`
+owns the reconnect loop; the page reimplements neither. Configuration is
+nothing: five module constants, per ADR 9's reasoning that this service mounts no
+`config.yaml`.
+
+One cost is paid explicitly. Werkzeug's dev server is threaded, so one open tail
+is one held thread for as long as a tab is open. `MAX_TAIL_CLIENTS = 4` with a
+503 and a sentence over the cap, because a cap that fails open is a thread leak;
+a refused connection holds no slot, and a finished one gives its slot back in a
+`finally`.
+
+**Consequences.** This is the board's first `<script>`, inline in `events.html`.
+The line that holds is that it is *one* element and nothing else: delete it and
+Phase 2's page is still there, table and filter and stamp, which is a test and
+not a promise. The moment a second script wants to exist, the question of a
+`static/` directory is open again, and that is the point to answer it rather
+than growing the inline block.
+
+`test_the_token_travels_to_the_api_and_never_to_the_page` asserts `"<script"
+not in html` on route `/` only, and `/events` now has one. The narrower
+assertions — one `EventSource`, no `fetch(`, no `XMLHttpRequest` — are what
+carry the same guarantee on the page that gained a script, and they are the ones
+to keep honest if the script ever grows.
+
+The stream states the page shows — `connecting`, `live`, `retrying`, `not live`,
+the last two carrying the server's stamp — sit *over* an already-resolved region
+and do not reopen ADR 6's "three states per region, no Loading": the table is
+rendered before the connection is attempted, and the stream's state is about the
+tail, not about the data. The mark is built by the script rather than served in
+the HTML, so a browser that never runs it shows no stream state at all, which is
+the truth.
+
+That distinction is what the keepalive is for — a dead tail and a quiet harness
+are the same picture, and a comment frame every fifteen seconds is what makes
+`live` a fact. It fires no event in the browser; its real job is the socket
+write, which is what fails when the client is gone.
+
+## ADR 13 — What the tail does with a full poll and with a failed one
+
+**Status:** accepted (Phase 3, 2026-09-28).
+
+**Context.** `docs/plans/board.md` "Phase 3" sketches the loop, and the
+implementation departs from that sketch twice. Both departures are about the
+same thing — what the stream does when the poll's answer is not simply "here are
+the new rows" — and both are the kind a later task would undo without knowing it
+was a decision.
+
+**Decision, first departure.** A poll that comes back exactly at `limit` emits an
+`event: gap` frame, and that frame carries **no `id:`** and is emitted **before**
+the batch it describes.
+
+`ORDER BY id DESC LIMIT n` drops the *oldest* of the window, so a full answer may
+have skipped rows between `since` and what it returned. Announced rather than
+swallowed: the alternative is being asked in a month why an event that certainly
+happened is not in the tail. No `id:` because an id on a frame that is not a row
+would commit `Last-Event-ID` past rows this connection has not sent yet — a drop
+immediately after it would lose them. Before the batch because the gap is older
+than everything in the batch, and the page prepends, so emitting it after would
+draw it above rows that predate it.
+
+**Decision, second departure.** A poll that fails ends the stream with one
+`event: stalled` frame carrying `Region.error` verbatim, rather than retrying
+inside the loop.
+
+The board already has words for a failed api call — `_fetch` writes them, ADR 5
+pins their shape — and a stream that retried internally would need a second
+vocabulary for the same failure, plus its own backoff next to the one
+`EventSource` already implements. Ending it hands the retry to the browser,
+which is where `retry:` put it (ADR 12). A failed poll is therefore **not** a
+warning: warnings are the api's, forwarded once per connection by exact text,
+and a failure is a state change the page renders as `retrying`.
+
+**Consequences.** `stalled` is the one frame that means the connection is over,
+and the page renders it in the same notice list as a `gap` or a `warning` — the
+state change is not its job, because the close that follows fires `onerror` and
+the mark goes to `retrying` or `not live` on its own. That is deliberate: the
+three frames all say "something to read", and only the connection says whether
+the tail is alive. The browser then reconnects anyway, which is correct — if the
+api came back, the next connection resumes from `Last-Event-ID` with no repeats;
+if it did not, the page sits in `retrying`, which is true.
+
+The honest hole is that neither departure covers a server that is *hung* rather
+than failing. The socket stays open, the keepalive keeps being written into a
+connection nobody is answering on the far end, and the page keeps saying `live`.
+Nothing here detects that, and nothing should until it bites: the fix, if it
+does, is a named `tick` frame the page can time out on, which costs a state
+machine in the browser that this phase deliberately does not have.
+
+`GAP_SENTENCE` counts the rows that arrived, not the ones that did not: it says
+a poll came back full, never how many events were missed, because what `LIMIT`
+dropped is not knowable from the answer. That is a real limit of the
+announcement, and the reason it ends in "Reload for the full window." rather
+than in a number — a reload re-renders the table from the api, which is the one
+thing that certainly holds the rows the tail skipped.

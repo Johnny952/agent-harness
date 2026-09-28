@@ -800,6 +800,406 @@ def test_an_events_database_that_is_not_there_is_a_warning_over_an_empty_table(
     assert 'class="error"' not in html
 
 
+# --- the live tail --------------------------------------------------------
+
+
+_SCRIPT = re.compile(r"<script>.*?</script>", re.DOTALL)
+
+
+def _region(rows, warnings=()) -> board_app.Region:
+    return board_app.Region("/api/events", rows=list(rows), warnings=tuple(warnings))
+
+
+class _Poll:
+    """`/api/events`, scripted: one recorded answer per call, and every cursor it
+    was asked for, in order.
+
+    Running out answers an error `Region`, which is what ends the stream. That is
+    a prop and not a claim about the api — it is what lets a test spell
+    `list(...)` over a loop that, by design, does not stop.
+    """
+
+    def __init__(self, *answers: board_app.Region) -> None:
+        self._answers = list(answers)
+        self.cursors: list[int] = []
+
+    def __call__(self, cursor: int) -> board_app.Region:
+        self.cursors.append(cursor)
+        if not self._answers:
+            return board_app.Region("/api/events", error="the scripted poll ran out")
+        return self._answers.pop(0)
+
+
+class _Loop:
+    """`_stream`, made finite: one poll, its rows framed, then the end.
+
+    The real loop never returns, and its `sleep` is two real seconds, so the
+    route is exercised with this in its place. What that leaves under test is
+    everything around the loop — the cursor, the auth, the headers, the slot,
+    and the row macro rendering inside a request context — which is the part
+    the route owns.
+    """
+
+    def __init__(self) -> None:
+        self.since: int | None = None
+
+    def __call__(self, poll, render, since, sleep, **bounds):
+        self.since = since
+        region = poll(since)
+        for row in reversed(list(region.rows or [])):
+            yield board_app._frame(render(row), event="row", event_id=row["id"])
+
+
+def _cell(event: dict) -> str:
+    """A row rendered without a template: what the loop does with a row is the
+    subject here, not what the row looks like. The macro gets its own test."""
+    return f"<tr><td>{event['event_type']}</td></tr>"
+
+
+def _tailed(*answers: board_app.Region, since: int = 0, **bounds):
+    """Every frame the loop emits over a scripted set of answers, and no waiting:
+    `sleep` is where the two seconds would have gone."""
+    poll = _Poll(*answers)
+    frames = list(board_app._stream(poll, _cell, since, lambda _: None, **bounds))
+    return frames, poll
+
+
+def _of(frames: list[str], event: str) -> list[str]:
+    return [frame for frame in frames if f"event: {event}\n" in frame]
+
+
+def _data(frame: str) -> str:
+    """A frame's value, put back together the way the browser puts it back
+    together: the `data: ` prefixes off, the newlines between them kept."""
+    return "\n".join(
+        line[len("data: ") :] for line in frame.splitlines() if line.startswith("data: ")
+    )
+
+
+def test_a_value_with_newlines_in_it_is_one_data_line_per_line() -> None:
+    """A bare newline inside a value ends the frame, so a rendered `<tr>` — which
+    has several — has to carry the prefix on each of them or the browser sees a
+    truncated row followed by garbage."""
+    assert board_app._frame("one\ntwo", event="gap") == "event: gap\ndata: one\ndata: two\n\n"
+    assert board_app._frame("") == "data: \n\n"
+
+
+def test_the_first_frame_says_how_long_to_wait_before_reconnecting() -> None:
+    """`retry:` is the server's to set and the browser's to obey: `EventSource`
+    already owns the reconnect loop, so this is said once, at the top, and the
+    page never reimplements it."""
+    frames, _ = _tailed(_region([]))
+
+    assert frames[0] == f"retry: {board_app.TAIL_RETRY_MS}\n\n"
+    assert len([f for f in frames if f.startswith("retry:")]) == 1
+
+
+def test_a_row_frame_carries_the_events_own_id_and_a_rendered_row() -> None:
+    """The id is the event's, not a counter: it is the same integer `?since=`
+    takes, which is what makes the browser's `Last-Event-ID` a resumable cursor
+    rather than a number only this connection understands."""
+    frames, _ = _tailed(_region([_event_row(id=9, event_type="Stop")]))
+
+    assert "id: 9\nevent: row\ndata: <tr><td>Stop</td></tr>\n\n" in frames
+
+
+def test_a_batch_is_emitted_oldest_first_because_the_api_answers_newest_first() -> None:
+    """`list_events` answers `id DESC` and the page prepends each arrival, so a
+    tail that forwarded a batch in the order it arrived would draw a burst
+    backwards."""
+    frames, _ = _tailed(_region([_event_row(id=9), _event_row(id=8), _event_row(id=7)]))
+
+    assert [f.splitlines()[0] for f in _of(frames, "row")] == ["id: 7", "id: 8", "id: 9"]
+
+
+def test_the_next_poll_starts_from_the_newest_id_and_never_from_a_clock() -> None:
+    """`id > last` is the whole cursor. Nothing here compares timestamps, so two
+    events written in the same second cannot hide each other."""
+    _, poll = _tailed(_region([_event_row(id=9), _event_row(id=8)]), since=4)
+
+    assert poll.cursors == [4, 9]
+
+
+def test_a_poll_that_comes_back_full_announces_the_gap_before_the_batch() -> None:
+    """`ORDER BY id DESC LIMIT n` drops the *oldest* of the window, so a poll that
+    came back exactly full may have skipped rows between `since` and what it
+    answered. Announced, not swallowed: the alternative is being asked in a month
+    why an event that happened is not in the tail."""
+    frames, poll = _tailed(_region([_event_row(id=9), _event_row(id=8)]), limit=2)
+
+    gap = frames[1]
+    assert gap == board_app._frame(board_app.GAP_SENTENCE.format(count=2), event="gap")
+    assert not gap.startswith("id:"), "a gap is not a row and must not move Last-Event-ID"
+    assert frames.index(gap) < frames.index(_of(frames, "row")[0])
+    assert poll.cursors == [0, 9], "and the loop advances past the gap rather than re-reading it"
+
+
+def test_a_warning_from_the_tails_own_poll_is_forwarded_once_per_connection() -> None:
+    """The api repeats a standing warning on every answer. A tail that forwarded
+    the same sentence every two seconds is the one that teaches an operator to
+    stop reading them — so it is suppressed by its exact text, and a genuinely
+    new one still gets through."""
+    standing = "/events/events.db: no events database yet"
+    frames, _ = _tailed(
+        _region([], [standing]),
+        _region([], [standing]),
+        _region([], [standing, "and now a second thing"]),
+    )
+
+    assert [_data(f) for f in _of(frames, "warning")] == [standing, "and now a second thing"]
+
+
+def test_an_idle_connection_says_so_and_a_busy_one_has_nothing_to_prove() -> None:
+    """The keepalive is what makes Live a fact rather than an assumption: a dead
+    tail and a quiet harness are the same picture, and this is the difference.
+    It is a comment frame, so the browser fires no event for it — the point is
+    the socket write, which is what fails when the client is gone."""
+    idle, _ = _tailed(_region([]), _region([]), _region([]), keepalive=4)
+    busy, _ = _tailed(*[_region([_event_row(id=n)]) for n in (1, 2, 3)], keepalive=4)
+
+    assert idle.count(board_app.KEEPALIVE) == 1
+    assert board_app.KEEPALIVE not in busy
+
+
+def test_a_failed_poll_ends_the_stream_in_the_boards_own_words() -> None:
+    """A poll that fails is not a warning and gets no new vocabulary: it is the
+    sentence `_fetch` already writes, said once, and then the browser's own
+    reconnect is the Retrying state on the page."""
+    frames, poll = _tailed(
+        _region([]), board_app.Region("/api/events", error="GET /api/events → 502")
+    )
+
+    assert frames[-1] == "event: stalled\ndata: GET /api/events → 502\n\n"
+    assert poll.cursors == [0, 0], "and it stops polling rather than retrying in the loop"
+
+
+def test_a_client_that_goes_away_stops_the_loop() -> None:
+    """Werkzeug serves each connection on its own thread and holds it for as long
+    as the tab is open. A loop that kept polling into a closed socket would hold
+    that thread and a database read for a tab closed an hour ago."""
+    poll = _Poll(*[_region([_event_row(id=n)]) for n in range(1, 9)])
+    tail = board_app._stream(poll, _cell, 0, lambda _: None)
+
+    next(tail)  # retry:
+    next(tail)  # the first row
+    tail.close()
+
+    with pytest.raises(StopIteration):
+        next(tail)
+    assert poll.cursors == [0], "one poll, and no more after the close"
+
+
+@pytest.mark.parametrize(
+    "header, query, expected",
+    [
+        ("41", "9", 41),
+        (None, "9", 9),
+        (None, None, 0),
+        ("not a number", "9", 9),
+        ("-3", None, 0),
+    ],
+)
+def test_the_cursor_is_the_header_then_the_query_string_then_the_beginning(
+    header: str | None, query: str | None, expected: int
+) -> None:
+    """`Last-Event-ID` wins because the browser sets it from the last frame it
+    actually received, which is never older than the id the page was rendered
+    with. A mangled one falls through instead of 400ing: a reconnect should
+    resume from the page's cursor, not fail."""
+    assert board_app._since(header, query) == expected
+
+
+def test_the_stream_starts_where_the_page_ended_and_asks_the_api_for_the_rest(
+    monkeypatch,
+) -> None:
+    api = _Api(events=_envelope([_event_row(id=12)]))
+    loop = _Loop()
+    monkeypatch.setattr(board_app, "_stream", loop)
+
+    resp = _client(monkeypatch, api).get("/events/stream?since=11", headers=_auth())
+    body = resp.get_data(as_text=True)
+
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/event-stream"
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["X-Accel-Buffering"] == "no"
+    assert loop.since == 11
+    assert api.params_for("/api/events") == {"since": 11, "limit": board_app.TAIL_LIMIT}
+    assert body.startswith("id: 12\nevent: row\ndata: <tr>")
+
+
+def test_the_stream_asks_through_the_same_filter_the_page_is_looking_through(
+    monkeypatch,
+) -> None:
+    api = _Api(events=_envelope([]))
+    monkeypatch.setattr(board_app, "_stream", _Loop())
+
+    _client(monkeypatch, api).get(
+        "/events/stream?since=0&source_app=agent-cuenta2", headers=_auth()
+    ).get_data()
+
+    assert api.params_for("/api/events") == {
+        "since": 0,
+        "source_app": "agent-cuenta2",
+        "limit": board_app.TAIL_LIMIT,
+    }
+
+
+def test_last_event_id_beats_the_query_string_on_a_reconnect(monkeypatch) -> None:
+    """Which is the whole reason a reconnect does not repeat rows: the query
+    string is frozen at the moment the page rendered, the header is not."""
+    api = _Api(events=_envelope([]))
+    loop = _Loop()
+    monkeypatch.setattr(board_app, "_stream", loop)
+
+    _client(monkeypatch, api).get(
+        "/events/stream?since=11", headers={**_auth(), "Last-Event-ID": "41"}
+    ).get_data()
+
+    assert loop.since == 41
+    assert api.params_for("/api/events")["since"] == 41
+
+
+def test_a_tailed_row_is_the_same_html_the_page_draws(monkeypatch) -> None:
+    """Rendered server-side by the events template's own macro, so a row that
+    arrived on the stream and a row that arrived in the page are the same markup
+    by construction and not by agreement: "render, do not re-derive"
+    (`docs/decisions.md` ADR 8) is not suspended because the transport changed."""
+    api = _Api(events=_envelope([_event_row(id=12, event_type="Stop")]))
+    monkeypatch.setattr(board_app, "_stream", _Loop())
+
+    stream = _client(monkeypatch, api).get("/events/stream", headers=_auth())
+    framed = stream.get_data(as_text=True)
+    rendered = _page(monkeypatch, api, "/events")
+
+    row = _data(framed)
+    assert row.startswith("<tr>") and row.endswith("</tr>")
+    assert "agent-cuenta1" in row and "Stop" in row
+    assert row in rendered
+
+
+def test_a_tailed_cell_is_escaped_the_way_every_other_cell_is(monkeypatch) -> None:
+    """The macro escapes because it is a template; the frame does nothing to
+    undo that. A payload is attacker-shaped data — a hook writes whatever the
+    tool was called with."""
+    api = _Api(events=_envelope([_event_row(event_type="<script>alert(1)</script>")]))
+    monkeypatch.setattr(board_app, "_stream", _Loop())
+
+    stream = _client(monkeypatch, api).get("/events/stream", headers=_auth())
+    framed = stream.get_data(as_text=True)
+
+    assert "<script>alert(1)</script>" not in framed
+    assert "&lt;script&gt;" in framed
+
+
+def test_the_stream_asks_for_the_same_credential_as_every_other_route(monkeypatch) -> None:
+    """Which is the point of terminating it here: the browser replays the realm's
+    credentials on an `EventSource` because it is same-origin, and never holds
+    the api's token — `EventSource` cannot set an `Authorization` header at
+    all."""
+    client = _client(monkeypatch, _Api())
+
+    resp = client.get("/events/stream")
+
+    assert resp.status_code == 401
+    assert client.application.tails.open == 0, "and a refused connection holds no slot"
+
+
+def test_over_the_cap_the_board_says_so_and_the_page_keeps_its_snapshot(monkeypatch) -> None:
+    """A cap that fails open is a thread leak on a dev server: one open tail is
+    one held thread. 503 and a sentence, so the page can say Off and stay on the
+    rows it already has."""
+    client = _client(monkeypatch, _Api())
+    for _ in range(board_app.MAX_TAIL_CLIENTS):
+        assert client.application.tails.take()
+
+    resp = client.get("/events/stream", headers=_auth())
+
+    assert resp.status_code == 503
+    assert board_app.OVER_CAP_SENTENCE in resp.get_data(as_text=True)
+
+
+def test_a_finished_stream_gives_its_slot_back(monkeypatch) -> None:
+    """Otherwise the cap is a countdown to a board that answers 503 forever,
+    which is the same outage it exists to prevent."""
+    client = _client(monkeypatch, _Api(events=_envelope([])))
+    monkeypatch.setattr(board_app, "_stream", _Loop())
+
+    for _ in range(board_app.MAX_TAIL_CLIENTS + 2):
+        resp = client.get("/events/stream", headers=_auth())
+        assert resp.status_code == 200
+        resp.get_data()
+
+    assert client.application.tails.open == 0
+
+
+def test_the_page_hands_the_tail_the_newest_id_it_rendered(monkeypatch) -> None:
+    """The handoff from snapshot to stream is one integer, and it is the id of
+    the top row — so the first frame is the first event the page does not already
+    show."""
+    api = _Api(events=_envelope([_event_row(id=12), _event_row(id=11)]))
+
+    html = _page(monkeypatch, api, "/events")
+
+    assert "/events/stream?since=12" in html
+
+
+def test_a_page_with_nothing_on_it_tails_from_the_beginning(monkeypatch) -> None:
+    """`since=0` and not an absent `since`: `id > 0` is every row there will ever
+    be, which is what a first connection to a harness that has never run wants."""
+    api = _Api(events=_envelope([]))
+
+    html = _page(monkeypatch, api, "/events")
+
+    assert "/events/stream?since=0" in html
+
+
+def test_the_tail_inherits_the_filter_the_page_is_looking_through(monkeypatch) -> None:
+    api = _Api(events=_envelope([_event_row(id=12)]))
+
+    html = _page(monkeypatch, api, "/events?source_app=agent-cuenta2")
+
+    assert "/events/stream?since=12" in html
+    assert "source_app=agent-cuenta2" in html
+
+
+def test_with_the_script_removed_the_events_page_is_the_one_phase_2_rendered(
+    monkeypatch,
+) -> None:
+    """The no-JS case is checked and not promised: delete the one element this
+    phase added and what is left is Phase 2's screen, table and filter and stamp
+    and all."""
+    api = _Api(events=_envelope([_event_row(id=12, event_type="Stop")]))
+
+    without = _SCRIPT.sub("", _page(monkeypatch, api, "/events"))
+
+    assert "<script" not in without, "the tail is one element and nothing else"
+    assert "EventSource" not in without
+    assert "<table>" in without
+    assert "<th>when</th>" in without
+    assert "Stop" in without
+    assert 'method="get"' in without
+    assert "as of" in without
+
+
+def test_the_script_opens_one_connection_and_never_talks_to_the_api(monkeypatch) -> None:
+    """The browser holds the board's credential and not the api's, which is the
+    first reason this stream terminates on the board at all. A script that
+    fetched anything would be reaching for a token it must never have — the thing
+    `test_the_token_travels_to_the_api_and_never_to_the_page` exists to
+    prevent."""
+    html = _page(monkeypatch, _Api(events=_envelope([_event_row()])), "/events")
+    script = _SCRIPT.search(html).group(0)
+
+    assert script.count("new EventSource(") == 1
+    assert "fetch(" not in script
+    assert "XMLHttpRequest" not in script
+    # The only markup it inserts is a row the board rendered and escaped, and the
+    # only number it knows is the one the page was capped at.
+    assert ".innerHTML" not in script
+    assert f"var cap = {board_app.EVENTS_LIMIT};" in script
+
+
 # --- every page -----------------------------------------------------------
 
 
