@@ -41,11 +41,23 @@ hand into `tests/observability/test_auth.py`. Phase 3 is specified below and
 built, both by hand and out of cycle rather than dispatched, so there is no
 `docs/implementations/` record for it: the spec section was written first, then
 `/events/stream` and the page's one inline script, with ADRs 12 and 13 as the
-record of what it decided. Its *Done when* is met on the tests and on neither
-of its two by-hand checks: the cheap one has not been run, and the gate — one
-real dispatch watched end to end from `/events` — is by C-4 a human's to
-authorize, not this plan's to schedule, and is what the table above makes a
-precondition for Phases 4–6. Phases 4–6 have a row in the table and no spec.
+record of what it decided. Its *Done when* is met on the tests and on the
+cheaper of its two by-hand checks, run against the running stack on 2026-09-28
+with one `curl -N` connection standing in for the browser's `EventSource`:
+three events posted to the collector arrived as `row` frames — `retry: 3000`
+once at the top, ids ascending, each `data:` line the `<tr>` the board itself
+rendered — and with the api stopped the stream closed on one `stalled` frame
+carrying the `ConnectionError` verbatim, after which a reconnect sending
+`Last-Event-ID` returned only the two rows posted in between and repeated none.
+That is the whole server half of the check; the labels the page's script
+writes on top of it — `retrying · as of <stamp>` and the tailed count — were
+not watched in a browser and rest on their unit tests. Running any of it meant
+rebuilding the board image and recreating the container first: the board bakes
+its code in and has no bind mount, so a container left running keeps serving
+whatever it was built with. The gate — one real dispatch watched end to end
+from `/events` — is by C-4 a human's to authorize, not this plan's to schedule,
+and is what the table above makes a precondition for Phases 4–6. Phases 4–6
+have a row in the table and no spec.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
 used, and the surface a human gets is the one this plan built: `/`,
