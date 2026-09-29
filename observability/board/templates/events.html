@@ -26,8 +26,9 @@
 
 {#- The board's first script, and it stays here: inline, no static/, no build
     step, because a package.json on this service is the thing `docs/charter.md`
-    C-7 rules out. It adds rows the server rendered and reads nothing of the
-    api — the only network it opens is the EventSource below.
+    C-8 still rules out — it bought Node for `front/` alone. It adds rows the
+    server rendered and reads nothing of the api — the only network it opens is
+    the EventSource below.
 
     With this element deleted the page above is Phase 2's page in full, which
     `tests/observability/test_board.py` asserts rather than promises. -#}

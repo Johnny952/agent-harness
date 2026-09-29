@@ -144,7 +144,7 @@ written is what a later task, reading a trigger, would open.
 
 ---
 
-### C-7 — The board is Flask and Jinja, not Next.js
+### ~~C-7 — The board is Flask and Jinja, not Next.js~~ — superseded by C-8
 
 **Ruled:** 2026-09-26, answering the open question in *The toolchain is the one
 question this spec does not answer* in
@@ -170,3 +170,47 @@ the property that makes this ruling cheap to reverse. If phases 4–6 are
 approved, the replacement is written against the same specification; the
 screens, the states, the warnings and the exclusions do not change, and only
 *Where it runs* and *Configuration* name a toolchain at all.
+
+---
+
+### C-8 — The console is the front in `front/`, not the Flask board
+
+**Ruled:** 2026-09-28, superseding C-7.
+**Trigger:** you are building, extending or containerising the console, or you
+are about to add a `package.json`, a lockfile or a Node build step to this
+repo.
+
+C-7 deferred Node until a screen needed it, and priced that screen at Phase 5.
+The price has already been paid: `front/` is a TanStack Start app, written
+against these plans — the five roles, the four account states, the four gate
+names, the handoff envelope and its byte budgets, the six dispatcher verbs, and
+a queue with an operator and an agent as its two producers. It covers Phases 2
+through 6 and the conversational channel that Phase 5 was going to need. The
+question C-7 answered was whether to *build* a Node console; the question now is
+whether to *discard* one, and the answer is no.
+
+So Node enters this repo: a lockfile, a build step, a CVE surface and a fourth
+service on a Node base image. That cost is accepted, not discovered later.
+
+What does **not** change, because it was never about the toolchain:
+
+- The console is an HTTP client of the api and nothing else. No volumes, no
+  `.hive/`, no events database, no Docker socket. C-7's closing paragraph holds
+  word for word, and it is what makes the console replaceable a second time.
+- Actions reach the dispatcher through a queue drained by a worker. A web
+  process that can reach the socket is root on the host for anyone who reaches
+  the page, and no deadline changes that.
+- Nothing after Phase 3 is *implemented* before Phase 3 has run against a real
+  dispatch. Writing the specs, the ADRs and the endpoint contracts is not
+  implementation and does not wait; building Phase 4's queue is and does.
+
+`observability/board/` stays until the front serves the four screens it
+duplicates — tasks, task detail, debt and tail — against the real api, and is
+retired in the same task that closes the last of them. Until that task, it is
+the reference: where the two disagree about what a screen should say, the Flask
+board is right, because it has run.
+
+Two things this ruling does not decide, and no role may read into it: whether
+the front's chat dock becomes a second interactive session — C-1 says the
+conversation is the only one, and reconciling them is a later ruling, not an
+implementation detail — and whether `front/` keeps its Lovable round-trip.

@@ -59,6 +59,21 @@ from `/events` — is by C-4 a human's to authorize, not this plan's to schedule
 and is what the table above makes a precondition for Phases 4–6. Phases 4–6
 have a row in the table and no spec.
 
+**Phases 4–6 are no longer this plan's to build alone.** On 2026-09-28
+[`docs/charter.md`](../charter.md) C-8 superseded C-7 and named `front/` — a
+TanStack Start app written against these plans — the console. What that changes
+here is the implementer and the toolchain, not the phases: the numbering, the
+screens, the states, the warnings and the queue-not-a-socket rule below are all
+unchanged, and Phase 4's spec is still the spec whoever builds it works from.
+What it changes is that Phases 2 and 3 now have two implementations, one shipped
+and one to be wired, and that Phases 4–6 will be built in TypeScript against
+the same endpoints rather than in Jinja. `observability/board/` stays until the
+front serves its four screens against the real api, and is the tie-breaking
+reference until then — where the two disagree about what a screen should say,
+the Flask board is right, because it has run. The integration is planned in
+[`docs/plans/front.md`](front.md); this file stays the specification of what the
+phases *are*.
+
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
 used, and the surface a human gets is the one this plan built: `/`,
 `/tasks/<id>`, `/debt` and `/events` on `127.0.0.1:8790`, over the read API on
@@ -130,13 +145,20 @@ analytics, and this has one writer.
 who reaches the page. A row in a table and a worker that runs `dispatch` is the
 same feature with a blast radius.
 
-**Node is a real cost.** Next.js adds a toolchain, a lockfile and a CVE surface
-to a repo that is Python and Docker. It pays for itself at Phase 4 and not
-before. If phases 4–6 are not going to happen, Flask plus htmx delivers phases
-1–3 in about a day with no new toolchain. Ruled in
-[`docs/charter.md`](../charter.md) C-7, which keeps the reasoning and moves the
-trigger from Phase 4 to Phase 5: Phase 4's actions are a form post and a queue,
-which Jinja serves.
+**Node is a real cost, and it has been paid.** A client framework adds a
+toolchain, a lockfile and a CVE surface to a repo that is otherwise Python and
+Docker. That was the argument for deferring it, and it was right for as long as
+the choice was whether to *build* a Node console: C-7 ruled Flask and Jinja and
+moved the trigger to Phase 5, and Phases 1–3 duly shipped in about a day with
+no new toolchain. `front/` changed the question. It exists, it was written
+against these plans, and the choice became whether to *discard* a Node console
+rather than whether to start one — so [`docs/charter.md`](../charter.md) C-8
+supersedes C-7 and accepts the cost explicitly rather than discovering it later.
+The cost estimate above was not wrong; it was outbid.
+
+What survives the reversal unchanged is everything the cost was protecting:
+`observability/` stays Python, a Node app lives in its own top-level directory,
+and the console remains an HTTP client of the api and nothing else.
 
 ## Phases
 
@@ -144,15 +166,25 @@ which Jinja serves.
 |---|---|---|---|
 | 0 | `LocalBoardClient` behind the existing seam | ~½ day | none — new code behind an unchanged interface |
 | 1 | Read API in Python: `/api/tasks`, `/api/accounts`, `/api/events`, `/api/debt` | ~½ day | none — reads only |
-| 2 | Read-only board over those endpoints | ½ day | none — C-7 rules it Flask and Jinja |
+| 2 | Read-only board over those endpoints | ½ day | none — built Flask and Jinja under C-7 |
 | 3 | Live tail: SSE over `events` by `id > last` | ½–1 day | low |
 | 4 | Actions from the UI: `run-task`, `merge-task`, `cleanup-task` | 2–3 days | privilege — queue + worker, never a mounted socket |
 | 5 | Live execution timeline: `--output-format stream-json`, incremental `Popen` | 3–5 days | **highest** — touches the dispatcher's critical path |
 | 6 | Per-worktree diff and merge review | 2–3 days | medium |
 
 Phases 0–3 are the useful subtotal: 2–2½ days for a board that shows the truth.
-Phases 4–6 are another 7–11 days and turn it into a control surface. Nothing
-after Phase 3 should start before Phase 3 has run against a real dispatch.
+Phases 4–6 are another 7–11 days and turn it into a control surface. The
+effort column prices them in Jinja, which is no longer who builds them; treat
+those three rows as sizing the *work*, not the hours, now that `front/` already
+carries a draft of each.
+
+**The precondition, as C-8 sharpens it.** Nothing after Phase 3 is
+*implemented* before Phase 3 has run against a real dispatch. C-7's wording was
+"starts", which read as a freeze on the specs too; C-8 says writing the specs,
+the ADRs and the endpoint contracts is not implementation and does not wait,
+while building Phase 4's queue is and does. The gate itself has not moved and
+is unchanged below: one real dispatch watched end to end from `/events`, which
+by C-4 is a human's to authorize.
 
 ## Phase 0 — `LocalBoardClient`
 
@@ -496,6 +528,12 @@ it runs* and *Configuration* name a toolchain at all. That is the property that
 makes C-7 cheap to reverse, and it is why the section is still here instead of
 deleted — a ruling is reversible, and the reasoning has to outlive it.
 
+> **It was reversed, on 2026-09-28, by C-8.** This section is left as written
+> because it is the reason the reversal cost two paragraphs instead of a
+> rewrite: the screens, the states, the warnings and the exclusions specified
+> above did not depend on the toolchain and still do not. A spec that had
+> written Jinja into its state table would have had to be rebuilt here.
+
 ### Where it runs
 
 `observability/board/`, beside `observability/api/`, on the same
@@ -513,6 +551,13 @@ The board is an HTTP client of the api and nothing else — no volumes, no
 this paragraph: a Node app goes in a new top-level `board/` rather than under
 `observability/`, which is Python, and a `package.json` buried inside it would
 muddle that border for every tool and every role that walks the repo.
+
+> **That is what happened, with one name changed.** Under C-8 the Node app is
+> top-level as this paragraph required, but it is `front/`, not `board/`, and
+> it arrived already written rather than being started here. The sentence that
+> mattered held: nothing went under `observability/`, which is still Python and
+> still has no `package.json` anywhere beneath it — a property
+> `tests/observability/test_board.py` asserts, and which C-8 keeps.
 
 ### The screens, verbatim
 
@@ -618,10 +663,23 @@ no exit:
   format, whether the accounts strip wraps — is an ADR in
   [`docs/decisions.md`](../decisions.md): numbered, appended, supersedable.
 - A **screen and its states** go in the phase that builds it, here.
+- A **ruling that is later reversed** keeps both entries readable: C-7 is
+  struck through in the charter and C-8 points back at it. Nothing in this
+  plan's built phases is rewritten to match, because a spec that silently
+  agrees with the present cannot be audited against the past.
 
 There is no separate `docs/ui.md` and there should not be one until a second
 surface exists. A third file whose border with those two is "it is about
 pixels" is a file every role has to guess about.
+
+> **The condition this paragraph set has been met.** `front/` is the second
+> surface, and it renders the same four screens with different affordances, so
+> "which one is right" is now a real question that neither the charter nor an
+> ADR is shaped to answer. Where that file lives, what it is allowed to decide,
+> and whether the arquitecto may block a phase for a missing UI definition the
+> way it may block one for a missing ruling, are settled in
+> [`docs/plans/front.md`](front.md) — not here, because this paragraph's whole
+> point is that the answer is not the board's to give.
 
 ### Required behaviour
 
@@ -784,11 +842,12 @@ poll deleted there."
 
 There is a second reason, and it is the load-bearing one. This plan says
 nothing after Phase 3 starts before Phase 3 has run against a real dispatch,
-and `docs/charter.md` C-7 repeats it. Phase 3 is the first time a human sits
-in front of a live run through this surface rather than through
-`docker logs`. Everything Phase 4 proposes to build — buttons that queue
-actions — is a guess until someone has watched a dispatch go by on this page
-and found out which of them they reached for.
+and `docs/charter.md` C-7 repeats it — C-8 now does, narrowed to
+*implementation*, so the specs may be written while the gate stands. Phase 3
+is the first time a human sits in front of a live run through this surface
+rather than through `docker logs`. Everything Phase 4 proposes to build —
+buttons that queue actions — is a guess until someone has watched a dispatch
+go by on this page and found out which of them they reached for.
 
 ### Where the stream terminates
 
@@ -842,7 +901,9 @@ inline in the events template, beside the one inline `<style>` in
 `layout.html`, and it stays small enough to read in one screen. There is still
 no `static/` directory, no bundler, no build step. C-7 rules on Node for this
 repo; a phase that adds a `package.json` to make the tail work has broken the
-ruling it was supposed to be testing.
+ruling it was supposed to be testing. Under C-8 the rule survives with its
+scope named rather than assumed: Node is now in the repo, and still not under
+`observability/`, which is what the test actually asserts.
 
 Threading matters and should be said out loud: the board runs on Werkzeug's
 development server, which Flask starts threaded, so one open tail is one held
@@ -1126,4 +1187,6 @@ different questions:
     `/events`. This is what this plan and `docs/charter.md` C-7 mean by
     "nothing after Phase 3 starts before Phase 3 has run against a real
     dispatch", and by C-4 it is a human's to authorize, not this phase's to
-    schedule.
+    schedule. C-8 restates it as "nothing after Phase 3 is *implemented*",
+    which leaves this check exactly where it is and only makes explicit that
+    specifying Phases 4–6 was never what it was holding back.

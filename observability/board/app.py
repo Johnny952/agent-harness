@@ -2,10 +2,10 @@
 """The screens a human opens instead of a shell prompt.
 
 Phase 2 of `docs/plans/board.md`. Four routes over the five endpoints Phase 1
-answers, rendered on the server with Jinja — `docs/charter.md` C-7 rules the
-toolchain and no role re-decides it: this repo is Python and Docker, and a
-lockfile plus a build step is bought when a screen needs one (Phase 5's live
-timeline), not before.
+answers, rendered on the server with Jinja — `docs/charter.md` C-8 rules the
+toolchain and no role re-decides it: C-8 superseded C-7 and bought the lockfile
+and the build step for `front/` alone, so this service is Python and Docker
+only, and stays that way until the front reaches parity and retires it.
 
 What makes this service cheap to reason about is what it cannot reach. It is an
 HTTP client of the api and nothing else: no volumes, no `.hive/`, no events

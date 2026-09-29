@@ -436,8 +436,11 @@ EOF
     is the path every run takes and the entries are filed without cards.
   - This no longer waits on an operator. Item 1's debt cards and item 5's
     epic decomposition now depend on Phase 0 of `docs/plans/board.md`,
-    which gives `create_issue` a local implementation. The two things this
-    row wanted to check while a scratch issue existed carry over to it:
+    which gives `create_issue` a local implementation. That phase
+    shipped as `T-008` on 2026-09-26, so the dependency is satisfied:
+    `LocalBoardClient` in `dispatcher/vibe_kanban_client.py` answers
+    all four methods. The two things this row wanted to check while a
+    scratch issue existed carry over to it:
     that the `[debt] ` title prefix survives a round trip, since
     `create_issue` takes no label argument and the prefix is the label,
     and which field the reply carries the id in, because that id is what
@@ -471,7 +474,8 @@ The first real `run-task`, with costs capped.
 - **Task.** Passed on the command line now that `--description` exists;
   no hand-seeded task file. No card is created alongside it: V2.6 closed
   FAIL, so `NullKanbanClient` is the path this run takes, and the card
-  half comes back with Phase 0 of `docs/plans/board.md`.
+  half came back with Phase 0 of `docs/plans/board.md`, shipped as
+  `T-008`; a re-run configured against `local_board` would create one.
 - **Run:**
   ```bash
   dispatch run-task --task-id T-001 --project scratch --description "Add a
@@ -837,6 +841,18 @@ logins.
      quota as the scarce resource, `depends_on` as a graph, and heartbeat
      TTL locks), and because the seam makes the first phase half a day.
      Phase 0 is queued as `T-008`, to be built by the harness itself.
+     Phases 0-3 shipped between 2026-09-26 and 2026-09-28: the local
+     board client (`T-008`), the read API (`T-009`), the four
+     server-rendered screens that replaced the events dashboard
+     (`T-010`), and a live tail over `/api/events`. On 2026-09-28
+     `docs/charter.md` C-8 superseded C-7 and named `front/` — a
+     TanStack Start app written against these same plans — the console
+     this repo ships, so Phases 4-6 are built there rather than in
+     Jinja. What that reverses is the toolchain, not this answer:
+     implement rather than adopt, in phases, against the four-method
+     seam, all still hold, and the board stays as the tie-breaking
+     reference until the front serves those screens against the real
+     api.
    - Fixing README step 5's host run (confirmed, V0.3: `state_dir`/
      `hive_tasks_dir` are container paths and `vibe-kanban`/`collector`
      only resolve on `ia_harness_net`): drop it, or document a host-side
@@ -854,9 +870,11 @@ logins.
      the task file's frontmatter (not the body, which accumulates phase
      summaries) and embedded whole in every role's prompt; a task with no
      description anywhere is a usage error instead of four phases of
-     quota. Seeding it from a board (V2.5) stays open, and now waits on
+     quota. Seeding it from a board (V2.5) stays open, and waited on
      Phase 0 of `docs/plans/board.md` rather than on a cloud login: the
-     description round trip is one of that phase's tests.
+     description round trip is one of that phase's tests. Phase 0
+     shipped as `T-008`, so what is left is wiring `run-task` to read a
+     description off a card, not a board that can hold one.
    - **Roles don't see each other's code.** Fixed 2026-09-19, as
      designed: one branch per task (`agent/task/<task-id>`), one shared
      worktree on it for the writing roles (arquitecto, implementador), a
@@ -1631,13 +1649,15 @@ logins.
   and `mark_orphaned` only runs on a cycle that ends without merging,
   which V4.1 is the cheapest way to produce.
 - Changes to `dispatcher/debt.py`: V3, and — for the card half — a board
-  that answers. V2.6 was that board and closed FAIL, so the check now
-  waits on Phase 0 of `docs/plans/board.md`. The unit tests fake both
-  `create_issue` and `docker exec`, so what they cannot show is whether a
-  board accepts a `[debt] ` title and answers with an id the index row can
-  carry, nor whether the dedupe read finds `docs/debt/README.md` in the
-  writers' worktree of a project that actually has one — a read that fails
-  there costs a duplicate card and says so only in the log.
+  that answers. V2.6 was that board and closed FAIL, so the check moved
+  to Phase 0 of `docs/plans/board.md`, which shipped as `T-008`: run it
+  against `local_board` rather than the retired service. The unit tests
+  fake both `create_issue` and `docker exec`, so what they cannot show is
+  whether a board accepts a `[debt] ` title and answers with an id the
+  index row can carry, nor whether the dedupe read finds
+  `docs/debt/README.md` in the writers' worktree of a project that
+  actually has one — a read that fails there costs a duplicate card and
+  says so only in the log.
 - `mapping_enabled` turned on for the first time: V3 again, against a
   project with no `docs/README.md`. The mapper is the only phase that
   ignores `default_model`, and the only one with a turn budget, so its
@@ -1655,11 +1675,11 @@ depends on. A gate that fails reshapes the item before any design work.
 
 | Item (README *Prioritized*) | Run first | Notes |
 |---|---|---|
-| 1. Project memory | D1, D5, board Phase 0 | Debt cards need `create_issue`, which V2.6 closed FAIL — `docs/plans/board.md` supplies it locally; D5 sharpens the test gate rather than blocking it |
+| 1. Project memory | D1, D5 | Debt cards need `create_issue`, which V2.6 closed FAIL — `docs/plans/board.md` Phase 0 supplied it locally and shipped as `T-008`, so that gate is closed; D5 sharpens the test gate rather than blocking it |
 | 2. Token economy | V1.1 fields, D2, D3 | D3 only if the caveman wrap is adopted |
 | 3. Unattended 24/7 operation | V4.2, V4.4, D2 | V4.2 sizes the orphan-phase race; D2 gives machine-readable reset times |
 | 4. Per-role model selection | Item 2's usage records | Data-driven split, not a guess |
-| 5. Task profiles | D4, D5, D6, board Phase 0 | Epic decomposition needs `create_issue`, now Phase 0's to provide |
+| 5. Task profiles | D4, D5, D6 | Epic decomposition needs `create_issue`, which Phase 0 provided as `T-008` |
 | 6. Observability and hardening | V0.5, V0.6b | Note: the dispatcher mounts `claude_shared` and `docker.sock` |
 | 7. Code-intelligence tooling | D4 (for `--mcp-config`), D7 | Memory headroom for indexers, as in D6; D7 sizes the per-worktree index |
 | 8. Mid-phase compaction | — | Only if V3 or stage 1 runs show long phases failing |

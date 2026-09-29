@@ -286,6 +286,15 @@ Observability collector (SQLite/WAL) → read API → authenticated board (Tails
   the states, the token, the clock and the project it reads. It replaced a
   43-line events dashboard on 8788, whose three columns `/events` supersedes.
 
+  C-7 was superseded on 2026-09-28 by **C-8**, which names `front/` — a
+  TanStack Start app written against these same plans — the console this
+  repo ships. That does not retire the board today: it stays until the
+  front serves these four screens against the real api, and until then it
+  is the tie-breaking reference, because it has run. What C-8 changes for
+  a reader of this section is who builds the screens after Phase 3, not
+  what they say; the integration is planned in
+  [`docs/plans/front.md`](docs/plans/front.md).
+
 Full design rationale, decisions, and open caveats live in
 [`docs/superpowers/specs/2026-09-13-ia-harness-design.md`](docs/superpowers/specs/2026-09-13-ia-harness-design.md);
 the implementation task breakdown is in
@@ -296,6 +305,7 @@ the implementation task breakdown is in
 ```
 dispatcher/       Smart Dispatcher: config, state machine, docker exec, CLI
 observability/    Event collector (Flask/SQLite) + read API + board (Jinja)
+front/            Operations console (TanStack Start) — C-8, not yet wired
 hooks/            Claude Code hooks that emit events to the collector
 docker/           Dockerfiles + compose files (control-plane and agents)
 scripts/          Volume setup, dind image pruning
@@ -310,8 +320,11 @@ sidecars) and, per account, an existing Claude Pro OAuth login. Everything
 below runs on the server itself (e.g. right after `git clone`), no Python
 required for the host-level steps — only the `dispatcher`/`collector`/`api`/
 `board` containers need Python, and they get it from their own images. None of
-them needs Node: the board is Jinja on the same `python:3.11-slim` base, which
-is [`docs/charter.md`](docs/charter.md) C-7.
+those four needs Node: the board is Jinja on the same `python:3.11-slim` base.
+That was [`docs/charter.md`](docs/charter.md) C-7 and it survives C-8, which
+buys Node for `front/` alone — the console will be a fifth service on its own
+runtime, and the four above stay as they are. `front/` has no compose service
+yet, so none of the steps below needs it.
 
 ### 1. Clone and configure
 

@@ -592,3 +592,338 @@ dropped is not knowable from the answer. That is a real limit of the
 announcement, and the reason it ends in "Reload for the full window." rather
 than in a number — a reload re-renders the table from the api, which is the one
 thing that certainly holds the rows the tail skipped.
+
+## ADR 14 — ADR 6's Loading row comes back in `front/`, not in the Jinja board
+
+**Status:** accepted (C-8 documentation sweep, 2026-09-29).
+
+**Context.** ADR 6 left a forward conditional: "If C-7 is reversed at Phase 5,
+the Loading row comes back with the client that can be in it, and the skeleton
+is written then against the same table." That conditional has now fired, earlier
+than Phase 5 and by a different route than the one it imagined. C-8 did not
+reverse C-7 because a screen finally needed a client; it reversed it because a
+client already existed — `front/`, a TanStack Start app generated outside this
+repo. The conditional does not say *where* the skeleton gets written, and the
+reading nearest to hand is the wrong one, because ADR 6 is about the Jinja
+board and a reader arrives at the sentence from there.
+
+**Decision.** The Loading row comes back in `front/` and nowhere else.
+`observability/board/` gets no skeleton markup, no placeholder row and no
+client-side fetch of the api, for the rest of its life. C-8 retires that package
+once the front serves the same screens against the real api, so a skeleton added
+to it now is work paid for twice — once to write, once to delete. The row is
+already rendered on the other side: `front/src/routes/pool.tsx` answers
+`accounts.isLoading` with "Reading pool…", which is exactly the state ADR 6
+said only a client that resolves fetches after paint can occupy.
+
+**Consequences.** ADR 6 is not edited, and neither are 7 or 12 where they cite
+C-7. They were accurate on the day they were written and their reasoning is what
+made the reversal cheap; this entry is the second half of that record, not a
+correction to it. The state table in `docs/plans/board.md` stays one row wider
+than `observability/board/` and becomes exactly as wide as `front/`, which is
+the surface it was written for — so a reviewer reading the plan against the
+Jinja templates still finds a row with no markup behind it, and the answer is no
+longer "a ruling is reversible" but "the ruling was reversed and the row moved".
+
+Two edges stay open and belong to the front plan rather than here. The table
+makes the *region* the unit and the front's Loading is currently per page —
+`pool.tsx` returns one line of text where the table asks for the grid with each
+card in its own state — so parity on this row is not the same as the row
+existing. And until parity, C-8 keeps the Jinja board as the tie-breaking
+reference precisely because it has run against the real api; a reference that
+grows states the front does not share stops being able to break ties, which is
+the second reason not to retrofit it.
+
+## ADR 15 — The console authenticates as a service, from its server half
+
+**Status:** accepted (C-8 documentation sweep, 2026-09-29).
+
+**Context.** `front/AGENTS.md` carries a project rule: "No authentication of any
+kind: the console runs on a private network behind one trusted operator." The
+api it is about to read disagrees five times — `/api/tasks`,
+`/api/tasks/<task_id>`, `/api/accounts`, `/api/events` and `/api/debt` are each
+`@requires_auth`. `front/src/lib/api/client.ts` sends no header on any of its
+twelve functions and does not need one yet, because every one of them resolves
+from `src/lib/api/mock/fixtures.ts`.
+
+Two repairs suggest themselves and both are wrong. Dropping `@requires_auth` to
+make the rule true deletes the only thing standing between the pool's state and
+anything else that can reach port 8789. Putting the operator's Basic
+credentials in the client ships a human's password to every tab, and
+`observability/auth.py` says why that is worse than it looks: the api checks a
+*hash*, so a client authenticating with Basic needs the plaintext sitting beside
+the hash in `.env` and makes the hash decorative.
+
+ADR 7 already settled the shape for the Jinja board. The api accepts two
+credentials on one realm: a human sends Basic, a service sends
+`Authorization: Bearer <API_TOKEN>`, and the bearer path exists precisely so a
+service can call the api without holding a human's plaintext. The console is a
+service by that definition, and C-8 bought it somewhere to keep a secret — it is
+server-rendered, and `front/src/server.ts` exports `fetch(request, env, ctx)` on
+the Node side, where no browser can read a variable.
+
+**Decision.** The console presents the bearer token from its server half and
+never from the browser. Browser code calls the console's own origin; the
+console's server forwards to `observability/api/` with the header ADR 7 defines.
+`@requires_auth` stays on all five routes, and Basic stays the human's path —
+curl, and the Jinja board until it retires — untouched.
+
+Three things follow that are each easy to undo by accident. Vite inlines every
+`import.meta.env.VITE_*` into the client bundle, so the token is read without
+that prefix, on the server, or it is published. The forward makes every browser
+fetch same-origin, so `observability/api/` needs no CORS and goes on not knowing
+a browser exists. And a console started with no token configured fails at
+startup instead of falling through to unauthenticated requests: the api already
+closes the bearer path on a falsy token rather than opening it, and the console
+owes the same refusal on its own side.
+
+**Consequences.** `front/AGENTS.md`'s third project rule stops being true the
+moment `client.ts` stops reading fixtures, and the task that wires it rewrites
+the rule — that file describes the console's own code and is not a charter, so
+no amendment is involved. The forward is new code: the only files under
+`front/src/lib/api/` are `client.ts`, `types.ts`, `queries.ts` and
+`mock/fixtures.ts`, there is no `src/routes/api/`, and `src/server.ts` wraps
+TanStack's SSR entry without proxying anything. A console with no server half —
+a static build behind nginx — cannot satisfy this ADR at all, which is a second
+reason C-8 accepted the Node runtime it accepted. Rotation stays what ADR 7 made
+it, one line in `docker/compose/.env` and a restart, with one more service
+reading it.
+
+## ADR 16 — `client.ts` unwraps `data` and carries `warnings` out with it
+
+**Status:** accepted (C-8 documentation sweep, 2026-09-29).
+
+**Context.** Every 200 the read api answers is `{"data": …, "warnings": […]}`.
+`observability/api/app.py` states the reason in one line — "Nothing is dropped
+silently, which is the entire reason the envelope is not a bare array" — and
+ADR 5 spends a page bounding it: an unreadable task file is `data: null` plus a
+warning naming the file, an account whose state will not parse stays in the list
+with its unreadable half nulled plus a warning, a missing events database is
+`[]` plus a warning, and none of them is a 500.
+
+`client.ts` is typed `Promise<Task[]>`, `Promise<Account[]>`, and so on, one
+function per endpoint. The cheapest way to satisfy those signatures against the
+real api is `return (await res.json()).data`. It type-checks, every screen
+renders, and it converts the api's central design property into nothing: a
+console that quietly drops `warnings` turns "nothing is dropped silently" into a
+page that looks complete and is not, which is the failure mode ADR 5 exists to
+prevent and the hardest one for an operator to catch.
+
+**Decision.** Every function in `client.ts` returns the rows *and* the warnings
+the envelope carried, and nothing between the fetch and the render discards
+them. `data` is unwrapped — screens keep taking arrays and objects, not
+envelopes — but the warnings ride alongside, through `queries.ts` and into the
+component, and every screen that lists rows has somewhere to show them.
+
+A warning is not an error and does not take a region to its error state. ADR 6
+already named this case: three states per region plus a **partial**, which is
+rows together with a non-empty `warnings`. The console inherits that vocabulary
+rather than inventing a fourth state, and inherits ADR 5's reading of the two
+empties with it — `data === null` and `data === []` both mean "nothing to show,
+read the warnings", and the error path belongs to non-200s alone.
+
+The guards ADR 7 put in the board's one boundary function are the console's too:
+`application/json` before `.json()`, because Flask answers its own 404 and 405
+in HTML; then a shallow check that `data` is present and `warnings` is a list of
+strings. A non-200 is `{"error": "…"}` with no `warnings` key at all, so the
+error path reads a different shape and must not look for one.
+
+**Consequences.** `ApiError` stays for non-200s and grows no warning-carrying
+sibling, because a warning is a successful read. The keys and intervals in
+`queries.ts` do not change; what a `queryFn` resolves to does. Every fixture in
+`mock/fixtures.ts` gains the envelope's second half or the mock stops being a
+rehearsal for the api. And a screen with no place to render a warning is a
+screen that is not finished — a review criterion this entry hands the revisor,
+not a style note.
+
+## ADR 17 — Renames belong to the console; absent fields are not the api's to invent
+
+**Status:** accepted (C-8 documentation sweep, 2026-09-29).
+
+**Context.** `front/src/lib/api/types.ts` and the api disagree in three places,
+and the disagreements are not the same kind of thing.
+
+`/api/accounts` serves `name`, `container`, `state`, `current_task` and
+`rate_limited_at`. `Account` asks for `current_task_id`, and for `usage_pct`,
+`is_primary`, `rank` and `heartbeat`. Exactly one field already agrees, and it
+agrees exactly: the four names `state_machine.AccountState` writes are the four
+the union in `types.ts` lists.
+
+`/api/debt` serves the index's five columns — `id`, `what`, `where`, `fix`,
+`card` — plus `resolved`, a boolean. `DebtEntry` asks for `state`, one of
+declared, accepted, rejected or blocking, and for `task_id`.
+
+`/api/tasks` serves `TaskFile`'s fields plus `lock_expired`. `Task` asks for
+`depends_on`, `body` and `debt[]`, and has nowhere to put `kanban_issue_id`,
+`resolved_debt`, `card` or `lock_expired`.
+
+The api is not free to close these by growing whatever a fixture imagined.
+`_task`'s docstring says the fields are `TaskFile`'s and it invents none but
+`lock_expired`, and the module says a parser this service needs and does not
+have is one to make reachable in `dispatcher/`, not one to rewrite here.
+
+**Decision.** Sort each disagreement by whether the value exists in the harness
+at all, and the answer follows from the sort.
+
+**Served under another name: the console adapts, in `client.ts`.**
+`current_task` becomes `current_task_id` in one line. No route is renamed to
+match a fixture, because the route's name is the harness's word for the thing
+and the fixture's is a guess about it.
+
+**Present in the harness, absent from the route: the api grows it, its own
+way.** `is_primary` is `AccountConfig.is_primary` and `/api/accounts` already
+iterates `cfg.accounts` to build every row, so serving it is a line and no new
+source. `depends_on` and the task body are `TaskFile`'s, admitted under the same
+rule that admits every other field `_task` serves.
+
+**Present nowhere: the console drops it.** `rank` is that. Nothing in
+`dispatcher/config.py` ranks accounts, and the comment on `is_primary` says why
+there is nothing to rank — it is a sort key, not a kind of account; the pool is
+ordered, not partitioned, and the primary is simply the one the picker reaches
+last. `pool.tsx` sorts on `a.rank - b.rank` and then titles the result "pool
+priority — workers first, primary last", which is `is_primary` as a sort key and
+needs no second field to express.
+
+**The same word for a different object: neither side moves until the object is
+named.** The front's `heartbeat` sits on an account and is labelled "lock
+heartbeat"; in the harness a heartbeat is `TaskFile`'s, a property of the lock
+on a task, which `/api/tasks` already serves and `_lock_expired` already
+interprets. An account's heartbeat is therefore the heartbeat of the task that
+account currently owns — a join across two routes the console already calls, not
+a field for `/api/accounts` to grow. `DebtEntry.state` is the same trap.
+`/api/debt`'s `resolved` is best-effort by construction: `_RESOLVED_RE` matches
+a `**resolved` prefix in the **what** cell, and `dispatcher/debt.py` says the
+flag it produces is offered and never used to hide a row. The four-state
+lifecycle the console draws — declared, accepted, rejected, blocking — is a
+debt's life inside one task's handoffs, where the implementador declares, the
+revisor rules and the auditor files; it is not a column of the index, and asking
+`/api/debt` for it asks the index to be a state machine it is not.
+
+**Derived, not served.** Debt ids are written `T-010-D1`: the task is the
+prefix, so `task_id` is a split in `client.ts`, and `Task.debt[]` is the same
+split read the other way, a filter over `/api/debt` rather than a field on the
+task.
+
+**Served and unused stays served.** `kanban_issue_id`, `resolved_debt`, `card`
+and `lock_expired` have no home in `types.ts` today and lose nothing by waiting
+there; a client ignoring a field costs the api nothing. `lock_expired` in
+particular is the field the Tasks screen should be reading rather than deciding
+staleness for itself, for the reason ADR 18 gives.
+
+**Consequences.** Of the ten fields the console asks for and does not get, one
+is a rename, three are api work, three are a join or a split the console does
+for itself, two are deletions from the front, and one — `usage_pct` — is
+ADR 18's. A later task that finds a field missing reaches this list before
+reaching for the api: the api not serving something is not by itself a reason
+for it to start.
+
+## ADR 18 — The console's thresholds are served, not compiled in
+
+**Status:** accepted (C-8 documentation sweep, 2026-09-29).
+
+**Context.** `front/src/lib/api/types.ts` ends with five exported constants and
+four of them are this harness's configuration, copied as literals:
+`USAGE_THRESHOLD = 90` is `quota_threshold_pct`, `COOLDOWN_S = 1800` is
+`quota_cooldown_seconds`, `PRIMARY_RESERVE = 60` is `reserve_pct`, and
+`HEARTBEAT_STALE_S = 120` is `heartbeat_ttl_seconds`. All four agree with the
+defaults in `dispatcher/config.py` today, which is exactly what makes them
+dangerous: an operator who raises `quota_threshold_pct` changes what the
+dispatcher does and nothing about what the console draws, and the console goes
+on labelling a marker "local threshold 90%" over a pool that parks at 95.
+`config.py` also enforces a relation between two of them — `reserve_pct` may not
+exceed `quota_threshold_pct`, because a higher reserve would make the primary
+*more* available than a worker — and nothing in `types.ts` knows that relation
+exists to preserve it.
+
+`HEARTBEAT_STALE_S` is the worst of the four and the easiest to fix, because the
+console does not need the number at all. `/api/tasks` already applies
+`cfg.heartbeat_ttl_seconds` server-side and serves the answer as `lock_expired`.
+A console that re-derives staleness from its own 120 is computing, on stale
+input, a value it was handed.
+
+`usage_pct` is the same problem seen from the other end. `Account.usage_pct`
+drives a gauge, a parked banner and a tone, and no route serves it: the harness
+learns an account's usage from a `/usage` probe run inside a container at
+dispatch time, and `state_machine` persists the *outcome* — a state, a current
+task, a `rate_limited_at` stamp — never the number.
+
+**Decision.** The three thresholds that are genuinely numbers the console must
+show are served, on `/api/accounts`, beside the pool they describe: a console
+that has read the pool has already paid for them, and they are facts about the
+configured pool rather than about any one account. `types.ts` keeps
+`LEARNING_TABLE_CAP`, which is the console's own layout decision and nobody
+else's. `HEARTBEAT_STALE_S` is deleted rather than served: the console reads
+`lock_expired`.
+
+`usage_pct` is not served until something persists it. The probe result is a
+measurement with a time on it, and a number with no stamp, on a screen that
+refreshes every 2.5 seconds, is worse than no number — it will be read as
+current and will not be. Until `state_machine` records the probe and when it
+ran, the pool screen renders the state it does have: the four-state enum it
+already agrees with, `rate_limited_at`, and the cooldown countdown derived from
+it. The gauge is not part of the parity set C-8 measures the Jinja board's
+retirement against. Persisting the probe is a task of its own and this entry
+does not design it.
+
+**Consequences.** Raising a threshold becomes one edit in `config.yaml` and a
+restart, and the console follows without a rebuild. The relation `config.py`
+enforces stays enforced in the one place that can enforce it. The cooldown
+countdown is the constant with a consumer today, and it is live the moment
+`/api/accounts` carries it. The pool screen loses its most prominent widget
+until usage is persisted, which is a visible regression against the Lovable mock
+and a deliberate one: that gauge was reading a fixture, and the same gauge
+reading nothing is the same picture with none of the meaning.
+
+## ADR 19 — No console screen ships against a fixture
+
+**Status:** accepted (C-8 documentation sweep, 2026-09-29).
+
+**Context.** `front/src/lib/api/queries.ts` declares nine queries and
+`client.ts` twelve functions. Five have no route behind them — `listPhases`,
+`listLearnings`, `listActions`, `listThreads` and `enqueueAction` — plus
+`pingActionBackend` and `setActionBackendDown`, which exist to let the mock
+pretend a backend went away. Every one resolves from a fixture, and a fixture is
+indistinguishable from a working screen right up until the day it is wired.
+
+Two of the five are not "the api has not got round to it yet". `enqueueAction`
+is a write, and `observability/api/app.py` forecloses it in three sentences:
+every route is a `GET`, it writes nothing anywhere, and there is no docker
+socket on this service — `dispatcher/docker_exec.py` arrives as an import and is
+never called. C-8 already ruled that actions ride a queue and a worker and never
+a socket. `listThreads` is the chat dock, which C-8 explicitly did not decide
+because it collides with C-1: the conversation is the only interactive one.
+
+**Decision.** A screen joins the parity set only when every query it renders is
+backed by a route, and an unbacked screen says so on itself rather than showing
+a fixture. Per endpoint:
+
+`/api/phases` is a route this api may grow. The dispatcher already persists a
+structured handoff per task and role under the hive's `handoffs` directory, and
+`dispatcher/context_transfer.py` already reads one back — a `GET` over files on
+a `:ro` mount, with the parser where the module docstring says a parser belongs.
+
+`/api/learnings` is the same shape over the learnings tree, which
+`dispatcher/learnings.py` already parses into entries with frontmatter and a
+status.
+
+`/api/actions` and `enqueueAction` never land here. They belong to a write
+surface that does not exist yet, with its own credential and its own audit
+trail, and until it does the Queue screen's action half is outside the parity
+set. `setActionBackendDown` does not survive the wiring at all: a control that
+fakes a failure is a fixture wearing a button.
+
+`/api/threads` stays undecided, as C-8 left it. It is outside the parity set
+until a charter ruling puts it in, and this entry does not pre-empt that ruling
+by building half of it first.
+
+A screen whose route is not ready renders an empty state that names what is
+missing. The distinction is the whole point of the rule: an operator must never
+be unable to tell a quiet harness from an unwired console.
+
+**Consequences.** The parity C-8 retires `observability/board/` against is
+nameable today, which C-8 needs it to be. The Jinja board serves an index, a
+task page, a debt page and an events tail, and every route behind them —
+`/api/tasks`, `/api/tasks/<task_id>`, `/api/debt`, `/api/events`,
+`/api/accounts` — already exists, so parity waits on neither new route. Phases
+and Learnings join the console when their routes land; Queue's action half and
+the chat dock are out, and say so on screen until a decision brings them in.

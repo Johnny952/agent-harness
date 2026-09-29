@@ -491,9 +491,10 @@ def test_the_wheel_the_image_installs_ships_the_templates() -> None:
 
 
 def test_nothing_in_the_board_is_a_node_project() -> None:
-    """`docs/charter.md` C-7: a package.json, a lockfile or a build step anywhere
-    under here means the phase was built against the wrong ruling — and the
-    saving the ruling buys is that this phase adds no dependency to pin."""
+    """`docs/charter.md` C-8: a package.json, a lockfile or a build step anywhere
+    under here means the ruling was read wider than it is. C-8 superseded C-7 and
+    bought Node for `front/` alone; this service keeps the saving — no dependency
+    to pin — until the front reaches parity and retires it."""
     package = Path(board_app.__file__).parent
     names = {path.name for path in package.rglob("*")}
 

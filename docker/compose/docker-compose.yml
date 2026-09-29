@@ -97,7 +97,8 @@ services:
 
   # The board (docs/plans/board.md "Phase 2 — a read-only board"): four screens
   # over the five endpoints above, server-rendered with Jinja — docs/charter.md
-  # C-7 rules the toolchain, so there is no package.json and no build step here.
+  # C-8 bought Node for front/ alone, so there is still no package.json and no
+  # build step here, and this service stays until the front reaches parity.
   #
   # NO VOLUMES, deliberately, and this is the one service in this file for which
   # the absence of a key is the design: the board reads nothing from disk — no

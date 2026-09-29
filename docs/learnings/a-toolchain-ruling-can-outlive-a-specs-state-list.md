@@ -41,3 +41,10 @@ T-010: `docs/decisions.md` ADR 6, `docs/charter.md` C-7, and
 `docs/implementations/T-010.md` "What was ruled out" → "A Loading state and a
 skeleton". The plan's Phase 2 section is unedited apart from its Status
 paragraph.
+
+2026-09-28, C-8: the ruling was reversed the day after T-010 shipped, and the
+advice paid. The unedited Phase 2 section is what the front work is now being
+planned from, and ADR 6 was there to be read instead of the missing Loading row
+being re-litigated as a gap; `docs/decisions.md` ADR 14 records where that row
+went. The trap itself has not recurred, so the status is unchanged — this is
+the advice being vindicated, not the symptom being reproduced a second time.
