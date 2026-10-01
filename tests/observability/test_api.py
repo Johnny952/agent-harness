@@ -750,6 +750,92 @@ def test_one_task_by_id_carries_the_running_body_and_the_list_route_does_not(
     assert record not in listed.values()
 
 
+def test_a_body_under_the_cap_is_served_whole_and_says_nothing(tmp_path: Path) -> None:
+    # The common case, pinned so the cap cannot start announcing itself on every
+    # card: `MAX_BODY_BYTES` is over twice the largest card in this repository.
+    harness = _harness(tmp_path)
+    record = "### arquitecto\nplan ready\n" * 40
+    _task(harness.tasks_dir, "T-1", body=record)
+
+    body = _get(harness, "/api/tasks/T-1").get_json()
+
+    assert body["data"]["body"] == record
+    assert body["warnings"] == []
+
+
+def test_a_body_over_the_cap_keeps_its_newest_end_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`docs/decisions.md` ADR 23, closing `docs/debt/T-011-D1.md`.
+
+    Which end survives is the decision this test pins, not the arithmetic:
+    `handoff()` appends, so the oldest phase is what a bounded answer drops. The
+    constant is monkeypatched rather than met with a 128 KB fixture — the bound
+    is what is under test, not the number.
+    """
+    harness = _harness(tmp_path)
+    monkeypatch.setattr(api_app, "MAX_BODY_BYTES", 60)
+    oldest = "### cartografo\n" + "o" * 200 + "\n"
+    newest = "### auditor\nthe phase a reader came for\n"
+    _task(harness.tasks_dir, "T-1", body=oldest + newest)
+
+    body = _get(harness, "/api/tasks/T-1").get_json()
+
+    assert body["data"]["body"] == newest
+    assert "cartografo" not in body["data"]["body"]
+    # The caller is told, in the terms ADR 5 allows a warning: the file, the
+    # size, the cap. Nothing is dropped silently, which is the whole reason the
+    # envelope is not a bare object.
+    [warning] = body["warnings"]
+    assert context_transfer.task_file_path(harness.tasks_dir, "T-1") in warning
+    assert "256" in warning and "60" in warning
+
+
+def test_a_truncated_body_starts_at_a_whole_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness(tmp_path)
+    monkeypatch.setattr(api_app, "MAX_BODY_BYTES", 30)
+    _task(harness.tasks_dir, "T-1", body="aaaaaaaaaaaaaaaaaaaa\nbbbb\ncccc\n")
+
+    served = _get(harness, "/api/tasks/T-1").get_json()["data"]["body"]
+
+    # The byte slice lands inside the first line, and half a line of markdown at
+    # the top of the screen reads as damage to the file rather than as a cap.
+    assert served == "bbbb\ncccc\n"
+
+
+def test_a_truncated_body_does_not_carry_a_replacement_character(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cap counts bytes, so the slice can land inside a multibyte character.
+    # A dropped partial sequence costs one character; a U+FFFD would cost a
+    # human a minute working out whether the task file is corrupt.
+    harness = _harness(tmp_path)
+    monkeypatch.setattr(api_app, "MAX_BODY_BYTES", 9)
+    _task(harness.tasks_dir, "T-1", body="ñññññ")
+
+    served = _get(harness, "/api/tasks/T-1").get_json()["data"]["body"]
+
+    assert "�" not in served
+    assert served == "ññññ"
+
+
+def test_the_list_route_never_reports_a_truncated_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cap belongs to the field and the field belongs to the detail route
+    # (ADR 21), so a card over the cap changes nothing about `/api/tasks`.
+    harness = _harness(tmp_path)
+    monkeypatch.setattr(api_app, "MAX_BODY_BYTES", 10)
+    _task(harness.tasks_dir, "T-1", body="x" * 500)
+
+    body = _get(harness, "/api/tasks").get_json()
+
+    assert body["warnings"] == []
+    assert "body" not in body["data"][0]
+
+
 def test_one_task_json_cannot_serialise_is_null_with_a_warning(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))

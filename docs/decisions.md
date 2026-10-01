@@ -1029,3 +1029,294 @@ serialises. The placement is the module's rule — the guard wraps the use of
 parsed values, `docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md` —
 held to even where this one field cannot break it, because the next field added
 there may.
+
+## ADR 22 — The console consumes the collector's events; it does not re-terminate the stream
+
+**Status:** accepted (T-012, 2026-10-01). Answers the one tier-1 decision
+`docs/plans/front.md` *Decisions this tier's tasks make* binds to the Live
+tail's task, and the only one in that tier with design in it.
+
+**Context.** ADR 12 terminates the live tail on the Jinja board: the board holds
+the SSE connection and its frames carry *rendered HTML*, which is a Jinja answer
+to a Jinja problem. A console that renders React cannot consume rendered HTML, so
+the choice does not inherit. Two shapes were available. The console could become
+a second terminator — its server half holding a stream, re-reading the collector
+or standing in front of it — or it could consume what the collector already has
+through `/api/events`, which is a polled `GET` by `id > since` and is already up.
+
+**Decision.** The console consumes `/api/events`. There is no second
+terminator: no SSE or WebSocket endpoint on the console's server half, no second
+reader of `events.db`, and nothing re-pointed about `hooks/emit_event.py`.
+`front/src/routes/tail.tsx` keeps the polling loop it has — one request every
+2500ms carrying `since=<the last id it holds>` — and `listEvents` in `client.ts`
+is what makes that loop correct.
+
+**Consequences**, and the ones outside the console are why this is an ADR:
+
+- `observability/collector/` gains no consumer and keeps exactly one writer and
+  one reader of its table. The console is an HTTP client of the api and nothing
+  else, which is C-8's property, and a streaming terminator in the console would
+  have been the first thing to bend it.
+- ADR 12's SSE stays the board's alone and retires with the board. Nothing in
+  this harness grows a second streaming contract, and the HTML frames are not
+  resurrected in a second consumer that cannot use them.
+- `observability/collector/db.py:list_events` ends in `ORDER BY id DESC LIMIT ?`,
+  and the tail's cursor is `events.at(-1)?.id` over an array it appends to. Those
+  two wired together unchanged make `at(-1)` the *oldest* id of the batch: the
+  cursor walks backwards and the tail re-fetches the same window forever while
+  looking like it works. `listEvents` reverses each batch into ascending order
+  inside `client.ts`, and `tail.tsx` is not touched for it. That makes the `DESC`
+  a contract the console depends on — a later change to that order changes
+  `client.ts` in the same commit, or the tail stops moving.
+- `since` and `limit` compose as the route documents: when more events arrive
+  between polls than `limit` allows, the newest `limit` above the cursor are
+  answered and the older ones in that window are skipped. The console sends no
+  `limit` at all and takes `DEFAULT_EVENT_LIMIT`, and it does not paper the skip
+  over — a tail that hides a gap is worse than one that has it.
+- The cost is a poll interval of latency and one request per 2.5s per open tab
+  against a service that answers from SQLite. If a push surface is ever wanted,
+  it is a new decision over `/api/events` — a different route, a different
+  contract — and not a revival of ADR 12's frames.
+
+## ADR 23 — The task body is bounded at its newest end, and says so
+
+**Status:** accepted (T-012, 2026-10-01). Narrows ADR 21, which decided which
+route serves the body and left its size open; closes
+[`docs/debt/T-011-D1.md`](debt/T-011-D1.md).
+
+**Context.** `/api/tasks/<task_id>` served `TaskFile.body` whole, and
+`dispatcher/handoff.py`'s `handoff()` only ever appends to it: the field is the
+whole history of a task id and grows for as long as that id lives — 211 KB over
+ten cards in this repository on 2026-10-01, with a largest card of 55 KB. Every
+other thing this service answers has a bound (`MAX_EVENT_LIMIT`, `MAX_WARNINGS`,
+the size of the configured pool); this one had none. `T-011-D1` named two fixes
+and left the choice to the task that renders the detail screen, because that is
+the only thing that knows how much of the record the screen shows.
+
+**Decision.** `MAX_BODY_BYTES = 128 * 1024`, applied in `_bounded_body` on the
+detail route only, and the **newest** end survives. The truncation names itself
+in `warnings` with the file, the real size and the cap, on `MAX_EVENT_LIMIT`'s
+model under ADR 11: the request is legal and the answer is smaller than the
+record, which is the envelope's job to say.
+
+The newest end, not the earliest, because `handoff()` appends: the last phase to
+run is at the end of the file and it is what a detail screen is open for. Nothing
+is lost that a reader cannot reach — the operator's ask is `description`, a
+separate field served whole, and the start of the running record is in the task
+file. The cut is on bytes because what is bounded is a response, so it can land
+inside a multibyte character: the tail is decoded with `errors="ignore"` rather
+than `"replace"`, because a U+FFFD at the top of the record costs a human a
+minute deciding whether the card is corrupt. The first surviving line goes with
+it for the same reason, unless dropping it would leave nothing.
+
+Not the `?body=` parameter the debt entry also offered. A parameter is an escape
+hatch and not a bound: a caller that asks for everything still gets an unbounded
+answer, and the entry's cost — "the largest thing this service answers, with no
+warning and no cap" — survives it. It is also a contract change on
+`_reject_unknown_parameters`, which passes `frozenset()` on that route, bought
+for nothing. A later task that wants the earliest end, or a page through the
+record, adds the parameter *on top of* this cap and keeps the default bounded.
+
+**Consequences.** 128 KB is over twice today's largest card, so nothing in this
+harness is truncated yet; the first card that is will be one of the long-lived
+task ids, and the warning is how an operator finds out rather than a surprise on
+a screen. Four tests pin it in `tests/observability/test_api.py` — a body under
+the cap is whole and silent, a body over it keeps its newest end and warns, the
+truncation starts at a whole line, and it carries no replacement character — plus
+one that the list route reports nothing, because the field is still the detail
+route's alone and ADR 21 is not loosened here.
+
+The secondary cost `T-011-D1` named is bounded rather than removed: `row["body"]`
+is assigned before the guard's `app.json.dumps(row)`, so the body is serialised
+twice per request, and what is serialised twice is now at most `MAX_BODY_BYTES`.
+The placement stays where ADR 21 put it — the guard wraps the use of a parsed
+value — and moving the assignment after the round to save the second pass would
+trade that rule for a sub-millisecond saving on a request a screen makes once per
+view.
+
+## ADR 24 — The bearer forward is an interception in the console's own server entry
+
+**Status:** accepted (T-012, 2026-10-01). Narrows ADR 15, which decided *that*
+the console presents the token from its server half and left the shape open;
+nothing in ADR 15 is reversed.
+
+**Context.** ADR 15 requires that browser code call the console's own origin and
+that the console's server forward to `observability/api/` with ADR 7's header,
+and notes the forward is new code with no file. Three shapes could carry it: a
+file-based server route group under `front/src/routes/api/`, server functions
+(`createServerFn`), or the Node entry the console already owns.
+
+Two facts pick between them. `front/src/routeTree.gen.ts` is written by the
+router plugin and must not be hand-edited; `front/node_modules` does not exist in
+this repository and installing it is not authorised, so a task here cannot run
+the generator and a shape needing an entry in that file cannot be shipped
+complete. And `front/src/server.ts` already exists for exactly this layer: it
+wraps TanStack's SSR entry because h3 swallows in-handler throws into a JSON 500,
+which is observed behaviour and therefore evidence that this is the handler every
+request passes through.
+
+**Decision.** The forward is a closed, GET-only interception in
+`front/src/server.ts`, in front of the SSR handler, over a whitelist of five
+console paths that map one-to-one onto the five api routes. It is not a proxy:
+anything else under `/api/` is a JSON 404 from the console, a non-GET on one of
+the five is a JSON 405, and query parameters are copied by name per route — the
+same posture `_reject_unknown_parameters` takes on the other side — so a
+parameter the console did not mean to send cannot reach the api. `?project=` is
+added to the debt call from the console's own configuration and never from the
+browser. The browser's own headers are not forwarded and the api's are not
+returned: what crosses is a status and a JSON body.
+
+The console reads three names from its environment, none of them prefixed
+`VITE_`, because Vite inlines every `import.meta.env.VITE_*` into the client
+bundle:
+
+- `API_BASE_URL`, defaulting to `http://api:8789` — the same name and the same
+  default the Jinja board uses, so one compose network name means one thing.
+- `API_TOKEN`, with no default. **Missing or empty is a startup failure**, not a
+  fall-through to unauthenticated requests: the module that reads it throws at
+  import, and `server.ts` imports it, so a console with no token refuses to boot
+  instead of answering 401s from a screen. The asymmetry with the api — where
+  ADR 7 makes the same variable optional — is deliberate: the api must still
+  start on a host whose `.env` predates the token, with the bearer path shut,
+  and a console with the path shut has nothing to serve.
+- `CONSOLE_PROJECT`, optional, sent as `?project=` on the debt call when set and
+  omitted when unset, which is ADR 9's shape. Its own name rather than the
+  board's `BOARD_PROJECT`: that variable belongs to a service C-8 retires, and
+  two services may legitimately be pointed at two checkouts.
+
+Timeout is 5 seconds, ADR 7's number for ADR 7's reason — an unbounded read is
+how a console with no push becomes a page that never arrives — and a forward that
+cannot reach the api is a JSON 502 naming it, so `client.ts`'s content-type guard
+meets JSON on every path it can take.
+
+**Consequences.** `observability/api/` needs no CORS and goes on not knowing a
+browser exists, because every browser fetch is same-origin. The CSRF middleware
+in `front/src/start.ts` is untouched and its comment stays true: it filters
+`handlerType === "serverFn"`, the forward is not a server function, and all five
+forwarded calls are reads against a service that writes nothing. A write that
+ever goes this way re-opens that sentence rather than inheriting it — which is
+the one thing this entry asks a tier-3 task to notice.
+
+`client.ts` builds same-origin relative URLs, so it must only ever be called from
+the browser: a relative `fetch` on the server has no base. That holds today
+because every one of the five reads is behind a `useQuery` in a component or a
+`useEffect`, and React Query does not fetch during SSR without a prefetch. A
+later task that moves a read into a route loader has to answer the base-URL
+question there, and that is the case that would force the server-function shape
+instead. It is named here so the answer is not improvised.
+
+Rotation stays what ADR 7 made it — one line in `docker/compose/.env` and a
+restart — with one more reader. The three names are documented in
+`front/AGENTS.md` and `front/README.md` *Running it*, which is the list an
+operator starting this service actually reads;
+`docs/learnings/an-env-key-only-an-adr-names-is-invisible.md` is why they are not
+left in this entry alone.
+
+## ADR 25 — `ApiResult<T>` is what a wired read resolves to, and only a wired read carries it
+
+**Status:** accepted (T-012, 2026-10-01). Narrows ADR 16, which decided that
+`client.ts` carries `warnings` out with `data` and left the type open.
+
+**Context.** ADR 16 says every function in `client.ts` returns the rows *and* the
+warnings, and that every fixture in `mock/fixtures.ts` gains the envelope's
+second half "or the mock stops being a rehearsal for the api". It was written
+when all twelve functions resolved from fixtures. Eleven of the twenty-five
+exports now have no route behind them, and under ADR 19 several of them never
+will: `/api/actions` and `enqueueAction` are a write surface that does not exist,
+`/api/threads` is undecided, and `listPhases` and `listLearnings` wait for
+tier 2. A function with no route has no envelope to carry.
+
+**Decision.** One generic type in `types.ts`:
+
+```ts
+export interface ApiResult<T> { data: T; warnings: string[] }
+```
+
+The five functions with a route behind them — `listTasks`, `getTask`,
+`listAccounts`, `listEvents`, `listDebt` — resolve to it, and `data` is unwrapped
+exactly as ADR 16 says: a screen takes an array or an object, never an envelope,
+and the warnings ride beside it into the component. `queries.ts` does not change,
+which ADR 16 already required: the keys and the intervals stay, and what a
+`queryFn` resolves to moves.
+
+The other reads keep their bare signatures and their fixtures keep no `warnings`.
+That is the half of ADR 16's fixture sentence this entry takes: the five fixtures
+that backed the five wired reads stop being a rehearsal for the api because they
+back nothing, and a fixture for a route that does not exist cannot rehearse an
+envelope that has no producer. They are kept rather than deleted — they still
+type-check against the served shapes, and the deletion is a bigger edit in a tree
+C-9 keeps syncing to Lovable than the dead code is worth — with a comment at the
+top of `mock/fixtures.ts` saying which five reads no longer come from there.
+
+**Consequences.** When `/api/phases` or `/api/learnings` lands, that task changes
+one signature to `ApiResult<T>` and the screens that read it, and finds the
+vocabulary already here. `ApiError` still belongs to non-200s alone and grows no
+warning-carrying sibling, because a warning is a successful read: `data === null`
+and `data === []` are both "nothing to show, read the warnings", and the shallow
+guard — `application/json` before `.json()`, `data` present, `warnings` a list of
+strings — is what separates the two shapes, since a non-200 is `{"error": …}`
+with no `warnings` key at all.
+
+A screen with no place to render a warning is unfinished, which ADR 16 handed the
+revisor as a criterion; `docs/ui.md` *A degraded backend is a banner, not a blank
+screen* now says what that place looks like, so the criterion is checkable
+against a file rather than against a reading.
+
+## ADR 26 — A task file's status carries no role, so the board's five lanes wait on `/api/phases`
+
+**Status:** accepted (T-012, 2026-10-01). Narrows ADR 17 by sorting two fields
+it did not reach; nothing in ADR 17 is reversed.
+
+**Context.** `front/src/lib/api/types.ts` types a task's status as
+`"queued" | "blocked" | "done" | in_progress:${Role}`, and
+`front/src/routes/index.tsx` is built on the second half of that: it splits In
+Progress into five role lanes and its own subtitle says "that split is the
+point". Neither half is what the harness writes. `dispatcher/context_transfer.py`
+writes `pending`, `in_progress`, `blocked` and `done` into a task file — there is
+no `queued` — and the role appears in exactly one place,
+`dispatcher/dispatcher.py`'s `_update_task_status(…, f"in_progress:{role}")`,
+which is Kanban-only: it reaches a board card's status and never the file.
+`/api/tasks` serves the file. So the role of a running phase is not a field that
+route has, and the five lanes cannot be filled from it.
+
+**Decision.** Both are ADR 17's sort applied again, and they land in different
+places.
+
+`queued` is a **rename the console does not get to make**: the served word is
+`pending`, the route's name is the harness's word for the thing, and `TaskStatus`
+becomes `"pending" | "in_progress" | "blocked" | "done"`. The Board's first
+column is Pending.
+
+The role of an in-progress task is **present nowhere this tier can read**, so the
+five lanes collapse into one In progress column and the screen says what the
+split is waiting for: `/api/phases`, tier 2 of `docs/plans/front.md`, which is
+where the per-role handoff record already on disk becomes a route. That is
+ADR 19's rule rather than a new one — an operator must never be unable to tell a
+quiet harness from an unwired console — and it is why the lanes are not left
+standing and empty, which is the same screen with none of the meaning.
+
+`/api/phases` is **not** the only way this could be answered, and the alternative
+is recorded so a later task weighs it rather than rediscovering it: every task row
+already carries `card`, and on a harness with a board configured that card's
+`status` is the `in_progress:<role>` string the dispatcher wrote. This harness has
+no board — every `card` is `null`, which `docs/debt/README.md` says in its own
+closing paragraph — so a lane fed from `card.status` would be surface that works
+only on somebody else's harness and is exercised nowhere here. It is also the
+wrong source on the merits: a card is a mirror the dispatcher writes to, and
+`docs/plans/front.md` puts the phase record behind `/api/phases`.
+
+**Consequences.** Nobody should close this by growing a role field on
+`/api/tasks`. The file does not have it, `_task` invents nothing but
+`lock_expired`, and the dispatcher would have to start writing a second status
+into the card it already writes one into. The Phases task of tier 2 inherits the
+lanes with the route, and `docs/plans/front.md` *What a phase row is* is already
+bound to it.
+
+Two smaller things follow and are pinned here because a later reader will
+otherwise take them for defects. A status outside the four is possible — the api
+serves what the file says, and `read_task_file` validates none of it — so the
+Board renders a warning naming any task whose status it does not know rather than
+dropping it from every column, which is what filtering on four literals does
+quietly. And `splitStatus` in `front/src/lib/format.ts` keeps parsing
+`in_progress:<role>`: it costs nothing, and it is the shape a card's status has
+if the alternative above is ever taken.
