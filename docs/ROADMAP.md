@@ -218,6 +218,55 @@ login.
   `GET /api/… → no answer` and the page keeps its stamp, its nav and its other
   regions rather than 500-ing.
 
+**V0.6c The console's bearer forward, and the five reads behind it.**
+- A new id beside V0.6b rather than a change to it: V0.6b checks
+  `observability/board/`, which C-8 keeps until the console reaches parity, and
+  both services read the same api with the same token. This one has never been
+  run, **and no phase can run it**: `front/node_modules` does not exist and
+  `bun install` is not authorised for a role, so there is no way to start the
+  console from inside a phase — and `/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`
+  says the container half is a human's row too. It is a recipe with no results
+  row on purpose.
+- There is no compose service for the console yet. It runs on the host, against
+  the api on 8789, which is why step 1 points `API_BASE_URL` at `127.0.0.1`
+  rather than at the compose network name.
+- Run:
+  0. The same `API_TOKEN` V0.6b added to `docker/compose/.env`, and the api up:
+     `docker compose -f docker/compose/docker-compose.yml up -d api`.
+  1. `cd front && bun install`, then start it with the three names — none of them
+     `VITE_`-prefixed:
+     `API_TOKEN=<the token> API_BASE_URL=http://127.0.0.1:8789 CONSOLE_PROJECT=ia-harness bun run dev`.
+  1b. Then once **without** `API_TOKEN`, to see the refusal: the console must fail
+     rather than start and answer 401s from a screen.
+  2. `bun run build`, then `grep -ro "<the token>" dist .output 2>/dev/null` and
+     `grep -rc API_TOKEN dist .output 2>/dev/null` over whatever the client bundle
+     directory turns out to be. The token must not appear in anything a browser
+     downloads.
+  3. The four screens in a browser: `/` (board), a task from it, `/pool`, `/debt`.
+     Each one lists rows from the real harness, and the Board and the task detail
+     each show an empty state naming `/api/phases` — and the detail screen one for
+     `/api/learnings` — rather than a fixture.
+  4. `/tail`, for two minutes. Watch the `id` column.
+  5. With the console still up, `docker stop compose-api-1`, reload a screen, then
+     `docker start compose-api-1` and reload again.
+  6. `curl -si 127.0.0.1:3000/api/phases` and `curl -si -X POST
+     127.0.0.1:3000/api/tasks` (whatever port `bun run dev` prints).
+- Pass:
+  - Step 1b fails at startup with the `API_TOKEN is not set` message, not with a
+    screen showing 401.
+  - Step 2 finds the token nowhere in the built client bundle.
+  - Step 3's rows are this harness's — the same task ids and accounts V0.6b sees on
+    the board — and no screen shows a fixture's `cuenta6` or a `D-1NN` debt id.
+    Where the api sends a warning, the screen shows it in a banner **above the
+    rows, with the rows still there**.
+  - Step 4's ids go **up**. A tail whose newest id stops changing while the harness
+    is busy is the cursor walking backwards, which is what
+    `docs/decisions.md` ADR 22 and the reverse in `client.ts` exist to prevent.
+  - Step 5 shows an error state naming what failed, never an empty state, and
+    recovers on the second reload.
+  - Step 6 answers JSON `404` and JSON `405` respectively, from the console and not
+    from the api: the forward is a whitelist, not a proxy (ADR 24).
+
 **V0.7 Docker-in-docker.**
 - Run:
   - `docker exec agent-cuenta1 docker info`

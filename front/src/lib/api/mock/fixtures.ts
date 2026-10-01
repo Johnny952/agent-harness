@@ -9,63 +9,83 @@ import type {
   Task,
 } from "../types";
 
+/**
+ * **Five of these back nothing.** `mockTasks`, `mockAccounts`, `mockDebt`,
+ * `mockEvents` and `nextMockEvent` stopped being the source of a screen when
+ * T-012 wired `listTasks`, `getTask`, `listAccounts`, `listEvents` and `listDebt`
+ * against `observability/api/`. They are kept rather than deleted and kept
+ * conforming to the *served* shapes — `docs/decisions.md` ADR 25 — so a typecheck
+ * still catches a type that drifts from the route, and so a later task has a
+ * fixture it can trust the shape of.
+ *
+ * `mockPhases`, `mockLearnings`, `mockActions` and `mockThreads` still back
+ * `listPhases`, `listLearnings`, `listActions` and `listThreads`, whose routes are
+ * tier 2 and tier 3 of `docs/plans/front.md`, and they carry no `warnings`: ADR 25
+ * says a fixture for a route with no producer cannot rehearse an envelope.
+ */
+
 /** Fixtures are anchored to "now" so heartbeat freshness is realistic. */
 const now = () => Date.now();
 const iso = (secondsAgo: number) => new Date(now() - secondsAgo * 1000).toISOString();
 
 export function mockDebt(): DebtEntry[] {
+  // Ids take the `T-0NN-Dn` shape the harness writes, because `task_id` is a split
+  // of the id and not a column (ADR 17), and `card` is a *board* card id — `none`
+  // on a harness with no board configured, which is this one.
   return [
     {
-      id: "D-101",
+      id: "T-008-D1",
       what: "Retry loop swallows provider 429 body",
-      where: "harness/pool/client.py:212",
+      where: "harness/pool/client.py, the retry branch",
       fix: "Surface the provider payload into the event stream before retrying",
-      card: "T-008",
-      state: "blocking",
+      card: "none",
+      resolved: false,
       task_id: "T-008",
     },
     {
-      id: "D-102",
+      id: "T-004-D1",
       what: "Worktree cleanup leaves stale lock files",
-      where: "harness/worktree.py:88",
+      where: "harness/worktree.py, the abandon path",
       fix: "Unlink .lock in the finally branch",
-      card: "T-004",
-      state: "accepted",
+      card: "none",
+      resolved: true,
       task_id: "T-004",
     },
     {
-      id: "D-103",
+      id: "T-011-D1",
       what: "Phase byte budget hardcoded per role",
-      where: "harness/phases/budget.py:14",
+      where: "harness/phases/budget.py, every caller of the constants",
       fix: "Move budgets into config with per-role override",
-      card: "T-011",
-      state: "declared",
+      card: "none",
+      resolved: false,
       task_id: "T-011",
     },
     {
-      id: "D-104",
+      id: "T-011-D2",
       what: "Revisor writes rejected silently",
-      where: "harness/phases/revisor.py:40",
+      where: "harness/phases/revisor.py, the write guard",
       fix: "Emit a write_rejected event instead of dropping",
-      card: "T-011",
-      state: "blocking",
+      card: "none",
+      resolved: false,
       task_id: "T-011",
     },
     {
-      id: "D-105",
+      id: "T-002-D1",
       what: "Event ids reused after restart",
-      where: "hooks/store.py:61",
+      where: "hooks/store.py, the id counter",
       fix: "Persist the monotonic counter",
-      card: "T-002",
-      state: "rejected",
+      card: "none",
+      resolved: true,
       task_id: "T-002",
     },
   ];
 }
 
 export function mockTasks(): Task[] {
-  const debt = mockDebt();
-  const byTask = (id: string) => debt.filter((d) => d.task_id === id);
+  // The served four statuses, with no role in any of them (ADR 26), and no `body`
+  // or `debt[]`: the body is the detail route's (ADR 21) and the debt list is a
+  // filter over /api/debt (ADR 17). `lock_expired` is the api's judgement, which is
+  // why a stale heartbeat here carries `true` rather than leaving it to be derived.
   return [
     {
       task_id: "T-002",
@@ -74,8 +94,10 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: [],
       description: "Persist hook event ids across harness restarts",
-      body: "## Goal\nEvent ids must be monotonic across restarts.\n\n### cartografo\nMapped the hook store and its two callers.\n\n### implementador\nCounter moved to sqlite; migration added.\n\n### auditor\nGates clean. Merged as 4f1ac2d.",
-      debt: byTask("T-002"),
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: null,
     },
     {
       task_id: "T-004",
@@ -84,18 +106,22 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: ["T-002"],
       description: "Clean up worktrees when a task is abandoned",
-      body: "## Goal\nAbandoned tasks leave worktrees behind.\n\n### implementador\nCleanup path added, lock files still linger (see debt).",
-      debt: byTask("T-004"),
+      kanban_issue_id: null,
+      resolved_debt: ["T-004-D1"],
+      card: null,
+      lock_expired: null,
     },
     {
       task_id: "T-007",
-      status: "queued",
+      status: "pending",
       owner: null,
       heartbeat: null,
       depends_on: [],
       description: "Add a dry-run flag to bootstrap-project",
-      body: "## Goal\nOperators want to preview the bootstrap plan.",
-      debt: [],
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: null,
     },
     {
       task_id: "T-008",
@@ -104,58 +130,70 @@ export function mockTasks(): Task[] {
       heartbeat: iso(940),
       depends_on: ["T-004", "T-011"],
       description: "Surface provider rate-limit payloads into the event stream",
-      body: "## Goal\nA 429 from the provider currently disappears into the retry loop.\n\n### cartografo\nFound three call sites that swallow the response body.\n\n### arquitecto\nProposed an event envelope `pool.rate_limited` carrying the raw payload.\n\n> Blocked on T-011: the envelope schema lands there first.",
-      debt: byTask("T-008"),
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: true,
     },
     {
       task_id: "T-011",
-      status: "in_progress:revisor",
+      status: "in_progress",
       owner: "cuenta1",
       heartbeat: iso(41),
       depends_on: ["T-002"],
       description: "Per-role byte budgets moved into config",
-      body: "## Goal\nBudgets differ per role and are currently hardcoded.\n\n### cartografo\nBudget constants live in one module, read from four.\n\n### arquitecto\nConfig block `phases.budgets` with per-role keys, defaults preserved.\n\n### implementador\nConfig loader written, four call sites migrated, tests added.\n\n### revisor\nRound 1: requested the over-budget shrink retry be logged. Round 2 in progress.",
-      debt: byTask("T-011"),
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: false,
     },
     {
       task_id: "T-012",
-      status: "in_progress:implementador",
+      status: "in_progress",
       owner: "cuenta4",
       heartbeat: iso(17),
       depends_on: [],
       description: "Pool priority: workers before primary",
-      body: "## Goal\nPrimary account should be the last resort.\n\n### cartografo\nRanking read from a single ordered list.\n\n### arquitecto\nRank field on each account; primary pinned to the tail.\n\n### implementador\nIn progress.",
-      debt: [],
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: false,
     },
     {
       task_id: "T-013",
-      status: "in_progress:cartografo",
+      status: "in_progress",
       owner: "cuenta5",
       heartbeat: iso(6),
       depends_on: ["T-012"],
       description: "Re-probe parked accounts every 60s",
-      body: "## Goal\nAccounts parked over the local threshold should self-heal.",
-      debt: [],
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: false,
     },
     {
       task_id: "T-014",
-      status: "in_progress:auditor",
+      status: "in_progress",
       owner: "cuenta3",
       heartbeat: iso(312),
       depends_on: [],
       description: "Gate: fail the phase when tests-in-diff is empty",
-      body: "## Goal\nA diff with no tests should stop at the gate.\n\n### auditor\nRunning gates; tests-run is currently warning.",
-      debt: [],
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: true,
     },
     {
       task_id: "T-015",
-      status: "queued",
+      status: "pending",
       owner: null,
       heartbeat: null,
       depends_on: ["T-008"],
       description: "Operator console: live tail transport hardening",
-      body: "## Goal\nReconnect without losing events.",
-      debt: [],
+      kanban_issue_id: null,
+      resolved_debt: [],
+      card: null,
+      lock_expired: null,
     },
   ];
 }
@@ -383,72 +421,68 @@ export function mockPhases(): Phase[] {
 }
 
 export function mockAccounts(): Account[] {
+  // No `usage_pct`, no `rank` and no `heartbeat`: nothing persists usage, nothing
+  // ranks accounts, and an account's lock is the lock on the task it is running
+  // (ADR 17, ADR 18). The three thresholds repeat per row because the envelope has
+  // no slot beside `data` for a pool-wide fact (ADR 20), and they are the defaults
+  // `dispatcher/config.py` carries.
+  const limits = { quota_threshold_pct: 90, reserve_pct: 60, quota_cooldown_seconds: 1800 };
   return [
     {
       name: "cuenta1",
       container: "agent-cuenta1",
-      state: "BUSY",
-      usage_pct: 47,
-      rate_limited_at: null,
-      current_task_id: "T-011",
       is_primary: false,
-      rank: 1,
-      heartbeat: iso(41),
+      ...limits,
+      state: "BUSY",
+      current_task_id: "T-011",
+      rate_limited_at: null,
     },
     {
       name: "cuenta2",
       container: "agent-cuenta2",
-      state: "COOLING_DOWN",
-      usage_pct: 64,
-      rate_limited_at: iso(620),
-      current_task_id: null,
       is_primary: false,
-      rank: 2,
-      heartbeat: null,
+      ...limits,
+      state: "COOLING_DOWN",
+      current_task_id: null,
+      rate_limited_at: iso(620),
     },
     {
       name: "cuenta3",
       container: "agent-cuenta3",
-      state: "BUSY",
-      usage_pct: 81,
-      rate_limited_at: null,
-      current_task_id: "T-014",
       is_primary: false,
-      rank: 3,
-      heartbeat: iso(312),
+      ...limits,
+      state: "BUSY",
+      current_task_id: "T-014",
+      rate_limited_at: null,
     },
     {
       name: "cuenta4",
       container: "agent-cuenta4",
-      state: "BUSY",
-      usage_pct: 55,
-      rate_limited_at: null,
-      current_task_id: "T-012",
       is_primary: false,
-      rank: 4,
-      heartbeat: iso(17),
+      ...limits,
+      state: "BUSY",
+      current_task_id: "T-012",
+      rate_limited_at: null,
     },
     {
       name: "cuenta5",
       container: "agent-cuenta5",
-      state: "PRE_COOLDOWN",
-      usage_pct: 93,
-      rate_limited_at: null,
-      current_task_id: "T-013",
       is_primary: false,
-      rank: 5,
-      heartbeat: iso(6),
+      ...limits,
+      state: "PRE_COOLDOWN",
+      current_task_id: "T-013",
+      rate_limited_at: null,
     },
     {
       name: "cuenta6",
       container: "agent-cuenta6",
-      state: "IDLE",
-      usage_pct: 12,
-      rate_limited_at: null,
-      current_task_id: null,
       is_primary: true,
-      rank: 99,
-      heartbeat: null,
+      ...limits,
+      // `null` is a served value here and not an omission: the api nulls what an
+      // unreadable state file says and keeps the row, with a warning.
+      state: null,
+      current_task_id: null,
+      rate_limited_at: null,
     },
   ];
 }

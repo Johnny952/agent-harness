@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Pause, Play } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
-import { EmptyState, ErrorState, Mono, PageHeader } from "@/components/console/primitives";
+import {
+  EmptyState,
+  ErrorState,
+  Mono,
+  PageHeader,
+  WarningBanner,
+} from "@/components/console/primitives";
 import * as api from "@/lib/api/client";
 import type { HookEvent } from "@/lib/api/types";
 import { formatClock } from "@/lib/format";
@@ -27,10 +33,28 @@ export const Route = createFileRoute("/tail")({
 
 const ROW_H = 24;
 
+/**
+ * What to show when a read failed.
+ *
+ * An `ApiError` carries the api's own sentence, and the forward's 502 names what
+ * did not answer — `<base url> did not answer: …` — which is the difference
+ * between "the harness is quiet" and "the console cannot reach it". Anything else
+ * keeps the generic line.
+ */
+function failureMessage(cause: unknown, fallback: string): string {
+  return cause instanceof api.ApiError ? cause.message : fallback;
+}
+
 function TailPage() {
   const searchRef = useSearchHotkey();
   const [events, setEvents] = useState<HookEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Warnings are their own piece of state and not folded into `error`. A warning
+  // is a successful read with something to say — rows plus a warning is a partial,
+  // which shows both — and this screen used to collapse every failure *and* every
+  // warning into one `error` string, which swallowed the warning outright.
+  // `docs/ui.md` *A degraded backend is a banner, not a blank screen*.
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [paused, setPaused] = useState(false);
   const [source, setSource] = useState("all");
   const [type, setType] = useState("all");
@@ -45,25 +69,40 @@ function TailPage() {
     let alive = true;
     api
       .listEvents()
-      .then((e) => alive && (setEvents(e), setLastRefreshed(Date.now())))
-      .catch(() => alive && setError("The event stream could not be opened."));
+      .then(({ data, warnings: w }) => {
+        if (!alive) return;
+        setEvents(data);
+        setWarnings(w);
+        setLastRefreshed(Date.now());
+      })
+      .catch(
+        (cause: unknown) =>
+          alive && setError(failureMessage(cause, "The event stream could not be opened.")),
+      );
     return () => {
       alive = false;
     };
   }, []);
 
   // SSE-style polling on id > last_seen. Never faster than 2s.
+  //
+  // `events.at(-1)?.id` is the *newest* id this screen holds and the array stays
+  // ascending, because `listEvents` reverses each batch out of the api's
+  // `ORDER BY id DESC` before it gets here. Neither the cursor nor the append
+  // changed for the wiring, and neither should: `docs/decisions.md` ADR 22 keeps
+  // the knowledge of the api's order in `client.ts`, in one place.
   useEffect(() => {
     if (paused) return;
     const t = setInterval(async () => {
       try {
         const last = events.at(-1)?.id ?? 0;
-        const next = await api.listEvents(last);
+        const { data: next, warnings: w } = await api.listEvents(last);
         setEvents((prev) => [...prev, ...next].slice(-2000));
+        setWarnings(w);
         setLastRefreshed(Date.now());
         setError(null);
-      } catch {
-        setError("The event stream dropped. Retrying every 2.5s.");
+      } catch (cause) {
+        setError(failureMessage(cause, "The event stream dropped. Retrying every 2.5s."));
       }
     }, 2500);
     return () => clearInterval(t);
@@ -155,11 +194,12 @@ function TailPage() {
           {error}
         </div>
       )}
+      <WarningBanner warnings={warnings} />
 
       {!error && events.length === 0 ? (
         <EmptyState
           title="No events yet"
-          body="The hook stream is open but nothing has been emitted. Start a phase from the Queue screen and rows will appear here."
+          body="The api answered and the collector holds no events. Run a phase and rows will appear here — this console polls /api/events on id > last_seen and terminates no stream of its own."
         />
       ) : error && events.length === 0 ? (
         <ErrorState

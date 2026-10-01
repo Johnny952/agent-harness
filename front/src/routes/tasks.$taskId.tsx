@@ -13,10 +13,11 @@ import {
   PageHeader,
   RoleBadge,
   StatusPill,
+  WarningBanner,
   gateTone,
 } from "@/components/console/primitives";
 import { Markdown } from "@/components/console/markdown";
-import { debtQuery, learningsQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
+import { debtQuery, taskQuery } from "@/lib/api/queries";
 import type { Phase, Task } from "@/lib/api/types";
 import { agoSeconds, formatAge, formatBytes, formatClock, formatDuration, roleColorVar } from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
@@ -28,12 +29,12 @@ export const Route = createFileRoute("/tasks/$taskId")({
       { title: `${params.taskId} — task detail` },
       {
         name: "description",
-        content: `Phase timeline, handoff envelopes, byte budgets and gate findings for task ${params.taskId}.`,
+        content: `Status, owner, dependencies, the running record and the declared debt of task ${params.taskId}.`,
       },
       { property: "og:title", content: `${params.taskId} — task detail` },
       {
         property: "og:description",
-        content: `Phase-by-phase record for harness task ${params.taskId}.`,
+        content: `The task file and the debt index, as the harness holds them, for ${params.taskId}.`,
       },
     ],
   }),
@@ -44,10 +45,12 @@ function TaskDetailPage() {
   const { taskId } = Route.useParams();
   const now = useNow();
   const task = useQuery(taskQuery(taskId));
-  const phases = useQuery(phasesQuery(taskId));
   const debt = useQuery(debtQuery);
-  const learnings = useQuery(learningsQuery);
 
+  // Broken is a query that failed, and it never degrades into an empty state:
+  // `docs/ui.md` *Absent, empty and broken are three different things*. A 404 and
+  // a refused api both land here; a card that exists and could not be *read* is
+  // `data: null` below, which is a different screen.
   if (task.isError) {
     return (
       <AppShell>
@@ -59,10 +62,10 @@ function TaskDetailPage() {
     );
   }
 
-  const t = task.data;
-  const phaseLearningIds = new Set((phases.data ?? []).flatMap((p) => p.learning_ids));
-  const handed = (learnings.data ?? []).filter((l) => phaseLearningIds.has(l.id));
-  const taskDebt = (debt.data ?? []).filter((d) => d.task_id === taskId);
+  const t = task.data?.data ?? null;
+  const warnings = [...(task.data?.warnings ?? []), ...(debt.data?.warnings ?? [])];
+  // Debt ids are shaped `T-011-D1`, and `task_id` is that split. ADR 17.
+  const taskDebt = (debt.data?.data ?? []).filter((d) => d.task_id === taskId);
 
   return (
     <AppShell>
@@ -72,8 +75,18 @@ function TaskDetailPage() {
         right={<RefreshedAt at={task.dataUpdatedAt} />}
       />
 
-      {!t ? (
+      <WarningBanner warnings={warnings} />
+
+      {task.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading task…</p>
+      ) : !t ? (
+        // `data: null` on a 200: the card is there and the api could not parse it,
+        // with the reason in the banner above. Not an error state — the read
+        // succeeded — and not "Reading task…", which would spin forever.
+        <EmptyState
+          title={`${taskId} exists and could not be read`}
+          body="The harness holds a card with this id but the api could not parse it. The reason is in the warning above; the file itself is under .hive/tasks/."
+        />
       ) : (
         <div className="space-y-4 p-4">
           <div className="panel flex flex-wrap items-center gap-4 px-3 py-2">
@@ -84,11 +97,12 @@ function TaskDetailPage() {
               {t.owner ? <Mono className="text-[11px]">{t.owner}</Mono> : <Absent label="no owner" />}
             </Field>
             <Field label="lock heartbeat">
-              {t.heartbeat ? (
-                <HeartbeatDot heartbeat={t.heartbeat} now={now} withLabel />
-              ) : (
-                <Absent label="no lock held" />
-              )}
+              <HeartbeatDot
+                heartbeat={t.heartbeat}
+                lockExpired={t.lock_expired}
+                now={now}
+                withLabel
+              />
             </Field>
             <Field label="depends on">
               {t.depends_on.length ? (
@@ -114,22 +128,16 @@ function TaskDetailPage() {
             <BodySections body={t.body} />
           </section>
 
+          {/* A region waiting on a route is an empty state about the console, not
+              about the harness — `docs/ui.md` *A region with no route says which
+              route, and when*. The phase record is already on disk, one handoff per
+              task and role; what is missing is the route over it. */}
           <section>
             <h2 className="label-xs mb-2">phase timeline</h2>
-            {phases.isLoading ? (
-              <p className="text-xs text-muted-foreground">Reading phases…</p>
-            ) : (phases.data ?? []).length === 0 ? (
-              <EmptyState
-                title="No phase has run for this task"
-                body="Start one from the Queue screen with run-task, or run a single phase with run-phase."
-              />
-            ) : (
-              <ol className="space-y-2">
-                {(phases.data ?? []).map((p) => (
-                  <PhaseRow key={p.id} phase={p} now={now} />
-                ))}
-              </ol>
-            )}
+            <EmptyState
+              title="The phase timeline is waiting on /api/phases"
+              body="This console cannot see the per-phase record yet — that route is tier 2 of docs/plans/front.md. The handoffs themselves are on disk under the hive's handoffs directory, and this is not a statement about whether phases have run."
+            />
           </section>
 
           <section className="panel px-3 py-3">
@@ -140,16 +148,19 @@ function TaskDetailPage() {
               </p>
             ) : (
               <ul className="space-y-1.5">
+                {/* `resolved` where `state` used to be: the index has no severity
+                    column, and the four-state lifecycle this screen drew is a
+                    debt's life inside one task's handoffs. ADR 17. */}
                 {taskDebt.map((d) => (
                   <li key={d.id} className="flex flex-wrap items-center gap-2 text-[11px]">
                     <Mono className="text-muted-foreground">{d.id}</Mono>
                     <span
                       className={cn(
                         "rounded-sm border px-1 text-[10px] uppercase",
-                        d.state === "blocking" ? gateTone.blocking : gateTone.note,
+                        d.resolved ? gateTone.note : gateTone.warning,
                       )}
                     >
-                      {d.state}
+                      {d.resolved ? "resolved" : "open"}
                     </span>
                     <span>{d.what}</span>
                     <Mono className="text-[10px] text-muted-foreground">{d.where}</Mono>
@@ -159,24 +170,12 @@ function TaskDetailPage() {
             )}
           </section>
 
-          <section className="panel px-3 py-3">
+          <section>
             <h2 className="label-xs mb-2">learnings handed to these phases</h2>
-            {handed.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                No learning rows were handed to these phases.
-              </p>
-            ) : (
-              <ul className="space-y-1.5">
-                {handed.map((l) => (
-                  <li key={l.id} className="flex flex-wrap items-baseline gap-2 text-[11px]">
-                    <Mono className="text-muted-foreground">{l.id}</Mono>
-                    <span className="label-xs">{l.scope}</span>
-                    <span className="text-muted-foreground">{l.trigger}</span>
-                    <span>{l.body}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <EmptyState
+              title="Learnings handed to a phase are waiting on /api/learnings"
+              body="Two routes, both tier 2 of docs/plans/front.md: /api/learnings for the rows, and /api/phases for the join, because the list this region drew is a phase's learning_ids read against them. The learnings tree is on disk either way."
+            />
           </section>
         </div>
       )}
@@ -280,6 +279,14 @@ function DependencyGraph({ task }: { task: Task }) {
   );
 }
 
+/**
+ * No caller until `/api/phases` lands — tier 2 of `docs/plans/front.md`, and the
+ * section above says so on screen rather than rendering this against a fixture
+ * (ADR 19). Kept rather than deleted on the same reasoning ADR 25 gives for the
+ * fixtures it kept: it still type-checks against `Phase`, and re-deleting a
+ * hundred lines of a generated screen that tier 2 needs back verbatim costs more
+ * in a tree C-9 keeps syncing to Lovable than the dead code does.
+ */
 function PhaseRow({ phase, now }: { phase: Phase; now: number }) {
   const over = phase.bytes_used > phase.bytes_budget;
   const pct = Math.round((phase.bytes_used / phase.bytes_budget) * 100);
