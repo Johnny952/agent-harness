@@ -214,3 +214,31 @@ Two things this ruling does not decide, and no role may read into it: whether
 the front's chat dock becomes a second interactive session — C-1 says the
 conversation is the only one, and reconciling them is a later ruling, not an
 implementation detail — and whether `front/` keeps its Lovable round-trip.
+
+---
+
+### C-9 — `front/` lives in this repo, and the Lovable round-trip stays live
+
+**Ruled:** 2026-10-01, closing the second of the two things C-8 left open.
+**Trigger:** you are about to add, move or remove a file under `front/`, or you
+are about to rewrite history on `main`.
+
+`front/` is in this repo, whole, in one commit: the code, `bun.lock` and
+`.lovable/project.json`. It is not a vendor directory and not a submodule. A
+change to a screen is a change to this repo, and it goes through the same role
+cycle as everything else.
+
+The round-trip stays live: `front/` can still be edited in Lovable, and what is
+published on the connected branch syncs back into the editor. One thing follows
+from that, and it is operational rather than cosmetic — **no force-push, and no
+rebase, amend or squash of a commit that is already pushed.** It holds on
+`main`, not only on a side branch, because `main` is the branch that is
+connected. `front/AGENTS.md` says it from Lovable's side; here it is a rule of
+the project. C-5 already keeps every role away from `origin`, so what this
+binds is the operator in the conversation, which is where every push so far has
+come from. A commit that turns out wrong is corrected by a commit on top of it.
+
+Closing the round-trip — treating the generation as a one-time import, after
+which the editor is no longer a producer — is a later ruling and needs an entry
+that supersedes this one. It does not close by habit, and it does not close
+because a task finds the history constraint inconvenient.
