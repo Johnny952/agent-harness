@@ -117,9 +117,14 @@ it. A `docs/ui.md` entry that can only be honoured by changing a route is an
 entry filed in the wrong place, and the arquitecto that wrote it owes an ADR
 instead.
 
-It does not exist yet. The arquitecto of the first tier-1 task creates it, with
-the entries that task needs and no others; speculative vocabulary for screens
-nobody is building is how a style guide stops describing the product.
+It exists, created out of cycle on 2026-10-01 alongside the commit that put
+`front/` in the repo, and seeded only from what the adopted console already
+does — every entry cites the file it was read out of and is attributed to *the
+`front/` import* rather than to a task. That is the same bar as the one this
+paragraph used to set for the first tier-1 task: speculative vocabulary for
+screens nobody is building is how a style guide stops describing the product,
+and description of code that shipped is not speculation. The next task to
+change one of those entries puts its own id there.
 
 ### How it changes
 
@@ -286,18 +291,30 @@ than wired.
 
 ### Decisions this tier's tasks make
 
-Bound to the **first tier-1 task**, whichever screen it takes:
+Two were bound to the **first tier-1 task**, whichever screen it took. T-011
+was that task and it took no screen — it built the api's share and nothing in
+`front/` — so neither fired, which
+[`docs/debt/T-011-D2.md`](../debt/T-011-D2.md) recorded. Both were then
+discharged out of cycle on 2026-10-01, by the operator rather than by a task,
+and they are kept here as settled rather than deleted because the reasoning is
+what a later screen inherits:
 
-- **How `front/` enters the repo.** It is untracked today and `front/AGENTS.md`
-  warns that rewriting published history breaks the Lovable sync. C-8
-  deliberately did not rule on whether `front/` keeps that round-trip, and the
-  first commit that touches these files is the last moment the question can be
-  avoided. This is a **ruling**: it is about what the operator wants from a
-  tool, not about consistency, so the arquitecto raises it and stops.
-- **`docs/ui.md` is created**, with the entries this task needs, under the loop
-  above. This plan says the file exists and what it may hold; it does not write
-  its first entry, because the first entry should come from a screen somebody is
-  actually building.
+- **How `front/` enters the repo.** ~~Bound to the first tier-1 task.~~ The
+  operator ruled it in: `front/` is tracked, in one commit, with its `bun.lock`
+  and its `.lovable/project.json`. It was a **ruling** and not a decision for
+  exactly the reason stated here — `front/AGENTS.md` warns that rewriting
+  published history breaks the Lovable sync, so the choice is about what the
+  operator wants from a tool. The half C-8 deferred, whether `front/` keeps
+  that round-trip, is still open; until it is closed the sync is treated as
+  live, which makes "no force-push, no rebase or amend of a pushed commit" a
+  constraint on `main` and not just on a side branch.
+- **`docs/ui.md` is created.** ~~Bound to the first tier-1 task.~~ Done, with
+  the entries the import already implies and no others — see *What
+  `docs/ui.md` may decide* above for why reading them out of shipped code is
+  not the speculative vocabulary this plan refuses. A screen's task still owns
+  its own entries; the three cross-screen questions this tier leaves open are
+  listed in that file under *Not decided here*, pointing back at the bullets
+  below.
 
 Bound to the **Board screen's task**:
 
@@ -488,14 +505,16 @@ is not wired to one.
 
 ## Deferred decisions, in one table
 
-Every row is open on purpose. The column that matters is the third: a decision
+Every row is open on purpose, except the two struck through, which were
+discharged out of cycle on 2026-10-01 and are kept so a reader of this table
+does not go looking for them. The column that matters is the third: a decision
 is made by the task that needs it, by the role named, at the time that task is
 taken — not now.
 
 | Question | Decided by | Kind |
 |---|---|---|
-| How `front/` enters the repo, and the Lovable round-trip | first tier-1 task | charter |
-| First entries of `docs/ui.md` | first tier-1 task, arquitecto | `docs/ui.md` |
+| ~~How `front/` enters the repo~~ — ruled in, 2026-10-01; the Lovable round-trip is still open | the operator | charter |
+| ~~First entries of `docs/ui.md`~~ — written 2026-10-01 from the import | the operator | `docs/ui.md` |
 | Loading per region or per page (ADR 14) | Board screen task | `docs/ui.md` |
 | The inert `Release` button | Pool screen task | task-local |
 | Tail: re-terminate the stream, or consume ADR 12's frames | Live tail task | ADR |
