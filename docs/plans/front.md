@@ -1,6 +1,7 @@
 # Plan: wiring the console in `front/`
 
-Status: nothing here is built. `front/` is in the working tree and untracked —
+Status: *The api's share* of tier 1 is built, by T-011; nothing in `front/` is.
+`front/` is in the working tree and untracked —
 97 versionable files of TanStack Start, React 19, Tailwind and shadcn/ui,
 generated against the specifications in [`board.md`](board.md) and named the
 console by [`docs/charter.md`](../charter.md) C-8 on 2026-09-28. Every screen it
@@ -252,6 +253,21 @@ Tier 1 is not purely front work. ADR 17 admits three fields — `is_primary` on
 puts three thresholds on `/api/accounts` beside the pool they describe. All six
 are lines in routes that already iterate the right objects; none needs a new
 source and none makes the api write anything.
+
+T-011 served all six, and closed the two shapes these paragraphs left open.
+`/api/accounts` answers nine keys per row — the five it had, plus `is_primary`
+and the three thresholds as columns on every row, because the envelope has no
+slot beside `data` for a pool-wide fact
+([`decisions.md`](../decisions.md) ADR 20, narrowing ADR 18). `/api/tasks`
+answers ten, growing `depends_on`, and `/api/tasks/<task_id>` answers those ten
+plus `body`: the running record is the detail route's alone, so the list a
+screen polls does not carry every card's whole history
+([`decisions.md`](../decisions.md) ADR 21, narrowing ADR 17). The console must
+therefore not treat the two task routes as interchangeable. `usage_pct`, `rank`
+and the account `heartbeat` are still unserved, as ADR 17 and ADR 18 leave
+them. What remains of this tier is the console half, in
+[`docs/implementations/T-011.md`](../implementations/T-011.md) *What was not
+done, and is not debt*.
 
 ### Parity, and what it retires
 
