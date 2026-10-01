@@ -930,7 +930,7 @@ the chat dock are out, and say so on screen until a decision brings them in.
 
 ## ADR 20 — The pool's thresholds are columns on every account row, not a sibling of `data`
 
-**Status:** accepted (T-011). Narrows ADR 18, which decided *that* they are served and left the shape open; nothing in ADR 18 is reversed.
+**Status:** accepted (T-011, 2026-10-01). Narrows ADR 18, which decided *that* they are served and left the shape open; nothing in ADR 18 is reversed.
 
 **Context.** ADR 18 says the three thresholds are served "on `/api/accounts`,
 beside the pool they describe", and *beside* reads two ways: a fourth key next to
@@ -986,7 +986,7 @@ is the record of what grew after it.
 
 ## ADR 21 — The task body is served on the detail route only
 
-**Status:** accepted (T-011). Narrows ADR 17, which admitted the body with `depends_on` and named `/api/tasks` for both; the admission stands and the route for one of them does not.
+**Status:** accepted (T-011, 2026-10-01). Narrows ADR 17, which admitted the body with `depends_on` and named `/api/tasks` for both; the admission stands and the route for one of them does not.
 
 **Context.** `context_transfer.TaskFile.body` is not the task as the operator
 asked for it — that is `description`, and the two are separate fields for the

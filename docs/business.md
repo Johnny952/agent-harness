@@ -29,6 +29,17 @@ cite the entry and move it up, or drop the row.
 - **Nothing is dropped silently: one unreadable file costs a warning naming it
   and the rest of the list still comes back.** Confirmed: the same spec section,
   bounded by `docs/decisions.md` ADR 5.
+- **The quota ceiling an account is held to is `reserve_pct` when it is the
+  primary and `quota_threshold_pct` otherwise, so an account row carrying all
+  three facts has to be read as a pair and not as three independent numbers.**
+  Confirmed: `dispatcher/dispatcher.py:_threshold_for`, whose docstring says why
+  every reader of it has to agree — the gate that parks an account above the line
+  and the recheck that un-parks it below one are the same decision seen twice, and
+  disagreeing would loop. `docs/charter.md` C-2 is the ruling behind it (a reserve
+  is a ceiling, not a partition) and `docs/decisions.md` ADR 20 is why
+  `/api/accounts` serves both numbers on every row with `is_primary` beside them:
+  the relation is not served, so the consumer applies it. Added by T-011, which
+  served the three fields and had to state which one governs.
 
 ## Unconfirmed — inferred from the code by T-009
 
