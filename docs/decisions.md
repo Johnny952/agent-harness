@@ -927,3 +927,105 @@ task page, a debt page and an events tail, and every route behind them —
 `/api/accounts` — already exists, so parity waits on neither new route. Phases
 and Learnings join the console when their routes land; Queue's action half and
 the chat dock are out, and say so on screen until a decision brings them in.
+
+## ADR 20 — The pool's thresholds are columns on every account row, not a sibling of `data`
+
+**Status:** accepted (T-011). Narrows ADR 18, which decided *that* they are served and left the shape open; nothing in ADR 18 is reversed.
+
+**Context.** ADR 18 says the three thresholds are served "on `/api/accounts`,
+beside the pool they describe", and *beside* reads two ways: a fourth key next to
+`data` and `warnings`, or three more columns inside every row. They are facts
+about the configured pool and not about any one account, so the sibling is the
+shape the sentence suggests, and it is the one that cannot be built.
+
+Two things close it, and both are properties of code that is already running.
+
+The envelope has exactly two keys and two tests say so for every route —
+`tests/observability/test_api.py:test_every_route_answers_the_same_envelope` and
+its bearer twin `test_every_route_accepts_the_configured_bearer_token`, both
+asserting `set(resp.get_json()) == {"data", "warnings"}`. That is ADR 5 as
+widened by ADR 11, and it is an invariant of the whole service rather than a convention of one
+route: a third top-level key is not a slot this envelope has.
+
+Nor can `data` become an object with the list inside it.
+`observability/board/app.py:index` and `:task` both call
+`fetch("/api/accounts", keys=ACCOUNT_KEYS)` with `many=True`, and
+`_envelope_problem` checks `data` is a list before checking each row; an object
+there blanks the pool table on two of the four screens the board serves.
+`docs/charter.md` C-8 keeps that board the tie-breaking reference until the
+console reaches parity, so breaking it to improve a shape is not available to a
+task in this tier. The same function checks rows with
+`missing = [key for key in keys if key not in row]` — a subset check, so rows may
+grow keys freely.
+
+**Decision.** `quota_threshold_pct`, `reserve_pct` and `quota_cooldown_seconds`
+are keys on every account row, beside `is_primary`, and `data` stays a list of
+rows. They are read off the `Config` `create_app` already loaded, never by a
+second `load_config` inside the view, for the reason `_task`'s docstring gives
+about the expiry window. They are built before the `try` that reads the state
+file, with `name`, `container` and `is_primary`: a state file that will not parse
+nulls what the state file says and nothing the config says.
+
+The repetition is forced by the envelope, not chosen for the console's
+convenience, and that is the honest reading of why this entry exists. What it
+buys is real, though: `dispatcher/dispatcher.py:_threshold_for` holds the primary
+to `reserve_pct` and a worker to `quota_threshold_pct`, so the ceiling that
+actually governs an account is already per-account, and a row carrying both
+numbers next to its own `is_primary` lets a reader work out which one applies
+without knowing a relation ADR 18 says nothing on the console side knows.
+
+**Consequences.** Three numbers travel once per account in a response the pool
+screen polls; with the two accounts this harness runs, and the five the console's
+fixtures imagine, that is not a size worth a shape nobody can serve. A pool-wide
+fact that is genuinely *not* derivable per row — a count, a queue depth — has no
+home in this envelope and would need an ADR to put one there; this entry
+deliberately does not open that door for a value that is per-row already.
+`docs/plans/board.md`'s *The shapes* list no longer enumerates every key of an
+Account row, and stays as written: it is Phase 1's specification, and this entry
+is the record of what grew after it.
+
+## ADR 21 — The task body is served on the detail route only
+
+**Status:** accepted (T-011). Narrows ADR 17, which admitted the body with `depends_on` and named `/api/tasks` for both; the admission stands and the route for one of them does not.
+
+**Context.** `context_transfer.TaskFile.body` is not the task as the operator
+asked for it — that is `description`, and the two are separate fields for the
+reason the comment in `dispatcher/context_transfer.py` gives. `body` is the
+running record: `handoff()` appends every phase's summary to it, so it only
+grows, for the life of a task id. In this repository on 2026-10-01 `.hive/tasks/`
+is 211 KB over ten cards and the largest single card is 55 KB.
+
+`/api/tasks` is the list the console's Board screen and the Jinja board's index
+both poll. Serving the body from `_task`, which both task routes share, would put
+every card's whole history in every one of those responses to feed a field only
+the detail screen reads.
+
+**Decision.** `_task` grows `depends_on` and not `body`. The
+`/api/tasks/<task_id>` view adds `body` to the row after it calls `_task`, inside
+the same `try` that wraps the shaping and the `app.json.dumps` round. The two
+task routes therefore answer different key sets, which is new for this service:
+`/api/tasks` answers ten keys and `/api/tasks/<task_id>` those ten plus `body`.
+
+This is not an invitation to sort every future field by size. The body is a
+distinct case on two counts — it is unbounded and it grows monotonically, and no
+screen that lists rows renders it. A field that is merely large has a cap or a
+parameter available to it; this one has a route.
+
+**Consequences.** A client cannot assume the two task routes are
+interchangeable. The Jinja board already models exactly that distinction with
+`TASK_KEYS` and `TASK_DETAIL_KEYS`, and the console does it in `client.ts` under ADR 16, so neither consumer pays
+for it. The asymmetry is pinned from both sides in
+`tests/observability/test_api.py`:
+`test_tasks_reports_the_fields_the_task_file_carries` asserts a list row whole
+over a fixture that has a body, and
+`test_one_task_by_id_carries_the_running_body_and_the_list_route_does_not`
+asserts the difference is exactly `body`. Moving the field into `_task` fails
+both rather than quietly doubling the size of a polled response.
+
+One thing this entry cannot prove, named so a later reader does not look for the
+test: the `try` the assignment sits inside cannot fire on it. `read_task_file`
+builds `body` by splitting the file's text, so it is always a `str` and always
+serialises. The placement is the module's rule — the guard wraps the use of
+parsed values, `docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md` —
+held to even where this one field cannot break it, because the next field added
+there may.

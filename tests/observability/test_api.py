@@ -49,6 +49,10 @@ def _harness(
     with_db: bool = True,
     heartbeat_ttl_seconds: int | None = None,
     token: str | None = None,
+    primary_account: str | None = None,
+    quota_threshold_pct: int | None = None,
+    reserve_pct: int | None = None,
+    quota_cooldown_seconds: int | None = None,
 ) -> types.SimpleNamespace:
     """The mounts, the config and a test client over them."""
     state_dir = tmp_path / "state"
@@ -78,6 +82,22 @@ def _harness(
         # runs with. Passed only where a test pins that the ttl comes from config
         # rather than from a constant in the api.
         raw["heartbeat_ttl_seconds"] = heartbeat_ttl_seconds
+    for key, value in (
+        # Left out by default for the reason above, and one more: the three
+        # thresholds agree with `dispatcher/config.py`'s defaults today, so a
+        # route answering literals of its own would pass every case that takes
+        # them. `reserve_pct` is the one to watch — its default bends to
+        # `quota_threshold_pct` (`_load_reserve_pct`) and an explicit value does
+        # not, so the pinned case sets all three rather than one. An absent
+        # `primary_account` marks nothing, which is why `is_primary` needs a case
+        # that writes it.
+        ("primary_account", primary_account),
+        ("quota_threshold_pct", quota_threshold_pct),
+        ("reserve_pct", reserve_pct),
+        ("quota_cooldown_seconds", quota_cooldown_seconds),
+    ):
+        if value is not None:
+            raw[key] = value
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
@@ -108,7 +128,7 @@ def _task(tasks_dir: str, task_id: str, **fields) -> None:
             task_id=task_id,
             status=fields.pop("status", "in_progress"),
             owner=fields.pop("owner", None),
-            depends_on=[],
+            depends_on=fields.pop("depends_on", []),
             heartbeat=fields.pop("heartbeat", None),
             body=fields.pop("body", ""),
             **fields,
@@ -215,9 +235,11 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "T-1",
         status="in_progress",
         owner="cuenta1",
+        depends_on=["T-0"],
         heartbeat="2026-09-26T18:00:00+00:00",
         description="Do the thing",
         resolved_debt=["T-008-D2"],
+        body="arquitecto: plan ready",
     )
 
     [task] = _get(harness, "/api/tasks").get_json()["data"]
@@ -226,6 +248,7 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "task_id": "T-1",
         "status": "in_progress",
         "owner": "cuenta1",
+        "depends_on": ["T-0"],
         "heartbeat": "2026-09-26T18:00:00+00:00",
         "description": "Do the thing",
         "kanban_issue_id": None,
@@ -235,6 +258,9 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         # holder stopped writing. The three values of this field have their own
         # tests below, against heartbeats relative to now.
         "lock_expired": True,
+        # No `body`, and the fixture above wrote one: it is the detail route's
+        # alone (`docs/decisions.md` ADR 21). Asserting the whole dict is what
+        # makes moving it into `_task` fail here rather than pass quietly.
     }
 
 
@@ -384,6 +410,7 @@ def test_a_harness_with_no_board_is_not_an_error(tmp_path: Path) -> None:
                 "task_id": "T-1",
                 "status": "in_progress",
                 "owner": None,
+                "depends_on": [],
                 "heartbeat": None,
                 "description": None,
                 "kanban_issue_id": "11111111-2222-3333-4444-555555555555",
@@ -697,6 +724,32 @@ def test_one_task_whose_kanban_issue_id_is_not_a_string_is_null_with_a_warning(
     assert str(broken) in resp.get_json()["warnings"][0]
 
 
+def test_one_task_by_id_carries_the_running_body_and_the_list_route_does_not(
+    tmp_path: Path,
+) -> None:
+    """`docs/decisions.md` ADR 21: `body` is the detail route's and nothing else's.
+
+    The two task routes answer different key sets on purpose, so both halves are
+    asserted over one task file: a `body` that reached `_task` would show up on
+    the list, which is the request a screen repeats every few seconds.
+    """
+    harness = _harness(tmp_path)
+    record = "arquitecto: plan ready\n\nimplementador: built it\n"
+    _task(harness.tasks_dir, "T-1", depends_on=["T-0"], body=record)
+
+    detail = _get(harness, "/api/tasks/T-1").get_json()["data"]
+    [listed] = _get(harness, "/api/tasks").get_json()["data"]
+
+    assert detail["body"] == record
+    assert detail["depends_on"] == ["T-0"]
+    assert set(detail) == set(listed) | {"body"}
+    assert "body" not in listed
+    # Not only absent under that name: the record must not have travelled on
+    # another key either, which is what a rename rather than a move would look
+    # like.
+    assert record not in listed.values()
+
+
 def test_one_task_json_cannot_serialise_is_null_with_a_warning(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))
@@ -723,6 +776,9 @@ def test_accounts_reports_the_pool_from_the_state_directory(tmp_path: Path) -> N
     body = _get(harness, "/api/accounts").get_json()
 
     assert body["warnings"] == []
+    # The four config columns carry `dispatcher/config.py`'s own defaults here —
+    # this fixture names none of them — and the cases below pin that they are
+    # read from the config rather than written as literals.
     assert body["data"] == [
         {
             "name": "cuenta1",
@@ -730,6 +786,10 @@ def test_accounts_reports_the_pool_from_the_state_directory(tmp_path: Path) -> N
             "state": "BUSY",
             "current_task": "T-1",
             "rate_limited_at": None,
+            "is_primary": False,
+            "quota_threshold_pct": 90,
+            "reserve_pct": 60,
+            "quota_cooldown_seconds": 1800,
         },
         {
             "name": "cuenta2",
@@ -737,6 +797,10 @@ def test_accounts_reports_the_pool_from_the_state_directory(tmp_path: Path) -> N
             "state": "IDLE",
             "current_task": None,
             "rate_limited_at": 1700000000.0,
+            "is_primary": False,
+            "quota_threshold_pct": 90,
+            "reserve_pct": 60,
+            "quota_cooldown_seconds": 1800,
         },
     ]
 
@@ -781,6 +845,65 @@ def test_a_state_file_that_is_not_an_object_is_a_warning_naming_it(tmp_path: Pat
     assert account["name"] == "cuenta1"
     assert account["state"] is None
     assert str(path) in resp.get_json()["warnings"][0]
+
+
+def test_the_primary_account_is_marked_and_the_rest_are_not(tmp_path: Path) -> None:
+    """`is_primary` is `load_config`'s, from the top-level `primary_account`.
+
+    Every other case here leaves the key out, which marks nothing, so without
+    this one the field is only ever asserted false — `docs/charter.md` C-3 makes
+    which account is primary configuration, and this is the route answering it.
+    """
+    harness = _harness(tmp_path, accounts=("cuenta1", "cuenta2"), primary_account="cuenta2")
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    assert [(row["name"], row["is_primary"]) for row in body["data"]] == [
+        ("cuenta1", False),
+        ("cuenta2", True),
+    ]
+
+
+def test_the_thresholds_on_a_row_are_the_configured_ones(tmp_path: Path) -> None:
+    """`docs/decisions.md` ADR 18 and ADR 20: configured, not compiled in.
+
+    All three differ from `dispatcher/config.py`'s defaults, and `reserve_pct`
+    is set above that default's ceiling of 60 — the value a route holding
+    literals, or re-deriving the default, would get wrong while the pool parks
+    somewhere else entirely.
+    """
+    harness = _harness(
+        tmp_path,
+        accounts=("cuenta1", "cuenta2"),
+        quota_threshold_pct=95,
+        reserve_pct=70,
+        quota_cooldown_seconds=900,
+    )
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    assert body["warnings"] == []
+    for row in body["data"]:
+        assert (row["quota_threshold_pct"], row["reserve_pct"], row["quota_cooldown_seconds"]) == (
+            95,
+            70,
+            900,
+        )
+
+
+def test_an_unreadable_state_file_keeps_the_config_half_of_the_row(tmp_path: Path) -> None:
+    # The four config columns are built before the `try`, so a state file that
+    # will not parse nulls what the state file says and nothing else: an account
+    # the config calls primary does not stop being primary because the pool's
+    # record of what it is doing is damaged.
+    harness = _harness(tmp_path, primary_account="cuenta1", quota_threshold_pct=95)
+    (Path(harness.state_dir) / "cuenta1.json").write_text("{truncated")
+
+    [account] = _get(harness, "/api/accounts").get_json()["data"]
+
+    assert account["state"] is None
+    assert account["is_primary"] is True
+    assert account["quota_threshold_pct"] == 95
 
 
 # --- events ---------------------------------------------------------------
