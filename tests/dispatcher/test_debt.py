@@ -272,6 +272,31 @@ def test_a_cell_keeps_the_backtick_it_only_opens_or_only_closes_with() -> None:
     assert row["card"] == "card-aaa"
 
 
+def test_a_cell_that_opens_with_one_code_span_and_closes_with_another() -> None:
+    """T-010-D2: opening and closing with a backtick is not being one span.
+
+    The row this fix would file is the shape that breaks: a **where** cell
+    naming two files opens with one code span and closes with a different one,
+    and the outer pair T-009-D3 taught the reader to take off is not a pair at
+    all. `/api/debt` and the console's debt screen render **where** and **fix**
+    as plain text, so each orphaned delimiter is visible on the screen.
+    Nesting still unwraps once — that case is the sibling test above.
+    """
+    text = (
+        "| id | what | where | fix | card |\n"
+        "|---|---|---|---|---|\n"
+        "| `task-5-D1` | the two unwraps disagree | "
+        "`debt.py` or `cli.py` | reuse `_unwrap_code` in `resolved` | `card-bbb` |\n"
+    )
+
+    [row] = debt.index_rows(text)
+
+    assert row["id"] == "task-5-D1"
+    assert row["where"] == "`debt.py` or `cli.py`"
+    assert row["fix"] == "reuse `_unwrap_code` in `resolved`"
+    assert row["card"] == "card-bbb"
+
+
 def test_the_fingerprints_of_the_projects_own_index_did_not_move(monkeypatch) -> None:
     """The check T-009-D3's fix had to pass, run against the real index.
 
@@ -384,6 +409,28 @@ def test_the_entries_a_task_says_it_resolved_are_read_once_each() -> None:
     payload = {"resolved_debt": ["`task-3-D1`", "task-3-D1", "task-4-D1", "  "]}
 
     assert debt.resolved(payload) == ["task-3-D1", "task-4-D1"]
+
+
+def test_an_id_a_handoff_wrapped_in_code_unwraps_like_the_index_does() -> None:
+    """T-010-D1: `resolved` takes off a pair here too, not one per end.
+
+    A handoff writes the id the way the index shows it, so the two readers
+    have to give one answer for one cell. The `str.strip("`")` this replaced
+    ate half of an id that only closes with a backtick and both pairs of a
+    doubly wrapped one; `index_rows` returns the same two strings for the same
+    two cells, which is the property worth holding rather than either string.
+    """
+    cells = ["``task-4-D1``", "task-5-D1`"]
+    text = (
+        "| id | what |\n"
+        "|---|---|\n"
+        + "".join(f"| {cell} | a row |\n" for cell in cells)
+    )
+
+    assert debt.resolved({"resolved_debt": cells}) == [
+        row["id"] for row in debt.index_rows(text)
+    ]
+    assert debt.resolved({"resolved_debt": cells}) == ["`task-4-D1`", "task-5-D1`"]
 
 
 # --- what the auditor is told about them ---------------------------------

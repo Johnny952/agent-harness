@@ -243,6 +243,25 @@ def read_index(container: str, workdir: str) -> str:
     return proc.stdout if proc.returncode == 0 else ""
 
 
+def _is_code_span(cell: str) -> bool:
+    """Whether the cell is one code span and nothing else.
+
+    What a cell has to be before `_unwrap_code` takes a pair off it: the outer
+    backticks have to be *its* pair, not the opening of one span and the
+    closing of another. A **where** cell that names two files
+    (`` `debt.py` or `cli.py` ``) starts and ends with a backtick and is still
+    two spans, and unwrapping it moved both delimiters inwards, which
+    `/api/debt` and the console's debt screen render as plain text
+    (`docs/debt/T-010-D2.md`, fixed here). Nesting is the one thing an interior
+    backtick may legitimately be — `` `x` `` wrapped again is one span — which
+    is why this recurses rather than rejecting any backtick it sees inside.
+    """
+    if len(cell) < 2 or not cell.startswith("`") or not cell.endswith("`"):
+        return False
+    inner = cell[1:-1]
+    return "`" not in inner or _is_code_span(inner)
+
+
 def _unwrap_code(cell: str) -> str:
     """One matched pair of backticks off a cell, and never half of one.
 
@@ -255,8 +274,9 @@ def _unwrap_code(cell: str) -> str:
     whose text legitimately opens or closes with a backtick survives intact.
     No fingerprint moves: the **what** cell of an existing row is wrapped in no
     backticks at all, so it unwrapped to itself before this and does now.
+    Whether the pair is one is `_is_code_span`'s question, not this one's.
     """
-    if len(cell) >= 2 and cell.startswith("`") and cell.endswith("`"):
+    if _is_code_span(cell):
         return cell[1:-1]
     return cell
 
@@ -350,10 +370,17 @@ def card_ids(text: str, entries: list[str]) -> dict[str, str]:
 
 
 def resolved(payload: dict | None) -> list[str]:
-    """The entry ids one handoff claims to have resolved."""
+    """The entry ids one handoff claims to have resolved.
+
+    Unwrapped through `_unwrap_code`, because a handoff writes the id the way
+    the index shows it and the two readers have to agree on what it says. The
+    `str.strip("`")` this replaces ate half a pair here for as long after
+    `_rows` stopped doing it as it took someone to notice
+    (`docs/debt/T-010-D1.md`, fixed here).
+    """
     seen = []
     for item in (payload or {}).get("resolved_debt") or []:
-        entry = str(item or "").strip().strip("`").strip()
+        entry = _unwrap_code(str(item or "").strip()).strip()
         if entry and entry not in seen:
             seen.append(entry)
     return seen
