@@ -182,6 +182,15 @@ def create_app(
             # Shaping and serialisation inside the guard, as on `/api/tasks`
             # and for the same reason; the comment there says why.
             row = _task(found, cards, cfg.heartbeat_ttl_seconds)
+            # The running record, on this route and not on the list: `handoff()`
+            # appends every phase's summary to `body`, so it only grows for the
+            # life of a task id, and `/api/tasks` is the list a screen polls.
+            # `docs/decisions.md` ADR 21. Inside the guard with the shaping and
+            # the serialisation round because that is the rule here — the guard
+            # wraps the *use* of a parsed value — and not because this field can
+            # break it: `read_task_file` splits it out of the file's text, so it
+            # is always a `str`. The next field added here may not be.
+            row["body"] = found.body
             app.json.dumps(row)
         except _UNREADABLE as exc:
             # A 404 here would say the task does not exist, which is a lie
@@ -202,7 +211,22 @@ def create_app(
             # `state_machine._state_path` writes. Named here so a warning can
             # point at the file and not at the account.
             path = os.path.join(cfg.state_dir, f"{account.name}.json")
-            row = {"name": account.name, "container": account.container}
+            # Everything the config knows, before the `try`: an unreadable state
+            # file nulls what the state file says and nothing the config says.
+            # `is_primary` is `load_config`'s, read from the top-level
+            # `primary_account` — `docs/decisions.md` ADR 17. The three
+            # thresholds are the pool's and are repeated on every row because
+            # the envelope has no slot beside `data` for a pool-wide fact:
+            # ADR 20, narrowing ADR 18. They come off the `cfg` `create_app`
+            # loaded, for the reason `_task` gives about the expiry window.
+            row = {
+                "name": account.name,
+                "container": account.container,
+                "is_primary": account.is_primary,
+                "quota_threshold_pct": cfg.quota_threshold_pct,
+                "reserve_pct": cfg.reserve_pct,
+                "quota_cooldown_seconds": cfg.quota_cooldown_seconds,
+            }
             try:
                 row["state"] = state_machine.get_state(cfg.state_dir, account.name).value
                 row["current_task"] = state_machine.get_current_task(cfg.state_dir, account.name)
@@ -424,11 +448,18 @@ def _task(task: context_transfer.TaskFile, cards: dict[str, dict], ttl_seconds: 
     `ttl_seconds` is an argument and not a module global: it is
     `cfg.heartbeat_ttl_seconds`, which `create_app` has already loaded, and a
     second `load_config` here is a second answer to the same question.
+
+    One `TaskFile` field is deliberately missing here and is added by
+    `/api/tasks/<task_id>` after it calls this: `body`. It is the running record
+    every phase appends to, so the two task routes answer different key sets on
+    purpose — `docs/decisions.md` ADR 21, which says why, and why moving it in
+    here would be a regression rather than a tidy-up.
     """
     return {
         "task_id": task.task_id,
         "status": task.status,
         "owner": task.owner,
+        "depends_on": task.depends_on,
         "heartbeat": task.heartbeat,
         "description": task.description,
         "kanban_issue_id": task.kanban_issue_id,
