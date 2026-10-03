@@ -84,6 +84,19 @@ MAX_EVENT_LIMIT = 1000
 #: there were. `docs/decisions.md` ADR 11.
 MAX_WARNINGS = 100
 
+#: The most bytes of a task's running record one `/api/tasks/<task_id>` answer
+#: carries. `handoff()` only ever appends to `body`, so the field grows for the
+#: life of a task id — 55 KB for the largest card in this repository on
+#: 2026-10-01 — and it was the one thing this service answered with no bound at
+#: all (`docs/debt/T-011-D1.md`). Over the cap the *newest* end survives, which
+#: is the end `handoff()` writes to and the end a reader of the detail screen
+#: came for, and the truncation names itself in `warnings` on `MAX_EVENT_LIMIT`'s
+#: model. 128 KB is over twice today's largest card, so nothing in this harness
+#: is truncated yet: the first card that is will be one of the long-lived task
+#: ids, and the warning is how an operator finds out. `docs/decisions.md`
+#: ADR 23, narrowing ADR 21.
+MAX_BODY_BYTES = 128 * 1024
+
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
 #: on how much a caller may ask for — `MAX_EVENT_LIMIT` is that, and it clamps
@@ -190,14 +203,23 @@ def create_app(
             # wraps the *use* of a parsed value — and not because this field can
             # break it: `read_task_file` splits it out of the file's text, so it
             # is always a `str`. The next field added here may not be.
-            row["body"] = found.body
+            #
+            # Bounded here rather than served whole: ADR 23, closing
+            # `docs/debt/T-011-D1.md`. The bound is also what bounds the one cost
+            # that entry named and did not fix — the body is serialised twice,
+            # once by the `app.json.dumps` round below and once by `jsonify` —
+            # since what is serialised twice is now at most `MAX_BODY_BYTES`.
+            row["body"], body_warnings = _bounded_body(path, found.body)
             app.json.dumps(row)
         except _UNREADABLE as exc:
             # A 404 here would say the task does not exist, which is a lie
             # about a file that does: the caller gets `null` and the reason.
             warnings.append(f"{path}: unreadable task file: {exc}")
             return _envelope(None, warnings)
-        return _envelope(row, warnings)
+        # `body_warnings` only on the path that serves the row: a truncation
+        # note beside `data: null` would describe a record the caller did not
+        # get.
+        return _envelope(row, warnings + body_warnings)
 
     @app.get("/api/accounts")
     @requires_auth
@@ -467,6 +489,39 @@ def _task(task: context_transfer.TaskFile, cards: dict[str, dict], ttl_seconds: 
         "card": cards.get(task.kanban_issue_id) if task.kanban_issue_id else None,
         "lock_expired": _lock_expired(task, ttl_seconds),
     }
+
+
+def _bounded_body(path: str, body: str) -> tuple[str, list[str]]:
+    """The newest `MAX_BODY_BYTES` of a task's running record, and what was cut.
+
+    Bytes and not characters, because what is being bounded is the size of a
+    response. A byte slice can land inside a multibyte character, so the tail is
+    decoded with `errors="ignore"`: a dropped partial sequence costs one
+    character, where `errors="replace"` would put a U+FFFD at the top of the
+    record for a human to recognise as an artefact. The first surviving line goes
+    with it for the same reason — half a line of markdown at the top of the
+    screen reads as damage to the file rather than as a cap — unless dropping it
+    would leave nothing, which is what a record with one very long line is.
+
+    Which end survives is the decision, not the arithmetic: `handoff()` appends,
+    so the newest phase is at the end and that is what the detail screen is open
+    for. The start of the record is reachable in the task file, and the task's
+    own `description` — the operator's ask, a separate field — is served whole
+    either way. `docs/decisions.md` ADR 23.
+    """
+    raw = body.encode("utf-8")
+    if len(raw) <= MAX_BODY_BYTES:
+        return body, []
+    kept = raw[-MAX_BODY_BYTES:].decode("utf-8", errors="ignore")
+    _partial, newline, rest = kept.partition("\n")
+    if newline and rest:
+        kept = rest
+    return kept, [
+        f"{path}: the task body is {len(raw)} bytes and this service answers at "
+        f"most {MAX_BODY_BYTES}: the newest {len(kept.encode('utf-8'))} bytes "
+        "are served and the start of the running record is not. The whole "
+        "record is in the task file."
+    ]
 
 
 def _read_cards(cfg: Config) -> tuple[dict[str, dict], list[str]]:

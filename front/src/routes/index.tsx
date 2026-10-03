@@ -4,18 +4,17 @@ import { useQuery } from "@tanstack/react-query";
 import { GitBranch } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
+  Banner,
   EmptyState,
   ErrorState,
-  GateChip,
   HeartbeatDot,
   Mono,
   PageHeader,
-  RoleBadge,
-  worstGate,
+  WarningBanner,
 } from "@/components/console/primitives";
-import { accountsQuery, phasesQuery, tasksQuery } from "@/lib/api/queries";
-import { ROLES, type GateFinding, type Role, type Task } from "@/lib/api/types";
-import { splitStatus } from "@/lib/format";
+import { accountsQuery, debtQuery, tasksQuery } from "@/lib/api/queries";
+import { debtTaskId } from "@/lib/api/client";
+import type { Task, TaskStatus } from "@/lib/api/types";
 import { useNow, useSearchHotkey } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 
@@ -26,7 +25,7 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Kanban of harness tasks with In Progress split into the five agent role lanes, heartbeat freshness and gate status.",
+          "Kanban of harness tasks over the four statuses a task file carries, with the api's lock-expiry judgement and declared debt per card.",
       },
       { property: "og:title", content: "Board — harness operations console" },
       {
@@ -38,49 +37,70 @@ export const Route = createFileRoute("/")({
   component: BoardPage,
 });
 
+/** The four columns, in the order a task moves through them. ADR 26. */
+const COLUMNS: { status: TaskStatus; title: string }[] = [
+  { status: "pending", title: "Pending" },
+  { status: "in_progress", title: "In progress" },
+  { status: "blocked", title: "Blocked" },
+  { status: "done", title: "Done" },
+];
+
 function BoardPage() {
   const now = useNow();
   const searchRef = useSearchHotkey();
   const tasks = useQuery(tasksQuery);
-  const phases = useQuery(phasesQuery());
   const accounts = useQuery(accountsQuery);
+  // The debt chip is a filter over /api/debt by the task prefix of a debt id, not
+  // a field /api/tasks serves. `docs/decisions.md` ADR 17.
+  const debt = useQuery(debtQuery);
 
   const [q, setQ] = useState("");
-  const [roleFilter, setRoleFilter] = useState<string>("all");
   const [accountFilter, setAccountFilter] = useState<string>("all");
-  const [gateFilter, setGateFilter] = useState<string>("all");
   const [dense, setDense] = useState(false);
 
-  const gatesByTask = useMemo(() => {
-    const map = new Map<string, GateFinding[]>();
-    for (const p of phases.data ?? []) {
-      map.set(p.task_id, [...(map.get(p.task_id) ?? []), ...p.gate_findings]);
+  const rows = tasks.data?.data ?? [];
+
+  const debtByTask = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const d of debt.data?.data ?? []) {
+      const taskId = debtTaskId(d.id);
+      if (taskId) map.set(taskId, (map.get(taskId) ?? 0) + 1);
     }
     return map;
-  }, [phases.data]);
+  }, [debt.data]);
 
   const filtered = useMemo(() => {
-    return (tasks.data ?? []).filter((t) => {
-      const { role } = splitStatus(t.status);
-      if (roleFilter !== "all" && role !== roleFilter) return false;
+    return rows.filter((t) => {
       if (accountFilter !== "all" && t.owner !== accountFilter) return false;
-      if (gateFilter !== "all" && worstGate(gatesByTask.get(t.task_id) ?? []) !== gateFilter)
-        return false;
       if (q && !(`${t.task_id} ${t.description}`.toLowerCase().includes(q.toLowerCase())))
         return false;
       return true;
     });
-  }, [tasks.data, roleFilter, accountFilter, gateFilter, q, gatesByTask]);
+  }, [rows, accountFilter, q]);
 
-  const byLane = (lane: string) => filtered.filter((t) => splitStatus(t.status).lane === lane);
-  const byRole = (role: Role) =>
-    filtered.filter((t) => splitStatus(t.status).role === role);
+  const byStatus = (status: TaskStatus) => filtered.filter((t) => t.status === status);
+
+  // A status outside the four appears in no column, so it is named rather than
+  // dropped: the api serves what the task file says and nothing validates it, and
+  // filtering on four literals loses a row silently. ADR 26.
+  const unplaced = rows.filter((t) => !COLUMNS.some((c) => c.status === t.status));
+
+  const warnings = [
+    ...(tasks.data?.warnings ?? []),
+    ...(accounts.data?.warnings ?? []),
+    ...(debt.data?.warnings ?? []),
+    ...unplaced.map(
+      (t) =>
+        `${t.task_id}: status ${JSON.stringify(t.status)} is none of pending, in_progress, blocked or done, ` +
+        `so this task is in no column. The api serves what the task file says.`,
+    ),
+  ];
 
   return (
     <AppShell>
       <PageHeader
         title="Board"
-        subtitle="In Progress is split into the five pipeline roles — that split is the point."
+        subtitle="The four statuses a task file carries. Lock expiry is the api's judgement, not this screen's."
         right={
           <>
             <RefreshedAt at={tasks.dataUpdatedAt} />
@@ -102,75 +122,62 @@ function BoardPage() {
           placeholder="Filter tasks…  /"
           className="mono w-56 rounded-sm border border-border bg-surface px-2 py-1 text-[11px] outline-none focus:border-ring"
         />
-        <Select value={roleFilter} onChange={setRoleFilter} options={["all", ...ROLES]} label="role" />
         <Select
           value={accountFilter}
           onChange={setAccountFilter}
-          options={["all", ...(accounts.data ?? []).map((a) => a.name)]}
+          options={["all", ...(accounts.data?.data ?? []).map((a) => a.name)]}
           label="account"
         />
-        <Select
-          value={gateFilter}
-          onChange={setGateFilter}
-          options={["all", "note", "warning", "blocking"]}
-          label="gate"
-        />
         <span className="ml-auto text-[10px] text-muted-foreground">
-          {filtered.length} of {(tasks.data ?? []).length} tasks
+          {filtered.length} of {rows.length} tasks
         </span>
       </div>
+
+      {/* The role lanes, the role filter and the gate filter are not here, and this
+          says so rather than standing five columns empty: a control that cannot act
+          is the same mistake as a fixture. `docs/ui.md` *A region with no route
+          says which route, and when*, ADR 26 for why the status cannot supply it. */}
+      <Banner tone="info">
+        In progress is one column. A task file&apos;s <Mono>status</Mono> carries no role, so the
+        five role lanes, the role filter and the gate chips wait on{" "}
+        <Mono>/api/phases</Mono> — tier 2 of <Mono>docs/plans/front.md</Mono>, which is where the
+        per-phase record already on disk becomes a route.
+      </Banner>
+
+      <WarningBanner warnings={warnings} />
 
       {tasks.isError ? (
         <ErrorState
           title="The task API did not answer"
-          body="The board could not read tasks. Check the harness API on the Tailscale host, then reload — nothing was changed."
+          body="The board could not read /api/tasks. Check that observability/api is up and that this console was started with API_TOKEN set, then reload — nothing was changed."
         />
       ) : tasks.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading tasks…</p>
+      ) : rows.length === 0 ? (
+        <EmptyState
+          title="No task has been filed"
+          body="The harness holds no task cards. Create one with run-task and it will appear in Pending."
+        />
       ) : filtered.length === 0 ? (
         <EmptyState
           title="No task matches these filters"
-          body="Clear the filter bar or widen the role and gate filters to see the rest of the board."
+          body="Clear the search box or set the account filter back to all to see the rest of the board."
         />
       ) : (
         <div className="flex min-h-0 gap-3 overflow-x-auto p-3">
-          <Column title="Queued" count={byLane("queued").length}>
-            {byLane("queued").map((t) => (
-              <TaskCard key={t.task_id} task={t} now={now} dense={dense} gates={gatesByTask.get(t.task_id) ?? []} />
-            ))}
-          </Column>
-
-          <div className="flex shrink-0 flex-col rounded-md border border-border-strong bg-surface/40">
-            <div className="border-b border-border px-2 py-1.5 text-[10px] uppercase tracking-widest text-muted-foreground">
-              In progress · pipeline
-            </div>
-            <div className="flex gap-2 p-2">
-              {ROLES.map((role) => (
-                <Column key={role} role={role} title={role} count={byRole(role).length} lane>
-                  {byRole(role).map((t) => (
-                    <TaskCard
-                      key={t.task_id}
-                      task={t}
-                      now={now}
-                      dense={dense}
-                      gates={gatesByTask.get(t.task_id) ?? []}
-                    />
-                  ))}
-                </Column>
+          {COLUMNS.map(({ status, title }) => (
+            <Column key={status} title={title} count={byStatus(status).length}>
+              {byStatus(status).map((t) => (
+                <TaskCard
+                  key={t.task_id}
+                  task={t}
+                  now={now}
+                  dense={dense}
+                  debtCount={debtByTask.get(t.task_id) ?? 0}
+                />
               ))}
-            </div>
-          </div>
-
-          <Column title="Blocked" count={byLane("blocked").length}>
-            {byLane("blocked").map((t) => (
-              <TaskCard key={t.task_id} task={t} now={now} dense={dense} gates={gatesByTask.get(t.task_id) ?? []} />
-            ))}
-          </Column>
-          <Column title="Done" count={byLane("done").length}>
-            {byLane("done").map((t) => (
-              <TaskCard key={t.task_id} task={t} now={now} dense={dense} gates={gatesByTask.get(t.task_id) ?? []} />
-            ))}
-          </Column>
+            </Column>
+          ))}
         </div>
       )}
     </AppShell>
@@ -210,22 +217,16 @@ function Column({
   title,
   count,
   children,
-  lane = false,
-  role,
 }: {
   title: string;
   count: number;
   children: React.ReactNode;
-  lane?: boolean;
-  role?: Role;
 }) {
   return (
-    <section
-      className={cn("flex shrink-0 flex-col", lane ? "w-[164px]" : "w-[210px] panel")}
-    >
+    <section className="panel flex w-[210px] shrink-0 flex-col">
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-muted-foreground">
-          {role ? <RoleBadge role={role} /> : title}
+          {title}
         </span>
         <span className="mono text-[10px] text-muted-foreground">{count}</span>
       </div>
@@ -241,15 +242,13 @@ function TaskCard({
   task,
   now,
   dense,
-  gates,
+  debtCount,
 }: {
   task: Task;
   now: number;
   dense: boolean;
-  gates: GateFinding[];
+  debtCount: number;
 }) {
-  const worst = worstGate(gates);
-  const { role } = splitStatus(task.status);
   return (
     <Link
       to="/tasks/$taskId"
@@ -261,13 +260,12 @@ function TaskCard({
     >
       <div className="flex items-center justify-between gap-2">
         <Mono className="text-[11px] font-semibold">{task.task_id}</Mono>
-        <HeartbeatDot heartbeat={task.heartbeat} now={now} />
+        <HeartbeatDot heartbeat={task.heartbeat} lockExpired={task.lock_expired} now={now} />
       </div>
       {!dense && (
         <p className="mt-1 line-clamp-2 text-[11px] text-foreground/90">{task.description}</p>
       )}
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
-        {role && <RoleBadge role={role} compact />}
         {task.owner ? (
           <Mono className="text-[10px] text-muted-foreground">{task.owner}</Mono>
         ) : (
@@ -279,10 +277,9 @@ function TaskCard({
             {task.depends_on.length}
           </span>
         )}
-        {worst && <GateChip level={worst} />}
-        {task.debt.length > 0 && (
+        {debtCount > 0 && (
           <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
-            debt {task.debt.length}
+            debt {debtCount}
           </span>
         )}
       </div>

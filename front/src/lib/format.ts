@@ -1,8 +1,21 @@
-import { HEARTBEAT_STALE_S, type Role, type TaskStatus } from "./api/types";
+import { type Role } from "./api/types";
 
+/**
+ * How long ago, in whole seconds, or `null` when there is nothing to subtract
+ * from.
+ *
+ * A string that is not a timestamp answers `null` rather than `NaN`: a
+ * hand-edited heartbeat is a real case (`docs/decisions.md` ADR 10, and ADR 8 for
+ * the board already handling it) and the console would otherwise render the word
+ * `NaN` at the operator. What to show instead is `HeartbeatDot`'s decision, not
+ * this function's — `docs/ui.md` *Staleness is served, never computed* renders the
+ * unparseable string verbatim.
+ */
 export function agoSeconds(iso: string | null, now: number = Date.now()): number | null {
   if (!iso) return null;
-  return Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  return Math.max(0, Math.round((now - then) / 1000));
 }
 
 export function formatAge(seconds: number | null): string {
@@ -29,12 +42,20 @@ export function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
-export function isStale(iso: string | null, now: number = Date.now()): boolean {
-  const age = agoSeconds(iso, now);
-  return age !== null && age > HEARTBEAT_STALE_S;
-}
+// `isStale` is deleted, not moved. Staleness is served: the api applies
+// `heartbeat_ttl_seconds` against its own config and answers `lock_expired`, and a
+// console that re-derives it is computing, on stale input, a value it was handed.
+// `docs/decisions.md` ADR 18, `docs/ui.md` *Staleness is served, never computed*.
+// Its only caller was `routes/pool.tsx`, which now joins the task's own field.
 
-export function splitStatus(status: TaskStatus): { lane: string; role: Role | null } {
+/**
+ * Kept with no caller, deliberately. Nothing `/api/tasks` serves has a role in it
+ * — `docs/decisions.md` ADR 26 — but `in_progress:<role>` is the shape a *card's*
+ * status has, which is the alternative that ADR records for the Board's role
+ * lanes, so the parser costs nothing and is here if that route is taken. Widened
+ * to `string` for the same reason: a card's status is not a `TaskStatus`.
+ */
+export function splitStatus(status: string): { lane: string; role: Role | null } {
   if (status.startsWith("in_progress:")) {
     return { lane: "in_progress", role: status.split(":")[1] as Role };
   }

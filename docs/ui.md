@@ -75,16 +75,26 @@ meaning into the pair of them.
 
 `success` is a terminal good outcome — a task `done`, a phase that finished.
 `warning` is something that still works and will not keep working — an account
-in `PRE_COOLDOWN`, a heartbeat going stale, a gate note. `destructive` is a
-failure that already happened — `blocked`, a blocking finding, a refused write.
-`info` is work in flight — `in_progress`, a running action. Anything the
-harness simply has not said is `muted`, and that is the next entry.
+in `PRE_COOLDOWN`, a lock whose heartbeat has expired, a gate note, an open debt
+row. `destructive` is a failure that already happened — `blocked`, a blocking
+finding, a refused write. `info` is work in flight — `in_progress`, a running
+action. Anything the harness simply has not said is `muted`, and that is the
+next entry. A task that is `pending` is `muted` too: nothing has happened to it
+yet, which is not the same news as something that finished.
+
+The four task states are the four the harness writes — `pending`,
+`in_progress`, `blocked`, `done` — and not the four a fixture imagined;
+`docs/decisions.md` ADR 26 says why there is no `queued` and why
+`in_progress` carries no role. A status outside those four is possible, because
+the api serves what the task file says: it renders `muted` with the string
+verbatim rather than unstyled.
 
 The tone of a state is a cross-screen definition because the same state appears
 on the board, on the task detail and in the pool, and an operator who has to
 re-learn what amber means per screen is reading three products.
 
-**Set by:** the `front/` import. Source of truth:
+**Set by:** the `front/` import; amended by T-012 for the served state
+vocabulary and the tone of `pending`. Source of truth:
 `front/src/components/console/primitives.tsx` (`StatusPill`, `gateTone`).
 
 ### Absent, empty and broken are three different things
@@ -101,11 +111,73 @@ re-learn what amber means per screen is reading three products.
   failed and what the operator can do, and it never degrades into an empty
   state: a screen that shows "nothing to see" when the api refused is lying.
 
-This is the entry most screens get wrong, which is why it is three bullets
+A **warning** is a fourth thing and is none of those three. Rows together with a
+non-empty `warnings` is a *partial*: it shows both, and the next entry says how.
+A region that turns a warning into an empty state, or into an error state, has
+lost the one thing the api went to the trouble of telling it.
+
+This is the entry most screens get wrong, which is why it is four paragraphs
 rather than one.
 
-**Set by:** the `front/` import. Source of truth:
+**Set by:** the `front/` import; the partial added by T-012 under
+`docs/decisions.md` ADR 16. Source of truth:
 `front/src/components/console/primitives.tsx`.
+
+### Staleness is served, never computed
+
+Whether a lock is stale is `lock_expired` on a task row, computed by the api
+against the expiry window it holds in its own config. No screen compares a
+heartbeat against a number of its own: `docs/decisions.md` ADR 18 deleted
+`HEARTBEAT_STALE_S` for this, and a console that re-derives staleness is
+computing, on stale input, a value it was handed.
+
+The field has three values and they are three different renderings, through
+`HeartbeatDot`:
+
+- `true` — `destructive`, reading `stale <age>`, with the absolute timestamp in
+  the `title`. The age is the console's own subtraction and ticks; the
+  *judgement* is the api's.
+- `false` — `muted` with a `success` dot and the age. A live lock is not good
+  news, it is ordinary news.
+- `null` — nothing to judge, and two facts share it. With no `heartbeat` it is a
+  task nobody holds, and renders through `Absent` as *no lock*. With a
+  `heartbeat` that is not a timestamp it is a hand-edited card, and the string
+  renders verbatim beside the dot, because an unparseable heartbeat is the
+  harness's news to report and not the console's to hide
+  (`docs/decisions.md` ADR 10, and ADR 8 for the board doing the same).
+
+An account has no heartbeat of its own. The lock an account holds is the lock on
+the task it is running, which is a join the console does across two routes it
+already calls — ADR 17 — and an account with no current task renders `Absent`
+rather than a dot.
+
+**Set by:** T-012. Source of truth:
+`front/src/components/console/primitives.tsx` (`HeartbeatDot`),
+`front/src/lib/format.ts`.
+
+### A region with no route says which route, and when
+
+A region whose query has no route behind it renders an `EmptyState` whose body
+names the missing route and the tier it lands in — "`/api/phases`, tier 2 of
+`docs/plans/front.md`" — and never a fixture, never a blank, and never the
+wording of an empty harness. `docs/decisions.md` ADR 19 is the rule; this entry
+is what it looks like, because more than one screen has such a region and an
+operator must never be unable to tell a quiet harness from an unwired console.
+
+The distinction to hold on to: *this harness has not done that yet* and *this
+console cannot see it yet* are different sentences, and only the first one is an
+`EmptyState` about the harness. A region waiting on a route is an empty state
+about the console.
+
+Where a region has no shape of its own to fill — a filter over a dimension
+nothing supplies, a column that would always be empty — the control goes rather
+than being disabled, and a `Banner` with tone `info` above the content names the
+route. A control that cannot act is the same mistake as a fixture: it tells an
+operator something is available when it is not.
+
+**Set by:** T-012. Source of truth:
+`front/src/components/console/primitives.tsx` (`EmptyState`, `Banner`),
+`front/src/routes/index.tsx`, `front/src/routes/tasks.$taskId.tsx`.
 
 ### Times are absolute, ages are relative, and ages tick
 
@@ -150,9 +222,27 @@ The general rule follows from `docs/decisions.md` ADR 16: every read answers
 given. A warning the api went to the trouble of producing and the console
 swallowed is the failure mode this entry exists to prevent.
 
-**Set by:** the `front/` import, under ADR 16. Source of truth:
+Concretely, on every screen that lists rows:
+
+- The warnings render in **one** `Banner`, tone `warning`, above the content and
+  below the page header and any filter bar — one line per warning, in the order
+  the api sent them, in a region that scrolls if there are many. **Every** one
+  renders: the api already caps the list at a hundred and spends the last slot
+  tallying the rest, so a console that truncates a second time is dropping
+  something nothing will mention again.
+- A screen that makes several reads concatenates their warnings into that one
+  banner. Three banners stacked is three queries' implementation detail on an
+  operator's screen.
+- The rows still render beside it. A warning never takes a region to its error
+  state and never replaces its rows — that is the partial of *Absent, empty and
+  broken*.
+- A screen that lists rows and has nowhere to put this is unfinished, which is
+  the criterion ADR 16 hands the revisor.
+
+**Set by:** the `front/` import, under ADR 16; the four rules above by T-012,
+which wired the first five reads that can produce a warning. Source of truth:
 `front/src/components/console/app-shell.tsx`,
-`front/src/components/console/primitives.tsx` (`Banner`).
+`front/src/components/console/primitives.tsx` (`Banner`, `WarningBanner`).
 
 ### The four utilities, and what they are for
 
@@ -167,13 +257,18 @@ a one-off class.
 
 ## Not decided here
 
-Three cross-screen questions are deliberately open, and each is bound to the
+Two cross-screen questions are deliberately open, and each is bound to the
 task that first needs it in `docs/plans/front.md` *Decisions this tier's tasks
 make*. They are listed so an arquitecto does not write them speculatively:
 
 - **Loading per region or per page** — ADR 14's first open edge. The Board
-  screen's task decides it, and the answer lands here.
+  screen's task decides it, and the answer lands here. T-012 wired the five
+  reads without touching it: each screen keeps the one line of text it had.
 - **The inert `Release` button** — whether the pool shows a control nothing
-  serves. The Pool screen's task decides it.
-- **Whether the live tail re-terminates the stream** — this one is an ADR, not
-  an entry here: it has a consequence outside the console.
+  serves. The Pool screen's task decides it. T-012 left the button exactly as
+  it found it, including its `disabled` and `title`.
+
+A third was listed here and is now answered, outside this file because it had a
+consequence outside the console: whether the live tail re-terminates the stream
+is `docs/decisions.md` ADR 22, and it consumes `/api/events` rather than
+terminating anything.

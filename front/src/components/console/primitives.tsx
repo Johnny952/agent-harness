@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { agoSeconds, formatAge, roleColorVar, roleGlyph } from "@/lib/format";
 import type { GateFinding, Role, TaskStatus } from "@/lib/api/types";
-import { splitStatus } from "@/lib/format";
 
 export function Mono({ children, className }: { children: ReactNode; className?: string }) {
   return <span className={cn("mono", className)}>{children}</span>;
@@ -29,11 +28,20 @@ export function RoleBadge({ role, compact = false }: { role: Role; compact?: boo
   );
 }
 
+/**
+ * The four states the harness writes, and a fifth rendering for anything else.
+ *
+ * `pending` is `muted` because nothing has happened to the task yet, which is not
+ * the same news as something that finished. A status outside the four is possible
+ * — the api serves what the task file says and `read_task_file` validates none of
+ * it — and renders muted with the string verbatim rather than as an unstyled pill
+ * nobody designed. `docs/ui.md` *The tone of a state*, `docs/decisions.md` ADR 26.
+ */
 export function StatusPill({ status }: { status: TaskStatus }) {
-  const { lane, role } = splitStatus(status);
-  if (role) return <RoleBadge role={role} />;
+  const muted = "text-muted-foreground border-border-strong bg-surface-2";
   const tone: Record<string, string> = {
-    queued: "text-muted-foreground border-border-strong bg-surface-2",
+    pending: muted,
+    in_progress: "text-info border-info/50 bg-info/10",
     blocked: "text-destructive border-destructive/60 bg-destructive/10",
     done: "text-success border-success/50 bg-success/10",
   };
@@ -41,48 +49,90 @@ export function StatusPill({ status }: { status: TaskStatus }) {
     <span
       className={cn(
         "inline-flex items-center rounded-sm border px-1.5 py-[1px] text-[10px] font-medium uppercase tracking-wide",
-        tone[lane],
+        tone[status] ?? muted,
       )}
     >
-      {lane}
+      {status}
     </span>
   );
 }
 
+/**
+ * Whether a lock is stale is the api's judgement, not this component's.
+ *
+ * `lockExpired` is `lock_expired` on a task row, computed against the expiry
+ * window the api holds in its own config; the age beside it is the console's own
+ * subtraction and ticks. The three values are three renderings and the `null` is
+ * two facts, exactly as `docs/ui.md` *Staleness is served, never computed* writes
+ * them. This component compared an age against its own `120` until T-012 —
+ * `docs/decisions.md` ADR 18 deleted that number rather than serving it.
+ *
+ * An account has no heartbeat of its own: the lock an account holds is the lock on
+ * the task it is running, so callers on the Pool screen pass the joined task's two
+ * fields. ADR 17.
+ *
+ * `withLabel` suppresses the *ordinary* words — the age, and "no lock" — on the
+ * dense surfaces that only have room for the dot. It does not suppress the two
+ * pieces of news: a stale lock always says so, and an unparseable heartbeat always
+ * shows its string.
+ */
 export function HeartbeatDot({
   heartbeat,
+  lockExpired,
   now,
   withLabel = false,
 }: {
   heartbeat: string | null;
+  lockExpired: boolean | null;
   now: number;
   withLabel?: boolean;
 }) {
   const age = agoSeconds(heartbeat, now);
-  if (age === null) {
+
+  if (lockExpired === null) {
+    // Nothing to judge. With no heartbeat, a task nobody holds; with a heartbeat
+    // that is not a timestamp, a hand-edited card — and the string travels
+    // verbatim, because an unparseable heartbeat is the harness's news to report
+    // and not the console's to hide (ADR 10).
+    if (heartbeat === null) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+          <span className="inline-block size-[7px] rounded-full border border-border-strong" />
+          {withLabel && <Absent label="no lock" />}
+        </span>
+      );
+    }
     return (
-      <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+      <span
+        className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+        title="The harness recorded a heartbeat this console cannot read as a timestamp."
+      >
         <span className="inline-block size-[7px] rounded-full border border-border-strong" />
-        {withLabel && "no lock"}
+        <Mono className="text-[10px]">{heartbeat}</Mono>
       </span>
     );
   }
-  const stale = age > 120;
+
+  if (lockExpired) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] font-medium text-destructive"
+        title={`Heartbeat stale — last beat ${heartbeat}`}
+      >
+        <span className="inline-block size-[7px] animate-pulse rounded-full bg-destructive ring-2 ring-destructive/30" />
+        stale {formatAge(age)}
+      </span>
+    );
+  }
+
+  // A live lock is not good news, it is ordinary news: a success dot in muted type.
   return (
     <span
-      className={cn(
-        "inline-flex items-center gap-1 text-[10px]",
-        stale ? "font-medium text-destructive" : "text-muted-foreground",
-      )}
-      title={stale ? `Heartbeat stale — last beat ${formatAge(age)} ago` : `Heartbeat ${formatAge(age)} ago`}
+      className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+      title={`Heartbeat ${formatAge(age)} ago — last beat ${heartbeat}`}
     >
-      <span
-        className={cn(
-          "inline-block size-[7px] rounded-full",
-          stale ? "animate-pulse bg-destructive ring-2 ring-destructive/30" : "bg-success",
-        )}
-      />
-      {stale ? `stale ${formatAge(age)}` : withLabel ? formatAge(age) : null}
+      <span className="inline-block size-[7px] rounded-full bg-success" />
+      {withLabel ? formatAge(age) : null}
     </span>
   );
 }
@@ -203,6 +253,35 @@ export function Banner({
   }[tone];
   return (
     <div className={cn("mx-4 mt-3 rounded-md border px-3 py-2 text-xs", cls)}>{children}</div>
+  );
+}
+
+/**
+ * Every warning a screen was handed, in one banner above the content.
+ *
+ * `docs/ui.md` *A degraded backend is a banner, not a blank screen* is the rule
+ * and this is the shape of it. A screen that makes several reads concatenates
+ * their warnings into this one banner, because three banners stacked is three
+ * queries' implementation detail on an operator's screen; the rows still render
+ * beside it, because a warning is a partial and never an error state.
+ *
+ * Nothing is truncated. `observability/api/app.py:_capped` already holds the list
+ * at a hundred and spends its last slot tallying the rest, so a console that
+ * truncated a second time would be dropping something nothing will mention again —
+ * the region scrolls instead.
+ */
+export function WarningBanner({ warnings }: { warnings: string[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Banner tone="warning">
+      <div className="max-h-32 space-y-0.5 overflow-y-auto">
+        {warnings.map((w, i) => (
+          <p key={i} className="mono text-[10px] leading-relaxed">
+            {w}
+          </p>
+        ))}
+      </div>
+    </Banner>
   );
 }
 

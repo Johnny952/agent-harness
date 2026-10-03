@@ -1,5 +1,6 @@
 import "./lib/error-capture";
 
+import { forwardApiRequest } from "./lib/api/forward";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 
@@ -47,6 +48,20 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
+      // The bearer forward, in front of SSR: docs/decisions.md ADR 24. It answers
+      // null for anything that is not one of the five api paths, so every page
+      // the console renders falls through untouched.
+      //
+      // The import at the top of this file is load-bearing twice over and must
+      // stay static. `forward.ts` imports `lib/api/server-env.ts`, which throws
+      // at import when `API_TOKEN` is unset — that is how a console with no token
+      // refuses to boot instead of answering 401s from a screen (ADR 15). Making
+      // this a lazy `await import(...)` to tidy the module graph would turn that
+      // refusal into a 500 per request, which is the failure ADR 15 asks for the
+      // opposite of.
+      const forwarded = await forwardApiRequest(request);
+      if (forwarded) return forwarded;
+
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Send, X, Wrench } from "lucide-react";
 import { threadsQuery, tasksQuery } from "@/lib/api/queries";
 import { cn } from "@/lib/utils";
-import { formatClock, splitStatus } from "@/lib/format";
+import { formatClock } from "@/lib/format";
 import type { ChatMessage } from "@/lib/api/types";
 import { Mono, Absent } from "./primitives";
 
@@ -21,7 +21,12 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     [threads, threadId],
   );
 
-  const phaseRunning = (tasks ?? []).some((t) => splitStatus(t.status).role !== null);
+  // `tasksQuery` resolves to an envelope now (ADR 16), and a task's status carries
+  // no role (ADR 26) — so "a phase is running" is the `in_progress` status itself
+  // rather than a role parsed out of it. Which role is running waits on
+  // `/api/phases`, and nothing on this dock needs it: the chat surface is what
+  // C-8 declined to decide, and this is a translation, not a design.
+  const phaseRunning = (tasks?.data ?? []).some((t) => t.status === "in_progress");
   const messages = thread ? [...thread.messages, ...extra] : [];
 
   useEffect(() => {

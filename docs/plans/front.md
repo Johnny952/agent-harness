@@ -1,11 +1,21 @@
 # Plan: wiring the console in `front/`
 
-Status: *The api's share* of tier 1 is built, by T-011; nothing in `front/` is.
-`front/` is in the working tree and untracked —
-97 versionable files of TanStack Start, React 19, Tailwind and shadcn/ui,
-generated against the specifications in [`board.md`](board.md) and named the
-console by [`docs/charter.md`](../charter.md) C-8 on 2026-09-28. Every screen it
-draws resolves from a fixture; it has never spoken to the api. This plan says in
+Status: **tier 1 is built on both sides and parity is not reached.** The api's
+share landed with T-011; the console's — the five served reads in
+`front/src/lib/api/client.ts`, the server-side bearer forward, and the warning
+banner on every screen that lists rows — landed with T-012, whose decisions are
+[`decisions.md`](../decisions.md) ADR 22–26. Parity, as *Parity, and what it
+retires* defines it below, is **not** reached and was out of reach by
+construction: the Board screen and the task detail both want `/api/phases` and the
+detail screen wants `/api/learnings`, and both routes are tier 2. Those regions
+name the route they are waiting for on screen rather than showing a fixture, so
+`observability/board/` stays with its compose service and its tests, and
+[`docs/charter.md`](../charter.md) C-8 keeps it the tie-breaking reference.
+
+`front/` is in this repo, whole, since 2026-10-01 — C-9, which also keeps the
+Lovable round-trip live — having been generated against the specifications in
+[`board.md`](board.md) and named the console by C-8 on 2026-09-28. Seven of its
+twelve screens still resolve from a fixture. This plan says in
 what order that stops being true, what each step may decide for itself, and what
 it must stop and ask. It renumbers nothing: [`board.md`](board.md) owns Phases
 0–6 and stays the specification of what the phases *are*, as its own C-8

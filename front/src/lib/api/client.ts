@@ -1,10 +1,30 @@
 /**
  * Typed API client. One function per endpoint.
- * Today every function resolves from mock fixtures; swapping to the real REST
- * backend means replacing the bodies in this single file.
+ *
+ * **Five of them are real.** `listTasks`, `getTask`, `listAccounts`, `listEvents`
+ * and `listDebt` read `observability/api/` through the console's own origin —
+ * `lib/api/forward.ts` is the server half that holds the bearer, so nothing here
+ * carries a credential and every URL below is relative. They resolve to
+ * `ApiResult<T>`: `data` unwrapped into the rows a screen takes, `warnings`
+ * riding beside it. `docs/decisions.md` ADR 16, with ADR 25 for the type.
+ *
+ * Everything else still resolves from `./mock/fixtures` and `./mock/ops-fixtures`,
+ * because the routes behind them are tier 2 and tier 3 of `docs/plans/front.md`:
+ * `listPhases` and `listLearnings` wait for `/api/phases` and `/api/learnings`,
+ * and `listActions`, `enqueueAction` and `listThreads` are never coming here at
+ * all — ADR 19 puts the write surface in another service with its own credential,
+ * and C-1 has not ruled on the chat dock. A screen reading one of those says so on
+ * itself rather than looking finished; `docs/ui.md` *A region with no route says
+ * which route, and when*.
+ *
+ * Relative URLs mean these five may only be called from the browser: a relative
+ * `fetch` on the server has no base. Every one is behind a `useQuery` or a
+ * `useEffect` today, and ADR 24 names moving one into a route loader as the case
+ * that has to answer the base-URL question again.
  */
 import type {
   Account,
+  ApiResult,
   ChatThread,
   DebtEntry,
   HookEvent,
@@ -12,17 +32,13 @@ import type {
   Phase,
   QueuedAction,
   Task,
+  TaskDetail,
 } from "./types";
 import {
-  mockAccounts,
   mockActions,
-  mockDebt,
-  mockEvents,
   mockLearnings,
   mockPhases,
-  mockTasks,
   mockThreads,
-  nextMockEvent,
 } from "./mock/fixtures";
 
 export class ApiError extends Error {
@@ -36,51 +52,156 @@ export class ApiError extends Error {
 
 const latency = () => new Promise((r) => setTimeout(r, 120));
 
-/** Flipped by a failing action call so read-only screens can warn. */
-let actionBackendDown = false;
-export const isActionBackendDown = () => actionBackendDown;
+/**
+ * Permanently false. It was flipped by `setActionBackendDown`, a control that
+ * faked a failure so the mock could rehearse one, and ADR 19 is explicit that a
+ * control which fakes a failure is a fixture wearing a button — so that function
+ * and its `isActionBackendDown` reader are gone, with no callers anywhere in
+ * `front/src` to mourn them. Nothing flips this now, and nothing will until there
+ * is a real write surface to be down. Kept because the five mock write helpers
+ * below read it, and deleting it would reshape five more functions that have no
+ * route either.
+ */
+const actionBackendDown = false;
 
-export async function listTasks(): Promise<Task[]> {
-  await latency();
-  return mockTasks();
+/* ── The five wired reads ─────────────────────────────────────────────────
+ * One boundary function, and every one of the five goes through it: ADR 7's
+ * "one boundary function per call", inherited by the console under ADR 16.
+ */
+
+async function readEnvelope<T>(path: string): Promise<ApiResult<T>> {
+  let res: Response;
+  try {
+    res = await fetch(path, { headers: { accept: "application/json" } });
+  } catch (cause) {
+    // The console's own origin did not answer. Status 0: there was no response.
+    throw new ApiError(`${path} could not be reached: ${String(cause)}`, 0);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    // Flask answers its own 404 and 405 in HTML, so a routing mistake must not
+    // become a parse error. docs/learnings/flask-answers-404-and-405-in-html.md,
+    // and ADR 7's guard, which ADR 16 makes the console's too.
+    throw new ApiError(
+      `${path} answered ${res.status} as ${contentType || "no content type"}, not JSON`,
+      res.status,
+    );
+  }
+
+  const body: unknown = await res.json();
+
+  if (!res.ok) {
+    // A non-200 is {"error": "…"} with no warnings key at all, so the error path
+    // reads a different shape and does not look for one.
+    const reported = (body as { error?: unknown } | null)?.error;
+    throw new ApiError(
+      typeof reported === "string" ? reported : `${path} answered ${res.status}`,
+      res.status,
+    );
+  }
+
+  // Shallow, as ADR 16 says: `data` present, `warnings` a list of strings. Deeper
+  // validation here would be a second copy of the api's own shape, maintained by
+  // hand on the other side of a network.
+  if (!isEnvelope(body)) {
+    // Not an empty screen: a 200 that is not {data, warnings} is a different
+    // service than the one this console was written against, and rendering it as
+    // "nothing to show" is the failure ADR 16 exists to prevent.
+    throw new ApiError(`${path} answered 200 but not {data, warnings}`, res.status);
+  }
+
+  // `data === null` and `data === []` are *not* errors — both mean "nothing to
+  // show, read the warnings". The error path belongs to non-200s alone.
+  return { data: body.data as T, warnings: body.warnings };
 }
 
-export async function getTask(taskId: string): Promise<Task> {
-  await latency();
-  const task = mockTasks().find((t) => t.task_id === taskId);
-  if (!task) throw new ApiError(`Task ${taskId} not found`, 404);
-  return task;
+function isEnvelope(body: unknown): body is { data: unknown; warnings: string[] } {
+  if (typeof body !== "object" || body === null) return false;
+  if (!("data" in body)) return false;
+  const warnings = (body as { warnings?: unknown }).warnings;
+  return Array.isArray(warnings) && warnings.every((w) => typeof w === "string");
 }
+
+export function listTasks(): Promise<ApiResult<Task[]>> {
+  return readEnvelope<Task[]>("/api/tasks");
+}
+
+/**
+ * One task, with its running record. `data` is `null` for a card that exists and
+ * could not be read, with the reason in `warnings` — a 404 is an `ApiError` and
+ * that is a different screen.
+ */
+export function getTask(taskId: string): Promise<ApiResult<TaskDetail | null>> {
+  return readEnvelope<TaskDetail | null>(`/api/tasks/${encodeURIComponent(taskId)}`);
+}
+
+/** The api serves `current_task`; the console's `Account` keeps `current_task_id`. */
+type ServedAccount = Omit<Account, "current_task_id"> & { current_task: string | null };
+
+export async function listAccounts(): Promise<ApiResult<Account[]>> {
+  const { data, warnings } = await readEnvelope<ServedAccount[]>("/api/accounts");
+  // The one rename the console does make, written as a destructure so the served
+  // name does not linger beside the console's. ADR 17: the route's name is the
+  // harness's word for the thing, so the api is not renamed to match a fixture.
+  const accounts = data.map(({ current_task, ...rest }) => ({
+    ...rest,
+    current_task_id: current_task,
+  }));
+  return { data: accounts, warnings };
+}
+
+/**
+ * Events above `afterId`, oldest first.
+ *
+ * `observability/collector/db.py:list_events` ends in `ORDER BY id DESC LIMIT ?`
+ * and `routes/tail.tsx` keeps an ascending array whose next cursor is
+ * `events.at(-1)?.id`. Wired together unchanged, `at(-1)` would read the *oldest*
+ * id of the batch: the cursor walks backwards and the tail re-fetches the same
+ * window forever while looking like it works. The reverse is here rather than in
+ * `tail.tsx` so there is one place that knows the api's order —
+ * `docs/decisions.md` ADR 22, which also makes that `DESC` a contract: a later
+ * change to it changes this line in the same commit, or the tail stops moving.
+ *
+ * No `limit`: the service's `DEFAULT_EVENT_LIMIT` of 100 is the burst ceiling a
+ * `since`-bounded tail wants. When more events arrive between polls than that, the
+ * api answers the newest 100 above the cursor and the older ones in that window
+ * are skipped. That is what the route documents and the console does not paper
+ * over it — a tail that hides a gap is worse than one that has it.
+ */
+export async function listEvents(afterId?: number): Promise<ApiResult<HookEvent[]>> {
+  const path =
+    afterId === undefined ? "/api/events" : `/api/events?since=${encodeURIComponent(afterId)}`;
+  const { data, warnings } = await readEnvelope<HookEvent[]>(path);
+  return { data: [...data].reverse(), warnings };
+}
+
+/**
+ * The task a debt id belongs to, or `null` for an id that is not shaped that way.
+ *
+ * Debt ids are written `T-011-D1`, so the task is the prefix and `task_id` is a
+ * split rather than a column — and `Task.debt[]` is the same split read the other
+ * way, a filter over this list rather than a field `/api/tasks` serves. ADR 17.
+ * Exported so the screens that group by task group with the same rule.
+ */
+export function debtTaskId(id: string): string | null {
+  return /^(.+)-D\d+$/.exec(id)?.[1] ?? null;
+}
+
+export async function listDebt(): Promise<ApiResult<DebtEntry[]>> {
+  // The project slug is added by the forward, server-side, from CONSOLE_PROJECT:
+  // `?project=` is the one parameter this route takes and it is not the browser's
+  // to choose. ADR 24.
+  const { data, warnings } = await readEnvelope<Omit<DebtEntry, "task_id">[]>("/api/debt");
+  return { data: data.map((row) => ({ ...row, task_id: debtTaskId(row.id) })), warnings };
+}
+
+/* ── Still fixtures: tier 2, tier 3, and the ones that never land ────────── */
 
 export async function listPhases(taskId?: string): Promise<Phase[]> {
   await latency();
   const all = mockPhases();
   return taskId ? all.filter((p) => p.task_id === taskId) : all;
-}
-
-export async function listAccounts(): Promise<Account[]> {
-  await latency();
-  return mockAccounts();
-}
-
-export async function listEvents(afterId?: number): Promise<HookEvent[]> {
-  await latency();
-  const all = mockEvents();
-  if (afterId === undefined) return all;
-  const extra: HookEvent[] = [];
-  let last = afterId;
-  const burst = 1 + Math.floor(Math.random() * 3);
-  for (let i = 0; i < burst; i++) {
-    const e = nextMockEvent(last);
-    last = e.id;
-    extra.push(e);
-  }
-  return extra;
-}
-
-export async function listDebt(): Promise<DebtEntry[]> {
-  await latency();
-  return mockDebt();
 }
 
 export async function listLearnings(): Promise<LearningEntry[]> {
@@ -118,11 +239,6 @@ export async function enqueueAction(
 export async function pingActionBackend(): Promise<boolean> {
   await latency();
   return !actionBackendDown;
-}
-
-/** Test/demo hook: lets the operator simulate the action backend going away. */
-export function setActionBackendDown(down: boolean) {
-  actionBackendDown = down;
 }
 
 export function commandLine(verb: string, args: string[]): string {
