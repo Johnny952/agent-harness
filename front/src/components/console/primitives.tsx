@@ -285,6 +285,37 @@ export function WarningBanner({ warnings }: { warnings: string[] }) {
   );
 }
 
+/**
+ * Every secondary read that failed, in one banner above the content.
+ *
+ * The sibling of `WarningBanner`, and the shape `docs/ui.md` *Absent, empty and
+ * broken are three different things* gives the broken case when the read that
+ * broke is not the one the screen is for. A screen's own read failing takes the
+ * screen, and that is `ErrorState`. A join, a filter's options, a count beside
+ * each row: those still have a page worth rendering around them, and blanking it
+ * would hide the rows that are fine in order to report the one that is not.
+ *
+ * Danger rather than warning because the two say different things. A warning is
+ * a partial the api itself declared and the row beside it is still true; this is
+ * a read that never answered, so every field it fed is now a guess. Each line
+ * names the route and what its silence costs, because an operator looking at a
+ * card with no debt chip has to know the chip is missing rather than the debt.
+ */
+export function BrokenBanner({ reads }: { reads: string[] }) {
+  if (reads.length === 0) return null;
+  return (
+    <Banner tone="danger">
+      <div className="space-y-0.5">
+        {reads.map((r, i) => (
+          <p key={i} className="text-[11px] leading-relaxed">
+            {r}
+          </p>
+        ))}
+      </div>
+    </Banner>
+  );
+}
+
 export function Absent({ label = "not recorded" }: { label?: string }) {
   return <span className="text-[11px] italic text-muted-foreground/70">{label}</span>;
 }

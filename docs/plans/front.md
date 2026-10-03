@@ -322,33 +322,53 @@ what a later screen inherits:
   the entries the import already implies and no others — see *What
   `docs/ui.md` may decide* above for why reading them out of shipped code is
   not the speculative vocabulary this plan refuses. A screen's task still owns
-  its own entries; the three cross-screen questions this tier leaves open are
+  its own entries; the three cross-screen questions this tier left open were
   listed in that file under *Not decided here*, pointing back at the bullets
-  below.
+  below. All three are answered now, and that section records where each
+  answer went.
+
+T-012 took the Board screen, the Pool screen and the live tail in one task, so
+all three bullets below were its to settle. It settled the third and left the
+first two, which is what the by-hand review of T-012 found: a pointer bound to
+a task that has already shipped is worse than an open question, because
+`docs/ui.md` goes on naming an owner that will never come back to it. The
+review closed both. They are kept here as settled rather than deleted because
+the reasoning is what a later screen inherits.
 
 Bound to the **Board screen's task**:
 
-- **ADR 14's first open edge.** The state table makes the *region* the unit and
-  `pool.tsx` answers `accounts.isLoading` with one line of text for the whole
-  page. Whether Loading is per region or per page is a `docs/ui.md` entry by the
-  test above — every screen has the state — and it is that task's to settle.
+- **ADR 14's first open edge.** ~~Bound to the Board screen's task.~~ The state
+  table makes the *region* the unit and `pool.tsx` answers `accounts.isLoading`
+  with one line of text for the whole page. Whether Loading is per region or
+  per page is a `docs/ui.md` entry by the test above — every screen has the
+  state. Settled by the by-hand review of T-012, per page, as *Loading is per
+  page, not per region* in that file: it was not a choice between two designs
+  so much as every screen already agreeing and nobody having written it down.
 
 Bound to the **Pool screen's task**:
 
-- **The inert `Release` button.** It has `disabled`, `title` and classes and no
-  `onClick`. It is a tier-3 affordance on a tier-1 screen, so the choice is to
-  remove it now and restore it with the write surface, or to render it as the
-  named empty affordance ADR 19 requires of an unbacked screen. Either is
-  defensible; the task decides and records it.
+- **The inert `Release` button.** ~~Bound to the Pool screen's task.~~ It had
+  `disabled`, `title` and classes and no `onClick`. It is a tier-3 affordance
+  on a tier-1 screen, so the choice was to remove it now and restore it with
+  the write surface, or to render it as the named empty affordance ADR 19
+  requires of an unbacked screen. Settled by the by-hand review of T-012:
+  removed, because T-012 itself shipped the `docs/ui.md` entry *A region with
+  no route says which route, and when*, which says the control goes rather than
+  being disabled, and a rule a screen breaks on the same branch that wrote it
+  is not a second defensible option. A `Banner` with tone `info` names tier 3
+  and `dispatcher release-account --name <account>`, which is how an operator
+  does it today.
 
 Bound to the **Live tail's task**:
 
 - **Whether the console's tail re-terminates the stream or consumes the board's
-  frames.** ADR 12 terminates the live tail on the board and makes its frames
-  carry rendered HTML, which is a Jinja answer. A console that renders React
-  cannot consume rendered HTML, and `/api/events` is a polled `GET` by
-  `id > last`. This is an ADR — it has a consequence outside the console — and
-  it is the one tier-1 decision with real design in it.
+  frames.** ~~Bound to the live tail's task.~~ ADR 12 terminates the live tail
+  on the board and makes its frames carry rendered HTML, which is a Jinja
+  answer. A console that renders React cannot consume rendered HTML, and
+  `/api/events` is a polled `GET` by `id > last`. This is an ADR — it has a
+  consequence outside the console — and it is the one tier-1 decision with real
+  design in it. Settled by T-012 as `docs/decisions.md` ADR 22: the console
+  consumes `/api/events` and terminates nothing.
 
 ### Done when
 

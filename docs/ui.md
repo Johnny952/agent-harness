@@ -111,17 +111,68 @@ vocabulary and the tone of `pending`. Source of truth:
   failed and what the operator can do, and it never degrades into an empty
   state: a screen that shows "nothing to see" when the api refused is lying.
 
+Which read broke decides how much of the screen it takes. A screen's *own*
+read — the one the screen exists to show — takes the screen, and that is
+`ErrorState` in place of the content. A *secondary* read does not: a join, a
+filter's options, a count beside each row all leave a page worth rendering
+around them, and blanking it would hide the rows that are fine in order to
+report the one that is not. Those report through `BrokenBanner` above the
+content where the region they feed is diffuse — a chip on every card, the
+options behind one `Select` — and through an `ErrorState` inside the region
+where that region is a discrete block of its own. Either way the slot the read
+fed stops claiming a fact: it is not `Absent`, because *not recorded* is
+something the harness told us and this is the absence of an answer.
+
+`BrokenBanner` is tone `danger` where a partial's banner is tone `warning`,
+and it sits above it, because the two say different things and broken outranks
+partial. A warning is a shortfall the api itself declared and the row beside it
+is still true; a read that never answered leaves every field it fed a guess.
+Each line names the route and what its silence costs, so an operator looking at
+a card with no debt chip knows the chip is missing rather than the debt.
+
 A **warning** is a fourth thing and is none of those three. Rows together with a
 non-empty `warnings` is a *partial*: it shows both, and the next entry says how.
 A region that turns a warning into an empty state, or into an error state, has
 lost the one thing the api went to the trouble of telling it.
 
-This is the entry most screens get wrong, which is why it is four paragraphs
-rather than one.
+This is the entry most screens get wrong, which is why it runs long rather than
+to one paragraph.
 
 **Set by:** the `front/` import; the partial added by T-012 under
-`docs/decisions.md` ADR 16. Source of truth:
-`front/src/components/console/primitives.tsx`.
+`docs/decisions.md` ADR 16; the secondary-read rule and `BrokenBanner` by the
+by-hand review of T-012, which found four such reads on three screens failing
+into silence. Source of truth:
+`front/src/components/console/primitives.tsx` (`ErrorState`, `BrokenBanner`),
+`front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
+`front/src/routes/tasks.$taskId.tsx`.
+
+### Loading is per page, not per region
+
+A screen that has not got its reads back yet says so once, in one line of muted
+text where the content goes, and not once per region. ADR 14's state table
+makes the region the unit for *Absent*, *Empty* and *Broken*, because those are
+facts about one field or one query and they can differ down a screen. Loading
+is not: it is a fact about the first paint, and regions resolving one after
+another is the queries' timing on an operator's screen rather than anything
+about the harness.
+
+A refresh is not a load. A query that already has data and is refetching keeps
+showing the data — the timestamp in the header is what says how old it is, by
+*Staleness is served, never computed*. This is why the screens read `isLoading`
+and not `isFetching`.
+
+This entry records what the console already does rather than something decided
+and then built: every screen under `front/src/routes/` that has a loading state
+at all answers it with one line for the whole page, `models.tsx` included,
+which ORs two reads into one. It is written down so the next screen has to
+match, and a screen that genuinely needs loading per region — one region behind
+a slow route the rest of the page should not wait on — changes this entry
+rather than diverging from it quietly.
+
+**Set by:** the `front/` import, recorded by the by-hand review of T-012 after
+the task bound to the question shipped without settling it. Source of truth:
+`front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
+`front/src/routes/models.tsx`.
 
 ### Staleness is served, never computed
 
@@ -175,9 +226,11 @@ than being disabled, and a `Banner` with tone `info` above the content names the
 route. A control that cannot act is the same mistake as a fixture: it tells an
 operator something is available when it is not.
 
-**Set by:** T-012. Source of truth:
+**Set by:** T-012; the paragraph above applied to the pool's `Release` button
+by the by-hand review of T-012, which removed it. Source of truth:
 `front/src/components/console/primitives.tsx` (`EmptyState`, `Banner`),
-`front/src/routes/index.tsx`, `front/src/routes/tasks.$taskId.tsx`.
+`front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
+`front/src/routes/tasks.$taskId.tsx`.
 
 ### Times are absolute, ages are relative, and ages tick
 
@@ -257,18 +310,28 @@ a one-off class.
 
 ## Not decided here
 
-Two cross-screen questions are deliberately open, and each is bound to the
-task that first needs it in `docs/plans/front.md` *Decisions this tier's tasks
-make*. They are listed so an arquitecto does not write them speculatively:
+Nothing is open here at the moment. A cross-screen question that an arquitecto
+should not answer speculatively is listed in this section and bound to the task
+that first needs it in `docs/plans/front.md` *Decisions this tier's tasks make*,
+and it is struck off here when that task answers it.
 
-- **Loading per region or per page** — ADR 14's first open edge. The Board
-  screen's task decides it, and the answer lands here. T-012 wired the five
-  reads without touching it: each screen keeps the one line of text it had.
-- **The inert `Release` button** — whether the pool shows a control nothing
-  serves. The Pool screen's task decides it. T-012 left the button exactly as
-  it found it, including its `disabled` and `title`.
+Three have been listed and all three are now answered. They are kept as a
+record of where each answer went, because the binding is the part that is easy
+to lose:
 
-A third was listed here and is now answered, outside this file because it had a
-consequence outside the console: whether the live tail re-terminates the stream
-is `docs/decisions.md` ADR 22, and it consumes `/api/events` rather than
-terminating anything.
+- ~~**Loading per region or per page**~~ — ADR 14's first open edge, bound to
+  the Board screen's task. That task was T-012, and it wired the five reads
+  without touching the question, which left the pointer with no owner. The
+  by-hand review of T-012 closed it the way the entry test asks: per page, as
+  every screen already did, written down as *Loading is per page, not per
+  region* above.
+- ~~**The inert `Release` button**~~ — whether the pool shows a control nothing
+  serves, bound to the Pool screen's task. That task was also T-012, which left
+  the button as it found it. The by-hand review removed it under *A region with
+  no route says which route, and when*, the entry T-012 itself wrote: the
+  button is gone and a `Banner` with tone `info` names the route it waits on
+  and the CLI verb that does the job today.
+- ~~**Whether the live tail re-terminates the stream**~~ — answered outside
+  this file, because it had a consequence outside the console:
+  `docs/decisions.md` ADR 22. It consumes `/api/events` rather than terminating
+  anything.

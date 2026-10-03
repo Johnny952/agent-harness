@@ -4,6 +4,8 @@ import { Crown } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
   Absent,
+  Banner,
+  BrokenBanner,
   EmptyState,
   ErrorState,
   HeartbeatDot,
@@ -55,6 +57,17 @@ function PoolPage() {
   const byTaskId = new Map<string, Task>(
     (tasks.data?.data ?? []).map((t) => [t.task_id, t]),
   );
+  // A failed read carries no `warnings`, so the banner below stays silent for it:
+  // broken and partial are different states and they are reported separately.
+  // The join failing does not take the screen — the pool itself still answered.
+  // `docs/ui.md` *Absent, empty and broken are three different things*.
+  const brokenReads = tasks.isError
+    ? [
+        "/api/tasks did not answer, so no card can show the heartbeat of the lock it " +
+          "holds: that join is the task index. The states, thresholds and cooldowns " +
+          "below come from /api/accounts and are unaffected.",
+      ]
+    : [];
   const warnings = [...(accounts.data?.warnings ?? []), ...(tasks.data?.warnings ?? [])];
 
   return (
@@ -64,6 +77,21 @@ function PoolPage() {
         subtitle="Parked over the account's own threshold self-heals; refused by the provider does not."
         right={<RefreshedAt at={accounts.dataUpdatedAt} />}
       />
+
+      {/* Releasing an account is a write, and the control goes rather than being
+          rendered disabled over a route nothing serves: `docs/ui.md` *A region with
+          no route says which route, and when*. The capability is not lost, only the
+          button: `release-account` already refuses on exactly the two conditions the
+          tooltip described, so nothing an operator could do here goes away with it. */}
+      <Banner tone="info">
+        Releasing an account back to the pool is a write and this console only reads, so the
+        control is not here rather than here and inert. It waits on the write surface — tier 3
+        of <Mono>docs/plans/front.md</Mono>. Until then it is{" "}
+        <Mono>dispatcher release-account --name &lt;account&gt;</Mono> on the host, which
+        refuses while the lock is live or a refusal is still inside its cooldown.
+      </Banner>
+
+      <BrokenBanner reads={brokenReads} />
 
       <WarningBanner warnings={warnings} />
 
@@ -87,6 +115,7 @@ function PoolPage() {
                 key={a.name}
                 account={a}
                 lockedTask={a.current_task_id ? (byTaskId.get(a.current_task_id) ?? null) : null}
+                lockJoinBroken={tasks.isError}
                 now={now}
               />
             ))}
@@ -120,10 +149,12 @@ function PoolPage() {
 function AccountCard({
   account,
   lockedTask,
+  lockJoinBroken,
   now,
 }: {
   account: Account;
   lockedTask: Task | null;
+  lockJoinBroken: boolean;
   now: number;
 }) {
   const refusedAge = agoSeconds(account.rate_limited_at, now);
@@ -135,14 +166,6 @@ function AccountCard({
   // `_threshold_for`. The console reads the state rather than re-deriving it from
   // a usage number it is not served — ADR 18.
   const parked = account.state === "PRE_COOLDOWN";
-  const lockLive = lockedTask !== null && lockedTask.lock_expired === false;
-
-  const releaseBlocked = lockLive || refused;
-  const releaseReason = lockLive
-    ? "The lock is live — this account is mid-phase and releasing it would orphan the worktree."
-    : refused
-      ? `The provider refused this account; ${formatAge(cooldownLeft)} of cooldown remain.`
-      : "Release this account back to the pool";
 
   const stateTone: Record<AccountState, string> = {
     IDLE: "text-muted-foreground border-border-strong",
@@ -232,6 +255,11 @@ function AccountCard({
               now={now}
               withLabel
             />
+          ) : lockJoinBroken ? (
+            // Not `Absent`: the task index refused, so whether this account holds a
+            // live lock is unknown, and "task not in the index" would be a fact the
+            // console does not have. The banner above names the read.
+            <span className="text-[11px] italic text-destructive/80">read failed</span>
           ) : account.current_task_id ? (
             <Absent label="task not in the index" />
           ) : (
@@ -239,14 +267,6 @@ function AccountCard({
           )}
         </div>
       </div>
-
-      <button
-        disabled={releaseBlocked}
-        title={releaseReason}
-        className="mt-3 w-full rounded-sm border border-border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        Release
-      </button>
     </article>
   );
 }

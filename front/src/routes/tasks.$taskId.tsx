@@ -142,7 +142,16 @@ function TaskDetailPage() {
 
           <section className="panel px-3 py-3">
             <h2 className="label-xs mb-2">debt declared by this task</h2>
-            {taskDebt.length === 0 ? (
+            {/* The region's own read failed, not the screen's: the task card above
+                answered and is still true. Broken never degrades into an empty
+                state, and "No debt declared" is that empty state told as a fact.
+                `docs/ui.md` *Absent, empty and broken are three different things*. */}
+            {debt.isError ? (
+              <ErrorState
+                title="The debt index did not answer"
+                body="/api/debt could not be read, so what this task declared is unknown rather than absent. Everything above comes from the task card and is unaffected; the index itself is docs/debt/ in the repo."
+              />
+            ) : taskDebt.length === 0 ? (
               <p className="text-xs text-muted-foreground">
                 No debt declared. Phases record debt when they knowingly leave something unfinished.
               </p>

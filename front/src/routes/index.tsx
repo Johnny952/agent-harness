@@ -5,6 +5,7 @@ import { GitBranch } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
   Banner,
+  BrokenBanner,
   EmptyState,
   ErrorState,
   HeartbeatDot,
@@ -85,6 +86,21 @@ function BoardPage() {
   // filtering on four literals loses a row silently. ADR 26.
   const unplaced = rows.filter((t) => !COLUMNS.some((c) => c.status === t.status));
 
+  // A failed read carries no `warnings`, so the banner above stays silent for it:
+  // broken and partial are different states and they are reported separately.
+  // `docs/ui.md` *Absent, empty and broken are three different things*. Neither
+  // of these two takes the screen — the board is the task index, and it is fine.
+  const brokenReads = [
+    accounts.isError
+      ? "/api/accounts did not answer, so the account filter has no options to offer. " +
+        "The rows below are the task index and are unaffected."
+      : null,
+    debt.isError
+      ? "/api/debt did not answer, so no card carries a debt chip. That is the read " +
+        "failing, not a board on which nothing has declared debt."
+      : null,
+  ].filter((r): r is string => r !== null);
+
   const warnings = [
     ...(tasks.data?.warnings ?? []),
     ...(accounts.data?.warnings ?? []),
@@ -143,6 +159,8 @@ function BoardPage() {
         <Mono>/api/phases</Mono> — tier 2 of <Mono>docs/plans/front.md</Mono>, which is where the
         per-phase record already on disk becomes a route.
       </Banner>
+
+      <BrokenBanner reads={brokenReads} />
 
       <WarningBanner warnings={warnings} />
 
