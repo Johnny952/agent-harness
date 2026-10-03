@@ -1320,3 +1320,202 @@ dropping it from every column, which is what filtering on four literals does
 quietly. And `splitStatus` in `front/src/lib/format.ts` keeps parsing
 `in_progress:<role>`: it costs nothing, and it is the shape a card's status has
 if the alternative above is ever taken.
+
+## ADR 27 — A phase row is the handoff file a phase left, and `Phase`'s twenty-two fields sort into six served keys
+
+**Status:** accepted (T-013, 2026-10-03). Answers *What a phase row is*, which
+`docs/plans/front.md` *Decisions this tier's tasks make* binds to the Phases
+task, by applying ADR 17's sort field by field. Nothing in ADR 17 is reversed;
+its closing rule is what decides three of the fields below.
+
+**Context.** `/api/phases` has one source and it is the only one:
+`<hive_tasks_dir>/<task_id>/handoffs/<role>.json`, written by
+`dispatcher/context_transfer.py:save_handoff` and reachable through
+`handoff_path` in the same module. The envelope is exactly four keys — `role`,
+`round`, `saved_at`, `handoff` — one file per role, overwritten each round, so
+the file a role left is the round that was approved and there is **no history of
+earlier rounds** to serve. `front/src/lib/api/types.ts` declares `Phase` with
+seventeen fields and `HandoffEnvelope` with five. The gap between twenty-two and
+four is this entry.
+
+Three properties of that source decide most of the sort.
+
+A handoff is written when a phase **ends**. Every row this route answers is a
+phase that finished; `saved_at` is an end stamp and no start is recorded
+anywhere. ADR 28 takes what that costs the board.
+
+The payload is the role's own structured return, and its key set is its schema
+in `dispatcher/handoff.py` — `schema_for` over `_PROPERTIES` and `_ROLE_EXTRAS`.
+Observed in `.hive/tasks/T-011/` and `.hive/tasks/T-012/`: arquitecto and
+auditor carry `changed debt learnings paths pending risks status subagents
+verified`, the implementador adds `resolved_debt`, the revisor adds
+`debt_rulings` and `verdict`. That is a per-role key set the api must not
+duplicate: a second copy of a schema maintained by hand on this side is exactly
+what this service's docstring refuses.
+
+And the harness runs the phase but records almost nothing *about* the run. The
+account, the model, the elapsed time, the shrink retry and the over-budget
+warning are logged by the dispatcher and persisted nowhere, which is
+`usage_pct`'s situation in ADR 18 — a number the harness knows at the moment it
+acts on it and does not keep.
+
+**Decision.** One row per handoff file, six keys:
+
+```
+{"id": "<task_id>:<role>", "task_id": str, "role": str,
+ "round": int | null, "saved_at": ISO-8601 UTC, "handoff": {…} | null}
+```
+
+`handoff` is the payload **whole and unpromoted**, as the role returned it and
+the dispatcher saved it. Nothing is lifted out of it onto the row, nothing is
+projected, and a key the console does not know is not an error: the payload's
+shape belongs to `dispatcher/handoff.py` and this route is a reader of it.
+`handoff: null` is a real answer and not a missing file — `save_handoff` writes
+the envelope even when the return would not parse, precisely so a re-run cannot
+leave the previous round's payload standing as if it were this round's, and a
+phase that left no parseable return is a fact the timeline shows.
+
+The twenty-two fields, each in exactly one of ADR 17's buckets:
+
+| Field | Bucket | What happens |
+|---|---|---|
+| `id` | api grows it | `<task_id>:<role>`, which *is* the file: one per role per task. The route owns the shape, so a later task that ever serves rounds adds to the id and the console does not change. |
+| `task_id` | api grows it | The directory the handoffs live under. |
+| `role` | api grows it | The envelope's `role`, and the file's own name. |
+| `revision_round` | served under another name | The envelope's `round`. The served word wins, as `pending` did over `queued` in ADR 26: the console's field becomes `round`. |
+| `started_at` | the same word for a different object | `saved_at` is when the phase **ended**. Serving one as the other would be the only lie on this route. The route serves `saved_at` under the harness's own name; the console drops `started_at` and labels the time *ended*. |
+| `duration_s` | present nowhere | No start is recorded, so there is no duration. Differencing two `saved_at`s is not one either: the gap between two phases' ends holds the gates, the commit, a failover and whatever the dispatcher waited for. |
+| `account` | present nowhere | Nothing in `.hive/` records which account ran a phase. `TaskFile.owner` is this bucket's trap — the account holding the task *now*, not the one that ran this phase — and `dispatcher/dispatcher.py:_commit_message` puts `Account:` in prose in a commit, which is the next row's problem. |
+| `model` | present nowhere | The dispatcher passes `--model` and keeps no record. `config.yaml`'s `default_model` is the *configured* model, which is a different object from the model that ran, and `docs/plans/front.md` puts configuration reads behind the Role models task. |
+| `bytes_used` | the same word for a different object | `dispatcher/handoff.py:measure` prices the model's *result* at the moment the budget is checked; the file on disk is the payload re-serialised with `indent=2`, and `subagents.backfill` and `_shrink_over_budget` sit between the two. Two numbers, one name, and the smaller consequence of confusing them is a budget bar that reads over when the phase was not. Nothing is served under this name. |
+| `bytes_budget` | api grows it, and does not | `budget_for(role)` is a pure function of the role and one line away. It is not served, under ADR 17's closing rule: its only consumer was the bar whose numerator is the row above, and a denominator with no numerator is a figure nobody can read. A later task that persists a measured size serves both together. |
+| `shrink_retry` | present nowhere | Logged by `_shrink_over_budget`, persisted nowhere. |
+| `write_rejected` | present nowhere | And it describes something the harness *prevents* rather than records: the revisor is not in `docker_exec.WRITER_ROLES`, so its tools refuse the write and no phase-level flag is written down. |
+| `gate_findings` | served under another name, on another route | `dispatcher/gates.py` renders its output as prose into the task file body under `**Dispatcher gates**`, and ADR 21 serves `body` on `/api/tasks/<task_id>` — the same screen, one region above. The console drops the chips and does not parse prose in `client.ts`; a structured gate record would need the dispatcher to keep one. |
+| `commit_sha` | present nowhere | The phase commit exists on `agent/task/<task-id>` with the role, the round and the account in its message, and `.data/projects` is mounted `:ro` — but a message is not a record, this image carries no git and this service spawns nothing, and a merged-and-cleaned branch is gone. Arguing for a git read on this route is a later task's to make, with the image it costs. |
+| `worktree_path` | the same word for a different object | The console's is a phase's own path. The harness's is one checkout per task that every writer role shares (`docker_exec`, `WRITER_ROLES`) and `cleanup-task` removes. |
+| `learning_ids` | served under another name | `handoff.learnings` is a line per entry, naming an inbox filename inside prose rather than an id. The join to learning records needs `/api/learnings`, which is not this route's and is not built here: the detail screen's learnings region goes on naming it, per ADR 19. |
+| `envelope` | the same word for a different object | `HandoffEnvelope` is a letter — from, to, a summary. The harness's handoff is a structured report. The type is replaced rather than filled, and the four rows below are what it sorted into. |
+| `envelope.from_role` | served under another name | The row's `role`. |
+| `envelope.to_role` | present nowhere | The record names no recipient; the cycle picks the next role and writes that in no handoff. |
+| `envelope.summary` | served under another name, on another route | `dispatcher/handoff.py:body` renders each phase's prose into the task file under its own `## <role>` heading, which ADR 21 serves as `body` and the detail screen already renders. The api synthesises no prose of its own. |
+| `envelope.artifacts` | served under another name | `changed` and `paths` in the payload, which carry what changed and where the detail is. |
+| `envelope.open_questions` | served under another name | `pending` and `risks` in the payload. For a blocked phase `pending` is literally the missing definitions, which is the field this bucket was asking for. |
+
+**The route.** `GET /api/phases`, one optional parameter `task_id`, on
+`/api/debt`'s model. Four things about its edges:
+
+- A `task_id` that is not a bare id is a 400, not a path that reaches
+  `handoff_path`: `_is_bare_task_id` is already the lock the detail route uses.
+  A bare id with no task file is `[]` plus a warning naming it, never a 404 —
+  the console reaches this route with an id it read off `/api/tasks`, and a 404
+  would take a region to *Broken* on a screen whose own read succeeded.
+- A missing or unparseable handoff is **not** a 404 either. A 404 says the phase
+  does not exist, which is a lie about a file that does. One file that will not
+  parse costs a warning naming it and the rest of the rows still come back,
+  which is this service's one rule.
+- Rows are ordered newest `saved_at` first, and `MAX_PHASES = 100` caps the
+  answer with a warning on `MAX_EVENT_LIMIT`'s model. The cap cannot bite the
+  call a screen makes — one task has at most one file per role — and it is there
+  so the unfiltered call does not become the second thing this service answers
+  without a bound (`docs/debt/T-011-D1.md` was the first). A byte cap is the
+  fix if a screen ever polls the unfiltered form; nothing does.
+- The sort key is built inside the per-row guard, as a string, and the sort runs
+  over strings outside it. The rule is
+  `docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md` — the guard
+  wraps the *use* of a parsed value, and a `saved_at` of the wrong type is a
+  use — and a sort over the whole list cannot be inside a per-row `try` without
+  one bad file costing every row.
+
+**The reader.** `read_handoff` swallows `(OSError, ValueError)` and returns
+`None`, which is right for its callers — they are repair paths asking what a
+phase declared — and useless to a route that has to tell an operator *why* a
+file did not parse. So `dispatcher/context_transfer.py` grows two functions and
+`read_handoff` keeps its contract by being written in terms of one of them:
+`list_handoff_roles(hive_dir, task_id)`, the roles with a file, on
+`list_task_ids`' model; and `read_handoff_envelope(hive_dir, task_id, role)`,
+the envelope whole, raising `OSError` and `ValueError` for the api to catch and
+name. The parser stays in `dispatcher/`, where this module's docstring says a
+parser belongs, and there is one definition of where a handoff lives.
+
+**Consequences.** Of the twenty-two fields, four are served, six are served
+under another name (two of them on `/api/tasks/<task_id>`, which the same screen
+already reads), three are a word for a different object, eight are present
+nowhere, and one is a line the api could write and does not. `PhaseRow` in
+`front/src/routes/tasks.$taskId.tsx` loses the byte bar, the gate chips, the
+account, the model, the duration, the commit and the worktree, and gains the
+payload: a status, a verdict where there is one, and the role's own lists. That
+is a thinner row than the fixture drew and a true one.
+
+The eight *present nowhere* fields have one fix between them and it is not on
+this route: the dispatcher persisting what it already knows while it runs a
+phase — the account, the model, a start stamp, the shrink retry. That is ADR
+18's `usage_pct` paragraph again, and like it, this entry does not design it. A
+later task that finds a field missing reaches this table before reaching for the
+api, which is what ADR 17's closing rule asks of it: the api not serving
+something is not by itself a reason for it to start.
+
+Two things this route deliberately does not do. It does not pretend to a history
+of rounds — one file per role is the record, and a timeline that showed round 1
+beside round 3 would be inventing the one. And it does not join to learnings:
+`handoff.learnings` travels as the role wrote it, and the region that wants
+records on the other end of those filenames still says it is waiting for
+`/api/learnings`.
+
+## ADR 28 — The board's In-progress lanes are not coming from `/api/phases`, because no file says which phase is running
+
+**Status:** accepted (T-013, 2026-10-03). Narrows ADR 26, which collapsed the
+five lanes into one column and named `/api/phases` as what they wait for.
+Nothing in ADR 26 is reversed: its reasoning is what makes this entry short, and
+its two refusals still hold.
+
+**Context.** ADR 26 found that a task file's `status` carries no role, that
+`card.status` is `null` on this harness and the wrong source on the merits, and
+that `/api/tasks` must not grow a role field. It passed the lanes to this task
+with the route, on the reading that a per-phase record on disk is a per-phase
+record of what is *happening*.
+
+It is not. `save_handoff` runs after a phase returns, so the newest file for a
+task names the phase that **finished**. A task whose implementador is running
+right now has an arquitecto file and nothing else, and five lanes fed from that
+put a running task under the role that already handed it on. That is a screen
+that looks live and is one phase behind, which is the one outcome worse than an
+empty lane: an operator cannot tell it from a correct one.
+
+Three candidates for the fact itself were weighed and all three fail.
+`dispatcher/dispatcher.py:_update_task_status` writes `in_progress:<role>` to a
+board card and never to the file, and ADR 26 already refused the card. The
+dispatcher's heartbeat loop knows the role while it runs and writes only a
+timestamp into the task file. And `/api/phases` answers ends, not starts, by
+ADR 27's first paragraph.
+
+**Decision.** In progress stays one column, and the Board stops naming
+`/api/phases` as what the split waits for, because the route has landed and does
+not answer the question. The banner names the missing *record* instead: which
+role is running is not written down anywhere, the dispatcher knows it while it
+runs and persists nothing, and a live lane needs that to change.
+
+What the Board already shows in its place is named with it, so the banner is not
+only a refusal: the card carries `owner` — the account holding the task — and
+the api's own `lock_expired` judgement over its heartbeat, which together say a
+phase is running and who is paying for it. Which phase it was last is on the
+task detail, where the timeline this route feeds names the last role that ended.
+
+`front/src/lib/format.ts:splitStatus` stays callerless and unchanged for the
+reason ADR 25 and ADR 26 both give. `/api/phases` keeps its optional `task_id`
+rather than requiring one, and the console calls it with an id: nothing polls
+the unfiltered form, which is why ADR 27 caps it rather than tuning it.
+
+**Consequences.** `docs/ui.md` *A region with no route says which route, and
+when* grows the case this entry creates — a region waiting on a fact nobody
+records, which names the record and who would have to write it rather than a
+route — because naming a route that exists and does not answer sends an operator
+to the wrong place, and `front/src/components/console/chat-panel.tsx` holds the
+same sentence about the same fact.
+
+The fix, if a later task wants lanes, is one line of dispatcher state and not a
+route: the phase loop already holds the role, the account and the start time,
+and writing them where `state_machine` or the task file can be read would serve
+the lanes, `started_at`, `duration_s`, `account` and `model` at once — every
+*present nowhere* row in ADR 27's table. That makes the lanes a dispatcher task,
+ADR 18's `usage_pct` for the fifth time, and it is not this one.
