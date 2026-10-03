@@ -149,15 +149,19 @@ function BoardPage() {
         </span>
       </div>
 
-      {/* The role lanes, the role filter and the gate filter are not here, and this
-          says so rather than standing five columns empty: a control that cannot act
-          is the same mistake as a fixture. `docs/ui.md` *A region with no route
-          says which route, and when*, ADR 26 for why the status cannot supply it. */}
+      {/* The role lanes are not waiting on a route any more: they are waiting on a
+          *record*, and this names it rather than sending an operator to look for a
+          bug in an api that answers correctly. `docs/ui.md` *A region with no route
+          says which route, and when*, third case; `docs/decisions.md` ADR 28. */}
       <Banner tone="info">
-        In progress is one column. A task file&apos;s <Mono>status</Mono> carries no role, so the
-        five role lanes, the role filter and the gate chips wait on{" "}
-        <Mono>/api/phases</Mono> — tier 2 of <Mono>docs/plans/front.md</Mono>, which is where the
-        per-phase record already on disk becomes a route.
+        In progress is one column, and the five role lanes are not coming from a route. Which role
+        is <em>running</em> is written down nowhere: the dispatcher knows it while the phase runs
+        and persists only a heartbeat, and <Mono>/api/phases</Mono> answers phases that have{" "}
+        <em>ended</em>. The role filter and the gate chips go with the lanes for the same reason.
+        What a card carries instead is <Mono>owner</Mono> — the account holding the task — and the
+        api&apos;s own <Mono>lock_expired</Mono> judgement over that heartbeat. The last role that
+        finished is on the task detail&apos;s timeline, and the gate notes are prose in that
+        task&apos;s body, on the same screen.
       </Banner>
 
       <BrokenBanner reads={brokenReads} />

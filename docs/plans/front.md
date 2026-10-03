@@ -1,16 +1,26 @@
 # Plan: wiring the console in `front/`
 
-Status: **tier 1 is built on both sides and parity is not reached.** The api's
-share landed with T-011; the console's — the five served reads in
-`front/src/lib/api/client.ts`, the server-side bearer forward, and the warning
-banner on every screen that lists rows — landed with T-012, whose decisions are
-[`decisions.md`](../decisions.md) ADR 22–26. Parity, as *Parity, and what it
-retires* defines it below, is **not** reached and was out of reach by
-construction: the Board screen and the task detail both want `/api/phases` and the
-detail screen wants `/api/learnings`, and both routes are tier 2. Those regions
-name the route they are waiting for on screen rather than showing a fixture, so
-`observability/board/` stays with its compose service and its tests, and
-[`docs/charter.md`](../charter.md) C-8 keeps it the tie-breaking reference.
+Status: **tier 1 is built on both sides, tier 2's first route is built, and
+parity is not reached.** The api's tier-1 share landed with T-011; the console's —
+the five served reads in `front/src/lib/api/client.ts`, the server-side bearer
+forward, and the warning banner on every screen that lists rows — landed with
+T-012, whose decisions are [`decisions.md`](../decisions.md) ADR 22–26. T-013
+built `/api/phases` and wired it: the task detail's phase timeline renders real
+handoff records, and *What a phase row is* below is answered by ADR 27.
+
+Parity, as *Parity, and what it retires* defines it below, is **not** reached and
+was out of reach by construction: the detail screen's learnings region wants
+`/api/learnings`, which is tier 2 and unbuilt, and it names that route on screen
+rather than showing a fixture. So `observability/board/` stays with its compose
+service and its tests, and [`docs/charter.md`](../charter.md) C-8 keeps it the
+tie-breaking reference.
+
+One thing tier 2 was expected to settle and did not: the Board's five role lanes.
+ADR 26 bound them to `/api/phases`, and ADR 28 found the route cannot answer them
+— a handoff is written when a phase **ends**, so the newest file names the role
+that finished and a lane fed from it would be one phase behind. In progress stays
+one column and the Board's banner names the missing *record*, not a route. The
+lanes are a dispatcher task now, not a console one.
 
 `front/` is in this repo, whole, since 2026-10-01 — C-9, which also keeps the
 Lovable round-trip live — having been generated against the specifications in
@@ -551,7 +561,7 @@ taken — not now.
 | UI copy language, and `backlog.tsx`'s Spanish | first task touching copy | `docs/ui.md` |
 | `run-phase` has no `--model` | Role models task | ADR + dispatcher |
 | Where the model list comes from | Role models task | ADR |
-| What a phase row is | Phases task | ADR |
+| ~~What a phase row is~~ — answered 2026-10-03 by ADR 27, which sorts all twenty-two fields; ADR 28 takes the lanes it cost | Phases task | ADR |
 | Whether a backlog has a source at all | Backlog task | ADR |
 | Session logs: file on a `:ro` mount, or a tee | board Phase 5 | ADR |
 | Persisting `usage_pct` with a stamp (ADR 18) | a dispatcher task | ADR |

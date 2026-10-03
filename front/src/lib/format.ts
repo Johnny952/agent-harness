@@ -25,6 +25,14 @@ export function formatAge(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+/**
+ * Kept with no caller, deliberately, and the reason is the same one `splitStatus`
+ * has below. Its only caller was the phase timeline's `started … · duration` line,
+ * and T-013 removed it: the harness records when a phase **ended** and nothing
+ * else, so there is no duration to format and differencing two end stamps is not
+ * one either (`docs/decisions.md` ADR 27). It comes back unchanged for the first
+ * duration the harness persists, which ADR 27 names as a dispatcher task.
+ */
 export function formatDuration(seconds: number | null): string {
   if (seconds === null) return "running";
   if (seconds < 60) return `${seconds}s`;
@@ -36,6 +44,13 @@ export function formatClock(iso: string): string {
   return d.toISOString().slice(11, 19);
 }
 
+/**
+ * Kept with no caller for `formatDuration`'s reason. It formatted both ends of the
+ * phase timeline's byte-budget bar, and T-013 removed the bar: `bytes_used` is the
+ * same word for two different numbers in the harness and neither is persisted, so
+ * `bytes_budget` — which `dispatcher/handoff.py:budget_for` would answer in one
+ * line — is a denominator with no numerator (`docs/decisions.md` ADR 27).
+ */
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

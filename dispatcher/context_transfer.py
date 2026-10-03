@@ -160,6 +160,48 @@ def save_handoff(
     return path
 
 
+def list_handoff_roles(hive_dir: str, task_id: str) -> list[str]:
+    """The roles that left a record on this task, sorted, empty when none did.
+
+    `list_task_ids`' shape, including its `os.path.isdir` guard: a task that
+    predates `save_handoff`, or one no phase has finished yet, has no handoffs
+    directory at all and that is a task with no records rather than damage.
+
+    Sorted by name and not ordered by the dispatcher's role list, which is not
+    this function's business. A file named after a role this harness does not
+    run is still a file, and a reader that walks these has to be told about it
+    rather than have it disappear.
+    """
+    directory = os.path.join(scratch_dir(hive_dir, task_id), _HANDOFF_SUBDIR)
+    if not os.path.isdir(directory):
+        return []
+    return sorted(Path(f).stem for f in os.listdir(directory) if f.endswith(".json"))
+
+
+def read_handoff_envelope(hive_dir: str, task_id: str, role: str) -> dict:
+    """The whole envelope `save_handoff` wrote — all four keys — or an exception.
+
+    For the reader that has to tell an operator *why* a record could not be
+    read, which `read_handoff` cannot: it answers `None` for a file that is
+    missing, a file that will not parse and a file holding the wrong shape, and
+    those are three different sentences on a screen. `observability/api/app.py`
+    is that reader and names the path in a warning.
+
+    Raises `OSError` for a file that will not open and `ValueError` for one
+    that will not parse or is not a JSON object — `json.JSONDecodeError` is a
+    `ValueError` already, which is why a caller catches the family and not the
+    subclass (`docs/learnings/a-lookup-that-never-raises-catches-valueerror.md`).
+    """
+    with open(handoff_path(hive_dir, task_id, role)) as fh:
+        envelope = json.load(fh)
+    if not isinstance(envelope, dict):
+        raise ValueError(
+            f"a handoff is a JSON object of role, round, saved_at and handoff, "
+            f"not a {type(envelope).__name__}"
+        )
+    return envelope
+
+
 def read_handoff(hive_dir: str, task_id: str, role: str) -> dict | None:
     """What that role returned, or None if this task has no record of it.
 
@@ -169,13 +211,14 @@ def read_handoff(hive_dir: str, task_id: str, role: str) -> dict | None:
     take `dict | None` for that reason. So a damaged file is not worth an
     exception here: the paths that read this are repair paths, and a task
     whose record is unreadable should still be closeable by hand.
+
+    Written in terms of `read_handoff_envelope` so there is one definition of
+    where a handoff lives and what shape it has; the swallow is this function's
+    contract and not the module's.
     """
     try:
-        with open(handoff_path(hive_dir, task_id, role)) as fh:
-            envelope = json.load(fh)
+        envelope = read_handoff_envelope(hive_dir, task_id, role)
     except (OSError, ValueError):
-        return None
-    if not isinstance(envelope, dict):
         return None
     payload = envelope.get("handoff")
     return payload if isinstance(payload, dict) else None

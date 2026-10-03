@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Five console paths map one-to-one onto
- * the five api routes; anything else under `/api/` is a JSON 404 from the console
+ * **It is a whitelist and not a proxy.** Six console paths map one-to-one onto
+ * the six api routes; anything else under `/api/` is a JSON 404 from the console
  * and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -29,6 +29,10 @@ const FORWARDED: Record<string, readonly string[]> = {
   "/api/events": ["limit", "source_app", "since"],
   // `project` is deliberately absent: it comes from CONSOLE_PROJECT below.
   "/api/debt": [],
+  // `task_id` is copied by name like `since`, and an empty value reads as absent
+  // on both sides. The api takes it as optional and the console always sends it:
+  // nothing here polls the unfiltered form (`docs/decisions.md` ADR 27, ADR 28).
+  "/api/phases": ["task_id"],
 };
 
 /** The detail route. No second segment: `/api/tasks/a/b` is not this route. */
@@ -101,7 +105,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the five.
+      // `%zz` and friends. A path the console cannot read is not one of the six.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -116,7 +120,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the five routes the console forwards.`,
+      error: `${path} is not one of the six routes the console forwards.`,
     };
   }
 

@@ -12,10 +12,11 @@ are. The board is not gone yet: C-8 keeps it until the console serves the four
 screens it duplicates against the real api, and until then it is the
 tie-breaking reference, because it has run.
 
-**Five reads are live.** The board, the task detail, the pool, the debt index and
-the live tail read `observability/api/` through this console's own server half;
-every other screen still reads mock fixtures, and says so on itself where a region
-is waiting for a route. See *What is real and what is not* below.
+**Six reads are live.** The board, the task detail, the pool, the debt index, the
+live tail and the task detail's phase timeline read `observability/api/` through
+this console's own server half; every other screen still reads mock fixtures, and
+says so on itself where a region is waiting for a route. See *What is real and
+what is not* below.
 
 ## Where the contract lives
 
@@ -25,7 +26,7 @@ Four documents, and none of them is this file:
 |---|---|
 | [`docs/plans/front.md`](../docs/plans/front.md) | Which screens are coming, in what order, over which routes — and which reads the api will never serve. Read it before adding a screen or a query. |
 | [`docs/ui.md`](../docs/ui.md) | The cross-screen vocabulary: tone per state, absent vs empty vs error, dates and ages, the nav and its chords. Binding — a screen that contradicts it is wrong, not different. |
-| [`docs/decisions.md`](../docs/decisions.md) | The ADRs the console has to honour, ADR 14–26 in particular: the envelope, the warnings, the bearer forward, what each route answers, and the four statuses a task actually has. |
+| [`docs/decisions.md`](../docs/decisions.md) | The ADRs the console has to honour, ADR 14–28 in particular: the envelope, the warnings, the bearer forward, what each route answers, the four statuses a task actually has, and what a phase row is. |
 | [`AGENTS.md`](AGENTS.md) | The four project rules, and the Lovable caveat below. |
 
 A decision true of one screen belongs in that screen's task, not in any of
@@ -83,17 +84,18 @@ the Node entry — a static build behind nginx cannot serve it.
 ## How it is put together
 
 - **One client, one file.** Every read and write goes through
-  `src/lib/api/client.ts`, one exported function per endpoint. Five of them —
-  `listTasks`, `getTask`, `listAccounts`, `listEvents`, `listDebt` — go through one
-  boundary function to the real api and resolve to `ApiResult<T>`, the rows plus
-  the envelope's `warnings`. The rest still resolve from `src/lib/api/mock/` after
-  a fake 120ms. A component that fetches on its own has bypassed the seam.
+  `src/lib/api/client.ts`, one exported function per endpoint. Six of them —
+  `listTasks`, `getTask`, `listAccounts`, `listEvents`, `listDebt`, `listPhases` —
+  go through one boundary function to the real api and resolve to `ApiResult<T>`,
+  the rows plus the envelope's `warnings`. The rest still resolve from
+  `src/lib/api/mock/` after a fake 120ms. A component that fetches on its own has
+  bypassed the seam.
 - **The server half is two files.** `src/lib/api/server-env.ts` reads the three
   environment variables above and throws if the token is absent;
   `src/lib/api/forward.ts` is the whitelist that presents it. `src/server.ts` calls
   the forward before SSR — that import is also the boot-time refusal, so do not
   make it lazy. `src/start.ts`'s CSRF middleware filters
-  `handlerType === "serverFn"`; the forward is not a server function and all five
+  `handlerType === "serverFn"`; the forward is not a server function and all six
   calls are reads, so its comment stays true. A write that ever goes this way
   re-opens that sentence.
 - **Query keys and intervals are central.** `src/lib/api/queries.ts` holds
@@ -118,7 +120,8 @@ the Node entry — a static build behind nginx cannot serve it.
 ## What is real and what is not
 
 Of the twelve screens, five now read the api: **Board, task detail, Pool, Debt
-and the live tail.** The other seven are built against `ops-types.ts` or against
+and the live tail** — the task detail over two routes since T-013, the task card
+and the phase timeline. The other seven are built against `ops-types.ts` or against
 routes that do not exist, and have no backend of any kind: **Learnings,
 Approvals, Tokens, Session logs, Role models, Backlog and Queue.** Writes are the
 same story; `docs/plans/front.md` tier 3 puts the write surface in a different
@@ -126,11 +129,20 @@ service, for reasons that are about blast radius rather than convenience.
 
 Tier 1 of that plan is parity with the Flask board's four screens against the real
 routes. The api's half was built by T-011 and the console's by T-012 — the five
-`client.ts` bodies, the warning banners and the server-side bearer forward — but
-**parity is not reached**, because the Board and the task detail both want
-`/api/phases` and the detail screen wants `/api/learnings`, and both are tier 2.
-Those regions name the route they are waiting for instead of showing a fixture, so
-`observability/board/` stays and C-8 keeps it the tie-breaking reference.
+`client.ts` bodies, the warning banners and the server-side bearer forward — and
+T-013 added the sixth, `/api/phases`, which fills the task detail's phase
+timeline. **Parity is not reached**: the detail screen's learnings region still
+wants `/api/learnings`, which is tier 2 and does not exist. That region names the
+route it is waiting for instead of showing a fixture, so `observability/board/`
+stays and C-8 keeps it the tie-breaking reference.
+
+The Board is no longer waiting on a route, and its banner no longer says it is.
+Its five role lanes wanted the role of the phase *running*, and no file in the
+harness records that — the dispatcher knows it while the phase runs and persists
+only a heartbeat, while `/api/phases` answers phases that have **ended**. So In
+progress stays one column, the banner names the missing record rather than a
+route, and the card carries `owner` and the api's `lock_expired` instead.
+`docs/decisions.md` ADR 28.
 
 The console authenticates as a service, not as a human: a bearer token read
 server-side, never under a `VITE_` prefix, so Vite cannot inline it into the

@@ -267,6 +267,45 @@ login.
   - Step 6 answers JSON `404` and JSON `405` respectively, from the console and not
     from the api: the forward is a whitelist, not a proxy (ADR 24).
 
+**V0.6d The phase timeline, and the Board's banner after `/api/phases`.**
+- A new id beside V0.6c rather than a change to it: V0.6c covers the five reads,
+  has never been run and carries no results row, so it stays exactly as written —
+  including its steps 3 and 6, which describe the console *before* `/api/phases`
+  landed and are a true record of what T-012 shipped. This one checks the delta
+  T-013 added, and it inherits V0.6c's reason for having **no results row**: no
+  phase can run it, because `front/node_modules` does not exist and `bun install`
+  is not authorised for a role.
+- Setup is V0.6c's steps 0 and 1 unchanged — the api up, the console started on
+  the host with the three un-prefixed names.
+- Run:
+  1. A task with phase records in a browser: `/tasks/T-011` and `/tasks/T-012`.
+     On 2026-10-03 three of the thirteen task ids under `.hive/tasks/` hold a
+     `handoffs/` directory — those two and `T-013`, whose own cycle was still
+     writing into it.
+  2. A task older than the record: any task id whose scratch dir has no
+     `handoffs/` — ten of the thirteen on 2026-10-03.
+  3. `/` (the board), reading the banner above the columns.
+  4. Through the console, not the api: `curl -si
+     '127.0.0.1:3000/api/phases?task_id=T-011'`, then `?task_id=a/b`, then
+     `curl -si 127.0.0.1:3000/api/learnings` (whatever port `bun run dev` prints).
+- Pass:
+  - Step 1's timeline lists one row per role that has finished — four for `T-011`
+    and two for `T-012` on 2026-10-03 — in cycle order, each labelled **ended**
+    with an absolute
+    time and a ticking age, and carrying that role's own lists. No byte bar, no
+    gate chips, no account, no model and no commit: `docs/decisions.md` ADR 27
+    says the harness records none of them per phase.
+  - Step 2 shows the empty state about the *harness* — no phase of this task has
+    left a handoff — and **not** one naming a route, because the route answered.
+  - Step 3's banner names the missing *record*: which role is running is written
+    down nowhere. It must not name `/api/phases` as something being waited for,
+    and In progress must still be one column (ADR 28).
+  - Step 4 answers `200` with `{"data": […], "warnings": []}`, then `400` from the
+    api naming `task_id`, then a JSON `404` from the console — `/api/learnings` is
+    not one of the six routes the forward carries.
+  - The detail screen's learnings region still names `/api/learnings`. Parity is
+    not reached and this check does not claim it.
+
 **V0.7 Docker-in-docker.**
 - Run:
   - `docker exec agent-cuenta1 docker info`

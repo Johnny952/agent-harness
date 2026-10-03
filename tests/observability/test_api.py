@@ -33,7 +33,14 @@ from observability.collector import db as collector_db
 PASSWORD_HASH = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
 
 #: Every route, for the checks that are true of all of them.
-ROUTES = ["/api/tasks", "/api/tasks/T-1", "/api/accounts", "/api/events", "/api/debt"]
+ROUTES = [
+    "/api/tasks",
+    "/api/tasks/T-1",
+    "/api/accounts",
+    "/api/events",
+    "/api/debt",
+    "/api/phases",
+]
 
 
 def _auth() -> dict:
@@ -134,6 +141,22 @@ def _task(tasks_dir: str, task_id: str, **fields) -> None:
             **fields,
         ),
     )
+
+
+def _handoff(
+    tasks_dir: str,
+    task_id: str,
+    role: str,
+    payload: dict | None,
+    round_num: int | None = None,
+) -> str:
+    """One phase record, through the dispatcher's own writer.
+
+    `save_handoff` and not a hand-built JSON document, for the reason the file
+    docstring gives: a change to the envelope's shape has to show up here as a
+    failure rather than as two files that disagree.
+    """
+    return context_transfer.save_handoff(tasks_dir, task_id, role, payload, round_num=round_num)
 
 
 def _debt_index(projects_root: Path, slug: str, text: str) -> Path:
@@ -1222,6 +1245,282 @@ def test_a_checkout_with_no_debt_index_is_empty_with_a_warning(tmp_path: Path) -
 
     assert body["data"] == []
     assert "docs/debt/README.md" in body["warnings"][0]
+
+
+# --- phases ---------------------------------------------------------------
+
+
+def _stamp(tasks_dir: str, task_id: str, role: str, saved_at: str) -> None:
+    """Rewrite one record's `saved_at`, so an order assertion does not race a clock.
+
+    `save_handoff` stamps `now()`, and two writes in the same microsecond would
+    make the newest-first assertion below depend on how fast the machine is.
+    What is pinned is the order the api puts the rows in, not the clock.
+    """
+    path = Path(context_transfer.handoff_path(tasks_dir, task_id, role))
+    envelope = json.loads(path.read_text())
+    envelope["saved_at"] = saved_at
+    path.write_text(json.dumps(envelope))
+
+
+def test_phases_reports_the_six_keys_a_handoff_file_carries(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    payload = {"status": "complete", "changed": ["docs/decisions.md: ADR 27"], "pending": []}
+    _handoff(harness.tasks_dir, "T-1", "arquitecto", payload)
+
+    body = _get(harness, "/api/phases").get_json()
+
+    [phase] = body["data"]
+    saved_at = phase.pop("saved_at")
+    assert phase == {
+        "id": "T-1:arquitecto",
+        "task_id": "T-1",
+        "role": "arquitecto",
+        # The arquitecto is saved with no round, so `null` is a served value.
+        "round": None,
+        # The payload whole and unpromoted: nothing is lifted onto the row and
+        # nothing is projected. `docs/decisions.md` ADR 27. Asserting the whole
+        # dict is what makes a seventh key fail here rather than pass quietly.
+        "handoff": payload,
+    }
+    assert dt.datetime.fromisoformat(saved_at).tzinfo is not None
+    assert body["warnings"] == []
+
+
+def test_phases_serves_the_payload_whole_whatever_keys_the_role_returned(
+    tmp_path: Path,
+) -> None:
+    # The per-role key set is `dispatcher/handoff.py:schema_for`'s and this
+    # service holds no second copy of it: a revisor's two extra keys arrive
+    # because nothing here is filtering on a list of names. ADR 27.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    payload = {
+        "status": "complete",
+        "verdict": "CHANGES_REQUESTED",
+        "debt_rulings": [{"id": "T-013-D1", "ruling": "accepted"}],
+    }
+    _handoff(harness.tasks_dir, "T-1", "revisor", payload, round_num=1)
+
+    [phase] = _get(harness, "/api/phases").get_json()["data"]
+
+    assert phase["handoff"] == payload
+
+
+def test_a_round_is_the_number_the_envelope_carries(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _handoff(harness.tasks_dir, "T-1", "implementador", {"status": "complete"}, round_num=2)
+
+    [phase] = _get(harness, "/api/phases").get_json()["data"]
+
+    assert phase["round"] == 2
+
+
+def test_a_handoff_saved_with_no_payload_is_a_null_handoff_and_not_a_warning(
+    tmp_path: Path,
+) -> None:
+    # `save_handoff` writes the envelope even when the return would not parse,
+    # so a phase that left nothing is a record and not a missing file: `null` is
+    # a real answer here and the timeline shows it. ADR 27.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _handoff(harness.tasks_dir, "T-1", "implementador", None, round_num=2)
+
+    body = _get(harness, "/api/phases").get_json()
+
+    [phase] = body["data"]
+    assert phase["handoff"] is None
+    assert phase["round"] == 2
+    assert body["warnings"] == []
+
+
+def test_every_role_with_a_file_gets_a_row_and_the_newest_is_first(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    for role in ("arquitecto", "implementador", "revisor"):
+        _handoff(harness.tasks_dir, "T-1", role, {"status": "complete"})
+    _stamp(harness.tasks_dir, "T-1", "arquitecto", "2026-10-01T09:00:00+00:00")
+    _stamp(harness.tasks_dir, "T-1", "implementador", "2026-10-01T11:00:00+00:00")
+    _stamp(harness.tasks_dir, "T-1", "revisor", "2026-10-01T13:00:00+00:00")
+
+    data = _get(harness, "/api/phases").get_json()["data"]
+
+    assert [phase["role"] for phase in data] == ["revisor", "implementador", "arquitecto"]
+
+
+def test_task_id_filters_to_one_task(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _task(harness.tasks_dir, "T-2")
+    _handoff(harness.tasks_dir, "T-1", "arquitecto", {"status": "complete"})
+    _handoff(harness.tasks_dir, "T-2", "auditor", {"status": "complete"})
+
+    body = _get(harness, "/api/phases?task_id=T-1").get_json()
+
+    assert [phase["id"] for phase in body["data"]] == ["T-1:arquitecto"]
+    assert body["warnings"] == []
+
+
+def test_an_unknown_task_id_is_an_empty_list_and_a_warning_not_a_404(tmp_path: Path) -> None:
+    # The console reaches this route with an id it read off `/api/tasks`, so a
+    # 404 would take a region to Broken on a screen whose own read succeeded.
+    # ADR 27.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    resp = _get(harness, "/api/phases?task_id=T-999")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["data"] == []
+    assert "T-999" in resp.get_json()["warnings"][0]
+
+
+def test_a_task_id_that_is_not_a_bare_id_is_400(tmp_path: Path) -> None:
+    # A parameter is 400 territory, and the id never reaches `handoff_path`:
+    # `_is_bare_task_id` is the lock the detail route already uses.
+    harness = _harness(tmp_path)
+
+    for bad in ("../../etc/passwd", "a/b"):
+        resp = _get(harness, f"/api/phases?task_id={bad}")
+        assert resp.status_code == 400
+        assert "task_id" in resp.get_json()["error"]
+
+
+def test_a_handoff_that_will_not_parse_is_named_in_warnings_and_the_others_still_come_back(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _handoff(harness.tasks_dir, "T-1", "arquitecto", {"status": "complete"})
+    _handoff(harness.tasks_dir, "T-1", "revisor", {"verdict": "APPROVED"})
+    broken = Path(context_transfer.handoff_path(harness.tasks_dir, "T-1", "revisor"))
+    broken.write_text("{")
+
+    resp = _get(harness, "/api/phases")
+
+    # Not a 404: a 404 says the phase does not exist, which is a lie about a
+    # file that does. One warning naming it, and the other row still answers.
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [phase["role"] for phase in body["data"]] == ["arquitecto"]
+    assert len(body["warnings"]) == 1
+    assert str(broken) in body["warnings"][0]
+
+
+def test_a_handoff_whose_envelope_is_not_an_object_is_a_warning(tmp_path: Path) -> None:
+    # It parses, into something that is not an envelope — the shape no exception
+    # in the value family covers on its own.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _handoff(harness.tasks_dir, "T-1", "auditor", {"status": "complete"})
+    broken = Path(context_transfer.handoff_path(harness.tasks_dir, "T-1", "auditor"))
+    broken.write_text("[1, 2]")
+
+    resp = _get(harness, "/api/phases")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["data"] == []
+    assert str(broken) in resp.get_json()["warnings"][0]
+
+
+def test_a_saved_at_of_the_wrong_type_does_not_raise_in_the_sort(tmp_path: Path) -> None:
+    # The sort key is built inside the per-row guard and coerced to `str` there,
+    # so the sort that runs after the loop cannot compare a dict against a
+    # string — and one hand-edited record cannot cost every other row its
+    # answer. `docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md`.
+    #
+    # The odd value is still *served*, verbatim and with no warning, which is
+    # `docs/decisions.md` ADR 10's rule about an unparseable heartbeat applied to
+    # the one timestamp this route has: a value the api cannot judge is the
+    # harness's news to report and not this service's to hide. Nothing raises
+    # here, so there is nothing to warn about.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _handoff(harness.tasks_dir, "T-1", "arquitecto", {"status": "complete"})
+    _handoff(harness.tasks_dir, "T-1", "auditor", {"status": "complete"})
+    path = Path(context_transfer.handoff_path(harness.tasks_dir, "T-1", "auditor"))
+    envelope = json.loads(path.read_text())
+    envelope["saved_at"] = {"when": "yesterday"}
+    path.write_text(json.dumps(envelope))
+
+    resp = _get(harness, "/api/phases")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert sorted(phase["role"] for phase in body["data"]) == ["arquitecto", "auditor"]
+    assert [phase["saved_at"] for phase in body["data"] if phase["role"] == "auditor"] == [
+        {"when": "yesterday"}
+    ]
+    assert body["warnings"] == []
+
+
+def test_a_handoffs_directory_that_will_not_list_is_a_warning_and_not_a_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `list_handoff_roles` guards with `os.path.isdir` and then calls
+    # `os.listdir`, which still raises for a directory that exists and cannot be
+    # read — and this route calls it once per task, so one such directory would
+    # otherwise cost every other task its rows. Not reachable through a chmod in
+    # this suite, which may run as root; monkeypatched because what is pinned is
+    # the guard and not the filesystem.
+    #
+    # It is a live shape rather than a hypothetical: `.hive/` is written by the
+    # dispatcher and read by this service over a `:ro` mount, which is why
+    # `_write_atomic` restores 0644 for "agent containers (possibly non-root)".
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _task(harness.tasks_dir, "T-2")
+    _handoff(harness.tasks_dir, "T-2", "auditor", {"status": "complete"})
+    real = context_transfer.list_handoff_roles
+
+    def refuse(hive_dir: str, task_id: str):
+        if task_id == "T-1":
+            raise PermissionError(13, "Permission denied")
+        return real(hive_dir, task_id)
+
+    monkeypatch.setattr(context_transfer, "list_handoff_roles", refuse)
+
+    resp = _get(harness, "/api/phases")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [phase["id"] for phase in body["data"]] == ["T-2:auditor"]
+    assert len(body["warnings"]) == 1
+    assert "T-1" in body["warnings"][0]
+
+
+def test_a_task_with_no_handoffs_directory_is_an_empty_list_and_no_warning(
+    tmp_path: Path,
+) -> None:
+    # The task ids on this harness that predate `save_handoff` are this case,
+    # and it must not look like damage.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    body = _get(harness, "/api/phases").get_json()
+
+    assert body == {"data": [], "warnings": []}
+
+
+def test_the_answer_is_clamped_and_the_clamp_names_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cap cannot bite the call a screen makes — one task has at most one
+    # file per role — and it is there so the unfiltered call is not the second
+    # thing this service answers without a bound. ADR 27, on ADR 11's model.
+    monkeypatch.setattr(api_app, "MAX_PHASES", 2)
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    for role in ("arquitecto", "implementador", "revisor"):
+        _handoff(harness.tasks_dir, "T-1", role, {"status": "complete"})
+
+    body = _get(harness, "/api/phases").get_json()
+
+    assert len(body["data"]) == 2
+    assert "3 phase records" in body["warnings"][0]
+    assert "?task_id=" in body["warnings"][0]
 
 
 # --- what this service must never do --------------------------------------
