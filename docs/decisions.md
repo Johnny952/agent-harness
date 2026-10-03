@@ -1438,22 +1438,28 @@ the envelope whole, raising `OSError` and `ValueError` for the api to catch and
 name. The parser stays in `dispatcher/`, where this module's docstring says a
 parser belongs, and there is one definition of where a handoff lives.
 
-**Consequences.** Of the twenty-two fields, four are served, six are served
-under another name (two of them on `/api/tasks/<task_id>`, which the same screen
-already reads), three are a word for a different object, eight are present
-nowhere, and one is a line the api could write and does not. `PhaseRow` in
-`front/src/routes/tasks.$taskId.tsx` loses the byte bar, the gate chips, the
-account, the model, the duration, the commit and the worktree, and gains the
-payload: a status, a verdict where there is one, and the role's own lists. That
-is a thinner row than the fixture drew and a true one.
+**Consequences.** Of the twenty-two fields, three are served, seven are served
+under another name (two of them on `/api/tasks/<task_id>`, which the same
+screen already reads), four are a word for a different object, seven are
+present nowhere, and one is a line the api could write and does not.
+`PhaseRow` in `front/src/routes/tasks.$taskId.tsx` loses the byte bar, the
+gate chips, the account, the model, the duration, the commit and the worktree,
+and gains the payload: a status, a verdict where there is one, and the role's
+own lists. That is a thinner row than the fixture drew and a true one.
 
-The eight *present nowhere* fields have one fix between them and it is not on
-this route: the dispatcher persisting what it already knows while it runs a
-phase — the account, the model, a start stamp, the shrink retry. That is ADR
-18's `usage_pct` paragraph again, and like it, this entry does not design it. A
-later task that finds a field missing reaches this table before reaching for the
-api, which is what ADR 17's closing rule asks of it: the api not serving
-something is not by itself a reason for it to start.
+Five of those fields have one fix between them and it is not on this route:
+the dispatcher persisting what it already knows while it runs a phase — the
+account, the model, a start stamp, the shrink retry. That reaches four of the
+seven *present nowhere* rows, `duration_s`, `account`, `model` and
+`shrink_retry`, and `started_at` out of the bucket above them, which is a real
+start and not `saved_at` renamed. It reaches neither `commit_sha`, which needs
+a git read on a branch that may already be gone, nor `envelope.to_role`, which
+names a recipient the harness never writes down; and `write_rejected` has
+nothing to persist, because the harness prevents that write rather than
+recording it. That is ADR 18's `usage_pct` paragraph again, and like it, this
+entry does not design it. A later task that finds a field missing reaches this
+table before reaching for the api, which is what ADR 17's closing rule asks of
+it: the api not serving something is not by itself a reason for it to start.
 
 Two things this route deliberately does not do. It does not pretend to a history
 of rounds — one file per role is the record, and a timeline that showed round 1
@@ -1516,6 +1522,8 @@ same sentence about the same fact.
 The fix, if a later task wants lanes, is one line of dispatcher state and not a
 route: the phase loop already holds the role, the account and the start time,
 and writing them where `state_machine` or the task file can be read would serve
-the lanes, `started_at`, `duration_s`, `account` and `model` at once — every
-*present nowhere* row in ADR 27's table. That makes the lanes a dispatcher task,
+the lanes and five of ADR 27's rows at once — `duration_s`, `account`, `model`
+and `shrink_retry` out of *present nowhere*, and `started_at` out of the bucket
+above them. It does not reach `commit_sha` or `envelope.to_role`, which need
+something a state line is not. That makes the lanes a dispatcher task,
 ADR 18's `usage_pct` for the fifth time, and it is not this one.

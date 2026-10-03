@@ -643,7 +643,7 @@ def test_read_handoff_of_an_envelope_holding_no_dict_is_none(tmp_path: Path) -> 
 
 
 def test_list_handoff_roles_of_a_task_with_no_scratch_dir_is_empty(tmp_path: Path) -> None:
-    # The nine task ids on this harness that predate save_handoff are this case,
+    # The ten task ids on this harness that predate save_handoff are this case,
     # and a reader walking them must not have to tell it apart from damage.
     assert list_handoff_roles(str(tmp_path), "task-1") == []
 

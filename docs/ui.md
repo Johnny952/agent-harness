@@ -223,8 +223,8 @@ rather than a dot.
 ### A region with no route says which route, and when
 
 A region whose query has no route behind it renders an `EmptyState` whose body
-names the missing route and the tier it lands in — "`/api/phases`, tier 2 of
-`docs/plans/front.md`" — and never a fixture, never a blank, and never the
+names the missing route and the tier it lands in — "`/api/learnings`, tier 2
+of `docs/plans/front.md`" — and never a fixture, never a blank, and never the
 wording of an empty harness. `docs/decisions.md` ADR 19 is the rule; this entry
 is what it looks like, because more than one screen has such a region and an
 operator must never be unable to tell a quiet harness from an unwired console.

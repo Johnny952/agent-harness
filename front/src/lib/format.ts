@@ -39,8 +39,24 @@ export function formatDuration(seconds: number | null): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-export function formatClock(iso: string): string {
+/**
+ * The UTC clock time of a stamp, or `—` when there is nothing readable to show.
+ *
+ * `agoSeconds`'s shape, for `agoSeconds`'s reason. The api serves a phase's
+ * `saved_at` verbatim out of a handoff file and validates neither its presence
+ * nor its type (`observability/api/app.py:_phase`, and `docs/decisions.md` ADR
+ * 27 for why it is served that way), so a hand-edited or truncated file reaches
+ * here as `null` or as a string `Date` cannot parse, and `toISOString` answers
+ * that with a thrown `RangeError`. The only `errorComponent` in the console is
+ * on the root route, so one bad file would take the whole screen where
+ * `docs/ui.md` *Absent, empty and broken are three different things* gives it
+ * the region. The sentinel is `formatAge`'s, so both halves of a timestamp line
+ * degrade the same way.
+ */
+export function formatClock(iso: string | null): string {
+  if (!iso) return "—";
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toISOString().slice(11, 19);
 }
 

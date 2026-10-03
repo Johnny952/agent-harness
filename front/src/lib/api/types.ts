@@ -107,15 +107,16 @@ export interface HandoffPayload {
  * is no history of earlier rounds to show.
  *
  * Thirteen fields of the fixture's `Phase` are gone and the reason is not that
- * the api is lazy. `started_at`, `duration_s`, `account`, `model`,
- * `shrink_retry`, `write_rejected` and `commit_sha` are recorded nowhere in
- * `.hive/`: the dispatcher knows them while it runs a phase and persists only
- * `saved_at`, which is when the phase **ended** — never a start, so no screen may
- * label it one or difference two of them into a duration. `bytes_used` and
- * `worktree_path` are the same word for a different object in the harness, and
- * `bytes_budget` is a denominator whose numerator is not served. `gate_findings`
- * is prose in the task body, on the detail route. `learning_ids` travels as
- * `handoff.learnings` and the join still waits for `/api/learnings`.
+ * the api is lazy. `duration_s`, `account`, `model`, `shrink_retry`,
+ * `write_rejected` and `commit_sha` are recorded nowhere in `.hive/`: the
+ * dispatcher knows them while it runs a phase and persists none of them.
+ * `started_at`, `bytes_used` and `worktree_path` are the same word for a
+ * different object in the harness — the one stamp on disk is `saved_at`, which
+ * is when the phase **ended**, so no screen may label it a start or difference
+ * two of them into a duration — and `bytes_budget` is a denominator whose
+ * numerator is not served. `gate_findings` is prose in the task body, on the
+ * detail route. `learning_ids` travels as `handoff.learnings` and the join
+ * still waits for `/api/learnings`.
  * `docs/decisions.md` ADR 27 has the whole table, field by field, and a later
  * task that wants one of them reaches it before reaching for the api.
  *
@@ -129,8 +130,14 @@ export interface Phase {
   role: Role;
   /** The envelope's `round`, which is what the fixture called `revision_round`. */
   round: number | null;
-  /** When the phase **ended**. ISO-8601 UTC. */
-  saved_at: string;
+  /**
+   * When the phase **ended**. ISO-8601 UTC — but served verbatim out of the
+   * file and validated nowhere, so a missing or hand-edited stamp arrives as
+   * `null` or as a string no `Date` parses. `formatClock` and `agoSeconds`
+   * both answer that with a sentinel; a new reader of this field owes the
+   * same.
+   */
+  saved_at: string | null;
   /** `null` is a real answer: the phase ran and left no parseable return. */
   handoff: HandoffPayload | null;
 }
