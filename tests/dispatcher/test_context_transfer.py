@@ -12,10 +12,12 @@ from dispatcher.context_transfer import (
     handoff,
     handoff_path,
     is_lock_expired,
+    list_handoff_roles,
     list_task_ids,
     LockHeldError,
     read_description,
     read_handoff,
+    read_handoff_envelope,
     read_kanban_issue_id,
     read_task_file,
     refresh_heartbeat,
@@ -638,3 +640,112 @@ def test_read_handoff_of_an_envelope_holding_no_dict_is_none(tmp_path: Path) -> 
     path.write_text('{"role": "revisor", "round": 1, "handoff": "APPROVED"}')
 
     assert read_handoff(hive_dir, "task-1", "revisor") is None
+
+
+def test_list_handoff_roles_of_a_task_with_no_scratch_dir_is_empty(tmp_path: Path) -> None:
+    # The ten task ids on this harness that predate save_handoff are this case,
+    # and a reader walking them must not have to tell it apart from damage.
+    assert list_handoff_roles(str(tmp_path), "task-1") == []
+
+
+def test_list_handoff_roles_names_every_role_with_a_file_sorted(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"})
+    save_handoff(hive_dir, "task-1", "arquitecto", {"status": "complete"})
+
+    assert list_handoff_roles(hive_dir, "task-1") == ["arquitecto", "revisor"]
+
+
+def test_list_handoff_roles_lists_a_role_the_dispatcher_does_not_know(tmp_path: Path) -> None:
+    # Sorted by name and not ordered by the dispatcher's ROLES: the role list is
+    # not this function's business, and a file for an unknown role is still a
+    # file a reader has to be told about rather than one that vanishes.
+    hive_dir = str(tmp_path)
+    save_handoff(hive_dir, "task-1", "cartografo", {"status": "complete"})
+
+    assert list_handoff_roles(hive_dir, "task-1") == ["cartografo"]
+
+
+def test_list_handoff_roles_ignores_files_that_are_not_handoffs(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    save_handoff(hive_dir, "task-1", "auditor", {"status": "complete"})
+    handoffs = Path(handoff_path(hive_dir, "task-1", "auditor")).parent
+    (handoffs / "notes.md").write_text("scratch\n")
+
+    assert list_handoff_roles(hive_dir, "task-1") == ["auditor"]
+
+
+def test_read_handoff_envelope_answers_the_four_keys_whole(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    save_handoff(hive_dir, "task-1", "implementador", {"status": "complete"}, round_num=2)
+
+    envelope = read_handoff_envelope(hive_dir, "task-1", "implementador")
+
+    assert set(envelope) == {"role", "round", "saved_at", "handoff"}
+    assert envelope["role"] == "implementador"
+    assert envelope["round"] == 2
+    assert envelope["handoff"] == {"status": "complete"}
+
+
+def test_read_handoff_envelope_keeps_a_round_that_was_never_set(tmp_path: Path) -> None:
+    # The arquitecto and the auditor are saved with no round, so `null` is a real
+    # value here and not a reader's fallback.
+    hive_dir = str(tmp_path)
+    save_handoff(hive_dir, "task-1", "arquitecto", {"status": "complete"})
+
+    assert read_handoff_envelope(hive_dir, "task-1", "arquitecto")["round"] is None
+
+
+def test_read_handoff_envelope_raises_oserror_for_a_file_that_is_not_there(
+    tmp_path: Path,
+) -> None:
+    # The difference from read_handoff, and the whole reason this exists: a caller
+    # that has to tell an operator *why* gets the exception rather than a None.
+    with pytest.raises(OSError):
+        read_handoff_envelope(str(tmp_path), "task-1", "revisor")
+
+
+def test_read_handoff_envelope_raises_valueerror_for_a_file_that_will_not_parse(
+    tmp_path: Path,
+) -> None:
+    hive_dir = str(tmp_path)
+    path = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    path.parent.mkdir(parents=True)
+    path.write_text("{")
+
+    with pytest.raises(ValueError):
+        read_handoff_envelope(hive_dir, "task-1", "revisor")
+
+
+def test_read_handoff_envelope_raises_valueerror_for_a_file_that_is_not_an_object(
+    tmp_path: Path,
+) -> None:
+    # It parses, into something that is not an envelope. A reader asking for four
+    # keys cannot be handed a list, and the message has to say which shape it was.
+    hive_dir = str(tmp_path)
+    path = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    path.parent.mkdir(parents=True)
+    path.write_text("[1, 2]")
+
+    with pytest.raises(ValueError) as caught:
+        read_handoff_envelope(hive_dir, "task-1", "revisor")
+
+    assert "list" in str(caught.value)
+
+
+def test_read_handoff_still_answers_none_for_everything_the_envelope_raises_on(
+    tmp_path: Path,
+) -> None:
+    # The regression that matters: read_handoff is written in terms of
+    # read_handoff_envelope now, and its callers — debt.declarations, .rulings
+    # and .resolved — are repair paths that take `dict | None` and never an
+    # exception.
+    hive_dir = str(tmp_path)
+    broken = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    broken.parent.mkdir(parents=True)
+    broken.write_text("{")
+    save_handoff(hive_dir, "task-1", "auditor", {"status": "complete"})
+
+    assert read_handoff(hive_dir, "task-1", "revisor") is None
+    assert read_handoff(hive_dir, "task-2", "auditor") is None
+    assert read_handoff(hive_dir, "task-1", "auditor") == {"status": "complete"}

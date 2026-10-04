@@ -97,6 +97,17 @@ MAX_WARNINGS = 100
 #: ADR 23, narrowing ADR 21.
 MAX_BODY_BYTES = 128 * 1024
 
+#: The most phase records one `/api/phases` answer carries. A hundred because
+#: the cap cannot bite the call a screen makes — the console always sends
+#: `?task_id=`, and one task has at most one file per role, so five — and
+#: because the unfiltered call grows with every task this harness has ever run:
+#: it would otherwise be the second thing this service answered with no bound
+#: at all (`docs/debt/T-011-D1.md` was the first, closed by ADR 23). The clamp
+#: reports itself in `warnings` on `MAX_EVENT_LIMIT`'s model. It bounds a count
+#: and not bytes, which is enough while nothing polls the unfiltered form.
+#: `docs/decisions.md` ADR 27.
+MAX_PHASES = 100
+
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
 #: on how much a caller may ask for — `MAX_EVENT_LIMIT` is that, and it clamps
@@ -329,6 +340,82 @@ def create_app(
             return _envelope([], [f"{path}: no readable debt index: {exc}"])
         return _envelope(debt.index_rows(text), [])
 
+    @app.get("/api/phases")
+    @requires_auth
+    def phases():
+        rejected = _reject_unknown_parameters(frozenset({"task_id"}))
+        if rejected is not None:
+            return rejected
+        task_id = request.args.get("task_id") or None
+        if task_id is not None and not _is_bare_task_id(task_id):
+            # A 400 and not a 404: the resource of this route is a phase record
+            # and what is wrong here is the caller's parameter. The id never
+            # reaches `handoff_path` — `_is_bare_task_id` is the lock the detail
+            # route already uses, for the reason written there.
+            return _error(f"task_id must name one task file, not {task_id!r}", 400)
+        warnings: list[str] = []
+        if task_id is None:
+            task_ids = sorted(context_transfer.list_task_ids(cfg.hive_tasks_dir))
+        elif os.path.exists(context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)):
+            task_ids = [task_id]
+        else:
+            # Not a 404. The console reaches this route with an id it read off
+            # `/api/tasks`, and a 404 would take a region to *Broken* on a
+            # screen whose own read succeeded. `docs/decisions.md` ADR 27.
+            task_ids = []
+            warnings.append(
+                f"no task {task_id!r} in {cfg.hive_tasks_dir}: no phase records for it"
+            )
+        rows: list[tuple[str, dict]] = []
+        for tid in task_ids:
+            # Guarded like the rows below it, and for the same rule: a directory
+            # `os.path.isdir` admits can still refuse to be listed, and this
+            # route lists one per task — so without this, one directory the api
+            # cannot read costs every *other* task its rows. `.hive/` is written
+            # by the dispatcher and read here over a `:ro` mount, which is the
+            # mixed-ownership case `_write_atomic`'s chmod already exists for.
+            try:
+                roles = context_transfer.list_handoff_roles(cfg.hive_tasks_dir, tid)
+            except OSError as exc:
+                warnings.append(
+                    f"{context_transfer.scratch_dir(cfg.hive_tasks_dir, tid)}: "
+                    f"unreadable handoff directory: {exc}"
+                )
+                continue
+            for role in roles:
+                path = context_transfer.handoff_path(cfg.hive_tasks_dir, tid, role)
+                try:
+                    envelope = context_transfer.read_handoff_envelope(
+                        cfg.hive_tasks_dir, tid, role
+                    )
+                    # The guard wraps the *use* of the parsed values and not
+                    # only the parse, as on `/api/tasks`. The sort key is built
+                    # here, inside it, and as a `str`: a `saved_at` holding a
+                    # mapping is a use, and the sort below runs over the whole
+                    # list where one bad file would otherwise cost every row.
+                    # `app.json.dumps` is the serialisation `_envelope` does
+                    # anyway, run here so a payload JSON cannot take costs this
+                    # one file a warning instead of 500-ing the list. Narrowing
+                    # this `try` to the reader reopens all three.
+                    row = _phase(tid, role, envelope)
+                    order = str(row["saved_at"] or "")
+                    app.json.dumps(row)
+                except _UNREADABLE as exc:
+                    warnings.append(f"{path}: unreadable handoff: {exc}")
+                    continue
+                rows.append((order, row))
+        # Newest first: the end stamp is the only time a record carries, and the
+        # row a reader came for is the last phase that finished.
+        rows.sort(key=lambda pair: pair[0], reverse=True)
+        if len(rows) > MAX_PHASES:
+            warnings.append(
+                f"{len(rows)} phase records matched and this service answers at most "
+                f"{MAX_PHASES}: the newest {MAX_PHASES} are served. Narrow it with "
+                "?task_id=<id>."
+            )
+            rows = rows[:MAX_PHASES]
+        return _envelope([row for _, row in rows], warnings)
+
     return app
 
 
@@ -341,7 +428,7 @@ def _envelope(data, warnings: list[str]):
     `warnings` names files and the caller's own parameters, never states —
     `docs/decisions.md` ADR 5, widened by ADR 11 to admit the `limit` clamp.
     Every 200 funnels through here, which is why the cap lives here and not in
-    the four views that build the lists.
+    the five views that build the lists.
     """
     return jsonify({"data": data, "warnings": _capped(warnings)})
 
@@ -488,6 +575,41 @@ def _task(task: context_transfer.TaskFile, cards: dict[str, dict], ttl_seconds: 
         "resolved_debt": task.resolved_debt,
         "card": cards.get(task.kanban_issue_id) if task.kanban_issue_id else None,
         "lock_expired": _lock_expired(task, ttl_seconds),
+    }
+
+
+def _phase(task_id: str, role: str, envelope: dict) -> dict:
+    """One phase as the handoff file has it: six keys, and the payload whole.
+
+    The fields are the envelope's and this invents only `id`, which *is* the
+    file — one per role per task, so `<task_id>:<role>` is the record's own
+    identity and not a surrogate. The route owns that shape, so a later task
+    that ever serves more than the approved round adds to the id rather than
+    reshaping every client.
+
+    `handoff` travels whole and unpromoted. Nothing is lifted onto the row and
+    nothing is projected: the payload's key set is the role's own schema in
+    `dispatcher/handoff.py:schema_for`, and a second copy of it maintained by
+    hand on this side is what this module's docstring refuses. A key the
+    console does not know is not an error here.
+
+    `role` is the envelope's, with the filename as the fallback: one file per
+    role is the record, so the name is the stronger claim about which phase
+    this is. The full argument for which of `Phase`'s twenty-two fields are
+    served, and why the other sixteen are not, is `docs/decisions.md` ADR 27 —
+    this docstring cites it rather than re-making it, and a later task that
+    finds a field missing reaches that table before reaching for the api.
+    """
+    return {
+        "id": f"{task_id}:{role}",
+        "task_id": task_id,
+        "role": envelope.get("role") or role,
+        "round": envelope.get("round"),
+        # When the phase *ended*. No start is recorded anywhere in `.hive/`, so
+        # there is no `started_at` to serve and no duration to derive: serving
+        # this under another name would be the only lie on this route. ADR 27.
+        "saved_at": envelope.get("saved_at"),
+        "handoff": envelope.get("handoff"),
     }
 
 

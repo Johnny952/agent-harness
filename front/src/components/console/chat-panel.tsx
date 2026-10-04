@@ -23,9 +23,10 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
 
   // `tasksQuery` resolves to an envelope now (ADR 16), and a task's status carries
   // no role (ADR 26) — so "a phase is running" is the `in_progress` status itself
-  // rather than a role parsed out of it. Which role is running waits on
-  // `/api/phases`, and nothing on this dock needs it: the chat surface is what
-  // C-8 declined to decide, and this is a translation, not a design.
+  // rather than a role parsed out of it. Which role is running is recorded on no
+  // file at all: `/api/phases` landed and answers phases that have *ended*
+  // (ADR 27, ADR 28). Nothing on this dock needs it either way: the chat surface
+  // is what C-8 declined to decide, and this is a translation, not a design.
   const phaseRunning = (tasks?.data ?? []).some((t) => t.status === "in_progress");
   const messages = thread ? [...thread.messages, ...extra] : [];
 

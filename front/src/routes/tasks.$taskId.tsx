@@ -7,7 +7,6 @@ import {
   Absent,
   EmptyState,
   ErrorState,
-  GateChip,
   HeartbeatDot,
   Mono,
   PageHeader,
@@ -17,9 +16,10 @@ import {
   gateTone,
 } from "@/components/console/primitives";
 import { Markdown } from "@/components/console/markdown";
-import { debtQuery, taskQuery } from "@/lib/api/queries";
+import { debtQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
+import { ROLES } from "@/lib/api/types";
 import type { Phase, Task } from "@/lib/api/types";
-import { agoSeconds, formatAge, formatBytes, formatClock, formatDuration, roleColorVar } from "@/lib/format";
+import { agoSeconds, formatAge, formatClock, roleColorVar } from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 
@@ -46,6 +46,7 @@ function TaskDetailPage() {
   const now = useNow();
   const task = useQuery(taskQuery(taskId));
   const debt = useQuery(debtQuery);
+  const phases = useQuery(phasesQuery(taskId));
 
   // Broken is a query that failed, and it never degrades into an empty state:
   // `docs/ui.md` *Absent, empty and broken are three different things*. A 404 and
@@ -63,9 +64,17 @@ function TaskDetailPage() {
   }
 
   const t = task.data?.data ?? null;
-  const warnings = [...(task.data?.warnings ?? []), ...(debt.data?.warnings ?? [])];
+  // One banner, every warning, in the order the api sent them — three reads
+  // concatenated rather than three banners stacked. `docs/ui.md` *A degraded
+  // backend is a banner, not a blank screen*.
+  const warnings = [
+    ...(task.data?.warnings ?? []),
+    ...(debt.data?.warnings ?? []),
+    ...(phases.data?.warnings ?? []),
+  ];
   // Debt ids are shaped `T-011-D1`, and `task_id` is that split. ADR 17.
   const taskDebt = (debt.data?.data ?? []).filter((d) => d.task_id === taskId);
+  const timeline = byCycle(phases.data?.data ?? []);
 
   return (
     <AppShell>
@@ -128,16 +137,32 @@ function TaskDetailPage() {
             <BodySections body={t.body} />
           </section>
 
-          {/* A region waiting on a route is an empty state about the console, not
-              about the harness — `docs/ui.md` *A region with no route says which
-              route, and when*. The phase record is already on disk, one handoff per
-              task and role; what is missing is the route over it. */}
           <section>
             <h2 className="label-xs mb-2">phase timeline</h2>
-            <EmptyState
-              title="The phase timeline is waiting on /api/phases"
-              body="This console cannot see the per-phase record yet — that route is tier 2 of docs/plans/front.md. The handoffs themselves are on disk under the hive's handoffs directory, and this is not a statement about whether phases have run."
-            />
+            {/* A secondary read on a discrete block, so Broken takes the region
+                and not the screen: the task card above answered and is still
+                true. `docs/ui.md` *Absent, empty and broken are three different
+                things*, and the debt region below is the same shape. */}
+            {phases.isError ? (
+              <ErrorState
+                title="/api/phases did not answer"
+                body="The per-phase record could not be read, so what each phase returned is unknown rather than absent. Everything above comes from the task card and is unaffected; the handoffs themselves are on disk under the hive's handoffs directory."
+              />
+            ) : timeline.length === 0 ? (
+              // An empty state about the *harness*, not about the console: the
+              // route exists now, so naming one would send an operator looking
+              // for a bug in the api. `docs/ui.md` *A region with no route…*
+              <EmptyState
+                title="No phase of this task has left a handoff"
+                body="One record per role is written when a phase ends, so a task whose first phase is still running has none yet — and a task dispatched before the harness kept these records has none at all."
+              />
+            ) : (
+              <ul className="space-y-2">
+                {timeline.map((phase) => (
+                  <PhaseRow key={phase.id} phase={phase} now={now} />
+                ))}
+              </ul>
+            )}
           </section>
 
           <section className="panel px-3 py-3">
@@ -181,9 +206,11 @@ function TaskDetailPage() {
 
           <section>
             <h2 className="label-xs mb-2">learnings handed to these phases</h2>
+            {/* Still waiting, and on one route now rather than two: ADR 19 says
+                this names what is missing, and only /api/learnings is. */}
             <EmptyState
               title="Learnings handed to a phase are waiting on /api/learnings"
-              body="Two routes, both tier 2 of docs/plans/front.md: /api/learnings for the rows, and /api/phases for the join, because the list this region drew is a phase's learning_ids read against them. The learnings tree is on disk either way."
+              body="Tier 2 of docs/plans/front.md, and the half of the join that does not exist yet. The timeline above carries each phase's own learnings lines, which name inbox filenames rather than ids; the records on the other end of those names need that route. The learnings tree is on disk either way."
             />
           </section>
         </div>
@@ -289,108 +316,134 @@ function DependencyGraph({ task }: { task: Task }) {
 }
 
 /**
- * No caller until `/api/phases` lands — tier 2 of `docs/plans/front.md`, and the
- * section above says so on screen rather than rendering this against a fixture
- * (ADR 19). Kept rather than deleted on the same reasoning ADR 25 gives for the
- * fixtures it kept: it still type-checks against `Phase`, and re-deleting a
- * hundred lines of a generated screen that tier 2 needs back verbatim costs more
- * in a tree C-9 keeps syncing to Lovable than the dead code does.
+ * The timeline's order: by the cycle, not by the clock.
+ *
+ * `/api/phases` answers newest `saved_at` first, which is the right default for a
+ * route whose unfiltered form is a feed. A timeline of one task reads
+ * arquitecto → implementador → revisor → auditor, and that order survives a
+ * `saved_at` the api could not judge — the route serves the value verbatim
+ * (`docs/decisions.md` ADR 10's rule, ADR 27 for this field), so it is not a key
+ * to sort a screen on alone. A role outside `ROLES` goes last rather than first,
+ * because the api validates neither the filename nor the envelope's `role`.
+ */
+function byCycle(phases: Phase[]): Phase[] {
+  const rank = (role: Phase["role"]) => {
+    const index = (ROLES as readonly string[]).indexOf(role);
+    return index === -1 ? ROLES.length : index;
+  };
+  return [...phases].sort(
+    (a, b) => rank(a.role) - rank(b.role) || String(a.saved_at).localeCompare(String(b.saved_at)),
+  );
+}
+
+/**
+ * The tone of a phase's own status, which is a second vocabulary and not the
+ * task's four: `complete` finished, `partial` finished and left something,
+ * `blocked` is the one word both vocabularies share. A revisor's `verdict` reads
+ * the same way, and `CHANGES_REQUESTED` is `warning` and not `destructive` —
+ * sending a round back is the cycle working. `docs/ui.md` *The tone of a state*.
+ *
+ * Local because one screen shows it today. The second screen that does promotes
+ * it into `primitives.tsx` beside `StatusPill`, which is where the task's four
+ * live.
+ */
+const phaseTone: Record<string, string> = {
+  complete: "text-success border-success/50 bg-success/10",
+  partial: "text-warning border-warning/50 bg-warning/10",
+  blocked: "text-destructive border-destructive/60 bg-destructive/10",
+  APPROVED: "text-success border-success/50 bg-success/10",
+  CHANGES_REQUESTED: "text-warning border-warning/50 bg-warning/10",
+};
+
+function PhasePill({ value }: { value: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-sm border px-1.5 py-[1px] text-[10px] font-medium uppercase tracking-wide",
+        // Anything the harness has not said is muted with the string verbatim,
+        // the same way `StatusPill` treats a status outside its four.
+        phaseTone[value] ?? "text-muted-foreground border-border-strong bg-surface-2",
+      )}
+    >
+      {value}
+    </span>
+  );
+}
+
+/**
+ * One handoff file, as `/api/phases` serves it.
+ *
+ * The row the fixture drew is thinner now and true: no account, no model, no
+ * duration, no byte bar, no gate chips, no commit and no worktree, because the
+ * harness records none of them per phase — `docs/decisions.md` ADR 27 sorts all
+ * twenty-two fields and a later task that wants one reads that table first. What
+ * it gains is the payload the role actually returned.
  */
 function PhaseRow({ phase, now }: { phase: Phase; now: number }) {
-  const over = phase.bytes_used > phase.bytes_budget;
-  const pct = Math.round((phase.bytes_used / phase.bytes_budget) * 100);
+  const handoff = phase.handoff;
+  // The api serves whatever the filename says, so a role this console does not
+  // know still renders — as its own string, since there is no hue for it.
+  const known = (ROLES as readonly string[]).includes(phase.role);
   return (
     <li
-      className={cn(
-        "panel px-3 py-2",
-        phase.revision_round ? "ml-6 border-l-2" : "",
-      )}
-      style={phase.revision_round ? { borderLeftColor: roleColorVar.revisor } : undefined}
+      className={cn("panel px-3 py-2", phase.round ? "ml-6 border-l-2" : "")}
+      style={phase.round ? { borderLeftColor: roleColorVar.revisor } : undefined}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <RoleBadge role={phase.role} />
-        {phase.revision_round && (
-          <span className="label-xs">revision round {phase.revision_round}</span>
+        {known ? (
+          <RoleBadge role={phase.role} />
+        ) : (
+          <Mono className="text-[11px]">{phase.role}</Mono>
         )}
-        <Mono className="text-[11px]">{phase.account}</Mono>
-        <Mono className="text-[10px] text-muted-foreground">{phase.model}</Mono>
-        <span className="text-[10px] text-muted-foreground">
-          started {formatClock(phase.started_at)} · {formatAge(agoSeconds(phase.started_at, now))} ago ·{" "}
-          {formatDuration(phase.duration_s)}
+        {phase.round !== null && <span className="label-xs">round {phase.round}</span>}
+        {handoff?.status && <PhasePill value={handoff.status} />}
+        {handoff?.verdict && <PhasePill value={handoff.verdict} />}
+        {/* *ended*, and never *started*: `saved_at` is the only stamp a record
+            carries and the harness writes no start. `docs/ui.md` *Times are
+            absolute, ages are relative, and ages tick*. */}
+        <span className="ml-auto text-[10px] text-muted-foreground">
+          ended {formatClock(phase.saved_at)} · {formatAge(agoSeconds(phase.saved_at, now))} ago
         </span>
-        <span className="ml-auto flex items-center gap-1">
-          {phase.gate_findings.map((g, i) => (
-            <GateChip key={i} level={g.level} label={g.gate} />
-          ))}
-        </span>
-      </div>
-
-      {phase.write_rejected && (
-        <p className="mt-2 rounded-sm border border-destructive/50 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
-          This revisor phase attempted a write. Revisor is read-only by design, so the write was
-          rejected — the change has to go back to implementador.
-        </p>
-      )}
-
-      <div className="mt-2 grid gap-3 md:grid-cols-2">
-        <div>
-          <p className="label-xs mb-1">byte budget</p>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-surface-2">
-            <div
-              className="h-full rounded-full"
-              style={{
-                width: `${Math.min(100, pct)}%`,
-                backgroundColor: over ? "var(--destructive)" : "var(--info)",
-              }}
-            />
-          </div>
-          <p className={cn("mt-1 text-[10px]", over ? "text-destructive" : "text-muted-foreground")}>
-            {formatBytes(phase.bytes_used)} of {formatBytes(phase.bytes_budget)}
-            {over && ` · over by ${pct - 100}%`}
-            {over && (phase.shrink_retry ? " · shrink retry ran" : " · no shrink retry")}
-          </p>
-        </div>
-        <div>
-          <p className="label-xs mb-1">result</p>
-          <p className="text-[11px]">
-            commit{" "}
-            {phase.commit_sha ? (
-              <Mono>{phase.commit_sha}</Mono>
-            ) : (
-              <Absent label="no commit" />
-            )}
-          </p>
-          <p className="text-[10px] text-muted-foreground">
-            {phase.worktree_path ?? <Absent label="no worktree" />}
-          </p>
-        </div>
       </div>
 
       <div className="mt-2 rounded-sm border border-border bg-surface-2 px-2 py-1.5">
-        <p className="label-xs mb-1">handoff envelope</p>
-        {phase.envelope ? (
-          <div className="space-y-1 text-[11px]">
-            <p>
-              <Mono className="text-[10px] text-muted-foreground">
-                {phase.envelope.from_role} → {phase.envelope.to_role ?? "—"}
-              </Mono>
-            </p>
-            <p>{phase.envelope.summary}</p>
-            {phase.envelope.artifacts.length > 0 && (
-              <p className="mono text-[10px] text-muted-foreground">
-                {phase.envelope.artifacts.join("  ")}
-              </p>
-            )}
-            {phase.envelope.open_questions.map((q, i) => (
-              <p key={i} className="text-[10px] text-warning">
-                open: {q}
-              </p>
-            ))}
-          </div>
+        <p className="label-xs mb-1">what the phase returned</p>
+        {handoff === null ? (
+          // A phase ran and left nothing parseable — which is what the record
+          // says, not "not handed off yet". ADR 27.
+          <Absent label="no structured return" />
         ) : (
-          <Absent label="not handed off yet" />
+          <div className="space-y-1.5">
+            {/* Every list is guarded: the key set belongs to the role, so a key
+                this screen names may simply not be on this payload. */}
+            <PhaseList label="changed" lines={handoff.changed ?? []} />
+            <PhaseList label="verified" lines={handoff.verified ?? []} />
+            <PhaseList label="pending" lines={handoff.pending ?? []} />
+            <PhaseList label="risks" lines={handoff.risks ?? []} />
+            <PhaseList
+              label="paths"
+              lines={(handoff.paths ?? []).map((p) => `${p.path} — ${p.holds}`)}
+            />
+            <PhaseList label="learnings" lines={handoff.learnings ?? []} />
+          </div>
         )}
       </div>
     </li>
+  );
+}
+
+function PhaseList({ label, lines }: { label: string; lines: string[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <div>
+      <p className="label-xs">{label}</p>
+      <ul className="mt-0.5 space-y-0.5">
+        {lines.map((line, i) => (
+          <li key={i} className="text-[11px] text-muted-foreground">
+            {line}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

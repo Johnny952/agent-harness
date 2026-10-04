@@ -89,13 +89,27 @@ The four task states are the four the harness writes — `pending`,
 the api serves what the task file says: it renders `muted` with the string
 verbatim rather than unstyled.
 
+A **phase** has a status of its own and it is a second vocabulary, not the task's
+four: `dispatcher/handoff.py` validates every phase's return against
+`complete | partial | blocked`, and a revisor's carries `APPROVED` or
+`CHANGES_REQUESTED` besides. `complete` is `success`, `partial` is `warning` —
+the phase finished and left something — and `blocked` is `destructive`, which is
+the one word the two vocabularies share and means the same thing in both.
+`APPROVED` is `success`; `CHANGES_REQUESTED` is `warning` and **not**
+`destructive`, because a revisor sending a round back is the cycle working rather
+than a failure that happened. A phase whose handoff is `null` recorded no
+structured return at all, which is `Absent` and not a state.
+
 The tone of a state is a cross-screen definition because the same state appears
 on the board, on the task detail and in the pool, and an operator who has to
 re-learn what amber means per screen is reading three products.
 
 **Set by:** the `front/` import; amended by T-012 for the served state
-vocabulary and the tone of `pending`. Source of truth:
-`front/src/components/console/primitives.tsx` (`StatusPill`, `gateTone`).
+vocabulary and the tone of `pending`, and by T-013 for a phase's own status and
+verdict, which `/api/phases` serves inside the handoff payload
+(`docs/decisions.md` ADR 27). Source of truth:
+`front/src/components/console/primitives.tsx` (`StatusPill`, `gateTone`),
+`dispatcher/handoff.py` (`_STATUS_VALUES`, `APPROVED`, `CHANGES_REQUESTED`).
 
 ### Absent, empty and broken are three different things
 
@@ -209,8 +223,8 @@ rather than a dot.
 ### A region with no route says which route, and when
 
 A region whose query has no route behind it renders an `EmptyState` whose body
-names the missing route and the tier it lands in — "`/api/phases`, tier 2 of
-`docs/plans/front.md`" — and never a fixture, never a blank, and never the
+names the missing route and the tier it lands in — "`/api/learnings`, tier 2
+of `docs/plans/front.md`" — and never a fixture, never a blank, and never the
 wording of an empty harness. `docs/decisions.md` ADR 19 is the rule; this entry
 is what it looks like, because more than one screen has such a region and an
 operator must never be unable to tell a quiet harness from an unwired console.
@@ -220,14 +234,29 @@ console cannot see it yet* are different sentences, and only the first one is an
 `EmptyState` about the harness. A region waiting on a route is an empty state
 about the console.
 
+There is a third sentence and it needs its own wording: *nothing records that*.
+A region whose fact is not on any file names **the record that is missing and
+who would have to write it**, never a route — naming a route that exists and
+does not answer sends an operator to look for a bug in the api. The shipped case
+is the Board's In progress column: which role is running is known to the
+dispatcher while it runs and persisted nowhere, so the banner says that rather
+than going on naming `/api/phases`, which landed and answers phases that have
+**ended** (`docs/decisions.md` ADR 27 and ADR 28). A region in this state also
+names what the screen *does* show in place of the fact, where there is
+something — on that column, the account in `owner` and the api's `lock_expired`
+over the heartbeat — because an operator who cannot have the answer is still
+owed the nearest true one.
+
 Where a region has no shape of its own to fill — a filter over a dimension
 nothing supplies, a column that would always be empty — the control goes rather
 than being disabled, and a `Banner` with tone `info` above the content names the
 route. A control that cannot act is the same mistake as a fixture: it tells an
 operator something is available when it is not.
 
-**Set by:** T-012; the paragraph above applied to the pool's `Release` button
-by the by-hand review of T-012, which removed it. Source of truth:
+**Set by:** T-012; the paragraph on a control with nothing to act on applied to
+the pool's `Release` button by the by-hand review of T-012, which removed it;
+the *nothing records that* case by T-013, which landed `/api/phases` and found
+the Board's lanes waiting on a fact rather than on a route. Source of truth:
 `front/src/components/console/primitives.tsx` (`EmptyState`, `Banner`),
 `front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
 `front/src/routes/tasks.$taskId.tsx`.
@@ -240,11 +269,18 @@ a heartbeat, since a refresh — is relative and rendered through `formatAge`
 over `agoSeconds`, and it **ticks**: `useNow` re-renders it on its own interval
 so an age never goes stale behind a poll it is not driving.
 
+A time is labelled with the event it records and never with a neighbouring one.
+The case that forced this: a phase's only stamp is `saved_at`, which is when the
+phase **ended** — the harness records no start — so the timeline reads *ended*
+and no screen may label it *started* or derive a duration from two of them
+(`docs/decisions.md` ADR 27).
+
 Anything clock-dependent renders only after hydration. The server has a
 different now than the browser, and `RefreshedAt` exists because a server-
 rendered age mismatches on the first paint.
 
-**Set by:** the `front/` import. Source of truth: `front/src/lib/format.ts`,
+**Set by:** the `front/` import; the labelling rule by T-013. Source of truth:
+`front/src/lib/format.ts`,
 `front/src/hooks/use-console.ts`,
 `front/src/components/console/app-shell.tsx`.
 

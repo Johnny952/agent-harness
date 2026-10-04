@@ -10,18 +10,19 @@ import type {
 } from "../types";
 
 /**
- * **Five of these back nothing.** `mockTasks`, `mockAccounts`, `mockDebt`,
+ * **Six of these back nothing.** `mockTasks`, `mockAccounts`, `mockDebt`,
  * `mockEvents` and `nextMockEvent` stopped being the source of a screen when
  * T-012 wired `listTasks`, `getTask`, `listAccounts`, `listEvents` and `listDebt`
- * against `observability/api/`. They are kept rather than deleted and kept
- * conforming to the *served* shapes — `docs/decisions.md` ADR 25 — so a typecheck
- * still catches a type that drifts from the route, and so a later task has a
- * fixture it can trust the shape of.
+ * against `observability/api/`, and `mockPhases` when T-013 wired `listPhases`
+ * against `/api/phases`. They are kept rather than deleted and kept conforming to
+ * the *served* shapes — `docs/decisions.md` ADR 25 — so a typecheck still catches
+ * a type that drifts from the route, and so a later task has a fixture it can
+ * trust the shape of.
  *
- * `mockPhases`, `mockLearnings`, `mockActions` and `mockThreads` still back
- * `listPhases`, `listLearnings`, `listActions` and `listThreads`, whose routes are
- * tier 2 and tier 3 of `docs/plans/front.md`, and they carry no `warnings`: ADR 25
- * says a fixture for a route with no producer cannot rehearse an envelope.
+ * `mockLearnings`, `mockActions` and `mockThreads` still back `listLearnings`,
+ * `listActions` and `listThreads`, whose routes are tier 2 and tier 3 of
+ * `docs/plans/front.md`, and they carry no `warnings`: ADR 25 says a fixture for a
+ * route with no producer cannot rehearse an envelope.
  */
 
 /** Fixtures are anchored to "now" so heartbeat freshness is realistic. */
@@ -198,224 +199,62 @@ export function mockTasks(): Task[] {
   ];
 }
 
+/**
+ * Backs nothing since T-013 wired `listPhases`, and narrowed to the six keys
+ * `/api/phases` actually answers rather than deleted — ADR 25's rule for the five
+ * fixtures T-012 retired, applied to the sixth. An `id` is `<task_id>:<role>`
+ * because that is the file, `saved_at` is when the phase **ended**, and the
+ * payload's key set is the role's own (`docs/decisions.md` ADR 27).
+ */
 export function mockPhases(): Phase[] {
   return [
     {
-      id: "P-1101",
-      task_id: "T-011",
-      role: "cartografo",
-      account: "cuenta1",
-      model: "sonnet-4.5",
-      started_at: iso(5400),
-      duration_s: 214,
-      bytes_used: 38200,
-      bytes_budget: 60000,
-      shrink_retry: false,
-      write_rejected: false,
-      envelope: {
-        from_role: "cartografo",
-        to_role: "arquitecto",
-        summary: "Budget constants live in harness/phases/budget.py, read from four call sites.",
-        artifacts: ["notes/T-011-map.md"],
-        open_questions: ["Should defaults stay in code as a fallback?"],
-      },
-      gate_findings: [{ gate: "pointers", level: "note", detail: "4 pointers recorded" }],
-      commit_sha: "9ac31de",
-      worktree_path: "/srv/worktrees/T-011-cartografo",
-      revision_round: null,
-      learning_ids: ["L-01", "L-04"],
-    },
-    {
-      id: "P-1102",
+      id: "T-011:arquitecto",
       task_id: "T-011",
       role: "arquitecto",
-      account: "cuenta1",
-      model: "sonnet-4.5",
-      started_at: iso(4900),
-      duration_s: 341,
-      bytes_used: 71400,
-      bytes_budget: 65000,
-      shrink_retry: true,
-      write_rejected: false,
-      envelope: {
-        from_role: "arquitecto",
-        to_role: "implementador",
-        summary: "Config block phases.budgets, per-role keys, code defaults kept as fallback.",
-        artifacts: ["docs/contracts/budgets.md"],
-        open_questions: [],
+      round: null,
+      saved_at: iso(4900),
+      handoff: {
+        status: "complete",
+        changed: ["docs/contracts/budgets.md: the per-role budget block"],
+        verified: ["python3 -m pytest: 1173 passed"],
+        pending: ["The loader itself, and the four call sites"],
+        risks: ["Code defaults kept as a fallback, which a later task may read as dead"],
+        paths: [{ path: "docs/contracts/budgets.md", holds: "The key names and their defaults" }],
       },
-      gate_findings: [
-        { gate: "contract-docs", level: "note", detail: "budgets.md added" },
-        { gate: "pointers", level: "warning", detail: "1 pointer missing a line anchor" },
-      ],
-      commit_sha: "b40f72c",
-      worktree_path: "/srv/worktrees/T-011-arquitecto",
-      revision_round: null,
-      learning_ids: ["L-02"],
     },
     {
-      id: "P-1103",
+      id: "T-011:implementador",
       task_id: "T-011",
       role: "implementador",
-      account: "cuenta4",
-      model: "sonnet-4.5",
-      started_at: iso(3800),
-      duration_s: 903,
-      bytes_used: 118900,
-      bytes_budget: 90000,
-      shrink_retry: true,
-      write_rejected: false,
-      envelope: {
-        from_role: "implementador",
-        to_role: "revisor",
-        summary: "Loader written, four call sites migrated, 6 tests added.",
-        artifacts: ["harness/config/budgets.py", "tests/test_budgets.py"],
-        open_questions: ["Shrink retry is not logged anywhere."],
+      round: 2,
+      saved_at: iso(3800),
+      handoff: {
+        status: "partial",
+        changed: ["harness/config/budgets.py: the loader"],
+        verified: ["python3 -m pytest: 6 new tests"],
+        pending: ["The shrink retry is logged nowhere"],
+        risks: [],
+        resolved_debt: ["T-008-D1"],
       },
-      gate_findings: [
-        { gate: "tests-in-diff", level: "note", detail: "6 tests touched" },
-        { gate: "tests-run", level: "warning", detail: "2 tests skipped on this runner" },
-      ],
-      commit_sha: "1de9004",
-      worktree_path: "/srv/worktrees/T-011-implementador",
-      revision_round: null,
-      learning_ids: ["L-02", "L-03"],
     },
     {
-      id: "P-1104",
+      id: "T-011:revisor",
       task_id: "T-011",
       role: "revisor",
-      account: "cuenta1",
-      model: "sonnet-4.5",
-      started_at: iso(2600),
-      duration_s: 158,
-      bytes_used: 44100,
-      bytes_budget: 50000,
-      shrink_retry: false,
-      write_rejected: true,
-      envelope: {
-        from_role: "revisor",
-        to_role: "implementador",
-        summary: "Round 1: log the shrink retry; otherwise approved.",
-        artifacts: [],
-        open_questions: [],
-      },
-      gate_findings: [
-        { gate: "tests-run", level: "blocking", detail: "revisor attempted a write; rejected" },
-      ],
-      commit_sha: null,
-      worktree_path: "/srv/worktrees/T-011-revisor",
-      revision_round: 1,
-      learning_ids: ["L-05"],
+      round: 2,
+      saved_at: iso(2600),
+      handoff: { status: "complete", verdict: "CHANGES_REQUESTED", debt_rulings: [] },
     },
     {
-      id: "P-1105",
-      task_id: "T-011",
-      role: "revisor",
-      account: "cuenta1",
-      model: "sonnet-4.5",
-      started_at: iso(240),
-      duration_s: null,
-      bytes_used: 12800,
-      bytes_budget: 50000,
-      shrink_retry: false,
-      write_rejected: false,
-      envelope: null,
-      gate_findings: [],
-      commit_sha: null,
-      worktree_path: "/srv/worktrees/T-011-revisor",
-      revision_round: 2,
-      learning_ids: [],
-    },
-    {
-      id: "P-0801",
-      task_id: "T-008",
-      role: "cartografo",
-      account: "cuenta2",
-      model: "sonnet-4.5",
-      started_at: iso(9400),
-      duration_s: 190,
-      bytes_used: 29000,
-      bytes_budget: 60000,
-      shrink_retry: false,
-      write_rejected: false,
-      envelope: {
-        from_role: "cartografo",
-        to_role: "arquitecto",
-        summary: "Three call sites swallow the 429 body.",
-        artifacts: ["notes/T-008-map.md"],
-        open_questions: [],
-      },
-      gate_findings: [{ gate: "pointers", level: "note", detail: "3 pointers recorded" }],
-      commit_sha: "77c1a02",
-      worktree_path: "/srv/worktrees/T-008-cartografo",
-      revision_round: null,
-      learning_ids: ["L-01"],
-    },
-    {
-      id: "P-0802",
-      task_id: "T-008",
-      role: "arquitecto",
-      account: "cuenta2",
-      model: "sonnet-4.5",
-      started_at: iso(8800),
-      duration_s: 402,
-      bytes_used: 66000,
-      bytes_budget: 65000,
-      shrink_retry: false,
-      write_rejected: false,
-      envelope: {
-        from_role: "arquitecto",
-        to_role: null,
-        summary: "Envelope schema depends on T-011 config landing first.",
-        artifacts: ["docs/contracts/pool-events.md"],
-        open_questions: ["Blocked on T-011."],
-      },
-      gate_findings: [
-        { gate: "contract-docs", level: "blocking", detail: "contract references an unlanded schema" },
-      ],
-      commit_sha: null,
-      worktree_path: "/srv/worktrees/T-008-arquitecto",
-      revision_round: null,
-      learning_ids: ["L-04"],
-    },
-    {
-      id: "P-1401",
+      // `handoff: null` is a real answer and not a missing file: the phase ran
+      // and left no parseable return. ADR 27.
+      id: "T-014:auditor",
       task_id: "T-014",
       role: "auditor",
-      account: "cuenta3",
-      model: "sonnet-4.5",
-      started_at: iso(400),
-      duration_s: null,
-      bytes_used: 51000,
-      bytes_budget: 55000,
-      shrink_retry: false,
-      write_rejected: false,
-      envelope: null,
-      gate_findings: [{ gate: "tests-run", level: "warning", detail: "suite running" }],
-      commit_sha: null,
-      worktree_path: "/srv/worktrees/T-014-auditor",
-      revision_round: null,
-      learning_ids: [],
-    },
-    {
-      id: "P-1201",
-      task_id: "T-012",
-      role: "implementador",
-      account: "cuenta4",
-      model: "sonnet-4.5",
-      started_at: iso(120),
-      duration_s: null,
-      bytes_used: 22000,
-      bytes_budget: 90000,
-      shrink_retry: false,
-      write_rejected: false,
-      envelope: null,
-      gate_findings: [],
-      commit_sha: null,
-      worktree_path: "/srv/worktrees/T-012-implementador",
-      revision_round: null,
-      learning_ids: [],
+      round: null,
+      saved_at: iso(400),
+      handoff: null,
     },
   ];
 }

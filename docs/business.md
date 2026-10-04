@@ -68,3 +68,23 @@ cite the entry and move it up, or drop the row.
   project with no `docs/debt/README.md` as a project with no debt** (`[]` plus a
   warning), rather than as an unbootstrapped one. The distinction between "never
   filed debt" and "docs contract not set up" is not represented anywhere.
+
+## Unconfirmed — inferred from the code by T-013
+
+- **A task with no handoff files is a task no phase has finished *and* a task
+  that ran before the harness kept these records: `/api/phases` answers `[]` for
+  both and nothing distinguishes them.** A phase record exists only because
+  `dispatcher/context_transfer.py:save_handoff` wrote one, and `save_handoff` is
+  newer than most of this harness's task ids — ten of the thirteen under
+  `.hive/tasks/` have no `handoffs/` directory at all. The same screen shows the
+  contradiction: `/api/tasks/<id>` serves the task file `body`, which carries one
+  `## <role>` section per phase that ran (`dispatcher/handoff.py:body`), so the
+  detail screen renders six role sections for `T-008` one region above a phase
+  timeline that is empty, and the empty state has to cover both readings at once
+  ("a task whose first phase is still running has none yet — and a task
+  dispatched before the harness kept these records has none at all"). Nothing
+  rules on whether the api owes a reader that difference, and the prose sections
+  are the evidence it could serve: `docs/decisions.md` ADR 27 decides what a
+  phase row *is* and ADR 28 decides that no file says which phase is *running*,
+  but neither addresses a phase that ran and left no record. A human should say
+  whether "never recorded" and "not yet" are the same answer.

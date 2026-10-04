@@ -1,23 +1,22 @@
 /**
  * Typed API client. One function per endpoint.
  *
- * **Five of them are real.** `listTasks`, `getTask`, `listAccounts`, `listEvents`
- * and `listDebt` read `observability/api/` through the console's own origin —
- * `lib/api/forward.ts` is the server half that holds the bearer, so nothing here
- * carries a credential and every URL below is relative. They resolve to
- * `ApiResult<T>`: `data` unwrapped into the rows a screen takes, `warnings`
+ * **Six of them are real.** `listTasks`, `getTask`, `listAccounts`, `listEvents`,
+ * `listDebt` and `listPhases` read `observability/api/` through the console's own
+ * origin — `lib/api/forward.ts` is the server half that holds the bearer, so
+ * nothing here carries a credential and every URL below is relative. They resolve
+ * to `ApiResult<T>`: `data` unwrapped into the rows a screen takes, `warnings`
  * riding beside it. `docs/decisions.md` ADR 16, with ADR 25 for the type.
  *
  * Everything else still resolves from `./mock/fixtures` and `./mock/ops-fixtures`,
  * because the routes behind them are tier 2 and tier 3 of `docs/plans/front.md`:
- * `listPhases` and `listLearnings` wait for `/api/phases` and `/api/learnings`,
- * and `listActions`, `enqueueAction` and `listThreads` are never coming here at
- * all — ADR 19 puts the write surface in another service with its own credential,
- * and C-1 has not ruled on the chat dock. A screen reading one of those says so on
- * itself rather than looking finished; `docs/ui.md` *A region with no route says
- * which route, and when*.
+ * `listLearnings` waits for `/api/learnings`, and `listActions`, `enqueueAction`
+ * and `listThreads` are never coming here at all — ADR 19 puts the write surface
+ * in another service with its own credential, and C-1 has not ruled on the chat
+ * dock. A screen reading one of those says so on itself rather than looking
+ * finished; `docs/ui.md` *A region with no route says which route, and when*.
  *
- * Relative URLs mean these five may only be called from the browser: a relative
+ * Relative URLs mean these six may only be called from the browser: a relative
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
  * `useEffect` today, and ADR 24 names moving one into a route loader as the case
  * that has to answer the base-URL question again.
@@ -34,12 +33,7 @@ import type {
   Task,
   TaskDetail,
 } from "./types";
-import {
-  mockActions,
-  mockLearnings,
-  mockPhases,
-  mockThreads,
-} from "./mock/fixtures";
+import { mockActions, mockLearnings, mockThreads } from "./mock/fixtures";
 
 export class ApiError extends Error {
   constructor(
@@ -64,8 +58,8 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  */
 const actionBackendDown = false;
 
-/* ── The five wired reads ─────────────────────────────────────────────────
- * One boundary function, and every one of the five goes through it: ADR 7's
+/* ── The six wired reads ──────────────────────────────────────────────────
+ * One boundary function, and every one of the six goes through it: ADR 7's
  * "one boundary function per call", inherited by the console under ADR 16.
  */
 
@@ -196,13 +190,26 @@ export async function listDebt(): Promise<ApiResult<DebtEntry[]>> {
   return { data: data.map((row) => ({ ...row, task_id: debtTaskId(row.id) })), warnings };
 }
 
-/* ── Still fixtures: tier 2, tier 3, and the ones that never land ────────── */
-
-export async function listPhases(taskId?: string): Promise<Phase[]> {
-  await latency();
-  const all = mockPhases();
-  return taskId ? all.filter((p) => p.task_id === taskId) : all;
+/**
+ * The phases of one task, or of every task when no id is given.
+ *
+ * No reverse, no mapping and no sort: the api answers newest `saved_at` first and
+ * the order a timeline shows is the screen's decision, not this boundary's —
+ * `tasks.$taskId.tsx` sorts by the cycle, which is a different order on purpose
+ * and says why there. Nothing is adapted either, because nothing is served under
+ * another name: `revision_round` became `round` on the console's side rather than
+ * on the route's, the way `pending` beat `queued` (`docs/decisions.md` ADR 27,
+ * ADR 17's closing rule).
+ *
+ * The id is always sent by the screens that call this. The unfiltered form is
+ * legal and bounded by the api's own `MAX_PHASES`; nothing here polls it.
+ */
+export function listPhases(taskId?: string): Promise<ApiResult<Phase[]>> {
+  const path = taskId ? `/api/phases?task_id=${encodeURIComponent(taskId)}` : "/api/phases";
+  return readEnvelope<Phase[]>(path);
 }
+
+/* ── Still fixtures: tier 2, tier 3, and the ones that never land ────────── */
 
 export async function listLearnings(): Promise<LearningEntry[]> {
   await latency();
