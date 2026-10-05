@@ -474,15 +474,32 @@ def main() -> None:
         # just landed, so the inbox copy has stopped earning its place in
         # every later prompt. This is the call site where that premise can be
         # wrong — a branch landed by hand is one the cycle did not land, and
-        # its auditor may never have run — so the destination is printed, not
-        # just the count: the entries are in `dropped/`, not gone
-        # (`docs/debt/T-012-D1.md`).
+        # its auditor may never have run — so `drop_promoted` checks it against
+        # the task card, and each of the two answers gets its own line: the
+        # destination when the check passes, because the entries are in
+        # `dropped/` and not gone, and what stayed and why when it does not
+        # (`docs/debt/T-012-D1.md`, `docs/decisions.md` ADR 33 and ADR 34).
         dropped = learnings.drop_promoted(cfg.hive_tasks_dir, args.task_id)
         if dropped:
             print(
                 f"dropped {len(dropped)} filed inbox entr(y/ies) into "
                 f"{learnings.DROPPED_NAME}/: {', '.join(dropped)}"
             )
+        else:
+            # Empty both when the gate kept them and when there was nothing to
+            # drop, so the ordinary merge still says nothing about learnings.
+            kept = learnings.droppable(cfg.hive_tasks_dir, args.task_id)
+            if kept:
+                # Exit 0: landing a branch whose cycle never reached an auditor
+                # is the recovery path this verb exists for, not an operator
+                # error. Nothing was refused and nothing was lost.
+                print(
+                    f"kept {len(kept)} filed inbox entr(y/ies) in "
+                    f"{learnings.INBOX_NAME}/: no `## {learnings.PROMOTING_ROLE}` section in "
+                    f"{context_transfer.task_file_path(cfg.hive_tasks_dir, args.task_id)}, "
+                    f"so that phase never filed them: "
+                    f"{', '.join(entry.ref for entry in kept)}"
+                )
         # And the other half of the same "the branch landed": the debt this
         # task says it resolved is resolved in the docs now, so its cards have
         # stopped being work anybody should pick up.

@@ -4,6 +4,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -273,6 +274,37 @@ def read_task_file(path: str) -> TaskFile:
         kanban_issue_id=fm.get("kanban_issue_id"),
         resolved_debt=fm.get("resolved_debt") or [],
     )
+
+
+def has_phase_section(hive_dir: str, task_id: str, role: str) -> bool:
+    """The dispatcher's own record that this role's phase returned on this task.
+
+    `handoff()` appends one `## <label>` block per phase that finished, and the
+    phase loop only builds that label after `run_phase` returned something — so
+    a section is there because a phase came back, and it outlives the worktree,
+    the container and the process the phase ran in. That makes it the local
+    stand-in for "this role ran" that `learnings.drop_promoted` gates on
+    (`docs/decisions.md` ADR 34, `docs/debt/T-012-D1.md`).
+
+    The heading is matched in the parsed body rather than in the file's text,
+    anchored, with exactly two hashes, and `auditor (round 2)` counts as well as
+    `auditor` because `run-phase --round` labels a hand-resumed phase that way.
+
+    A card that is missing or will not parse answers `False`: it is absence of
+    evidence, and the one caller's `True` moves files. That is the exception
+    `a-never-500-read-wraps-the-use-not-the-parse` leaves room for — the
+    predicate's `False` already *means* "no evidence", so widening at the caller
+    would only turn a damaged card into a crashed `merge-task`. Silent because
+    this module has no logger; the caller logs what it kept.
+    """
+    try:
+        body = read_task_file(task_file_path(hive_dir, task_id)).body
+    except (OSError, ValueError, KeyError, yaml.YAMLError):
+        return False
+    heading = re.compile(
+        rf"^## {re.escape(role)}(?: \(round \d+\))?$", re.MULTILINE
+    )
+    return heading.search(body) is not None
 
 
 def _read_or_new(hive_dir: str, task_id: str) -> tuple[str, TaskFile]:

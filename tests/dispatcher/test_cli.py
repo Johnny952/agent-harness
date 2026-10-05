@@ -309,6 +309,20 @@ def _learning(tmp_path: Path, name: str, **meta) -> Path:
     return path
 
 
+def _card(tmp_path: Path, task_id: str, *, body: str = "## auditor\n\nFiled.\n") -> Path:
+    """The task card the drop reads for its evidence.
+
+    `merge-task` moves nothing unless the card carries a section for the
+    promoting role, so a test that expects the drop has to write one
+    (`docs/decisions.md` ADR 34).
+    """
+    hive = tmp_path / "hive"
+    hive.mkdir(parents=True, exist_ok=True)
+    path = hive / f"{task_id}.md"
+    path.write_text(f"---\ntask_id: {task_id}\nstatus: done\n---\n\n{body}")
+    return path
+
+
 def _run_command(monkeypatch, config_path: Path, *argv: str) -> None:
     monkeypatch.setattr(sys, "argv", [
         "ia-harness-dispatcher", "--config", str(config_path), *argv,
@@ -433,8 +447,10 @@ def test_cli_merge_task_drops_the_entries_the_merged_branch_filed(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
     """The manual merge has to do what the automatic one does: the docs are in
-    the repo now, so the inbox copy would charge every later prompt twice."""
+    the repo now, so the inbox copy would charge every later prompt twice. The
+    card's `## auditor` section is what says the docs really hold them."""
     config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
     path = _learning(tmp_path, "task-8-db.md", carried_by="task-1")
     _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
 
@@ -452,6 +468,7 @@ def test_cli_merge_task_keeps_the_entries_another_task_is_carrying(
     """Only what *this* branch filed goes: a run in flight elsewhere still
     needs the rows it is about to write into its own project's docs."""
     config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
     mine = _learning(tmp_path, "task-1-db.md", carried_by="task-1")
     theirs = _learning(tmp_path, "task-2-db.md", carried_by="task-2")
     _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
@@ -479,6 +496,33 @@ def test_cli_merge_task_that_was_refused_leaves_the_inbox_alone(
 
     assert excinfo.value.code == 1
     assert path.exists()
+
+
+def test_cli_merge_task_says_what_it_kept_when_no_auditor_ever_ran(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The recovery path, and it is not an error: the branch landed, so the
+    merge refuses nothing and exits zero — but its cycle never reached an
+    auditor, so nothing was promoted into the project's docs and the entries
+    stay in the inbox. The line says how many stayed, where they stayed and
+    which section was missing, because the operator reading it is the one who
+    may have to run the auditor by hand (`docs/decisions.md` ADR 34)."""
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1", body="## implementador\n\nBuilt it.\n")
+    path = _learning(tmp_path, "task-8-db.md", carried_by="task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    assert path.exists()
+    out = capsys.readouterr().out
+    assert "kept 1 filed inbox" in out
+    assert f"{learnings.INBOX_NAME}/" in out
+    assert "## auditor" in out
+    assert "inbox/task-8-db.md" in out
+    assert "dropped" not in out
 
 
 _DEBT_INDEX = (
