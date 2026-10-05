@@ -296,10 +296,21 @@ def has_phase_section(hive_dir: str, task_id: str, role: str) -> bool:
     predicate's `False` already *means* "no evidence", so widening at the caller
     would only turn a damaged card into a crashed `merge-task`. Silent because
     this module has no logger; the caller logs what it kept.
+
+    The tuple is the five that learning names, because `read_task_file` raises
+    every one: no file (`OSError`), no `---` to split on (`ValueError`),
+    frontmatter that does not scan (`yaml.YAMLError`), one that scans but is
+    missing a key (`KeyError`), and one that scans into something that is not a
+    mapping at all — `TODO write this up`, or a list of bullets — where
+    `fm["task_id"]` subscripts a `str` or a `list` (`TypeError`). A hand-edited
+    card is the normal state of the cycles `merge-task` runs on, so that last
+    one is the realistic shape of a damaged card rather than a contrived one.
+    `AttributeError` is not in it: `fm["task_id"]` is evaluated before any
+    `fm.get`, so the subscript raises first for every non-mapping PyYAML returns.
     """
     try:
         body = read_task_file(task_file_path(hive_dir, task_id)).body
-    except (OSError, ValueError, KeyError, yaml.YAMLError):
+    except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError):
         return False
     heading = re.compile(
         rf"^## {re.escape(role)}(?: \(round \d+\))?$", re.MULTILINE

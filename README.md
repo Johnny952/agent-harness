@@ -236,11 +236,11 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   auditor alone files entries into the project's `docs/learnings/`, and the
   dispatcher moves them with no model in the loop — it stamps the entries a
   task is carrying before the auditor runs, moves them out of the inbox once
-  that branch actually merges *and* the task card shows the auditor ran, into
-  a `dropped/` sibling no prompt reads rather than to deletion
+  that branch actually merges *and* the task card shows the auditor ran,
+  into a `dropped/` sibling no prompt reads rather than to deletion
   (`docs/debt/T-012-D1.md`), and, when the cycle ends any other way,
-  releases them unconfirmed for the next task rather than
-  losing them with the phase that found them. An entry is a claim until a
+  releases them unconfirmed for the next task rather than losing them
+  with the phase that found them. An entry is a claim until a
   second, distinct task hits the same wall or a human says so
   (`dispatch learnings --confirm`): one phase's wrong guess repeated to every
   later phase is worse than no note at all. Entries leave the same way they

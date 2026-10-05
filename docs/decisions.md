@@ -1969,11 +1969,15 @@ path, not an operator error: it refuses nothing and loses nothing.
 
 *Every unknown keeps the entries.* A card that is missing, or that will not
 parse, is not evidence that a phase ran, so `has_phase_section` answers `False`
-for both and the entries stay. It swallows `(OSError, ValueError, KeyError,
-yaml.YAMLError)` — the tuple
+for both and the entries stay. It swallows all five of
+`(OSError, TypeError, ValueError, KeyError, yaml.YAMLError)` — the tuple
 [`a-never-500-read-wraps-the-use-not-the-parse`](learnings/a-never-500-read-wraps-the-use-not-the-parse.md)
 names, because `read_task_file` raises every one of them — rather than widening
-at the caller, which is where that learning puts a warning. This is the case it
+at the caller, which is where that learning puts a warning. `TypeError` is the
+one worth naming: frontmatter that *scans* but is not a mapping subscripts a
+`str` or a `list` at `fm["task_id"]`, and a hand-edited card is the normal state
+of the cycles `merge-task` runs on, so dropping it from the tuple would crash
+the merge on exactly the cards this gate exists for. This is the case it
 excepts: the predicate's `False` already *means* "no evidence", the one caller's
 `True` branch moves files, and a reader that raises here would turn a damaged
 card into a crashed `merge-task`. It stays silent because

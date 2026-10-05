@@ -289,8 +289,20 @@ def test_drop_promoted_accepts_the_round_label_a_hand_resumed_auditor_leaves(
 def test_drop_promoted_keeps_the_entries_when_the_card_cannot_be_read(tmp_path: Path) -> None:
     """A card that is missing and a card that will not parse are both absence
     of evidence, not evidence of absence, and every unknown here resolves
-    towards keeping the entries (ADR 34). Neither raises: a damaged card must
-    not turn a `merge-task` into a crash."""
+    towards keeping the entries (ADR 34). None of them raises: a damaged card
+    must not turn a `merge-task` into a crash, and a hand-edited card is the
+    normal state of the cycles `merge-task` is used on.
+
+    The shapes here are four of the five `read_task_file` raises on: no file at
+    all (`OSError`), no `---` delimiter to split on (`ValueError`), frontmatter
+    that scans into something that is not a mapping (`TypeError`, twice — a
+    scalar and a sequence), and frontmatter that does not scan
+    (`yaml.YAMLError`). The fifth, a mapping missing `task_id` (`KeyError`), is
+    in `tests/dispatcher/test_context_transfer.py` with the reader's own cases.
+    The non-mapping pair is the one
+    `docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md` names and
+    the one a four-exception tuple lets through as a crashed `merge-task`.
+    """
     hive = tmp_path / "hive"
     missing = _entry(hive, "missing-card.md", task="task-9")
 
@@ -298,10 +310,24 @@ def test_drop_promoted_keeps_the_entries_when_the_card_cannot_be_read(tmp_path: 
     assert missing.exists()
 
     hive.mkdir(parents=True, exist_ok=True)
-    (hive / "task-9.md").write_text("## auditor\n\nno frontmatter anywhere\n")
+    card = hive / "task-9.md"
+    for frontmatter in (
+        # No delimiter to split on at all.
+        None,
+        # Scans, but `fm["task_id"]` subscripts a `str` and then a `list`.
+        "TODO write this up",
+        "- one bullet\n- another",
+        # Does not scan.
+        "status: [unclosed",
+    ):
+        if frontmatter is None:
+            card.write_text("## auditor\n\nno frontmatter anywhere\n")
+        else:
+            card.write_text(f"---\n{frontmatter}\n---\n\n## auditor\n\nFiled.\n")
 
-    assert learnings.drop_promoted(str(hive), "task-9") == []
-    assert missing.exists()
+        assert learnings.drop_promoted(str(hive), "task-9") == []
+        assert missing.exists()
+        assert not Path(learnings.dropped_dir(str(hive))).exists()
 
 
 def test_drop_promoted_reads_the_heading_and_not_the_role_name(tmp_path: Path) -> None:
