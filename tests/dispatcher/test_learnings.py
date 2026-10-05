@@ -178,11 +178,13 @@ def test_carry_takes_over_an_entry_whose_carrier_died(tmp_path: Path) -> None:
     assert _meta(stranded)["carried_by"] == "task-9"
 
 
-def test_drop_promoted_deletes_only_what_the_merged_branch_filed(tmp_path: Path) -> None:
+def test_drop_promoted_moves_only_what_the_merged_branch_filed(tmp_path: Path) -> None:
     """Once the branch lands, the entry is in the project's docs; keeping the
     inbox copy would charge every later phase for a row the repo already has.
-    Everyone else's entries are untouched, because their branch has not
-    landed."""
+    It moves to `dropped/` rather than being unlinked — no reader walks that
+    directory, so the prompt cost is gone and the file is still there for a
+    `merge-task` whose cycle never reached an auditor. Everyone else's entries
+    are untouched, because their branch has not landed."""
     hive = tmp_path / "hive"
     written = _entry(hive, "written.md", task="task-9")
     carried = _entry(hive, "carried.md", task="task-1", carried_by="task-9")
@@ -196,6 +198,32 @@ def test_drop_promoted_deletes_only_what_the_merged_branch_filed(tmp_path: Path)
     assert not carried.exists()
     assert shared.exists()
     assert someone_else.exists()
+
+    kept = Path(learnings.dropped_dir(str(hive)))
+    assert sorted(path.name for path in kept.iterdir()) == ["carried.md", "written.md"]
+    # Moved, not rewritten: what the phase wrote is what a human recovers.
+    assert _SYMPTOM in (kept / "written.md").read_text()
+    # And invisible to every prompt, which is the whole reason the drop exists.
+    assert [entry.ref for entry in learnings.read_all(str(hive))] == [
+        "inbox/shared.md", "inbox/theirs.md",
+    ]
+
+
+def test_drop_promoted_does_not_overwrite_an_earlier_dropped_entry(tmp_path: Path) -> None:
+    """Two tasks may file the same filename. The second one landing has to
+    stand beside the first, not on top of it — an overwrite here is the
+    permanent loss `dropped/` exists to stop."""
+    hive = tmp_path / "hive"
+    _entry(hive, "trap.md", task="task-9", symptom="the first one")
+    learnings.drop_promoted(str(hive), "task-9")
+    _entry(hive, "trap.md", task="task-2", symptom="the second one")
+
+    assert learnings.drop_promoted(str(hive), "task-2") == ["inbox/trap.md"]
+
+    kept = Path(learnings.dropped_dir(str(hive)))
+    assert sorted(path.name for path in kept.iterdir()) == ["trap-2.md", "trap.md"]
+    assert "the first one" in (kept / "trap.md").read_text()
+    assert "the second one" in (kept / "trap-2.md").read_text()
 
 
 def test_mark_orphaned_releases_the_carrier_and_leaves_a_breadcrumb(tmp_path: Path) -> None:

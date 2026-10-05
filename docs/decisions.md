@@ -1783,3 +1783,81 @@ on its screens and its tail, ADR 14 keeping the Loading row out of it, ADR 24
 saying of `BOARD_PROJECT` that it "belongs to a service C-8 retires" — are
 not rewritten. They are read through this one, which is how this file has always
 worked: an entry is narrowed by a later entry, never edited.
+
+## ADR 33 — a dropped learning entry is moved, not unlinked
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-05). It takes
+the first of the two halves of the fix in
+[`docs/debt/T-012-D1.md`](debt/T-012-D1.md) and leaves the second open. Two
+files change behaviour, `dispatcher/learnings.py` and the `merge-task` arm of
+`dispatcher/cli.py`. Nothing else does: `delete()` behind
+`dispatch learnings --drop` still unlinks, because that verb means "this entry
+was wrong"; the automatic call site in `dispatcher/dispatcher.py` is untouched;
+and no reader learns a new directory.
+
+**Context.** `drop_promoted` deleted every unreviewed project-scope entry in
+`.hive/learnings/inbox/` belonging to a task whose branch had just merged. Its
+premise — the entry is in the project's `docs/learnings/` now, committed, so
+the inbox copy only charges every later phase for a row the repo already holds
+— holds at the automatic call site, which runs after
+`run_phase(ctx, "auditor", final=True, …)` returned and after the task moved to
+`done`. It does not hold at `merge-task`, the verb for landing a branch by
+hand, which by definition lands a branch the cycle did not land. T-012's
+auditor never ran; the three entries its implementador and revisor had filed
+were unlinked with nothing to recover them from, `.gitignore:6` ignoring
+`.hive/` and the inbox living outside every worktree. Each deletion was logged
+by the entry's ref — a filename — and the "other copy" that ref pointed at was
+a file nobody ever wrote.
+
+**Decision.** The entry **moves** to `dropped/`, a third directory beside
+`inbox/` and `harness/` under the hive's `learnings/` root, by `os.replace`. A
+rename and not a reserialisation: unlike `promote`, nothing about the entry
+changes, so what a phase wrote is byte-for-byte what a human recovers.
+
+Three things about it are deliberate.
+
+`dropped/` is **not enumerated** by `read_inbox`, `read_harness` or `read_all`,
+and nothing is to teach them. That is what makes the move free: the drop exists
+for prompt cost, and a directory no reader walks is in no prompt. A later
+reader that walks it puts the cost back and undoes this entry.
+
+It is created in `drop_promoted` and not in `ensure_dirs`. `ensure_dirs` opens
+the directories a phase is told to write into, so that a phase sent somewhere
+finds the somewhere already there; no phase writes here, and an empty directory
+beside the two a phase *is* told to use is one more thing for a phase to wonder
+about.
+
+A name collision does not overwrite. Two tasks are free to file the same
+filename, and `_free_path` parks the second beside the first as `-2`, `-3`, …,
+because an overwrite there is exactly the permanent loss this directory exists
+to stop.
+
+`drop_promoted` keeps its name and its return value — the refs stay
+inbox-relative — so both call sites' output keeps its shape and the debt row,
+the two call sites and the cli all go on saying "drop". What `merge-task`
+prints changes: it names the destination rather than only the count, because
+that is the call site where the premise can be wrong, and the operator reading
+that line is the one who may have to go looking.
+
+**Consequences.** Nothing reclaims `dropped/`. It grows by one file per entry
+per hand-landed merge, in a root-owned directory outside every worktree, and a
+human empties it. No role is told it exists.
+
+The second half of `T-012-D1` stays open and the row stays open with it:
+`drop_promoted` still drops whether or not the promoting role ran, and the gate
+the row proposes — no `## auditor` section in the task file, no drop — is
+unimplemented. This entry makes that half cheaper to decline rather than
+unnecessary. The loss is recoverable now; it is still silent, and an operator
+has to know to look.
+
+`tests/dispatcher/test_learnings.py` carries both halves of the claim: the move
+test asserts the files left `inbox/`, arrived in `dropped/` with their text
+intact and are invisible to `read_all`, and a second test files the same
+filename from two tasks and asserts the first one's copy survives.
+
+The two passages in `README.md` that said the dispatcher deletes the entries
+once the branch merges are realigned in the same pass.
+[`docs/debt/T-012-D1.md`](debt/T-012-D1.md) is **not** rewritten: its
+blockquote of the old docstring is the record of what the premise said at
+filing time, and an implementation note is a historical record here, not a
+status page.

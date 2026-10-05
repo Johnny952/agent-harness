@@ -472,10 +472,17 @@ def main() -> None:
         # The same thing the automatic merge does, for the same reason: what
         # the task learned is in the project's docs now, on the branch that
         # just landed, so the inbox copy has stopped earning its place in
-        # every later prompt.
+        # every later prompt. This is the call site where that premise can be
+        # wrong — a branch landed by hand is one the cycle did not land, and
+        # its auditor may never have run — so the destination is printed, not
+        # just the count: the entries are in `dropped/`, not gone
+        # (`docs/debt/T-012-D1.md`).
         dropped = learnings.drop_promoted(cfg.hive_tasks_dir, args.task_id)
         if dropped:
-            print(f"dropped {len(dropped)} filed inbox entr(y/ies): {', '.join(dropped)}")
+            print(
+                f"dropped {len(dropped)} filed inbox entr(y/ies) into "
+                f"{learnings.DROPPED_NAME}/: {', '.join(dropped)}"
+            )
         # And the other half of the same "the branch landed": the debt this
         # task says it resolved is resolved in the docs now, so its cards have
         # stopped being work anybody should pick up.

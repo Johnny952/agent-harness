@@ -64,6 +64,12 @@ logger = logging.getLogger(__name__)
 ROOT_NAME = "learnings"
 INBOX_NAME = "inbox"
 HARNESS_NAME = "harness"
+#: Where a filed entry goes instead of being unlinked. Deliberately not
+#: enumerated by `read_inbox`, `read_harness` or `read_all`: the reason the
+#: inbox copy goes away is prompt cost, and a directory no reader walks costs
+#: a phase nothing, so the file can be kept for the one case where the drop
+#: was wrong (`docs/debt/T-012-D1.md`).
+DROPPED_NAME = "dropped"
 
 UNCONFIRMED = "unconfirmed"
 CONFIRMED = "confirmed"
@@ -108,6 +114,10 @@ def inbox_dir(hive_dir: str) -> str:
 
 def harness_dir(hive_dir: str) -> str:
     return os.path.join(root_dir(hive_dir), HARNESS_NAME)
+
+
+def dropped_dir(hive_dir: str) -> str:
+    return os.path.join(root_dir(hive_dir), DROPPED_NAME)
 
 
 def ensure_dirs(hive_dir: str) -> str:
@@ -517,14 +527,33 @@ def carry(hive_dir: str, project: str, task_id: str) -> list[str]:
     return carried
 
 
+def _free_path(path: str) -> str:
+    """`path`, or the first `-2`, `-3`, ... beside it that nothing holds.
+
+    Two tasks are free to file the same filename, and the second one landing
+    must not overwrite the first one's copy — that overwrite is exactly the
+    permanent loss the directory this is used for exists to stop.
+    """
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    nth = 2
+    while os.path.exists(f"{stem}-{nth}{ext}"):
+        nth += 1
+    return f"{stem}-{nth}{ext}"
+
+
 def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
-    """Delete the entries whose branch just merged.
+    """Take the entries whose branch just merged out of the inbox.
 
     They are in the project's `docs/learnings/` now, committed, so keeping
     them here would charge every later phase of every task for a row it can
-    already read in the repo. The risk is the other way: an auditor that ran
-    out of turns before filing one loses it here. That is why every deletion
-    is logged by ref — the inbox is not the only copy, the merge commit is.
+    already read in the repo. They move to `dropped/` rather than being
+    unlinked, because the premise only holds where an auditor ran: at
+    `merge-task`, on a cycle that died before one, the "other copy" the logged
+    ref points at is a file that was never written (`docs/debt/T-012-D1.md`).
+    No reader enumerates `dropped/`, so the prompt cost is gone either way —
+    what stops is the loss being permanent.
     """
     dropped = []
     for entry in read_inbox(hive_dir):
@@ -532,10 +561,18 @@ def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
             continue
         if task_id not in (entry.task, entry.carried_by):
             continue
-        Path(entry.path).unlink(missing_ok=True)
+        # Made here rather than in `ensure_dirs`: nothing writes into it but
+        # this function, and an empty directory beside the two a phase is told
+        # to use is one more thing for a phase to wonder about.
+        os.makedirs(dropped_dir(hive_dir), exist_ok=True)
+        target = _free_path(os.path.join(dropped_dir(hive_dir), os.path.basename(entry.path)))
+        os.replace(entry.path, target)
         dropped.append(entry.ref)
     if dropped:
-        logger.info("task %s merged: dropped inbox entries %s", task_id, ", ".join(dropped))
+        logger.info(
+            "task %s merged: moved inbox entries to %s/: %s",
+            task_id, DROPPED_NAME, ", ".join(dropped),
+        )
     return dropped
 
 
