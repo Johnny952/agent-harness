@@ -5,12 +5,16 @@ Lifted out of the first service that had it when the read API arrived
 (`docs/plans/board.md` "Phase 1 — a read API in Python"): the timing-safe
 comparison and the `auth.type != "basic"` guard are each one line that is wrong
 in an interesting way if it is written twice. Every service here reads the same
-credentials out of the same two environment variables and answers the same 401.
+credentials out of the same two environment variables and answers the same 401 —
+the api is the only one left since the Flask board was retired, and this stays a
+shared module because those two one-liners are why it was lifted out, not the
+number of callers.
 
 Two accepted credentials, one realm (`docs/decisions.md` ADR 7). A human sends
 Basic auth — the username and the sha256 hash an operator put in the compose
 file. A service sends `Authorization: Bearer <token>`, which is what lets the
-board call the api without holding the human's plaintext password: the api
+console's server half call the api without holding the human's plaintext
+password: the api
 checks a *hash*, so a service authenticating with Basic would need the
 plaintext in `.env` beside the hash and make the hash decorative. Which of the
 two a service accepts is an argument, not a default: `requires_auth` takes no
@@ -80,9 +84,11 @@ def requires_auth(username: str, password_hash: str, realm: str, token: str | No
     one string the services do not share, and a default here would move a
     service's `WWW-Authenticate` header the first time somebody added another.
 
-    `token` is last and optional because most callers have none: the board
-    passes no token, so a human's Basic credential is the only way in, and the
-    api's own token is not a second door into the board.
+    `token` is last and optional because a caller may have none: the api is the
+    only service that passes one, and it passes whatever `API_TOKEN` holds, which
+    on a host whose `.env` predates ADR 7 is nothing. A falsy token leaves a
+    human's Basic credential as the only way in rather than opening a bearer path
+    in every service that comes to import this module.
     """
 
     def decorator(f):

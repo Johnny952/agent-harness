@@ -67,13 +67,16 @@ PORT = 8789
 REALM = "ia-harness api"
 
 #: `db.list_events`' own default, restated so a caller that sends no `limit`
-#: gets the same answer whichever way it asked. The board never relies on it
-#: (`docs/plans/board.md`: every events call sets `limit` explicitly).
+#: gets the same answer whichever way it asked. The console leans on it: its tail
+#: sends `since` and no `limit` and takes this number as the burst ceiling a
+#: cursor-bounded poll wants (`front/src/lib/api/client.ts:listEvents`), so a
+#: change here changes what that tail can skip.
 DEFAULT_EVENT_LIMIT = 100
 
 #: The most rows one `/api/events` answer carries, whatever `limit` asked for.
-#: Five times the largest window the board opens (`EVENTS_LIMIT = 200` in
-#: `observability/board/app.py`), so nothing in this harness is clamped today,
+#: Five times the largest window any client here has opened — the retired Flask
+#: board asked for 200 and the console's tail asks for the default above — so
+#: nothing in this harness is clamped today,
 #: and Phase 3's tail is not constrained by it either: that tail is bounded by
 #: `since` (`id > last`), which makes its `limit` a burst ceiling rather than a
 #: page size. The clamp reports itself in `warnings`. `docs/decisions.md` ADR 11.
@@ -152,7 +155,8 @@ def create_app(
     `token` is last and optional because a host whose `docker/compose/.env`
     predates it has none: the api must still start there with Basic auth working
     and the bearer path shut (`docs/decisions.md` ADR 7). It is what lets the
-    board call this service without holding the human's plaintext password.
+    console's server half (`front/src/lib/api/forward.ts`) call this service
+    without holding the human's plaintext password.
     """
     cfg = load_config(config_path)
     app = Flask(__name__)
@@ -524,8 +528,8 @@ def _lock_expired(task: context_transfer.TaskFile, ttl_seconds: int) -> bool | N
 
     The one derived fact this service adds to a task row, and it is derived here
     because the TTL is config this service holds and no client does
-    (`docs/plans/board.md` "Two kinds of stale", `docs/decisions.md` ADR 8: the
-    board renders this field and never recomputes it). The computation itself is
+    (`docs/plans/board.md` "Two kinds of stale", `docs/decisions.md` ADR 8: a
+    client renders this field and never recomputes it). The computation itself is
     `dispatcher/context_transfer.py:is_lock_expired`, unchanged — the
     dispatcher's callers want the boolean it already returns.
 

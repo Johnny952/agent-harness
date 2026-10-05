@@ -11,7 +11,7 @@
  * than a 401 from a screen.
  *
  * ADR 24 is the decision, including why `CONSOLE_PROJECT` has its own name rather
- * than reusing the Jinja board's `BOARD_PROJECT`.
+ * than reusing `BOARD_PROJECT`, the name the since-retired Jinja board read.
  */
 
 // `tsconfig.json` sets `types: ["vite/client"]`, which admits no Node globals,
@@ -31,8 +31,7 @@ if (!token) {
   throw new Error(
     "API_TOKEN is not set. The console authenticates to observability/api as a " +
       "service and refuses to start without it (docs/decisions.md ADR 15 and " +
-      "ADR 24); it is the same value the api and the Jinja board read from " +
-      "docker/compose/.env.",
+      "ADR 24); it is the same value the api reads from docker/compose/.env.",
   );
 }
 

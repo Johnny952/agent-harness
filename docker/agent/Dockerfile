@@ -42,7 +42,6 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
         "flask>=3.0" \
         "requests>=2.31" \
         "mcp>=1.0.0" \
-        "markupsafe>=2.0" \
         "pytest>=8.0"
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

@@ -308,9 +308,11 @@ def _substitutions_of(variable: str, services: dict) -> set[str]:
     """Every way one `.env` variable is spelt across a file's services.
 
     Read off the values and not the keys, because a service may take a variable
-    under another name — the board reads `DASHBOARD_PASSWORD_HASH` into
-    `BOARD_PASSWORD_HASH` — and it is the substitution that decides whether
-    compose warns, not the name it lands under. A set, so a file that spells the
+    under another name — `FOO=${BAR}` reads `BAR` whatever the service calls it
+    inside the container — and it is the substitution that decides whether
+    compose warns, not the name it lands under. No service in either file does
+    that today; the retired Flask board did, and the next one to need it should
+    not have to rewrite this helper. A set, so a file that spells the
     same variable two ways fails on the comparison rather than on whichever
     service happened to be read last.
     """
@@ -327,47 +329,22 @@ def _substitutions_of(variable: str, services: dict) -> set[str]:
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
-def test_the_board_mounts_nothing_at_all(compose_file: str) -> None:
-    """The board (docs/plans/board.md Phase 2) is an HTTP client of the api and
-    nothing else: no volumes, no docker socket, no events database, no .hive/.
-    That is the property that makes the phase cheap to reason about — and the one
-    a later hand-edit would undo by "just" mounting the events volume to add a
-    screen, which is how a second parser of the same files gets into the tree.
-
-    Asserted as the *absence of the key*, not as an empty list: `volumes: []` on
-    this service would be a reviewer's invitation to add one. Both files, because
-    the Coolify one is a whole deploy path."""
-    board = _load(compose_file)["services"]["board"]
-
-    assert "volumes" not in board, (
-        f"the board service in {compose_file} must have no volumes key at all: it "
-        "reads nothing from disk and everything over HTTP from the api"
-    )
-    assert board.get("privileged") is not True
-    # Loopback-only like every other published port in these files.
-    assert board["ports"] == ["127.0.0.1:8790:8790"]
-    assert "ia_harness_net" in board["networks"]
-    assert _environment(board)["API_BASE_URL"] == "http://api:8789"
-
-
-@pytest.mark.parametrize(
-    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
-)
-def test_the_api_takes_the_token_the_board_authenticates_with(compose_file: str) -> None:
-    """Both services read `API_TOKEN` from the same `docker/compose/.env`
-    (docs/decisions.md ADR 7). A board holding a token the api was never given is
-    a board whose every region shows an Error state, which is a deployment that
-    looks broken rather than misconfigured."""
+def test_the_api_takes_the_token_a_service_authenticates_with(compose_file: str) -> None:
+    """The api reads `API_TOKEN` from `docker/compose/.env` (docs/decisions.md
+    ADR 7), and in these files that is the whole of it: the holder is the
+    console's server half (`front/src/lib/api/forward.ts`), which runs outside
+    compose. A holder carrying a token the api was never given shows its Error
+    state in every region, which is a deployment that looks broken rather than
+    misconfigured."""
     services = _load(compose_file)["services"]
 
     assert "API_TOKEN" in _environment(services["api"])
-    assert "API_TOKEN" in _environment(services["board"])
 
 
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
-@pytest.mark.parametrize("variable", ["API_TOKEN", "BOARD_PROJECT"])
+@pytest.mark.parametrize("variable", ["API_TOKEN"])
 def test_an_optional_variable_carries_an_empty_default(
     compose_file: str, variable: str
 ) -> None:
@@ -410,3 +387,17 @@ def test_the_dashboard_service_is_gone_from_both_files(compose_file: str) -> Non
     is a build that fails at `up`. `/events` on the board supersedes its three
     columns."""
     assert "dashboard" not in _load(compose_file)["services"]
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_the_flask_board_service_is_gone_from_both_files(compose_file: str) -> None:
+    """Charter C-8 retires `observability/board/` in the task that closes the last
+    of the four screens it duplicated — tasks, task detail, debt and tail — and
+    those four now come from `front/` against the real api (docs/decisions.md
+    ADR 32). A compose file still naming the service is a build that fails at
+    `up`, the same failure the dashboard's row above pins.
+
+    `vibe-kanban` is a different board and stays."""
+    assert "board" not in _load(compose_file)["services"]

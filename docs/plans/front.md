@@ -1,19 +1,24 @@
 # Plan: wiring the console in `front/`
 
-Status: **tier 1 is built on both sides, tier 2's first route is built, and
-parity is not reached.** The api's tier-1 share landed with T-011; the console's —
+Status: **tier 1 is built on both sides and closed, tier 2's first route is
+built, and the Jinja board is retired.** The api's tier-1 share landed with
+T-011; the console's —
 the five served reads in `front/src/lib/api/client.ts`, the server-side bearer
 forward, and the warning banner on every screen that lists rows — landed with
 T-012, whose decisions are [`decisions.md`](../decisions.md) ADR 22–26. T-013
 built `/api/phases` and wired it: the task detail's phase timeline renders real
 handoff records, and *What a phase row is* below is answered by ADR 27.
 
-Parity, as *Parity, and what it retires* defines it below, is **not** reached and
-was out of reach by construction: the detail screen's learnings region wants
+Parity, as *Parity, and what it retires* defines it below, **is** reached: the
+four screens the Jinja board had — tasks, a task's detail, debt and the events
+tail — all read the real api, so on 2026-10-04 `observability/board/` was
+deleted together with its compose service and its tests, which is what
+[`docs/charter.md`](../charter.md) C-8 made it stay for
+(`docs/decisions.md` ADR 32). The detail screen's learnings region still wants
 `/api/learnings`, which is tier 2 and unbuilt, and it names that route on screen
-rather than showing a fixture. So `observability/board/` stays with its compose
-service and its tests, and [`docs/charter.md`](../charter.md) C-8 keeps it the
-tie-breaking reference.
+rather than showing a fixture — but the board never had a learnings region, so
+that is tier 2 arriving late, not tier 1 left open. ADR 32 is where that
+reading is written down.
 
 One thing tier 2 was expected to settle and did not: the Board's five role lanes.
 ADR 26 bound them to `/api/phases`, and ADR 28 found the route cannot answer them
@@ -46,10 +51,12 @@ sorting again over the part that arrived afterwards.
 
 Three documents point here and expect an answer.
 
-[`board.md`](board.md) line 74 and [`README.md`](../../README.md) both defer the
+[`board.md`](board.md) line 78 and [`README.md`](../../README.md) both defer the
 integration itself: who builds the screens after Phase 3, in what order the
 console replaces the Jinja board, and what has to be true before
-`observability/board/` can be deleted. That is the tiers.
+`observability/board/` can be deleted. That is the tiers — answered, and
+spent: the condition fired and the deletion happened on 2026-10-04
+(`docs/decisions.md` ADR 32).
 
 [`board.md`](board.md)'s *Where a UI decision lives* defers something harder. It
 set a condition — "there is no separate `docs/ui.md` and there should not be one
@@ -70,9 +77,11 @@ thing.
 console and accepts the Node runtime that implies. The console is an HTTP client
 of the api and nothing else: no volumes, no `.hive/`, no events database, no
 Docker socket. Actions reach the dispatcher through a queue drained by a worker,
-never a mounted socket. `observability/board/` stays until the console serves
-tasks, task detail, debt and the tail against the real api, and is the
-tie-breaking reference until then. C-1 makes this conversation the only
+never a mounted socket. `observability/board/` stayed until the console served
+tasks, task detail, debt and the tail against the real api, and was the
+tie-breaking reference until then; all four landed, so it was deleted on
+2026-10-04 and `git log` holds the reference (`docs/decisions.md` ADR 32).
+C-1 makes this conversation the only
 interactive one, and C-4 keeps a human in front of every run that spends quota.
 
 **Decisions, in [`docs/decisions.md`](../decisions.md).** ADR 14 keeps the
@@ -296,9 +305,11 @@ done, and is not debt*.
 
 ### Parity, and what it retires
 
-The parity C-8 measures `observability/board/`'s retirement against is nameable,
-and ADR 19 says so. It is: the four Jinja screens — index, task detail, debt,
-tail — rendered by the console against the five real routes, with warnings shown
+The parity C-8 measured `observability/board/`'s retirement against was
+nameable, and ADR 19 said so — and it was reached on 2026-10-04, which is when
+the directory was deleted (`docs/decisions.md` ADR 32). It was: the four Jinja
+screens — index, task detail, debt, tail — rendered by the console against the
+five real routes, with warnings shown
 on every screen that lists rows, with no fixture behind any query those four
 screens make, and with the bearer forward in place. The usage gauge is not in
 it. Pool is not in it either, being a screen the Jinja board never had, though
@@ -386,6 +397,14 @@ The four parity screens read the real api, warnings render, the bearer never
 reaches a browser, and `observability/board/` is deleted together with its
 compose service and the tests that pin it. Not before: C-8 is explicit that the
 board is the tie-breaking reference until exactly this.
+
+**Met on 2026-10-04.** V0.6c walked the console's five reads and its bearer
+forward against the running api, V0.6d the phase timeline and the Board's
+banner, and the deletion followed in the same stroke — the directory, the
+compose service in both files, and `tests/observability/test_board.py`
+(`docs/decisions.md` ADR 32). What the tier does not own, and did not wait for,
+is the detail screen's learnings region: the board had no such region, so
+`/api/learnings` is tier 2's to grow.
 
 ## Tier 2 — the reads the api must grow
 

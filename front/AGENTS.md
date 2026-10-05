@@ -17,8 +17,8 @@
 
   | Name | Default | When it is missing |
   |---|---|---|
-  | `API_BASE_URL` | `http://api:8789`, the compose network name the Jinja board also uses | the default; point it at `127.0.0.1:8789` to run against the api on the host |
+  | `API_BASE_URL` | `http://api:8789`, the api's own compose network name | the default; point it at `127.0.0.1:8789` to run against the api on the host |
   | `API_TOKEN` | none | **the console refuses to start.** `src/lib/api/server-env.ts` throws at import rather than falling through to unauthenticated requests |
-  | `CONSOLE_PROJECT` | none | `?project=` is omitted from the debt call and the api picks the project; its own name rather than the board's `BOARD_PROJECT`, which belongs to a service C-8 retires |
+  | `CONSOLE_PROJECT` | none | `?project=` is omitted from the debt call and the api picks the project; its own name rather than the retired Jinja board's `BOARD_PROJECT` (`docs/decisions.md` ADR 24 for the name, ADR 32 for the retirement) |
 
 - Every screen renders inside `AppShell` (`src/components/console/app-shell.tsx`), which owns navigation, keyboard shortcuts and the chat dock.

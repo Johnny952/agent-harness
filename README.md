@@ -26,7 +26,7 @@ Agent container (per Claude Pro account)
         └── registry mirror + BuildKit cache (shared across sidecars)
         │
         ▼ hooks → HTTP
-Observability collector (SQLite/WAL) → read API → authenticated board (Tailscale)
+Observability collector (SQLite/WAL) → read API → authenticated console (Tailscale)
 ```
 
 - **Smart Dispatcher** (`dispatcher/`) — for one task, runs the role sequence
@@ -275,24 +275,24 @@ Observability collector (SQLite/WAL) → read API → authenticated board (Tails
   `/api/events`, `/api/debt`. It is Phase 1 of
   [`docs/plans/board.md`](docs/plans/board.md); see `docs/decisions.md` ADR 3–5
   for the envelope, the card it reports and the error half.
-  A third (`observability/board`) is what a human opens, on `127.0.0.1:8790`
-  and meant to be reached over Tailscale rather than exposed publicly: four
-  server-rendered screens — the accounts strip over the tasks table, one task,
-  the debt index, the event log — over those five endpoints and no other source
-  of truth. The browser never talks to the api: every fetch is server-side, so
-  the api's credential stays in a container instead of in a page an operator can
-  view-source. Phase 2 of the same plan; Flask and Jinja per
-  [`docs/charter.md`](docs/charter.md) C-7, with `docs/decisions.md` ADR 6–9 for
-  the states, the token, the clock and the project it reads. It replaced a
-  43-line events dashboard on 8788, whose three columns `/events` supersedes.
+  Phase 2 of the same plan was a third service, `observability/board` on
+  `127.0.0.1:8790`: four server-rendered Flask/Jinja screens — the accounts strip
+  over the tasks table, one task, the debt index, the event log — over those five
+  endpoints and no other source of truth. **It was retired on 2026-10-04**, when
+  `front/` took over those four screens against the real api
+  ([`docs/charter.md`](docs/charter.md) C-8, `docs/decisions.md` ADR 32). What it
+  settled outlives it: the browser never talks to the api — every fetch is
+  server-side, so the api's credential stays on a server instead of in a page an
+  operator can view-source — and `docs/decisions.md` ADR 6–9 still hold the
+  states, the token, the clock and the project a console reads. It had itself
+  replaced a 43-line events dashboard on 8788, whose three columns `/events`
+  supersedes.
 
-  C-7 was superseded on 2026-09-28 by **C-8**, which names `front/` — a
-  TanStack Start app written against these same plans — the console this
-  repo ships. That does not retire the board today: it stays until the
-  front serves these four screens against the real api, and until then it
-  is the tie-breaking reference, because it has run. What C-8 changes for
-  a reader of this section is who builds the screens after Phase 3, not
-  what they say; the integration is planned in
+  C-7 — Flask and Jinja, no Node in the control plane — was superseded on
+  2026-09-28 by **C-8**, which names `front/`, a TanStack Start app written
+  against these same plans, the console this repo ships, and which retires the
+  board in the same task that closes the last of its four screens. That task has
+  now run; the integration it finished is planned in
   [`docs/plans/front.md`](docs/plans/front.md).
 
 Full design rationale, decisions, and open caveats live in
@@ -304,8 +304,8 @@ the implementation task breakdown is in
 
 ```
 dispatcher/       Smart Dispatcher: config, state machine, docker exec, CLI
-observability/    Event collector (Flask/SQLite) + read API + board (Jinja)
-front/            Operations console (TanStack Start) — C-8, not yet wired
+observability/    Event collector (Flask/SQLite) + read API (Flask, JSON)
+front/            Operations console (TanStack Start) — C-8, no service yet
 hooks/            Claude Code hooks that emit events to the collector
 docker/           Dockerfiles + compose files (control-plane and agents)
 scripts/          Volume setup, dind image pruning
@@ -318,13 +318,13 @@ docs/superpowers/ Spec and implementation plan
 Requires Docker with the `sysbox-runc` runtime installed (for the dind
 sidecars) and, per account, an existing Claude Pro OAuth login. Everything
 below runs on the server itself (e.g. right after `git clone`), no Python
-required for the host-level steps — only the `dispatcher`/`collector`/`api`/
-`board` containers need Python, and they get it from their own images. None of
-those four needs Node: the board is Jinja on the same `python:3.11-slim` base.
-That was [`docs/charter.md`](docs/charter.md) C-7 and it survives C-8, which
-buys Node for `front/` alone — the console will be a fifth service on its own
-runtime, and the four above stay as they are. `front/` has no compose service
-yet, so none of the steps below needs it.
+required for the host-level steps — only the `dispatcher`/`collector`/`api`
+containers need Python, and they get it from their own images. None of those
+three needs Node, all three being on the same `python:3.11-slim` base. That was
+[`docs/charter.md`](docs/charter.md) C-7 and it survives C-8, which buys Node for
+`front/` alone — the console will be a fourth service on its own runtime, and the
+three above stay as they are. `front/` has no compose service yet, so none of the
+steps below needs it.
 
 ### 1. Clone and configure
 
@@ -333,8 +333,8 @@ git clone <this-repo> ia-harness && cd ia-harness
 ```
 
 Generate `config.yaml` (and, optionally, `docker/compose/.env` with the hashed
-credentials the board and the api check, plus the `API_TOKEN` the board
-authenticates to the api with) using the interactive wizard — pure `bash` +
+credentials the api checks, plus the `API_TOKEN` the console authenticates to
+the api with) using the interactive wizard — pure `bash` +
 coreutils, so it needs nothing beyond a POSIX shell and `sha256sum`:
 
 ```bash
@@ -351,7 +351,7 @@ cp config.example.yaml config.yaml
 
 ### 2. Build the account-specific images
 
-`dispatcher`, `collector`, `api` and `board` have `build:` stanzas in
+`dispatcher`, `collector` and `api` have `build:` stanzas in
 `docker/compose/docker-compose.yml` and build automatically on first
 `docker compose up`. The agent and dind-sidecar images do **not** — they're
 referenced by name only in `docker-compose.agents.yml` and must be built
@@ -490,19 +490,21 @@ credential variables keep their `DASHBOARD_` names although the dashboard they
 were written for is gone — renaming them means editing a `.env` that exists on
 every running host to buy a spelling. An `.env` written before `API_TOKEN`
 existed still starts everything: the api rejects every bearer and keeps
-serving a human's password, and the board says so in each region's Error state.
-This step brings up four **persistent** control-plane services (`collector`,
-`api`, `board`, `registry-mirror`) plus, from the second file, one persistent
+serving a human's password, and the console says so in each region's Error state.
+This step brings up three **persistent** control-plane services (`collector`,
+`api`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account.
 
-`BOARD_PROJECT` is optional, read only by `board`, and worth setting on a host
-that holds more than one checkout. It names the slug under the dispatcher's
-`projects_root` whose debt the board shows — `ia-harness` on a host that only
-works on this repo. Where `projects_root` holds several checkouts `/api/debt`
-has no default to fall back on and answers `400 project is required`, listing
-what it found, so `/debt` is an Error state until the variable is set; `/`,
-`/tasks` and `/events` are unaffected. Both compose files default it to empty
-rather than guessing, and `?project=<slug>` overrides it for one navigation.
+The console's `CONSOLE_PROJECT` does what `BOARD_PROJECT` did here until
+2026-10-04: it is optional, read by `front/` from its own environment, and worth
+setting on a host that holds more than one checkout. It names the slug under the
+dispatcher's `projects_root` whose debt the console asks for — `ia-harness` on a
+host that only works on this repo. Where `projects_root` holds several checkouts
+`/api/debt` has no default to fall back on and answers `400 project is
+required`, listing what it found, so the debt screen is an Error state until the
+variable is set; the tasks, task and tail screens are unaffected. Neither compose
+file sets it, because no service in either one reads it (`docs/decisions.md`
+ADR 24 for the name, ADR 32 for the retirement that freed it).
 `docs/decisions.md` ADR 9 says why `scripts/configure.sh` does not prompt for it.
 
 Two services in those files are deliberately kept out of that default
@@ -963,8 +965,10 @@ Two things to know before uncommenting the `vibe_kanban` block:
 container — is the other block, and the one that works today: no service,
 no Node, no account. The dispatcher writes one JSON document per issue
 into that directory, atomically, and reads them back, so an `ls` is the
-whole board until Phase 2 of [`docs/plans/board.md`](docs/plans/board.md)
-renders it. It has no `status_map` and needs none: there is no column here
+whole board — nothing renders these cards: the Flask board that was to be
+Phase 2 of [`docs/plans/board.md`](docs/plans/board.md) is retired
+(`docs/decisions.md` ADR 32), and the console's lanes come from the api's
+tasks, not from here. It has no `status_map` and needs none: there is no column here
 to rename, so a card carries the dispatcher's own status verbatim,
 `in_progress:<role>` included — the one dimension a generic board flattens.
 Why each of those is the way it is: `docs/decisions.md` ADR 1.
@@ -1075,7 +1079,7 @@ included:
   (just paths, thresholds, and account names — see `config.example.yaml`),
   so a Coolify pre-deployment command is safe: `test -f config.yaml || cp config.example.yaml config.yaml`.
   Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, and `API_TOKEN` if the
-  board is to reach the api, through Coolify's own environment-variables UI on
+  console is to reach the api, through Coolify's own environment-variables UI on
   the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
   compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based
@@ -1978,19 +1982,18 @@ either.
    - Hook payloads include tool inputs and outputs (file contents, env
      files, tokens) and land in SQLite as-is. Redact them in
      `hooks/emit_event.py`.
-   - The board and the read API compare in constant time
-     (`hmac.compare_digest`, shared in `observability/auth.py`), but the
-     stored digest both check against is still an unsalted SHA-256 of the
-     password. A salted digest (e.g. `salt$sha256(salt + password)`) keeps
+   - The read API compares in constant time (`hmac.compare_digest`, in
+     `observability/auth.py`), but the stored digest it checks against is
+     still an unsalted SHA-256 of the password. A salted digest (e.g. `salt$sha256(salt + password)`) keeps
      `scripts/configure.sh` Python-free; mind that compose interpolates
      `$` in `.env` values. That one digest also guards the read API, which
      serves the task files and root-owned `dispatcher_state/` rather than an
      events table — the widest thing behind it. The api's second credential,
      `API_TOKEN`, is compared the same way and is not a password: it exists so
-     the board never holds one. The collector, the board and the read API also
-     run Flask's development server rather than a production WSGI server.
-   - The board's `/events` shows the last 200 raw events, and `/tasks/<id>`
-     shows the owning account's window rather than the task's own: the
+     the console never holds one. The collector and the read API also run
+     Flask's development server rather than a production WSGI server.
+   - The event log shows raw events, and a task's screen shows the owning
+     account's window rather than the task's own: the
      collector records per agent and no field joins an event to a task. A
      per-task view (phase, account, duration, rounds, verdict, cost) would
      answer "what happened to this task" directly, and is Phase 5 of

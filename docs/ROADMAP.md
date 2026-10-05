@@ -177,10 +177,20 @@ login.
 - Events from a real session are checked in V1.1.
 
 **V0.6b Board auth, and the board over the api.**
+- **Spent once, and unrepeatable as of 2026-10-04: there is no board.** It
+  passed on 2026-09-27 — the row is in the Results log — and then
+  `observability/board/` was deleted together with its compose service and its
+  tests, once the console served the four screens C-8 named
+  (`docs/decisions.md` ADR 32). Nothing answers on 8790 now and
+  `docker compose build board` has no service to build, so this check cannot be
+  re-run and is not meant to be. The block is left as written below because it
+  is what the passing row attests to. V0.6c and V0.6d are the checks that cover
+  those screens from here on.
 - A new id rather than a re-use of `V0.6`: that id belongs to the events
   dashboard's auth on 8788, which T-010 deleted, so the
   `2026-09-16 | V0.6 | PASS` row in the results log is that superseded check
-  and says nothing about the board. This one has never been run.
+  and says nothing about the board. This one was first run on 2026-09-27, and
+  has its own row.
 - The port moved: T-010 deleted the events dashboard on 8788 and put the board
   on 8790, which reads the api on 8789. The credentials are the same two
   `DASHBOARD_*` variables, which kept their names.
@@ -220,8 +230,9 @@ login.
 
 **V0.6c The console's bearer forward, and the five reads behind it.**
 - A new id beside V0.6b rather than a change to it: V0.6b checks
-  `observability/board/`, which C-8 keeps until the console reaches parity, and
-  both services read the same api with the same token. This one has never been
+  `observability/board/`, which C-8 kept until the console reached parity — it
+  has since been deleted (`docs/decisions.md` ADR 32) — and both services read
+  the same api with the same token. This one has never been
   run, **and no phase can run it**: a phase works in a fresh worktree, where
   `front/node_modules` is gitignored and absent and `bun install` is not a
   role's call — and `/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`

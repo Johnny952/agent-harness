@@ -1705,3 +1705,81 @@ worktree — so that half of `T-013-D1` step 3 stays a human's row under
 `docs/ROADMAP.md` *Deferred gates*. What a gate should do with each of the
 three `front/` scripts once it can run them is ruled in `docs/charter.md`
 C-10, not here.
+
+## ADR 32 — the Flask board is retired, and C-8's parity is the four screens it had
+
+**Status:** accepted (by hand on `main`, out of cycle — the deletion on
+2026-10-04, this entry and the prose realignment on 2026-10-05). It spends the
+retirement clause of [`docs/charter.md`](charter.md) C-8. Nothing else stops
+running: no dispatcher module, no api route and no file under `front/` changes
+behaviour, and the only test deleted is the one that tested the deleted code.
+
+**Context.** C-8 set the condition and named the four screens: the Flask board
+"is retired in the same task that closes the last of them" — tasks, a task's
+detail, debt and the events tail. All four read the real api now, and V0.6c and
+V0.6d walked them against the running stack on 2026-10-04, both PASS.
+
+What stood in the way of reading the condition as met was the console's own
+prose. `front/README.md` and `docs/plans/front.md` both said parity was "not
+reached, and out of reach by construction", on one ground: the detail screen's
+learnings region wants `/api/learnings`, a tier-2 route that does not exist, and
+it names that route on screen rather than showing a fixture. Taken literally
+that made the retirement wait on tier 2, which C-8 does not say and ADR 19's
+enumeration of parity does not contain.
+
+**Decision.** Two things.
+
+First, **parity is measured against the board's four screens, not against every
+region the console draws.** The board never had a learnings region. A screen the
+console added cannot keep alive the service the console replaced, so
+`/api/learnings` is tier 2 arriving late, not tier 1 left open. ADR 19's list is
+the whole test — the four screens rendered against the real routes, warnings on
+every screen that lists rows, no fixture behind any query those four make, the
+bearer forward in place — and it is met.
+
+Second, **the board is gone.** Deleted: `observability/board/` entire — its
+717-line `app.py`, its `__init__.py`, its Dockerfile and its six templates —
+`tests/observability/test_board.py`, and the `board:` service from both
+`docker/compose/docker-compose.yml` and `docker-compose.coolify.yml`.
+`tests/integration/test_compose_invariants.py` grows the inverse of the
+assertion it used to make, `test_the_flask_board_service_is_gone_from_both_files`,
+so a re-added service fails a test instead of a build. The `markupsafe>=2.0` pin
+leaves `pyproject.toml` and `docker/agent/Dockerfile` with it: the board was the
+one service that imported `escape` directly, nothing left in this project
+renders a template, and Flask still brings MarkupSafe in through Jinja. The
+`observability.board` package-data entry goes too.
+
+**Consequences.** The tie-breaking reference is `git log`. C-8 made the Flask
+board right wherever the two implementations disagreed about what a screen
+should say, "because it has run"; from here the console is the only
+implementation, and a disagreement is a bug rather than a tie.
+
+[`docs/charter.md`](charter.md) is **not** edited. C-8's sentence stays true as
+history, and the charter is the human's file — no role may edit it, and neither
+may this one. A C-11 recording the retirement is a ruling a human writes or
+declines; this entry is not it and does not stand in for it.
+
+ROADMAP V0.6b cannot be re-run. It passed on 2026-09-27 against the board, and
+nothing answers on 8790 now, so its block is left as written: the passing row is
+what it attests to, and V0.6c and V0.6d cover those screens from here.
+
+The `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH` pair outlives a second
+service that gave it a prefix — `observability/api/` reads it for the human
+realm of ADR 7, and the names stay for the reason `observability/api/app.py`
+gives at the call site: renaming them means editing a `.env` that exists on a
+running host to buy a spelling. `BOARD_PROJECT` in
+a host's `docker/compose/.env` is inert: nothing reads it any more, the console
+carries its own `CONSOLE_PROJECT` (ADR 24), and an operator may leave the line
+where it is.
+
+Phases 2 and 3 of [`docs/plans/board.md`](plans/board.md) have no
+implementation. Both sections keep their specs, under a marker saying the Flask
+half is retired, because those specs are what `front/` was built against and
+what the four screens still owe. Phase 1, the api, is untouched; Phases 4–6 were
+already `front/`'s to build.
+
+Earlier entries that speak of the board in the present tense — ADR 6 to ADR 13
+on its screens and its tail, ADR 14 keeping the Loading row out of it, ADR 24
+saying of `BOARD_PROJECT` that it "belongs to a service C-8 retires" — are
+not rewritten. They are read through this one, which is how this file has always
+worked: an entry is narrowed by a later entry, never edited.

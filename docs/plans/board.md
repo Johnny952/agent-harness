@@ -67,18 +67,23 @@ screens, the states, the warnings and the queue-not-a-socket rule below are all
 unchanged, and Phase 4's spec is still the spec whoever builds it works from.
 What it changes is that Phases 2 and 3 now have two implementations, one shipped
 and one to be wired, and that Phases 4–6 will be built in TypeScript against
-the same endpoints rather than in Jinja. `observability/board/` stays until the
-front serves its four screens against the real api, and is the tie-breaking
-reference until then — where the two disagree about what a screen should say,
-the Flask board is right, because it has run. The integration is planned in
+the same endpoints rather than in Jinja. `observability/board/` stayed until
+the front served its four screens against the real api, and was the tie-breaking
+reference until then — where the two disagreed about what a screen should say,
+the Flask board was right, because it had run. That condition fired on
+2026-10-04: the console serves the board, a task's detail, debt and the events
+tail against the real api, so `observability/board/` was deleted together with
+its compose service and its tests (`docs/decisions.md` ADR 32), and `git log` is
+where the tie-breaker lives now. The integration is planned in
 [`docs/plans/front.md`](front.md); this file stays the specification of what the
 phases *are*.
 
 The dispatcher has no board. `NullKanbanClient` is what every run to date has
-used, and the surface a human gets is the one this plan built: `/`,
-`/tasks/<id>`, `/debt` and `/events` on `127.0.0.1:8790`, over the read API on
-8789. Before Phase 2 it was `observability/dashboard/` — 43 lines of Flask
-rendering the last 200 hook events as one table — which is what the sections
+used, and the surface a human gets is the console in `front/`, serving the four
+screens this plan built — `/`, `/tasks/<id>`, `/debt` and `/events` — over the
+read API on 8789. The Flask board served those same four on `127.0.0.1:8790`
+until 2026-10-04. Before Phase 2 it was `observability/dashboard/` — 43 lines
+of Flask rendering the last 200 hook events as one table — which is what the sections
 below mean whenever they speak of the dashboard in the present tense. This plan
 says what replaced it, in what order, and what each phase is allowed to assume.
 
@@ -485,6 +490,17 @@ configured: `curl -u` on `/api/tasks` returns that task with `card` populated.
 
 ## Phase 2 — a read-only board
 
+> **Its Flask implementation was retired on 2026-10-04.** This section is left
+> as written, because it is the specification of what the four screens *are* and
+> the console in `front/` was built against it. What is gone is
+> `observability/board/` itself — the directory, the image, the compose service,
+> the `127.0.0.1:8790` port and the tests that pinned them — deleted once the
+> console served all four screens against the real api, which is the condition
+> [`docs/charter.md`](../charter.md) C-8 set (`docs/decisions.md` ADR 32).
+> Everything below that names the board in the present tense names that retired
+> service; everything it says about screens, states, warnings and exclusions is
+> still the contract, and `front/` is where the contract holds.
+
 ### Why it comes next
 
 Phase 1 made the harness readable over HTTP and nothing reads it. Every fact
@@ -825,6 +841,11 @@ endpoint while the page keeps everything else.
 
 ## Phase 3 — a live tail
 
+> **Its Flask implementation went with Phase 2's, on 2026-10-04.** The tail is
+> the fourth of the four screens C-8 named and the console serves it, so the
+> paths, module constants and `/events/stream` endpoint below are the retired
+> `observability/board/`'s (`docs/decisions.md` ADR 32). The spec stands.
+
 ### Why it comes next
 
 Phase 2 shipped a board that tells the truth at one instant and stamps that
@@ -1082,7 +1103,7 @@ forever, and the poll is the board's, not the operator's. The rule:
 No new environment variable. No new key in `config.yaml` — the board mounts
 nothing and reads no config file, which is the same shape ADR 9 works in. No
 compose change at all. What the phase adds is module constants beside
-`EVENTS_LIMIT` in `observability/board/app.py`:
+`EVENTS_LIMIT` in the retired `observability/board/app.py`:
 
 ```python
 TAIL_INTERVAL_SECONDS = 2      # between polls of /api/events

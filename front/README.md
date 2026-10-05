@@ -7,10 +7,11 @@ had. A TanStack Start app in TypeScript, served on its own Node runtime.
 
 It is the console under [`docs/charter.md`](../docs/charter.md) **C-8**, which
 retired the Jinja board in `observability/board/` as the thing to build on and
-bought Node for this directory alone — the four Python services stay as they
-are. The board is not gone yet: C-8 keeps it until the console serves the four
-screens it duplicates against the real api, and until then it is the
-tie-breaking reference, because it has run.
+bought Node for this directory alone — the three Python services stay as they
+are. **The board is gone.** C-8 kept it until the console served the four screens
+it duplicated against the real api; those four now do, so it was deleted on
+2026-10-04 (`docs/decisions.md` ADR 32). It is no longer the tie-breaking
+reference, and `git log` is where it went.
 
 **Six reads are live.** The board, the task detail, the pool, the debt index, the
 live tail and the task detail's phase timeline read `observability/api/` through
@@ -64,8 +65,8 @@ bundle, and one of the three is a credential. They are read in
 
 | Name | Default | When it is missing |
 |---|---|---|
-| `API_BASE_URL` | `http://api:8789` — the compose network name, the same default the Jinja board takes | the default is used. Running against the api on the host means `API_BASE_URL=http://127.0.0.1:8789` |
-| `API_TOKEN` | none | **the console does not start.** The module throws at import and `src/server.ts` imports it, so a missing token is a refusal to boot rather than a 401 from a screen. It is the same value `observability/api/` and the board read from `docker/compose/.env` |
+| `API_BASE_URL` | `http://api:8789` — the compose network name, the same default the Jinja board took | the default is used. Running against the api on the host means `API_BASE_URL=http://127.0.0.1:8789` |
+| `API_TOKEN` | none | **the console does not start.** The module throws at import and `src/server.ts` imports it, so a missing token is a refusal to boot rather than a 401 from a screen. It is the same value `observability/api/` reads from `docker/compose/.env` |
 | `CONSOLE_PROJECT` | none | `?project=` is omitted from the debt call and the api picks the project — right for a harness with one checkout, and a self-describing 400 for the other kind |
 
 ```sh
@@ -134,10 +135,13 @@ Tier 1 of that plan is parity with the Flask board's four screens against the re
 routes. The api's half was built by T-011 and the console's by T-012 — the five
 `client.ts` bodies, the warning banners and the server-side bearer forward — and
 T-013 added the sixth, `/api/phases`, which fills the task detail's phase
-timeline. **Parity is not reached**: the detail screen's learnings region still
-wants `/api/learnings`, which is tier 2 and does not exist. That region names the
-route it is waiting for instead of showing a fixture, so `observability/board/`
-stays and C-8 keeps it the tie-breaking reference.
+timeline. **Parity is reached and the board is gone**: the four screens it had —
+the board, a task's detail, debt and the events tail — all read the real api, so
+C-8's condition fired and `observability/board/` was deleted on 2026-10-04
+(`docs/decisions.md` ADR 32). The detail screen's learnings region still wants
+`/api/learnings`, which is tier 2 and does not exist, and it names that route on
+screen instead of showing a fixture — but the board never had a learnings region,
+so that is tier 2 arriving late, not tier 1 left open.
 
 The Board is no longer waiting on a route, and its banner no longer says it is.
 Its five role lanes wanted the role of the phase *running*, and no file in the
