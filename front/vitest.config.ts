@@ -6,12 +6,15 @@
 // the plugins the tests need are listed here on their own.
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import tsconfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
-  // `tsconfigPaths` is what resolves the `@/*` alias every file under src/ imports
-  // with; `react` is what compiles the JSX a render test mounts.
-  plugins: [tsconfigPaths(), react()],
+  // `react` is what compiles the JSX a render test mounts. The `@/*` alias every file
+  // under src/ imports with is resolved by Vite itself: `resolve.tsconfigPaths` is
+  // native as of Vite 8 and warns when the `vite-tsconfig-paths` plugin that used to
+  // do it here is also present. The package stays in `package.json` either way --
+  // `@lovable.dev/vite-tanstack-config` declares it as a peer.
+  plugins: [react()],
+  resolve: { tsconfigPaths: true },
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
