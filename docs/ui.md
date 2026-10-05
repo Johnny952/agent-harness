@@ -160,6 +160,58 @@ into silence. Source of truth:
 `front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
 `front/src/routes/tasks.$taskId.tsx`.
 
+### A value of the wrong shape is named, not rendered and not dropped
+
+The entry above sorts what the harness *recorded*. This one sorts what it
+recorded **wrongly**: a field holding something that is not the kind of thing
+the key means. `depends_on: T-001` written without a dash is a string where
+every screen expects a list; a handoff whose `paths` holds a bare filename is
+a string where a `{path, holds}` was annotated. Both are routine — nothing
+between the YAML and the screen checks either — and neither is absent, empty,
+broken or a warning.
+
+A console has three wrong answers available here and takes none of them.
+Rendering it is the worst: `.length` over a string is a number, so a board
+card shows a confident `7` dependencies, and `{value}` over an object throws,
+which in a tree whose only `errorComponent` is on the root route costs the
+whole page for one line of someone's YAML. Dropping it is the *Broken* rule
+one level down — a region that quietly filters out what it cannot read is
+saying "nothing to see" about something there is something to see about. And
+an `Absent` is a lie in the other direction: it says the harness recorded
+nothing, when the harness recorded something this console cannot read.
+
+So it is **named, in place**, through `Malformed`: the key, the type that
+arrived and the type the key means — `paths — a string, not a list`. It is
+`Absent`'s size and sits in `Absent`'s slot, because the two are the halves of
+the one question an operator asks of a blank region, and it is danger-toned,
+because the answer to this half is a file to go open.
+
+Three parts of it are easy to get wrong:
+
+- **It names the type and never the value.** What arrived is file content of
+  unbounded length and unknown shape — a whole handoff body can land in a
+  field meant to hold one line. The key plus the type is already everything
+  needed to know which file to open.
+- **One bad item does not cost the list.** A list that *is* a list, holding
+  one item of the wrong kind, renders every other item and a `Malformed` in
+  that item's place. Only a value that is not a list at all replaces the
+  region.
+- **The guard goes where the render is** — not in the route, and not by
+  weakening the type. A `string[]` in `front/src/lib/api/types.ts` is an
+  annotation over a file nothing validated, not a fact, and so is every type
+  over a served value; mapping such a key at the *call site* of the component
+  that guards it, as the phase timeline did with `paths`, runs the map before
+  the guard.
+
+**Set by:** T-013, whose auditor filed one instance of this as debt; closing
+it by hand found nine more of the same shape, all but one on the task detail.
+`docs/decisions.md` ADR 29 and
+`docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md` hold
+the reasoning. Source of truth:
+`front/src/components/console/primitives.tsx` (`Malformed`),
+`front/src/routes/tasks.$taskId.tsx` (`PhaseList`, `PhasePill`,
+`DependencyGraph`), `front/src/routes/index.tsx`.
+
 ### Loading is per page, not per region
 
 A screen that has not got its reads back yet says so once, in one line of muted
@@ -269,6 +321,14 @@ a heartbeat, since a refresh — is relative and rendered through `formatAge`
 over `agoSeconds`, and it **ticks**: `useNow` re-renders it on its own interval
 so an age never goes stale behind a poll it is not driving.
 
+That absolute time is **UTC** and it carries no suffix: `formatClock` slices the
+clock out of `toISOString`, so a phase whose `saved_at` is `15:31:24+00:00`
+reads `15:31:24` on a screen whose operator may be hours off that. This is what
+ships, and this paragraph records it rather than changing it — a suffix is a
+visible edit to every time in the console and belongs to a task that owns the
+screens. Until one does, correlating a screen with a local log means applying
+the host's own offset by hand.
+
 A time is labelled with the event it records and never with a neighbouring one.
 The case that forced this: a phase's only stamp is `saved_at`, which is when the
 phase **ended** — the harness records no start — so the timeline reads *ended*
@@ -279,8 +339,9 @@ Anything clock-dependent renders only after hydration. The server has a
 different now than the browser, and `RefreshedAt` exists because a server-
 rendered age mismatches on the first paint.
 
-**Set by:** the `front/` import; the labelling rule by T-013. Source of truth:
-`front/src/lib/format.ts`,
+**Set by:** the `front/` import; the labelling rule by T-013; the UTC note by
+the 2026-10-04 walk of V0.6c and V0.6d, which read it off the ten `saved_at`
+on disk. Source of truth: `front/src/lib/format.ts`,
 `front/src/hooks/use-console.ts`,
 `front/src/components/console/app-shell.tsx`.
 

@@ -131,6 +131,21 @@ def test_source_files_are_code(path: str) -> None:
     assert gates.is_code(path) is True
 
 
+@pytest.mark.parametrize("path,group", [
+    ("dispatcher/gates.py", "Python"),
+    ("front/src/button.tsx", "JavaScript/TypeScript"),
+    ("front/src/lib/api/client.ts", "JavaScript/TypeScript"),
+    ("cmd/main.go", "Go"),
+    ("scripts/deploy.sh", None),
+    ("db/schema.sql", None),
+    ("docs/README.md", None),
+])
+def test_a_path_knows_what_language_a_test_for_it_would_be_in(
+    path: str, group: str | None,
+) -> None:
+    assert gates.group_of(path) == group
+
+
 @pytest.mark.parametrize("path", ["README.md", "package.json", "docs/tools/mapper.py"])
 def test_docs_and_data_are_not_code(path: str) -> None:
     """`docs/` is excluded by path, not by suffix: the mapper writes scripts
@@ -327,6 +342,63 @@ def test_a_change_that_touches_no_code_is_not_asked_about(monkeypatch) -> None:
     worktree = _Worktree(diff=("docs/README.md", "config.example.yaml")).install(monkeypatch)
 
     assert _findings(_run(worktree), gates.TESTS_IN_DIFF) == []
+
+
+def test_a_test_in_one_language_does_not_cover_another(monkeypatch) -> None:
+    """The gate's whole reason to pair by language. This is the shape T-012
+    and T-013 both shipped: Python changed, a Python test came with it, and a
+    `front/src/**` edit rode along untested while the gate said nothing
+    (`docs/debt/T-013-D1.md`)."""
+    worktree = _Worktree(diff=(
+        "dispatcher/gates.py",
+        "tests/dispatcher/test_gates.py",
+        "front/src/routes/tasks.$taskId.tsx",
+    )).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.TESTS_IN_DIFF)
+
+    assert finding.level == gates.ASK
+    assert "tasks.$taskId.tsx`" in finding.detail
+    assert "gates.py" not in finding.detail
+
+
+def test_each_language_is_cleared_by_its_own_test(monkeypatch) -> None:
+    worktree = _Worktree(diff=(
+        "dispatcher/gates.py",
+        "tests/dispatcher/test_gates.py",
+        "front/src/components/console/payload.tsx",
+        "front/src/components/console/payload.test.tsx",
+    )).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.TESTS_IN_DIFF) == []
+
+
+def test_a_test_beside_the_file_clears_its_own_language(monkeypatch) -> None:
+    """The toy repo `docs/ROADMAP.md` checks the gates against: `sum.js` plus
+    `sum.test.js` and nothing else. Both are one group, so it stays silent."""
+    worktree = _Worktree(diff=("sum.js", "sum.test.js")).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.TESTS_IN_DIFF) == []
+
+
+def test_code_with_no_test_convention_is_paired_by_any_test(monkeypatch) -> None:
+    """`.sh` and `.sql` get no group: this repo's seven shell files are
+    entrypoints and its one `.sql` is a schema, so asking for a shell test
+    every round would get the same one-line answer every round."""
+    worktree = _Worktree(
+        diff=("scripts/deploy.sh", "db/schema.sql"), untracked=("tests/test_api.py",),
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.TESTS_IN_DIFF) == []
+
+
+def test_ungrouped_code_with_no_test_at_all_is_still_asked_about(monkeypatch) -> None:
+    worktree = _Worktree(diff=("scripts/deploy.sh",)).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.TESTS_IN_DIFF)
+
+    assert finding.level == gates.ASK
+    assert "`scripts/deploy.sh`" in finding.detail
 
 
 # --------------------------------------------------------------------------

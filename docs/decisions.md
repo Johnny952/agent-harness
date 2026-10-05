@@ -1527,3 +1527,181 @@ and `shrink_retry` out of *present nowhere*, and `started_at` out of the bucket
 above them. It does not reach `commit_sha` or `envelope.to_role`, which need
 something a state line is not. That makes the lanes a dispatcher task,
 ADR 18's `usage_pct` for the fifth time, and it is not this one.
+
+## ADR 29 — A served value of the wrong *shape* is named where it would have been drawn, not rendered, dropped or called absent
+
+**Status:** accepted (T-013, by hand after the merge, 2026-10-04). Refines
+`docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md`, which
+prescribes "the `—` sentinel or an `Absent` rather than a throw" and is the
+reason this console guards at the render at all. Nothing in the learning is
+reversed except that one word.
+
+**Context.** T-013's auditor filed one instance of the failure as debt:
+`PhaseList` tests `lines.length === 0` and then calls `lines.map`, so a
+non-empty **string** passes the test and throws at the map. Closing it by hand
+found nine more of the same shape — `handoff.paths` mapped at the *call site*,
+before the component that would guard it is entered; `paths` items that are not
+`{path, holds}` rendering `undefined — undefined`; array items that are not
+strings throwing "Objects are not valid as a React child", once from inside an
+`<svg>`; both `PhasePill` call sites handing `handoff.status` and
+`handoff.verdict` straight to `{value}`; and a board card counting `.length`
+over a string, which is the only one of the ten that does not throw and the
+worse for it.
+
+None of this needs a bad actor. `dispatcher/context_transfer.py` reads
+`depends_on=fm.get("depends_on", [])` straight off frontmatter with no
+coercion and `observability/api/app.py` serves it verbatim, so one missing dash
+in a task file is a string in the board's dep chip and in both of the task
+detail's dependency renders. `string[]` in `front/src/lib/api/types.ts` is an
+annotation over that file, not a check of it.
+
+The remedy the learning names does not survive contact with `docs/ui.md`
+*Absent, empty and broken are three different things*, which is binding and
+says broken "never degrades into an empty state". An `Absent` here says the
+harness recorded nothing when the harness recorded something unreadable, which
+is that rule one level down: not a region gone quiet because a read failed, but
+a slot gone quiet because a value cannot be read. That entry has no fourth word
+for this — it has one for a warning, and says so.
+
+**Decision.** A new primitive, `Malformed`, names the key, the type that
+arrived and the type the key means — `paths — a string, not a list` — at
+`Absent`'s size, in `Absent`'s slot, in danger tone. It names the **type and
+never the value**: what arrived is unvalidated file content of unbounded
+length, and the key plus the type already says which file to open.
+
+One malformed *item* does not cost its list. A value that is a list renders
+every good item and a `Malformed` in the bad one's place; only a value that is
+not a list at all replaces the region. Silent filtering is refused for the same
+reason `Absent` is.
+
+**Consequences.** This diverges on purpose from
+`dispatcher/handoff.py:_lines` and `_pairs`, which drop an item of the wrong
+type and answer `[]`. The divergence is the point rather than an
+inconsistency: those two build a prompt for a model, where a malformed line is
+noise worth dropping, and this one answers an operator asking what the role
+returned, where it is the answer.
+
+The guard stays at the render, which the learning already rules and which ADR
+10 and ADR 27 both support — a value this harness cannot judge is news to
+report, not something a reader hides. `types.ts` is **not** weakened to
+`unknown`: the annotation is still what a well-formed file holds and still
+catches the console's own mistakes, so these guards are conditions TypeScript
+considers redundant. Nothing flags them today, because
+`front/eslint.config.js` loads `tseslint.configs.recommended` rather than
+`recommendedTypeChecked` and so has no `no-unnecessary-condition`. A later task
+that turns type-aware linting on inherits this entry as the reason the guards
+stay.
+
+What this does **not** do is validate the harness's own output anywhere. The
+fix for `depends_on` arriving as a string is a dispatcher that coerces it or a
+gate that refuses the file, and neither is this entry; until one lands, the
+console says what it got.
+
+`docs/ui.md` gains *A value of the wrong shape is named, not rendered and not
+dropped*, beside the entry it refines.
+
+## ADR 30 — A component moves out of a route file when a test cannot otherwise reach it, not only when a second screen draws it
+
+**Status:** accepted (T-013, by hand after the merge, 2026-10-04). The rule it
+adds to is the one `front/README.md` states for `components/console/`: a thing
+lives there once a second screen needs it, and until then it stays in the
+screen that draws it, where it is read beside its only caller.
+
+**Context.** `docs/debt/T-013-D1.md` *Fix* step 2 asks for "one render per
+api-served value with a junk value in it", and after ADR 29 the renders worth
+that test are `PhaseList` and `PhasePill` — both defined inside
+`front/src/routes/tasks.$taskId.tsx`, both drawn by one screen. A test file
+beside them cannot exist: `@tanstack/router-plugin` scans every file under
+`src/routes/` and turns it into a route, and the knob that would excuse a
+`.test.tsx` — `routeFileIgnorePattern`, which
+`node_modules/@tanstack/router-generator/dist/esm/config.js:24` declares with
+**no default** — is set in `vite.config.ts`, which is Lovable-generated and
+which `docs/charter.md` C-9 keeps off-limits to a hand edit. Importing the
+route module from a test elsewhere does not help either: it would pull the
+whole screen, its queries and its router imports in to reach two functions.
+
+**Decision.** Being untestable where it sits is sufficient reason to promote a
+component into `front/src/components/console/`, with the same standing as a
+second screen needing it. `PhasePill`, `PhaseList` and `asPathLine` move to
+`front/src/components/console/payload.tsx`; `phaseTone` and `asLine` move with
+them and stay module-local, because nothing outside the file calls them. The
+route keeps every other renderer it has.
+
+**Consequences.** The directory stops being a reliable answer to "how many
+screens use this": a reader who finds a component there may be looking at one
+promoted for a test, and the file's own header docblock is where that is said
+— `payload.tsx` names this ADR and the generator as its reason. The cost is
+paid once per component and it buys the only executable check this directory
+has ever had.
+
+The alternative was a `front/tests/` tree outside `src/`, which keeps the
+components where they are and costs an import path that climbs out of the
+screen's directory. It was rejected for the reason the promotion is cheap: the
+two functions are a self-contained renderer over one api value, which is what
+`components/console/` is for, and the test then sits beside what it tests the
+way every other test in this repo does.
+
+This does **not** say a test justifies any extraction. The thing promoted is
+still a component with its own meaning — the renderer of one served value. A
+helper that only makes sense inside its screen is tested through the screen,
+once the board's `TaskCard` has a router harness to be rendered in.
+
+## ADR 31 — `tests-in-diff` pairs a changed file with a test in the same language, and only the ungrouped suffixes take any test
+
+**Status:** accepted (T-013, by hand after the merge, 2026-10-04). It replaces
+the rule `dispatcher/gates.py` shipped with, under which one test anywhere in
+a diff cleared the whole diff. The blast radius is two files: nothing outside
+`gates.py` reads an `ASK` finding.
+
+**Context.** `docs/debt/T-013-D1.md` *Fix* step 3 asks that
+`dispatcher/gates.py` "learn to see `front/`", on the premise that
+`tests-in-diff` "reasons about Python test files only". Running the gate's own
+helpers disproves the premise: `.ts` and `.tsx` were already in
+`_CODE_SUFFIXES`, and `payload.test.tsx` has the stem `payload.test`, which
+`is_test` matches on its `endswith("test")` branch. The gate has seen `front/`
+since the day it was written.
+
+What it could not do was keep looking after it found one test. The body was
+`if any(is_test(p) for p in changed): return []`, so a diff holding a Python
+change, its Python test, and a `front/src/**` edit with no console test at all
+produced no finding at all. That is not a hypothetical shape — it is the shape
+T-012 and T-013 both shipped, and T-012's implementador wrote it down at the
+time: "the `tests-in-diff` gate falls silent on the Python changes alone, and
+that silence is not TypeScript coverage" (`docs/implementations/T-012.md`).
+
+**Decision.** A test covers a language, not a diff. `_SUFFIX_GROUPS` maps each
+code suffix to the language a test for it would have to be written in —
+Python, JavaScript/TypeScript, Go, Rust, Ruby, JVM, Swift, C#, PHP, C/C++ —
+and `group_of` answers which group a path falls in. The gate collects the
+groups of the tests in the diff and goes on asking about every changed file
+whose group is not among them.
+
+`.sh` and `.sql` are deliberately *ungrouped*: they stay code, and any test in
+the diff clears them. The census behind that is this repo's own — seven shell
+files, every one an entrypoint or an operator script, and one `.sql`, a schema
+— so pairing them per language would ask the same question every round and get
+the same one-line answer, and a gate that is always answered the same way is a
+gate a role learns to skip. A project that does test its shell names the test
+`test_*`/`*_test` like everything else, which lands the test in no group
+either, so the pairing stays symmetric.
+
+**Consequences.** The finding stays one finding, not one per unpaired
+language. `needs_answer` is an `any(...)` over the report, so N findings cost
+exactly one `--resume` either way, and `render()` repeats the gate name on
+every bullet, which would read as noise. Its text changed with the rule: "code
+changed and no test in the same language did" is true in both cases, because a
+diff with no test at all certainly has none in the right language, and it
+names what would satisfy the gate.
+
+A language the dict does not list behaves exactly as it did before — no group,
+cleared by any test. Adding one is a line in `_SUFFIX_GROUPS`, and the
+question to ask when adding it is not what the suffix is but whether a test in
+that language is a thing this harness can run.
+
+This says nothing about *running* the console's suite. The test gate executes
+the single `test:` command in `docs/README.md`'s frontmatter, the agent images
+have no `bun`, and `front/node_modules` is ignored and absent from a fresh
+worktree — so that half of `T-013-D1` step 3 stays a human's row under
+`docs/ROADMAP.md` *Deferred gates*. What a gate should do with each of the
+three `front/` scripts once it can run them is ruled in `docs/charter.md`
+C-10, not here.

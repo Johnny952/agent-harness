@@ -242,3 +242,31 @@ Closing the round-trip — treating the generation as a one-time import, after
 which the editor is no longer a producer — is a later ruling and needs an entry
 that supersedes this one. It does not close by habit, and it does not close
 because a task finds the history constraint inconvenient.
+
+---
+
+### C-10 — a red `front/` lint is a note; a red `front/` typecheck blocks
+
+**Ruled:** 2026-10-04, when `front/` got a `typecheck`, a `lint` and a `test`
+script and the question of what a gate should do with each one came up.
+**Trigger:** you are about to teach a dispatcher gate to run `bun run lint`,
+`bun run typecheck` or `bun run test` under `front/`.
+
+A red `bun run typecheck` blocks the phase. A red `bun run lint` does not: its
+finding rides along as a note. `bun run test` needs no ruling here — a failing
+suite is what the test gate already blocks on for Python, and the console's
+suite is the same kind of thing.
+
+The asymmetry between the first two is measured, not aesthetic. `tsc --noEmit`
+is clean on the tree as it stands, so a red typecheck means the phase in front
+of you broke it, which is what a blocking gate is for. `eslint .` reports 125
+errors on that same tree — every one of them `prettier/prettier`, and every
+one of them already on `main` before the `lint` script existed. A lint gate
+that blocked would put every phase from today in red over lines nobody in the
+cycle touched, and a gate that is red before the work starts is a gate the
+roles learn to route around. That costs more than the formatting it was meant
+to buy.
+
+This is not a ruling that the 125 are acceptable. Clearing them is a task of
+its own, and once the tree is clean, promoting the lint to blocking is a later
+entry here — not a judgement call made inside a phase.

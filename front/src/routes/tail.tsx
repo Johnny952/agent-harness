@@ -37,9 +37,9 @@ const ROW_H = 24;
  * What to show when a read failed.
  *
  * An `ApiError` carries the api's own sentence, and the forward's 502 names what
- * did not answer — `<base url> did not answer: …` — which is the difference
- * between "the harness is quiet" and "the console cannot reach it". Anything else
- * keeps the generic line.
+ * did not answer — `The api did not answer: …`, the service and not its address —
+ * which is the difference between "the harness is quiet" and "the console cannot
+ * reach it". Anything else keeps the generic line.
  */
 function failureMessage(cause: unknown, fallback: string): string {
   return cause instanceof api.ApiError ? cause.message : fallback;

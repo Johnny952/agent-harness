@@ -77,10 +77,15 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
       signal: AbortSignal.timeout(API_TIMEOUT_MS),
     });
   } catch (cause) {
-    return jsonResponse(
-      { error: `${API_BASE_URL} did not answer: ${describe(cause)}` },
-      502,
-    );
+    // The service, not the address. This body is read by a browser, and
+    // `API_BASE_URL` is the server half's own topology — a host and a port the
+    // console has no reason to publish. What the screens need is the difference
+    // between "the harness is quiet" and "the console cannot reach it", and
+    // naming the api says that; the address goes to the server log, where
+    // whoever is debugging an unreachable api is already looking.
+    const why = describe(cause);
+    console.error(`[forward] ${API_BASE_URL} did not answer: ${why}`);
+    return jsonResponse({ error: `The api did not answer: ${why}` }, 502);
   }
 
   // The api's status and body, with the api's own content type. Flask answers its

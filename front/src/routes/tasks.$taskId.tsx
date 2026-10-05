@@ -8,6 +8,7 @@ import {
   EmptyState,
   ErrorState,
   HeartbeatDot,
+  Malformed,
   Mono,
   PageHeader,
   RoleBadge,
@@ -16,6 +17,7 @@ import {
   gateTone,
 } from "@/components/console/primitives";
 import { Markdown } from "@/components/console/markdown";
+import { PhaseList, PhasePill, asPathLine } from "@/components/console/payload";
 import { debtQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
 import { ROLES } from "@/lib/api/types";
 import type { Phase, Task } from "@/lib/api/types";
@@ -114,15 +116,21 @@ function TaskDetailPage() {
               />
             </Field>
             <Field label="depends on">
-              {t.depends_on.length ? (
+              {!Array.isArray(t.depends_on) ? (
+                <Malformed got={t.depends_on} want="a list" />
+              ) : t.depends_on.length ? (
                 <span className="flex gap-1">
-                  {t.depends_on.map((d) => (
-                    <Link key={d} to="/tasks/$taskId" params={{ taskId: d }}>
-                      <Mono className="rounded-sm border border-border-strong px-1 text-[10px] hover:text-foreground">
-                        {d}
-                      </Mono>
-                    </Link>
-                  ))}
+                  {t.depends_on.map((d, i) =>
+                    typeof d === "string" ? (
+                      <Link key={d} to="/tasks/$taskId" params={{ taskId: d }}>
+                        <Mono className="rounded-sm border border-border-strong px-1 text-[10px] hover:text-foreground">
+                          {d}
+                        </Mono>
+                      </Link>
+                    ) : (
+                      <Malformed key={i} got={d} want="a task id" />
+                    ),
+                  )}
                 </span>
               ) : (
                 <Absent label="nothing" />
@@ -260,7 +268,23 @@ function Collapsible({ title, children }: { title: string; children: React.React
 }
 
 function DependencyGraph({ task }: { task: Task }) {
-  const deps = task.depends_on;
+  // Widened back to `unknown` on purpose: `Task["depends_on"]` is `string[]`
+  // because that is what a well-formed task file holds, not because anything
+  // checked — `depends_on: T-001` written without a dash reaches here as a
+  // string. Inside an <svg> that is a thrown React child, and the only
+  // `errorComponent` in this console is on the root route, so the whole page
+  // would go for one line of YAML. `docs/decisions.md` ADR 29.
+  const raw: unknown = task.depends_on;
+  const deps: string[] | null =
+    Array.isArray(raw) && raw.every((d) => typeof d === "string") ? raw : null;
+  if (deps === null) {
+    return (
+      <div className="panel px-3 py-3">
+        <h2 className="label-xs mb-1">dependency graph</h2>
+        <Malformed label="depends on" got={raw} want="a list of task ids" />
+      </div>
+    );
+  }
   if (deps.length === 0) {
     return (
       <div className="panel px-3 py-3">
@@ -337,40 +361,6 @@ function byCycle(phases: Phase[]): Phase[] {
 }
 
 /**
- * The tone of a phase's own status, which is a second vocabulary and not the
- * task's four: `complete` finished, `partial` finished and left something,
- * `blocked` is the one word both vocabularies share. A revisor's `verdict` reads
- * the same way, and `CHANGES_REQUESTED` is `warning` and not `destructive` —
- * sending a round back is the cycle working. `docs/ui.md` *The tone of a state*.
- *
- * Local because one screen shows it today. The second screen that does promotes
- * it into `primitives.tsx` beside `StatusPill`, which is where the task's four
- * live.
- */
-const phaseTone: Record<string, string> = {
-  complete: "text-success border-success/50 bg-success/10",
-  partial: "text-warning border-warning/50 bg-warning/10",
-  blocked: "text-destructive border-destructive/60 bg-destructive/10",
-  APPROVED: "text-success border-success/50 bg-success/10",
-  CHANGES_REQUESTED: "text-warning border-warning/50 bg-warning/10",
-};
-
-function PhasePill({ value }: { value: string }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-sm border px-1.5 py-[1px] text-[10px] font-medium uppercase tracking-wide",
-        // Anything the harness has not said is muted with the string verbatim,
-        // the same way `StatusPill` treats a status outside its four.
-        phaseTone[value] ?? "text-muted-foreground border-border-strong bg-surface-2",
-      )}
-    >
-      {value}
-    </span>
-  );
-}
-
-/**
  * One handoff file, as `/api/phases` serves it.
  *
  * The row the fixture drew is thinner now and true: no account, no model, no
@@ -396,8 +386,8 @@ function PhaseRow({ phase, now }: { phase: Phase; now: number }) {
           <Mono className="text-[11px]">{phase.role}</Mono>
         )}
         {phase.round !== null && <span className="label-xs">round {phase.round}</span>}
-        {handoff?.status && <PhasePill value={handoff.status} />}
-        {handoff?.verdict && <PhasePill value={handoff.verdict} />}
+        <PhasePill field="status" value={handoff?.status} />
+        <PhasePill field="verdict" value={handoff?.verdict} />
         {/* *ended*, and never *started*: `saved_at` is the only stamp a record
             carries and the harness writes no start. `docs/ui.md` *Times are
             absolute, ages are relative, and ages tick*. */}
@@ -414,36 +404,27 @@ function PhaseRow({ phase, now }: { phase: Phase; now: number }) {
           <Absent label="no structured return" />
         ) : (
           <div className="space-y-1.5">
-            {/* Every list is guarded: the key set belongs to the role, so a key
-                this screen names may simply not be on this payload. */}
-            <PhaseList label="changed" lines={handoff.changed ?? []} />
-            <PhaseList label="verified" lines={handoff.verified ?? []} />
-            <PhaseList label="pending" lines={handoff.pending ?? []} />
-            <PhaseList label="risks" lines={handoff.risks ?? []} />
+            {/* Every list is guarded twice over: the key set belongs to the
+                role, so a key this screen names may simply not be on this
+                payload — and `HandoffPayload` only annotates what a well-formed
+                file holds, so the shape is checked at the render rather than
+                trusted from the type. `paths` is mapped inside `PhaseList` for
+                the second reason: mapping it here runs before any guard can.
+                `docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md`. */}
+            <PhaseList label="changed" value={handoff.changed} />
+            <PhaseList label="verified" value={handoff.verified} />
+            <PhaseList label="pending" value={handoff.pending} />
+            <PhaseList label="risks" value={handoff.risks} />
             <PhaseList
               label="paths"
-              lines={(handoff.paths ?? []).map((p) => `${p.path} — ${p.holds}`)}
+              value={handoff.paths}
+              line={asPathLine}
+              itemWant="a path and what it holds"
             />
-            <PhaseList label="learnings" lines={handoff.learnings ?? []} />
+            <PhaseList label="learnings" value={handoff.learnings} />
           </div>
         )}
       </div>
     </li>
-  );
-}
-
-function PhaseList({ label, lines }: { label: string; lines: string[] }) {
-  if (lines.length === 0) return null;
-  return (
-    <div>
-      <p className="label-xs">{label}</p>
-      <ul className="mt-0.5 space-y-0.5">
-        {lines.map((line, i) => (
-          <li key={i} className="text-[11px] text-muted-foreground">
-            {line}
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }

@@ -13,9 +13,9 @@ Findings come at three levels, because the answers are not equally cheap:
 
 - `BLOCKING` — the tests failed. The revisor is not called at all; the round
   goes around again with the log's path, which is a whole review call saved.
-- `ASK` — code changed and no test did. Worth one `--resume` into the session
-  that just ended, asking for a test or a reason, and the reason travels to the
-  revisor, which is the thing that can judge it.
+- `ASK` — code changed and no test in the same language did. Worth one
+  `--resume` into the session that just ended, asking for a test or a reason,
+  and the reason travels to the revisor, which is the thing that can judge it.
 - `NOTE` — everything else. It rides along in the task file for the revisor and
   the auditor to weigh, and costs no extra call.
 
@@ -163,11 +163,37 @@ def changed_paths(container: str, workdir: str, base: str) -> list[str]:
 # Gate 1 — a change to code is a change to a test
 # --------------------------------------------------------------------------
 
-_CODE_SUFFIXES = frozenset({
-    ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue", ".svelte",
-    ".go", ".rs", ".rb", ".java", ".kt", ".swift", ".scala", ".cs", ".php",
-    ".c", ".h", ".cc", ".cpp", ".hpp", ".sh", ".sql",
-})
+#: Code grouped by what a test for it would have to be written in. The groups
+#: are the gate's unit, not the suffix and not the directory: a Python test
+#: says nothing about a `.tsx` render, so a diff that changes both and tests
+#: one of them has an untested half — which is exactly what this harness
+#: shipped eleven times under `front/` before anyone noticed
+#: (`docs/debt/T-013-D1.md`).
+_SUFFIX_GROUPS: dict[str, frozenset[str]] = {
+    "Python": frozenset({".py"}),
+    "JavaScript/TypeScript": frozenset({
+        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue", ".svelte",
+    }),
+    "Go": frozenset({".go"}),
+    "Rust": frozenset({".rs"}),
+    "Ruby": frozenset({".rb"}),
+    "JVM": frozenset({".java", ".kt", ".scala"}),
+    "Swift": frozenset({".swift"}),
+    "C#": frozenset({".cs"}),
+    "PHP": frozenset({".php"}),
+    "C/C++": frozenset({".c", ".h", ".cc", ".cpp", ".hpp"}),
+}
+
+#: Code with no test convention `is_test` could recognise, so it gets no group
+#: and any test in the diff pairs with it. Entrypoints and schema files are
+#: the whole of it here, and a project that does test them names the test
+#: `test_*`/`*_test` like everything else, which lands it in no group either —
+#: so the pairing stays symmetric. Pairing these per language would ask the
+#: same question every round and get the same one-line answer, and a gate that
+#: is always answered the same way is a gate a role learns to skip.
+_UNGROUPED_SUFFIXES = frozenset({".sh", ".sql"})
+
+_CODE_SUFFIXES = frozenset().union(*_SUFFIX_GROUPS.values()) | _UNGROUPED_SUFFIXES
 
 _TEST_DIR_NAMES = frozenset({"test", "tests", "spec", "specs", "__tests__", "e2e"})
 
@@ -195,16 +221,37 @@ def is_code(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in _CODE_SUFFIXES
 
 
+def group_of(path: str) -> str | None:
+    """Which language group a path belongs to, or `None` for the ungrouped."""
+    suffix = os.path.splitext(path)[1].lower()
+    for group, suffixes in _SUFFIX_GROUPS.items():
+        if suffix in suffixes:
+            return group
+    return None
+
+
 def _tests_in_diff(changed: list[str]) -> list[Finding]:
     code = [p for p in changed if is_code(p) and not is_test(p)]
     if not code:
         return []
-    if any(is_test(p) for p in changed):
+    tested = {group_of(p) for p in changed if is_test(p)}
+    if tested:
+        # An ungrouped file is paired by any test at all; a grouped one needs
+        # a test of its own group. The second half is the whole point: the
+        # old gate took one test anywhere as cover for the entire diff, so a
+        # Python change that arrived with its test silenced the TypeScript
+        # change sitting beside it.
+        code = [
+            p for p in code
+            if group_of(p) is not None and group_of(p) not in tested
+        ]
+    if not code:
         return []
     return [Finding(
         TESTS_IN_DIFF,
-        f"code changed and no test did: {_sample(code)}. Add a test, or say in "
-        "one line why this change does not need one.",
+        f"code changed and no test in the same language did: {_sample(code)}. "
+        "Add a test beside it, or say in one line why this change does not "
+        "need one.",
         ASK,
     )]
 

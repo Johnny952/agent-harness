@@ -42,7 +42,10 @@ on:
 bun install
 bun run dev        # vite dev
 bun run build      # vite build
+bun run typecheck  # tsc --noEmit
 bun run lint       # eslint .
+bun run test       # vitest run
+bun run test:watch # vitest
 bun run format     # prettier --write .
 ```
 
@@ -149,10 +152,45 @@ server-side, never under a `VITE_` prefix, so Vite cannot inline it into the
 browser bundle. See *The three environment variables* above and
 `docs/decisions.md` ADR 15.
 
-**Nothing under `front/` has a test runner or a typecheck in CI.** There is no
-`test` script, no vitest config, and the harness's `python3 -m pytest` does not see
-this directory — so a green test gate on a commit that touches `front/src/` says
-nothing about it. Run `bun run lint` and `bunx tsc --noEmit` by hand after editing.
+**Nothing under `front/` runs in the loop.** There is a `typecheck`, a `lint`
+and a `test` since T-013, but the harness's `python3 -m pytest` does not see
+this directory and no gate in `dispatcher/gates.py` *runs* any of the three —
+so a green test gate on a commit that touches `front/src/` still says nothing
+about it. **Run `bun run typecheck`, `bun run lint` and `bun run test` by hand
+after editing.**
+
+The gate does at least know this directory exists. Since T-013 `tests-in-diff`
+pairs a changed file with a test in the **same language**, so a `front/src/**`
+edit arriving beside nothing but a Python test is asked about instead of
+cleared (`docs/decisions.md` ADR 31) — it never was blind to `.ts` and `.tsx`,
+it just stopped looking once it had found any test at all. Making a gate
+*execute* the three scripts is the open half of
+[`docs/debt/T-013-D1.md`](../docs/debt/T-013-D1.md) step 3, and it is blocked
+on an agent image with `bun` in it. What a red result costs is already ruled:
+[`docs/charter.md`](../docs/charter.md) **C-10** — the typecheck blocks the
+phase, the lint rides along as a note.
+
+### Writing a test
+
+Tests live beside what they test, as `*.test.tsx`, and two things about this
+tree constrain where that can be:
+
+- **Not under `src/routes/`.** `@tanstack/router-plugin` turns every file it
+  finds there into a route and errors on one it cannot; the knob that would
+  excuse a test file, `routeFileIgnorePattern`, has no default and is set in
+  the Lovable-generated `vite.config.ts`, which C-9 keeps off-limits. A
+  renderer worth a test moves to `src/components/console/` instead —
+  `docs/decisions.md` ADR 30, and `src/components/console/payload.tsx` is the
+  first one that did.
+- **Import `describe`/`it`/`expect`/`afterEach` from `"vitest"`, and call
+  `afterEach(cleanup)` yourself.** [`vitest.config.ts`](vitest.config.ts) sets
+  `globals: false`, and `@testing-library/react` registers its own cleanup only
+  when it finds a global `afterEach` — without that line every render in a file
+  stacks in one document.
+
+The config is a file of its own rather than a `test` key in `vite.config.ts`,
+for the same C-9 reason; vitest prefers it over `vite.config.ts` and does not
+merge the two, so it repeats the `tsconfigPaths()` and `react()` plugins.
 
 ## The Lovable round-trip
 

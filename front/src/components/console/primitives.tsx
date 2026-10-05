@@ -319,3 +319,37 @@ export function BrokenBanner({ reads }: { reads: string[] }) {
 export function Absent({ label = "not recorded" }: { label?: string }) {
   return <span className="text-[11px] italic text-muted-foreground/70">{label}</span>;
 }
+
+/**
+ * A served value whose *shape* is wrong, named where it was going to be drawn.
+ *
+ * This and `Absent` are the same size and sit in the same slot on purpose: they
+ * are the two halves of the question an operator asks of a blank region — did
+ * the harness record nothing here, or did it record something this console
+ * cannot read? Danger-toned because the second one is a file to go open, and
+ * `Absent`'s muted grey would file it under "nothing to see".
+ * `docs/ui.md` *A value of the wrong shape is named, not rendered and not
+ * dropped*; `docs/decisions.md` ADR 29.
+ *
+ * It names the **type** and never the value. What arrived is unvalidated file
+ * content of unbounded length — a whole handoff body can land in a field meant
+ * to hold one line — and the key plus the type is already everything the
+ * operator needs to know which file to open.
+ */
+export function Malformed({ label, got, want }: { label?: string; got: unknown; want: string }) {
+  return (
+    <span className="text-[11px] italic text-destructive">
+      {label ? `${label} — ` : ""}
+      {typeName(got)}, not {want}
+    </span>
+  );
+}
+
+/** What arrived, in the words an operator reading a YAML or JSON file uses. */
+function typeName(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) return "a list";
+  const kind = typeof value;
+  return kind === "object" ? "an object" : `a ${kind}`;
+}

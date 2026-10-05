@@ -9,6 +9,7 @@ import {
   EmptyState,
   ErrorState,
   HeartbeatDot,
+  Malformed,
   Mono,
   PageHeader,
   WarningBanner,
@@ -293,12 +294,17 @@ function TaskCard({
         ) : (
           <span className="text-[10px] italic text-muted-foreground/60">unassigned</span>
         )}
-        {task.depends_on.length > 0 && (
+        {/* `.length` over a string is a number, so a `depends_on: T-001` written
+            without a dash would put a confident `7` on this card — the one failure
+            of this kind that does not throw, and the worse one for it. ADR 29. */}
+        {!Array.isArray(task.depends_on) ? (
+          <Malformed label="depends on" got={task.depends_on} want="a list" />
+        ) : task.depends_on.length > 0 ? (
           <span className="inline-flex items-center gap-0.5 rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
             <GitBranch className="size-2.5" />
             {task.depends_on.length}
           </span>
-        )}
+        ) : null}
         {debtCount > 0 && (
           <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
             debt {debtCount}
