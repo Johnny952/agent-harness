@@ -236,10 +236,11 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   auditor alone files entries into the project's `docs/learnings/`, and the
   dispatcher moves them with no model in the loop — it stamps the entries a
   task is carrying before the auditor runs, moves them out of the inbox once
-  that branch actually merges, into a `dropped/` sibling no prompt reads
-  rather than to deletion (`docs/debt/T-012-D1.md`), and, when the cycle ends
-  any other way, releases them unconfirmed for the next task rather than
-  losing them with the phase that found them. An entry is a claim until a
+  that branch actually merges *and* the task card shows the auditor ran,
+  into a `dropped/` sibling no prompt reads rather than to deletion
+  (`docs/debt/T-012-D1.md`), and, when the cycle ends any other way,
+  releases them unconfirmed for the next task rather than losing them
+  with the phase that found them. An entry is a claim until a
   second, distinct task hits the same wall or a human says so
   (`dispatch learnings --confirm`): one phase's wrong guess repeated to every
   later phase is worse than no note at all. Entries leave the same way they
@@ -860,15 +861,22 @@ The dispatcher moves the entries with no model in the loop. It opens the
 directories before the first phase; stamps the entries this task is carrying
 just before the auditor runs, so the auditor knows which rows are its to
 file into `docs/learnings/` on the task branch; takes them out of the inbox
-once that branch actually merges, automatically or via `merge-task`, because
+once that branch actually merges, automatically or via `merge-task`, and the
+task card carries the auditor's own section, because that section is what says
 the docs now hold them — into a `dropped/` sibling rather than to deletion,
 since no reader enumerates that directory, so the prompt cost the drop exists
-for is gone either way and a `merge-task` whose cycle never reached an auditor
-no longer destroys what it filed (`docs/debt/T-012-D1.md`); and, when a cycle
-ends any other way — blocked, refused merge, crash — clears the stamp and
-leaves them in the inbox, marked with the task that dropped them, for
-whoever hits the same wall next. A run that bounced off another dispatcher's
-lock touches nothing: those entries belong to a run still working.
+for is gone either way; and, when a cycle ends any other way — blocked,
+refused merge, crash — clears the stamp and leaves them in the inbox, marked
+with the task that dropped them, for whoever hits the same wall next. A run
+that bounced off another dispatcher's lock touches nothing: those entries
+belong to a run still working.
+
+A `merge-task` whose cycle never reached an auditor moves nothing either. It
+keeps the entries in the inbox, prints how many it kept and that the card
+carries no auditor section, and exits zero: landing a branch the cycle did not
+land is what that verb is for, and the cycle that died before its auditor is
+the one whose entries were never promoted anywhere
+(`docs/debt/T-012-D1.md`, `docs/decisions.md` ADR 33 and ADR 34).
 
 Entries start `unconfirmed` and are promoted by evidence, not by assertion:
 when a second, *distinct* task files an entry whose symptom flattens to the

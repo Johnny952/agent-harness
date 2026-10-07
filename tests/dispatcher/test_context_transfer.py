@@ -11,6 +11,7 @@ from dispatcher.context_transfer import (
     acquire_lock,
     handoff,
     handoff_path,
+    has_phase_section,
     is_lock_expired,
     list_handoff_roles,
     list_task_ids,
@@ -749,3 +750,75 @@ def test_read_handoff_still_answers_none_for_everything_the_envelope_raises_on(
     assert read_handoff(hive_dir, "task-1", "revisor") is None
     assert read_handoff(hive_dir, "task-2", "auditor") is None
     assert read_handoff(hive_dir, "task-1", "auditor") == {"status": "complete"}
+
+
+def _card_with_body(tmp_path: Path, body: str) -> str:
+    path = str(tmp_path / "task-1.md")
+    write_task_file(
+        path,
+        TaskFile(
+            task_id="task-1", status="done", owner=None, depends_on=[], heartbeat=None, body=body
+        ),
+    )
+    return str(tmp_path)
+
+
+def test_has_phase_section_reads_the_heading_and_not_the_role_name(tmp_path: Path) -> None:
+    # The heading `handoff()` renders is the evidence; the word is not. A role
+    # writes prose into its own section, and `### auditor` is nothing anyone
+    # renders — so neither may answer for a phase that never returned.
+    hive_dir = _card_with_body(
+        tmp_path,
+        "## implementador\n\n**Risks**\n- the auditor never ran\n\n### auditor\n\nnot a section\n",
+    )
+
+    assert has_phase_section(hive_dir, "task-1", "auditor") is False
+    assert has_phase_section(hive_dir, "task-1", "implementador") is True
+
+
+def test_has_phase_section_accepts_the_round_suffix_the_phase_loop_builds(tmp_path: Path) -> None:
+    # `run-phase --round` labels a hand-resumed phase `auditor (round 2)`, and
+    # that is the same phase having returned.
+    hive_dir = _card_with_body(tmp_path, "## auditor (round 2)\n\nFiled.\n")
+
+    assert has_phase_section(hive_dir, "task-1", "auditor") is True
+
+
+def test_has_phase_section_is_false_for_every_card_it_cannot_read(tmp_path: Path) -> None:
+    # One per exception `read_task_file` raises. The non-mapping pair is the one
+    # a four-exception tuple let through as an uncaught `TypeError`, which is a
+    # crashed `merge-task` rather than entries kept.
+    assert has_phase_section(str(tmp_path), "task-1", "auditor") is False
+
+    for frontmatter in ("TODO write this up", "- one bullet\n- another", "status: [unclosed"):
+        (tmp_path / "task-1.md").write_text(f"---\n{frontmatter}\n---\n\n## auditor\n")
+        assert has_phase_section(str(tmp_path), "task-1", "auditor") is False
+
+    (tmp_path / "task-1.md").write_text("## auditor\n\nno frontmatter anywhere\n")
+    assert has_phase_section(str(tmp_path), "task-1", "auditor") is False
+
+    (tmp_path / "task-1.md").write_text("---\nstatus: done\n---\n\n## auditor\n")
+    assert has_phase_section(str(tmp_path), "task-1", "auditor") is False
+
+
+def test_has_phase_section_matches_against_the_body_and_not_the_frontmatter(
+    tmp_path: Path,
+) -> None:
+    # A card's description can quote the heading it is asking about — T-014's own
+    # does — so the match runs over the parsed body, never the file's text.
+    path = str(tmp_path / "task-1.md")
+    write_task_file(
+        path,
+        TaskFile(
+            task_id="task-1",
+            status="done",
+            owner=None,
+            depends_on=[],
+            heartbeat=None,
+            body="## implementador\n\nDone.\n",
+            description="no `## auditor` section, no drop:\n## auditor\n",
+        ),
+    )
+
+    assert "## auditor" in Path(path).read_text()
+    assert has_phase_section(str(tmp_path), "task-1", "auditor") is False

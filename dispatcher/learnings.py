@@ -81,6 +81,12 @@ REFUTED = "refuted"
 SCOPE_PROJECT = "project"
 SCOPE_HARNESS = "harness"
 
+#: The role whose phase files a project-scope entry into the project's
+#: `docs/learnings/`. Named once because the gate in `drop_promoted` and the
+#: line `merge-task` prints when that gate fires both read it, and a role named
+#: twice is two places to disagree.
+PROMOTING_ROLE = "auditor"
+
 #: Rows of the table a phase is handed. A prompt that grows with the inbox
 #: would quietly tax every phase of every task, so the table is capped and the
 #: rest is left to the grep the fragment asks for. When this starts truncating
@@ -543,6 +549,26 @@ def _free_path(path: str) -> str:
     return f"{stem}-{nth}{ext}"
 
 
+def droppable(hive_dir: str, task_id: str) -> list[Entry]:
+    """The inbox entries this task's merge claims it has promoted.
+
+    Lifted out of `drop_promoted` so that the drop and the line `merge-task`
+    prints when the gate keeps them read the same selector. `drop_promoted`
+    answers with a `list[str]` of refs and nothing else — `docs/decisions.md`
+    ADR 33 froze that — so a gated call answers `[]`, and `[]` cannot say what
+    stayed: the message has to select the entries for itself. One selector
+    means the count it prints can never disagree with the count that would have
+    moved.
+    """
+    return [
+        entry
+        for entry in read_inbox(hive_dir)
+        if not entry.reviewed
+        and entry.scope == SCOPE_PROJECT
+        and task_id in (entry.task, entry.carried_by)
+    ]
+
+
 def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
     """Take the entries whose branch just merged out of the inbox.
 
@@ -554,13 +580,28 @@ def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
     ref points at is a file that was never written (`docs/debt/T-012-D1.md`).
     No reader enumerates `dropped/`, so the prompt cost is gone either way —
     what stops is the loss being permanent.
+
+    And the premise is checked rather than assumed: nothing moves unless the
+    task card carries the promoting role's own section, which is the local
+    record that the phase which files these entries returned. It is a proxy —
+    an auditor that ran and ran out of turns before filing one entry still
+    drops, and only checking each ref against the merged tree answers that —
+    and it is the proxy for the case that has actually fired, a cycle that
+    never reached an auditor at all (`docs/decisions.md` ADR 34).
     """
+    entries = droppable(hive_dir, task_id)
+    # `entries and`: a merge that filed nothing reads no card, so the ordinary
+    # case costs what it cost before the gate existed.
+    if entries and not context_transfer.has_phase_section(
+        hive_dir, task_id, PROMOTING_ROLE
+    ):
+        logger.info(
+            "task %s merged with no `## %s` section in its card: kept %d inbox entr(y/ies)",
+            task_id, PROMOTING_ROLE, len(entries),
+        )
+        return []
     dropped = []
-    for entry in read_inbox(hive_dir):
-        if entry.reviewed or entry.scope != SCOPE_PROJECT:
-            continue
-        if task_id not in (entry.task, entry.carried_by):
-            continue
+    for entry in entries:
         # Made here rather than in `ensure_dirs`: nothing writes into it but
         # this function, and an empty directory beside the two a phase is told
         # to use is one more thing for a phase to wonder about.

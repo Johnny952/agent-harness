@@ -1861,3 +1861,162 @@ once the branch merges are realigned in the same pass.
 blockquote of the old docstring is the record of what the premise said at
 filing time, and an implementation note is a historical record here, not a
 status page.
+
+## ADR 34 — the drop waits for the promoting role's section in the task card, and every unknown keeps the entries
+
+**Status:** accepted (T-014, 2026-10-05). Narrows ADR 33, whose closing
+paragraphs left the second half of [`docs/debt/T-012-D1.md`](debt/T-012-D1.md)
+open and said only that this entry's half had become cheaper to decline.
+Nothing in ADR 33 is reversed: the entry still *moves* to `dropped/` when it
+moves at all, `drop_promoted` keeps the name and the `list[str]` of
+inbox-relative refs that entry froze, and no reader is taught that directory's
+name. Three symbols are added — `context_transfer.has_phase_section`,
+`learnings.droppable` (the filter that was inline in `drop_promoted`) and
+`learnings.PROMOTING_ROLE` — and no config key, flag or verb is.
+
+**Context.** `drop_promoted` takes every unreviewed project-scope inbox entry
+belonging to a task whose branch just merged out of `inbox/`, on the premise
+that the entry is in that project's `docs/learnings/` now. ADR 33 established
+where the premise holds — the automatic call site, which runs after
+`run_phase(ctx, "auditor", final=True, …)` returned — and where it does not:
+`merge-task`, the verb for landing a branch the cycle did not land. What ADR 33
+did *not* do is read whether the auditor ran. T-012's three entries were gone
+before that, unlinked, which is what filed the row in the first place; what ADR
+33 bought is that the next ones are recoverable. What it left is the silence,
+and the silence is what this row has stayed open for.
+
+A gate needs evidence that a *promotion* happened, and the harness records that
+nowhere directly. The entries' destination is `docs/learnings/` on the merged
+branch, inside a project checkout the dispatcher reaches only through
+`docker exec`; `drop_promoted` runs in the dispatcher process with two string
+arguments and touches nothing but `.hive/`. So the question is which local
+record stands in for "the promoting role ran", and that is a choice about
+proxies, not an implementation detail — which is why it is here rather than in
+a comment.
+
+**Decision.** The drop is gated on the task card carrying a section for the
+promoting role, and every unknown resolves towards keeping the entries. Six
+things make that up, and they are separate arguments.
+
+*The evidence is the card's body.* `context_transfer.task_file_path(hive_dir,
+task_id)` — `{hive_dir}/{task_id}.md` — is already in hand at both call sites,
+which pass `cfg.hive_tasks_dir`: the check costs one `open` and no new
+argument. The card is also the one record written by the **dispatcher** rather
+than by the role it describes. `context_transfer.handoff` appends the block
+`dispatcher/handoff.py:body` renders under the label the phase loop builds, and
+`run_phase` returns `None` before building that label when a fatal phase did not
+finish — so a section is there because a phase returned, and a role can neither
+forge one nor forget to write one. It outlives everything else, too: the card
+survives the worktree, the container and the process, and `cleanup-task` does
+not touch it. That is as close to "the auditor finished" as any local file gets.
+
+The heading is matched anchored at the start of a line, with exactly two
+hashes, in the *parsed body* and not in the file's text, and
+`## auditor (round 2)` counts as well as `## auditor`, because
+`run-phase --round` labels a hand-resumed phase that way. A substring search for
+the role's name is not the test: a role writes prose into its `**Detail**`, and
+that prose lands inside a section. Reading the parsed body rather than the text
+is the same guard one level up — a card's frontmatter carries the task
+description, and a description is free to quote the heading it is asking for.
+T-014's own card does exactly that.
+
+*`list_handoff_roles` is not the evidence, although it looks like it.* Its own
+docstring names the gap: a task that predates `save_handoff`, or one no phase
+has finished, has no `handoffs/` directory at all. Those cards still carry their
+`## <role>` sections, so a gate reading the directory would answer "no auditor"
+forever for the oldest tasks in the hive and keep their entries in the inbox for
+good — prompt cost with no end, which is the cost the drop exists to pay off.
+That is a different bug in the same place, not a safer default. (Handoffs
+surviving `cleanup-task` is not the objection; `cleanup-task` leaves the scratch
+directory alone. The tasks that predate the writer are.)
+
+*The gate lives inside `drop_promoted`, not at the `merge-task` call site.*
+There are two callers today, `dispatcher/cli.py`'s `merge-task` arm and
+`dispatcher/dispatcher.py`'s automatic merge, and "do not move an entry unless
+the role that files it ran" is the function's promise about the files it moves
+rather than one caller's good manners. A third caller — Phase 4's action queue
+in [`docs/plans/board.md`](plans/board.md) is the one with a name — would
+otherwise have to remember a rule it cannot see. It costs the automatic path
+nothing: there the gate is a no-op by construction, because the only line that
+reaches the drop is after the auditor returned, and that returning phase is
+what appended the section. That is a claim about control flow, so
+`tests/dispatcher/test_dispatcher.py` drives the automatic path end to end and
+asserts the entries still move — a later refactor that reorders those lines
+fails a test instead of surviving a comment.
+
+*There is no way to force the drop past the gate.* A flag for that is a switch
+for losing the entries again, which is the whole content of this row, and
+nothing needs it: when the gate fires, the entries simply stay in the inbox,
+where the next task sees them and where the table a phase is handed is already
+capped at `MAX_ROWS`. The operator who really has to clear one already has a
+narrower instrument than a flag — `dispatch learnings --drop <ref>` acts on one
+ref at a time, with the entry in front of them, and means "this entry was
+wrong".
+
+*The drop and the message read one selector.* ADR 33 froze the return value, so
+a gated call returns `[]` and `[]` cannot say what stayed. The filter that was
+inline in `drop_promoted` — unreviewed, `scope == SCOPE_PROJECT`, and `task_id`
+in `(entry.task, entry.carried_by)` — becomes `learnings.droppable(hive_dir,
+task_id)`, which both the drop and `merge-task`'s message call. One selector
+means the count printed can never disagree with the count that would have
+moved, and a later task that changes which entries the drop claims gets the
+message moved with it for free. `merge-task` prints how many entries stayed,
+that they stayed in `inbox/`, and that no section for the promoting role was
+found in the card it names — the same shape as ADR 33's line, which prints the
+destination and not only the count — and it exits zero. A hand-landed
+`merge-task` on a cycle that never reached an auditor is the normal recovery
+path, not an operator error: it refuses nothing and loses nothing.
+
+*Every unknown keeps the entries.* A card that is missing, or that will not
+parse, is not evidence that a phase ran, so `has_phase_section` answers `False`
+for both and the entries stay. It swallows all five of
+`(OSError, TypeError, ValueError, KeyError, yaml.YAMLError)` — the tuple
+[`a-never-500-read-wraps-the-use-not-the-parse`](learnings/a-never-500-read-wraps-the-use-not-the-parse.md)
+names, because `read_task_file` raises every one of them — rather than widening
+at the caller, which is where that learning puts a warning. `TypeError` is the
+one worth naming: frontmatter that *scans* but is not a mapping subscripts a
+`str` or a `list` at `fm["task_id"]`, and a hand-edited card is the normal state
+of the cycles `merge-task` runs on, so dropping it from the tuple would crash
+the merge on exactly the cards this gate exists for. This is the case it
+excepts: the predicate's `False` already *means* "no evidence", the one caller's
+`True` branch moves files, and a reader that raises here would turn a damaged
+card into a crashed `merge-task`. It stays silent because
+`dispatcher/context_transfer.py` has no logger, and the keep is logged by
+`drop_promoted`, which has one.
+
+**Consequences.** **The residual is accepted here, and not filed as a row.** The
+proxy answers the whole-cycle case, which is the one that has fired. It does not
+answer an auditor that ran, left its section, and ran out of turns before filing
+every entry: that cycle still drops, and the entries still go to `dropped/`
+rather than away. [`docs/debt/T-012-D1.md`](debt/T-012-D1.md) names the exact
+test — check each ref against the merged tree — and that is a second
+`docker exec` into the project checkout per merge, on every merge, to catch a
+case no run has yet produced. The cost is refused on the merits rather than
+deferred for capacity, which is why this paragraph is its home and a row in
+[`docs/debt/README.md`](debt/README.md) is not: a row is a condition a later
+task checks against its own work, and a row nobody intends to take reads as
+pending work for ever. What a later task needs here is the argument, and an ADR
+is where an argument lives. If the case does fire, this paragraph is the thing
+to supersede, and the ref list the merge printed is the evidence that it did.
+
+The `T-012-D1` row closes with this entry, and the entry file's `**Status:**`
+line is the one line of it that changes — from open to resolved by this task,
+naming ADR 33 and this ADR. The rest of
+[`docs/debt/T-012-D1.md`](debt/T-012-D1.md) is left exactly as it stands, for
+the reason ADR 33 gives: its blockquote of the old docstring is the record of
+what the premise said at filing time, and an implementation note is a
+historical record, not a status page. Its *Fix* section goes on describing two
+halves and a proxy, which is what it was.
+
+The two passages in `README.md` that ADR 33 realigned — the learnings bullet in
+the components list, and *The dispatcher moves the entries with no model in the
+loop* — are realigned again, to say the drop waits for the evidence. Neither
+names `dropped/` as somewhere anyone looks, and nothing in any role's prompt
+does either: ADR 33's move is free only because no reader walks that directory,
+and a reader there would put the prompt cost back.
+
+`dispatcher/learnings.py` names the promoting role once, as
+`PROMOTING_ROLE = "auditor"`, and the gate and the printed message both read it.
+The `role == "auditor"` branch in `duties` is left alone: it answers which role
+gets the filing fragment, selecting on the role name the dispatcher passed in,
+and a module constant about what counts as evidence is not what it is asking.

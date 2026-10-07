@@ -43,6 +43,25 @@ def _entry(
     return path
 
 
+def _card(hive: Path, task_id: str, *, body: str = "## auditor\n\nFiled.\n") -> Path:
+    """The task card, which is where the drop looks for its evidence.
+
+    A `## <role>` section is the dispatcher's own record that the role's phase
+    returned, and `drop_promoted` moves nothing without the promoting role's
+    (`docs/decisions.md` ADR 34). The frontmatter is the two keys
+    `read_task_file` insists on and nothing else.
+    """
+    hive.mkdir(parents=True, exist_ok=True)
+    path = hive / f"{task_id}.md"
+    path.write_text(
+        "---\n"
+        + yaml.safe_dump({"task_id": task_id, "status": "done"}, sort_keys=False)
+        + "---\n\n"
+        + body
+    )
+    return path
+
+
 def _meta(path: Path) -> dict:
     return yaml.safe_load(path.read_text().split("---")[1])
 
@@ -184,8 +203,10 @@ def test_drop_promoted_moves_only_what_the_merged_branch_filed(tmp_path: Path) -
     It moves to `dropped/` rather than being unlinked — no reader walks that
     directory, so the prompt cost is gone and the file is still there for a
     `merge-task` whose cycle never reached an auditor. Everyone else's entries
-    are untouched, because their branch has not landed."""
+    are untouched, because their branch has not landed. The card's `## auditor`
+    section is what admits the drop at all."""
     hive = tmp_path / "hive"
+    _card(hive, "task-9")
     written = _entry(hive, "written.md", task="task-9")
     carried = _entry(hive, "carried.md", task="task-1", carried_by="task-9")
     shared = _entry(hive, "shared.md", task="task-9", scope=learnings.SCOPE_HARNESS)
@@ -212,8 +233,11 @@ def test_drop_promoted_moves_only_what_the_merged_branch_filed(tmp_path: Path) -
 def test_drop_promoted_does_not_overwrite_an_earlier_dropped_entry(tmp_path: Path) -> None:
     """Two tasks may file the same filename. The second one landing has to
     stand beside the first, not on top of it — an overwrite here is the
-    permanent loss `dropped/` exists to stop."""
+    permanent loss `dropped/` exists to stop. Both cards carry the auditor's
+    section, which is what admits either drop."""
     hive = tmp_path / "hive"
+    _card(hive, "task-9")
+    _card(hive, "task-2")
     _entry(hive, "trap.md", task="task-9", symptom="the first one")
     learnings.drop_promoted(str(hive), "task-9")
     _entry(hive, "trap.md", task="task-2", symptom="the second one")
@@ -224,6 +248,125 @@ def test_drop_promoted_does_not_overwrite_an_earlier_dropped_entry(tmp_path: Pat
     assert sorted(path.name for path in kept.iterdir()) == ["trap-2.md", "trap.md"]
     assert "the first one" in (kept / "trap.md").read_text()
     assert "the second one" in (kept / "trap-2.md").read_text()
+
+
+def test_drop_promoted_keeps_what_a_cycle_without_an_auditor_filed(tmp_path: Path) -> None:
+    """The case that fired on T-012: a branch landed by hand is one the cycle
+    did not land, so its auditor may never have run and nothing was promoted
+    into the project's docs. With no `## auditor` section in the card there is
+    no evidence of a promotion, so nothing moves — not even into `dropped/`,
+    which is not created at all — and the entries stay where the next task
+    reading the inbox still sees them."""
+    hive = tmp_path / "hive"
+    _card(hive, "task-9", body="## implementador\n\nBuilt it.\n\n## revisor\n\nApproved.\n")
+    written = _entry(hive, "written.md", task="task-9")
+    carried = _entry(hive, "carried.md", task="task-1", carried_by="task-9")
+
+    assert learnings.drop_promoted(str(hive), "task-9") == []
+
+    assert written.exists()
+    assert carried.exists()
+    assert not Path(learnings.dropped_dir(str(hive))).exists()
+    assert [entry.ref for entry in learnings.read_all(str(hive))] == [
+        "inbox/carried.md", "inbox/written.md",
+    ]
+
+
+def test_drop_promoted_accepts_the_round_label_a_hand_resumed_auditor_leaves(
+    tmp_path: Path,
+) -> None:
+    """`run-phase --round` labels the section `auditor (round 2)`, because the
+    phase loop builds `f"{role} (round {round_num})"` whenever a round number
+    is in play. That is the same evidence under a different label, and a
+    hand-resumed cycle is exactly the one being landed by hand."""
+    hive = tmp_path / "hive"
+    _card(hive, "task-9", body="## auditor (round 2)\n\nFiled on the second pass.\n")
+    _entry(hive, "written.md", task="task-9")
+
+    assert learnings.drop_promoted(str(hive), "task-9") == ["inbox/written.md"]
+
+
+def test_drop_promoted_keeps_the_entries_when_the_card_cannot_be_read(tmp_path: Path) -> None:
+    """A card that is missing and a card that will not parse are both absence
+    of evidence, not evidence of absence, and every unknown here resolves
+    towards keeping the entries (ADR 34). None of them raises: a damaged card
+    must not turn a `merge-task` into a crash, and a hand-edited card is the
+    normal state of the cycles `merge-task` is used on.
+
+    The shapes here are four of the five `read_task_file` raises on: no file at
+    all (`OSError`), no `---` delimiter to split on (`ValueError`), frontmatter
+    that scans into something that is not a mapping (`TypeError`, twice — a
+    scalar and a sequence), and frontmatter that does not scan
+    (`yaml.YAMLError`). The fifth, a mapping missing `task_id` (`KeyError`), is
+    in `tests/dispatcher/test_context_transfer.py` with the reader's own cases.
+    The non-mapping pair is the one
+    `docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md` names and
+    the one a four-exception tuple lets through as a crashed `merge-task`.
+    """
+    hive = tmp_path / "hive"
+    missing = _entry(hive, "missing-card.md", task="task-9")
+
+    assert learnings.drop_promoted(str(hive), "task-9") == []
+    assert missing.exists()
+
+    hive.mkdir(parents=True, exist_ok=True)
+    card = hive / "task-9.md"
+    for frontmatter in (
+        # No delimiter to split on at all.
+        None,
+        # Scans, but `fm["task_id"]` subscripts a `str` and then a `list`.
+        "TODO write this up",
+        "- one bullet\n- another",
+        # Does not scan.
+        "status: [unclosed",
+    ):
+        if frontmatter is None:
+            card.write_text("## auditor\n\nno frontmatter anywhere\n")
+        else:
+            card.write_text(f"---\n{frontmatter}\n---\n\n## auditor\n\nFiled.\n")
+
+        assert learnings.drop_promoted(str(hive), "task-9") == []
+        assert missing.exists()
+        assert not Path(learnings.dropped_dir(str(hive))).exists()
+
+
+def test_drop_promoted_reads_the_heading_and_not_the_role_name(tmp_path: Path) -> None:
+    """The test is the section, not the word. A role writes prose into its
+    `**Detail**` and that prose lands inside somebody's section, so a substring
+    search for `auditor` would read a sentence saying the auditor never ran as
+    proof that it did."""
+    hive = tmp_path / "hive"
+    _card(
+        hive,
+        "task-9",
+        body=(
+            "## implementador\n\n"
+            "**Risks**\n- the auditor never ran, so nothing was filed\n\n"
+            "### auditor\n\nnot a phase section: three hashes, and nobody renders this\n"
+        ),
+    )
+    written = _entry(hive, "written.md", task="task-9")
+
+    assert learnings.drop_promoted(str(hive), "task-9") == []
+    assert written.exists()
+
+
+def test_droppable_is_exactly_what_the_drop_moves(tmp_path: Path) -> None:
+    """One selector behind both, so the count `merge-task` says it kept can
+    never disagree with the count it would have moved. Asserted against a card
+    that admits the drop, which is the only state in which the two lists can be
+    compared at all."""
+    hive = tmp_path / "hive"
+    _card(hive, "task-9")
+    _entry(hive, "written.md", task="task-9")
+    _entry(hive, "carried.md", task="task-1", carried_by="task-9")
+    _entry(hive, "shared.md", task="task-9", scope=learnings.SCOPE_HARNESS)
+    _entry(hive, "theirs.md", task="task-2")
+
+    selected = [entry.ref for entry in learnings.droppable(str(hive), "task-9")]
+
+    assert sorted(selected) == sorted(learnings.drop_promoted(str(hive), "task-9"))
+    assert sorted(selected) == ["inbox/carried.md", "inbox/written.md"]
 
 
 def test_mark_orphaned_releases_the_carrier_and_leaves_a_breadcrumb(tmp_path: Path) -> None:

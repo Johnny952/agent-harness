@@ -2,6 +2,7 @@ import datetime as dt
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -2842,6 +2843,34 @@ def test_run_task_cycle_merges_a_done_task_when_asked_to(tmp_path, monkeypatch, 
 
     assert (_ISSUE_ID, "done") in kanban.statuses
     assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+
+
+def test_run_task_cycle_still_drops_the_entries_its_auditor_filed(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The gate in `drop_promoted` is a no-op on the automatic path, and that is
+    a claim about control flow rather than about either function: the only line
+    that reaches the drop runs after `run_phase(ctx, "auditor", final=True, …)`
+    returned, and that returning phase is what appended the `## auditor` section
+    the gate reads. Pinned here rather than argued in a comment, so that a
+    refactor reordering those lines fails a test (`docs/decisions.md` ADR 34)."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    inbox = Path(learnings.ensure_dirs(cfg.hive_tasks_dir)) / learnings.INBOX_NAME
+    filed = inbox / "task-1-trap.md"
+    filed.write_text(
+        "---\n"
+        f"project: myproj\ntask: task-1\nphase: implementador\n"
+        f"scope: {learnings.SCOPE_PROJECT}\nstatus: {learnings.UNCONFIRMED}\n"
+        "when: the suite talks to a database\n"
+        "---\n\n## Rule\n\nStart postgres before the suite.\n"
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert "## auditor" in read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).body
+    assert not filed.exists()
+    assert (Path(learnings.dropped_dir(cfg.hive_tasks_dir)) / "task-1-trap.md").exists()
 
 
 def test_run_task_cycle_does_not_merge_a_blocked_task(tmp_path, monkeypatch, fake_git) -> None:
