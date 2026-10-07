@@ -414,6 +414,11 @@ _POINTER_LIMIT = 400
 _POINTER_REPORT_LIMIT = 8
 _HAS_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 _LS_MISSING = re.compile(r"^ls: (?:cannot access )?'?(.+?)'?: No such file")
+#: The same pattern again, for the lines a task added to a record: those are
+#: read out of a diff instead of off disk, and the two sides must agree on
+#: what a citation looks like, or a doc's pointers would depend on which of
+#: them happened to see it.
+_POINTER_RE = re.compile(_POINTER_PATTERN)
 
 
 def pointer_token(raw: str) -> str | None:
@@ -483,26 +488,157 @@ def _missing(container: str, workdir: str, paths: list[str]) -> set[str]:
     return missing
 
 
-def _broken_pointers(container: str, workdir: str) -> list[Finding]:
+def _added_lines(
+    container: str, workdir: str, base: str,
+) -> dict[str, list[str]]:
+    """What this task added under `docs/`, by doc.
+
+    A record is only answerable for its new lines, so the gate reads those out
+    of the diff rather than off disk. `--unified=0` because a context line
+    belongs to whoever wrote it, not to whoever edited nearby.
+    """
     proc = docker_exec.run_docker_exec(
         container, workdir,
-        ["grep", "-r", "-o", "-E", _POINTER_PATTERN, project_docs.DOCS_DIR],
+        ["git", "diff", "--unified=0", "--no-color", base, "--",
+         project_docs.DOCS_DIR],
         env=_C_LOCALE,
     )
     if proc.returncode != 0:
-        # 1 is "nothing matched", 2 is "there is no docs/". Neither is a
-        # finding: a project without docs is the mapper's problem, not this
-        # gate's.
-        return []
+        logger.warning(
+            "gates: git diff of the docs failed: %s",
+            proc.stderr.strip()[:200],
+        )
+        return {}
 
-    cited: dict[str, list[str]] = {}
+    added: dict[str, list[str]] = {}
+    doc: str | None = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("+++ "):
+            # `b/<path>` is the doc as it now stands; /dev/null is a deletion,
+            # and a deleted doc cites nothing.
+            target = line[4:].strip()
+            doc = target[2:] if target.startswith("b/") else None
+            continue
+        if doc and line.startswith("+"):
+            added.setdefault(doc, []).append(line[1:])
+    return added
+
+
+def _cited(
+    container: str, workdir: str, docs: list[str],
+) -> list[tuple[str, str]]:
+    """Every citation in these docs, as (doc, raw) pairs.
+
+    A file list rather than `-r docs/`: which docs are in scope is this gate's
+    ruling, not the directory's. `-H` because grep leaves the filename out when
+    it is handed exactly one file, and a pair needs both halves. The returncode
+    is not consulted — 1 is "nothing matched" and 2 is "one of these is not
+    there", and a project that never wrote `docs/business.md` is not a finding,
+    so what matters is only what grep did print.
+    """
+    if not docs:
+        return []
+    proc = docker_exec.run_docker_exec(
+        container, workdir,
+        ["grep", "-r", "-H", "-o", "-E", _POINTER_PATTERN, *docs],
+        env=_C_LOCALE,
+    )
+    pairs = []
     for line in proc.stdout.splitlines():
         doc, _, raw = line.partition(":")
-        token = pointer_token(raw) if doc and raw else None
+        if doc and raw:
+            pairs.append((doc, raw))
+    return pairs
+
+
+def _in_a_subproject(
+    container: str, workdir: str, tokens: set[str],
+) -> set[str]:
+    """Which of these land inside a project that has its own root.
+
+    `front/` is a project of its own — the charter says the console is that
+    directory — and docs about it cite its files the way its own source
+    imports them: `mock/fixtures.ts`, not `front/src/lib/api/mock/fixtures.ts`.
+    So a token that is the tail of a tracked path, on a path boundary, is a
+    citation that lands somewhere. What nothing tracks under any root is still
+    broken, and a tracked path that was deleted is still reported, because
+    `ls` already said it is not there.
+    """
+    proc = docker_exec.run_docker_exec(
+        container, workdir, ["git", "ls-files", "--cached"], env=_C_LOCALE,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "gates: git ls-files --cached failed: %s",
+            proc.stderr.strip()[:200],
+        )
+        return set()
+    tracked = [line.strip() for line in proc.stdout.splitlines()]
+    return {
+        token for token in tokens
+        if any(path.endswith(f"/{token}") for path in tracked)
+    }
+
+
+def _ignored(container: str, workdir: str, tokens: list[str]) -> set[str]:
+    """Which of these the project deliberately does not keep.
+
+    A doc that cites `docker/compose/.env`, a build output or a local data
+    directory is citing something its reader is expected to make, not something
+    this branch deleted. The ignore rules are the one place that intent is
+    written down, so they are what gets asked.
+    """
+    ignored: set[str] = set()
+    for start in range(0, len(tokens), _POINTER_CHUNK):
+        chunk = tokens[start:start + _POINTER_CHUNK]
+        proc = docker_exec.run_docker_exec(
+            container, workdir,
+            ["git", "check-ignore", "--", *chunk], env=_C_LOCALE,
+        )
+        # 0 is "these ones are", 1 is "none of them are", anything else is git
+        # declining to answer — and an excuse nobody answered just leaves the
+        # finding standing.
+        if proc.returncode != 0:
+            continue
+        ignored.update(
+            line.strip() for line in proc.stdout.splitlines() if line.strip()
+        )
+    return ignored
+
+
+def _broken_pointers(
+    container: str, workdir: str, base: str | None, changed: list[str],
+) -> list[Finding]:
+    added = _added_lines(container, workdir, base) if base else {}
+    # A record this task changed that the diff never saw is a record this task
+    # created: a phase cannot commit, so a brand new note is untracked, and
+    # every line of it is this task's own claim. That is the break this gate
+    # has actually caught — an implementation note citing a file the branch
+    # never created (`docs/ROADMAP.md`, the V0.4 walk).
+    fresh = [
+        path for path in changed
+        if project_docs.is_record(path) and path not in added
+    ]
+    raw_pairs = _cited(
+        container, workdir, [*project_docs.PRESENT_DOCS, *fresh],
+    )
+    for doc, lines in added.items():
+        if not project_docs.is_record(doc):
+            continue
+        for line in lines:
+            raw_pairs += [(doc, raw) for raw in _POINTER_RE.findall(line)]
+
+    cited: dict[str, list[str]] = {}
+    for doc, raw in raw_pairs:
+        token = pointer_token(raw)
         if token is None:
             continue
         cited.setdefault(f"{doc}\t{token}", _candidates(doc, token))
         if len(cited) >= _POINTER_LIMIT:
+            logger.info(
+                "gates: stopped after %d citations, the rest went unchecked",
+                _POINTER_LIMIT,
+            )
             break
 
     candidates = sorted({path for paths in cited.values() for path in paths})
@@ -514,6 +650,14 @@ def _broken_pointers(container: str, workdir: str) -> list[Finding]:
         key.split("\t") for key, paths in cited.items()
         if paths and all(path in missing for path in paths)
     ]
+    if broken:
+        # Only now, and only about what already looks broken: a docs tree with
+        # nothing wrong in it pays for none of this.
+        tokens = {token for _, token in broken}
+        excused = _in_a_subproject(container, workdir, tokens) | _ignored(
+            container, workdir, sorted(tokens),
+        )
+        broken = [pair for pair in broken if pair[1] not in excused]
     if not broken:
         return []
     shown = [f"`{doc}` points at `{token}`" for doc, token in broken[:_POINTER_REPORT_LIMIT]]
@@ -541,6 +685,7 @@ def run(
     findings: list[Finding] = []
 
     base = _fork_point(container, workdir, project_dir)
+    changed: list[str] = []
     if base is None:
         logger.info("gates: no fork point for this worktree, skipping the diff gates")
     else:
@@ -549,8 +694,9 @@ def run(
         findings += _contracts_without_docs(changed)
 
     findings += _run_tests(container, workdir, project_dir, test_timeout_seconds, test_log_path)
-    # Every doc, not only the ones this task touched: the pointer that breaks
-    # is usually in a file nobody opened, because what moved was the thing it
-    # pointed at.
-    findings += _broken_pointers(container, workdir)
+    # The docs that claim the present, whether this task opened them or not —
+    # the pointer that breaks is usually in a file nobody opened, because what
+    # moved was the thing it pointed at — plus the lines this task just added
+    # to a record, which are the only lines of a record anyone can still fix.
+    findings += _broken_pointers(container, workdir, base, changed)
     return Report(findings)

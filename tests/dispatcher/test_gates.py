@@ -29,6 +29,9 @@ class _Worktree:
         timeout: bool = False,
         pointers: tuple[str, ...] = (),
         present: tuple[str, ...] = (),
+        added: dict[str, tuple[str, ...]] | None = None,
+        tracked: tuple[str, ...] = (),
+        ignored: tuple[str, ...] = (),
     ) -> None:
         self.branch = branch
         self.merge_base = merge_base
@@ -39,6 +42,9 @@ class _Worktree:
         self.timeout = timeout
         self.pointers = pointers
         self.present = set(present)
+        self.added = added or {}
+        self.tracked = tracked
+        self.ignored = set(ignored)
         self.commands: list[list[str]] = []
         self.envs: list[dict[str, str] | None] = []
 
@@ -48,6 +54,24 @@ class _Worktree:
             gates.docker_exec, "current_branch", lambda container, project_dir: self.branch
         )
         return self
+
+    def added_lines(self) -> str:
+        """`git diff --unified=0` as git writes it, for the docs in `added`.
+
+        The headers matter as much as the `+` lines: the gate reads the path
+        off `+++ b/<path>`, so a fake that only listed the lines would let a
+        bug through that attributed every citation to the wrong doc.
+        """
+        out: list[str] = []
+        for path, lines in self.added.items():
+            out += [
+                f"diff --git a/{path} b/{path}\n",
+                f"--- a/{path}\n",
+                f"+++ b/{path}\n",
+                f"@@ -0,0 +{len(lines)} @@\n",
+            ]
+            out += [f"+{line}\n" for line in lines]
+        return "".join(out)
 
     def ran(self, prefix: list[str]) -> bool:
         return any(command[: len(prefix)] == prefix for command in self.commands)
@@ -61,9 +85,23 @@ class _Worktree:
                 return _done(command, 1, stderr="fatal: Not a valid object name\n")
             return _done(command, stdout=f"{self.merge_base}\n")
         if command[:2] == ["git", "diff"]:
+            # Two different questions wear the same verb: which paths the
+            # branch touched, and which lines it added to the docs.
+            if "--unified=0" in command:
+                return _done(command, stdout=self.added_lines())
             return _done(command, stdout="".join(f"{p}\n" for p in self.diff))
         if command[:2] == ["git", "ls-files"]:
-            return _done(command, stdout="".join(f"{p}\n" for p in self.untracked))
+            # And so does this one: `--others` is what the branch has not
+            # committed yet, `--cached` is what the repo already keeps.
+            listed = self.tracked if "--cached" in command else self.untracked
+            return _done(command, stdout="".join(f"{p}\n" for p in listed))
+        if command[:3] == ["git", "check-ignore", "--"]:
+            named = [p for p in command[3:] if p in self.ignored]
+            return _done(
+                command,
+                0 if named else 1,
+                stdout="".join(f"{p}\n" for p in named),
+            )
         if command == ["cat", project_docs.INDEX]:
             return _done(command, stdout=self.index)
         if command[:2] == ["sh", "-c"]:
@@ -567,3 +605,130 @@ def test_a_project_with_no_docs_is_not_this_gates_problem(monkeypatch) -> None:
     worktree = _Worktree(pointers=()).install(monkeypatch)
 
     assert _run(worktree).findings == []
+
+
+def _scope(worktree: _Worktree) -> list[str]:
+    """The docs the gate actually handed grep.
+
+    Which docs are in scope is the whole of this gate's ruling, and the fake
+    answers grep the same way whatever it is asked, so the command itself is
+    the only place the ruling shows.
+    """
+    greps = [c for c in worktree.commands if c[0] == "grep"]
+    assert len(greps) == 1, greps
+    return greps[0][6:]
+
+
+def test_a_record_is_read_for_the_lines_this_task_added_not_the_ones_it_kept(
+    monkeypatch,
+) -> None:
+    """`docs/decisions.md` is append-only and `docs/charter.md` is a claim about
+    the tree as it stands. The first goes stale by design, so only its new lines
+    are anybody's to answer for; the second is read whole, every task."""
+    worktree = _Worktree(
+        diff=("docs/decisions.md",),
+        added={"docs/decisions.md": ("No citation in this one.",)},
+    ).install(monkeypatch)
+
+    _run(worktree)
+    scope = _scope(worktree)
+
+    assert project_docs.CHARTER in scope
+    assert project_docs.DEBT_DIR in scope
+    assert project_docs.DECISIONS not in scope
+
+
+def test_a_citation_a_task_added_to_a_record_is_checked(monkeypatch) -> None:
+    """The line is read out of the diff rather than off disk, which is the point:
+    the task that wrote it is the one that can still fix it."""
+    worktree = _Worktree(
+        diff=("docs/decisions.md",),
+        added={"docs/decisions.md": ("The rule lives in `dispatcher/nope.py`.",)},
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "`docs/decisions.md` points at `dispatcher/nope.py`" in finding.detail
+
+
+def test_a_record_this_task_wrote_from_scratch_is_read_whole(monkeypatch) -> None:
+    """A phase cannot commit, so a brand new implementation note is untracked and
+    the diff never sees it — and every line in it is this task's own claim. This
+    is the break the gate has caught for real: a note citing a file the branch
+    never created."""
+    worktree = _Worktree(
+        untracked=("docs/implementations/T-020.md",),
+        pointers=("docs/implementations/T-020.md:`dispatcher/nope.py`",),
+    ).install(monkeypatch)
+
+    report = _run(worktree)
+    finding, = _findings(report, gates.POINTERS)
+
+    assert "docs/implementations/T-020.md" in _scope(worktree)
+    assert "`dispatcher/nope.py`" in finding.detail
+
+
+def test_a_doc_the_layout_does_not_name_is_not_this_gates_business(monkeypatch) -> None:
+    """`docs/ROADMAP.md` is this project's own file, not a doc the dispatcher
+    told any role to write, and the layout in `project_docs` is the whole
+    contract. Neither its old lines nor its new ones are read."""
+    worktree = _Worktree(
+        diff=("docs/ROADMAP.md",),
+        added={"docs/ROADMAP.md": ("Still citing `docs/gone.md` from 2019.",)},
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.POINTERS) == []
+    assert "docs/ROADMAP.md" not in _scope(worktree)
+
+
+def test_a_citation_that_lands_inside_a_subproject_is_not_broken(monkeypatch) -> None:
+    """`front/` is a project of its own, and docs about it cite its files the way
+    its own source imports them. A token that is the tail of a tracked path, on a
+    path boundary, lands somewhere."""
+    worktree = _Worktree(
+        pointers=("docs/architecture.md:`mock/fixtures.ts`",),
+        tracked=("front/src/lib/api/mock/fixtures.ts", "dispatcher/gates.py"),
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.POINTERS) == []
+
+
+def test_a_path_the_project_does_not_keep_is_not_a_broken_pointer(monkeypatch) -> None:
+    """A doc citing `docker/compose/.env` is citing something its reader is meant
+    to make, not something this branch deleted, and the ignore rules are the one
+    place that intent is written down."""
+    worktree = _Worktree(
+        pointers=("docs/README.md:`docker/compose/.env`",),
+        ignored=("docker/compose/.env",),
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.POINTERS) == []
+
+
+def test_a_tracked_path_that_was_deleted_is_still_reported(monkeypatch) -> None:
+    """The subproject excuse reads `git ls-files`, so a path the index still
+    carries would answer to it — but `ls` already said the file is not there, and
+    the deletion is exactly what this gate is for."""
+    worktree = _Worktree(
+        pointers=("docs/README.md:`docs/architecture.md`",),
+        tracked=("docs/architecture.md",),
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "`docs/README.md` points at `docs/architecture.md`" in finding.detail
+
+
+def test_without_a_fork_point_the_present_tense_docs_are_still_read(monkeypatch) -> None:
+    """The diff gates need a base and this one does not: a pointer that breaks is
+    usually in a file nobody opened, because what moved was the thing it pointed
+    at. Only the record half of the gate goes quiet."""
+    worktree = _Worktree(
+        merge_base=None, pointers=("docs/README.md:`docs/architecture.md`",),
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "`docs/architecture.md`" in finding.detail
+    assert _scope(worktree) == list(project_docs.PRESENT_DOCS)
+    assert not worktree.ran(["git", "diff"])

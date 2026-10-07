@@ -2020,3 +2020,122 @@ and a reader there would put the prompt cost back.
 The `role == "auditor"` branch in `duties` is left alone: it answers which role
 gets the filing fragment, selecting on the role name the dispatcher passed in,
 and a module constant about what counts as evidence is not what it is asking.
+
+## ADR 35 — the pointers gate reads the docs that claim the present, plus the lines a task added to a record
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-07).
+
+**Context.** Gate 4 landed by hand in `bc07f4e` (2026-09-23) with one rule:
+every backticked path and every link under `docs/`, resolved from the repo root
+and from beside the file citing it. The scope was the whole tree on purpose,
+because the break it was built for is a pointer in a file nobody opened — what
+moved was the thing the sentence pointed at, not the sentence.
+
+Measured against this repo before the change: 690 unique (doc, token) citations,
+and 41 of them broken over 24 distinct tokens. Three things are wrong with that
+number, and they compound.
+
+It stops at `_POINTER_LIMIT = 400` and says nothing, so 290 of the 690 were
+never checked and *which* 290 depended on the order `grep -r` happened to walk
+the tree. A gate whose coverage is decided by directory order is not a gate.
+
+It reads a record as if it were a claim about the present. `docs/decisions.md`
+is append-only, an implementation note describes a branch that already landed, a
+learning names the file it was learned in — and this project's own ruling for a
+record that disagrees with the tree is to leave the sentence alone and write the
+disagreement somewhere newer
+(`docs/learnings/a-plans-present-tense-claim-is-a-citation.md`, *What to do*).
+So the gate was asking every task to answer for sentences no task is allowed to
+edit. 15 of the 41 are exactly that.
+
+It has no notion of a subproject root, or of a path this project deliberately
+does not keep. `docs/charter.md` C-8 puts the console in `front/`, and a doc
+about the console cites its files the way its own source imports them — from
+`front/`, not from the repo root. Both of the 41 that landed in a doc about the
+present are `.lovable/project.json`, tracked here as
+`front/.lovable/project.json`.
+
+And 24 of the 41 are in docs the layout never named at all — `docs/ROADMAP.md`,
+`docs/plans/`, `docs/superpowers/` — where a gate between the implementador and
+the revisor is spending the project's turns on files no role was told to write.
+
+**Decision.**
+
+*The layout decides the scope, and the layout is `dispatcher/project_docs.py`.*
+Two tuples, each with the reason for the split in its own comment:
+`PRESENT_DOCS` — the index, the charter, the architecture, the business, the
+learnings index, the debt directory — is read whole, every task, whether the
+task opened it or not. `RECORD_DOCS` — `docs/decisions.md`, the implementation
+notes, the learnings themselves — is read only for the lines the task added.
+`is_record(path)` answers which, and `PRESENT_DOCS` wins the overlap, because
+`docs/learnings/README.md` sits inside the learnings directory and is the one
+file in there about the present. A path under `docs/` that neither group names
+is out of scope: not a claim that its citations are fine, a statement that no
+role was told to write it and nobody owes an answer for it either way.
+
+*A record's new lines come out of the diff, not off the disk.*
+`_broken_pointers` takes the base it already had for the other gates and runs
+`git diff --unified=0 --no-color <base> -- docs`, tracking the file off
+`+++ b/<path>` and keeping every `+` line. The same `_POINTER_PATTERN` the grep
+uses is compiled host-side as `_POINTER_RE` and run over those lines, so what
+counts as a citation cannot depend on which of the two saw it. A diff that
+fails to run logs a warning and yields nothing, which costs the record half of
+the gate and leaves the present half intact.
+
+*A record this task changed that the diff never saw is one this task created.*
+A phase cannot commit, so a brand new implementation note is untracked and no
+diff against the base mentions it — and every line in it is this task's own
+claim. Those files join the grep's file list and are read whole. That is the
+case the gate has actually caught in this repo: the V0.4 walk, an implementation
+note citing a file its branch never created.
+
+*Two excuses, consulted only about a token that already looks broken.* After
+`ls` has answered, and only for the tokens it said were missing,
+`_in_a_subproject` asks `git ls-files --cached` for a tracked path ending in
+`/<token>`, and `_ignored` asks `git check-ignore` in batches of 100. A docs
+tree with nothing wrong in it pays for neither. A tracked path that was deleted
+is still a finding, because `ls` had already answered before either excuse was
+asked — which is the whole point of the ordering.
+
+*Grep is handed a file list, and its exit code is not an answer.* The scope is
+now a list of paths rather than a directory walk, so an optional doc that a
+project never wrote makes `grep` exit 2 with perfectly good matches on stdout.
+The output is parsed regardless of the return code; a missing `docs/business.md`
+is not a broken pointer.
+
+*The limit stays at 400 and now says when it bites.* The new scope watches 151
+unique citations on this tree, so the truncation is not reached, and raising the
+number would only move the silence further out. A tree that does reach it gets
+a log line naming the count and saying the rest went unchecked.
+
+**Consequences.**
+
+On this tree the gate now reports nothing, in 8 container round trips, over
+exactly the six entries `PRESENT_DOCS` names. Before the change it reported 41
+findings, none of which the task in front of it could act on.
+
+**What stops being watched is a row, not a silence.** 11 of the 41 are excused
+by the two new rules; the other 30, across 12 docs, are real stale citations in
+files now out of scope, and they are filed as
+[`T-014-D2`](debt/T-014-D2.md) with the four classes they fall into. The row
+exists because the alternative — widening the scope back to the whole tree — is
+the state this ADR is leaving, and because one of those classes is a gap in the
+new rules themselves: the two excuses do not compose. `front/.gitignore` ignores
+`.output`, so `git ls-files` cannot list the file for the suffix rule and
+`check-ignore` is asked about a root-relative path it does not recognise, and a
+build output cited from inside `front/` is excused by neither.
+
+The gate stays a **note** and does not block, on `bc07f4e`'s own reasoning: a
+citation can be absent on purpose. `docs/ROADMAP.md` cites
+`/root/.claude/settings.json`, and the skills trash directory beside it, as
+paths inside the agent image: not in this filesystem at any depth, and never
+will be. The absolute form is already rejected as a token; the relative one is
+in the row below, named there rather than cited, because a row lives in
+`docs/debt/` and the gate reads that whole, every task.
+
+Eight tests in `tests/dispatcher/test_gates.py`. The fake answers
+`git diff --unified=0`, `git ls-files --cached` and `git check-ignore` as three
+separate commands, and a `_scope()` helper asserts on the grep invocation
+itself, because which docs are in scope *is* the ruling and a fake that answers
+the same whatever it is asked would prove nothing about it. The four pointer
+fixtures that predate this change are untouched and still pass.

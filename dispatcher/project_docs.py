@@ -26,8 +26,8 @@ from dispatcher import docker_exec
 
 logger = logging.getLogger(__name__)
 
-#: Everything below is under here, and the gates scan it whole: one name so
-#: that a project that moves its docs moves them in one place.
+#: Everything below is under here: one name so that a project that moves its
+#: docs moves them in one place.
 DOCS_DIR = "docs"
 #: The index, and what its absence means: a project nobody has mapped yet.
 INDEX = f"{DOCS_DIR}/README.md"
@@ -45,6 +45,49 @@ LEARNINGS_INDEX = f"{LEARNINGS_DIR}/README.md"
 DEBT_DIR = f"{DOCS_DIR}/debt"
 DEBT_INDEX = f"{DEBT_DIR}/README.md"
 IMPLEMENTATIONS_DIR = f"{DOCS_DIR}/implementations"
+
+#: The docs whose sentences are claims about the tree as it is now: an index of
+#: what exists, the rulings in force, the architecture, the business, the debt
+#: still open. A pointer in one of these is broken the moment what it names
+#: moves, and whoever moved it is the one who can fix it — so a gate reads
+#: these whole, every task, whether the task touched them or not.
+PRESENT_DOCS = (
+    INDEX, CHARTER, ARCHITECTURE, BUSINESS, LEARNINGS_INDEX, DEBT_DIR,
+)
+
+#: The docs that record what was true when they were written, and go stale by
+#: design: DECISIONS is appended to and never rewritten, an implementation note
+#: describes a branch that has already landed, a learning names the file it was
+#: learned in. This project's own rule for a record that disagrees with the
+#: tree is to leave the sentence alone and record the disagreement somewhere
+#: newer (`docs/learnings/a-plans-present-tense-claim-is-a-citation.md`), so
+#: the only lines in here anybody owes an answer for are the ones a task has
+#: just added.
+RECORD_DOCS = (DECISIONS, IMPLEMENTATIONS_DIR, LEARNINGS_DIR)
+
+
+def _named_by(path: str, group: tuple[str, ...]) -> bool:
+    """Whether the layout names this path, as a file or inside a directory.
+
+    A constant naming a file can never match the second test, so one loop
+    reads both kinds and no caller has to know which constants are directories.
+    """
+    return any(
+        path == entry or path.startswith(f"{entry}/") for entry in group
+    )
+
+
+def is_record(path: str) -> bool:
+    """Whether this doc is a record rather than a claim about the present.
+
+    PRESENT_DOCS wins where the two overlap: LEARNINGS_INDEX sits inside
+    LEARNINGS_DIR and is the one file in there about the present, its rows
+    saying which learnings exist right now. False is not the opposite claim —
+    a path under DOCS_DIR that neither group names is a doc no role was told
+    to write, and nobody owes anything for it either way.
+    """
+    return not _named_by(path, PRESENT_DOCS) and _named_by(path, RECORD_DOCS)
+
 
 #: The role of the mapping phase: it writes the index a project arrives
 #: without, and never touches the code.
