@@ -5,9 +5,13 @@
 `dispatcher_state/*.json` or a board card — `observability/api/app.py`'s views,
 or anything a later phase adds beside them.
 
-**Status:** unconfirmed — reported by T-009's arquitecto, revisor and
-implementador across four rounds; each case below is pinned by a test in
-`tests/observability/test_api.py`.
+**Status:** confirmed — reported by T-009's arquitecto, revisor and
+implementador across four rounds, each case below pinned by a test in
+`tests/observability/test_api.py`, and hit again by a second, distinct task.
+T-014's revisor caught a new card reader,
+`dispatcher/context_transfer.py:has_phase_section`, shipping the four-member
+tuple this entry says is not exhaustive, and reproduced the
+frontmatter-that-scans `TypeError` against it in a probe.
 
 ## Symptom
 
@@ -81,7 +85,13 @@ would do outside your guard. Narrowing it back to the parse call reopens every
 
 Widen it at the caller whose contract is never-crash, never in the `dispatcher/`
 reader it calls: that reader's narrow catch is load-bearing for the writer
-sharing it — see
+sharing it. One exception is on the record, and it is narrow: a `dispatcher/`
+predicate whose `False` already *means* "no evidence" swallows the five itself,
+because there is no caller to widen at — raising would turn a damaged file into
+a crashed command, and the safe answer is the one the predicate already has.
+`has_phase_section` is that case, argued in
+[`docs/decisions.md`](../decisions.md) ADR 34; a reader that returns *data* is
+not, and stays narrow. See
 [a-lookup-that-never-raises-catches-valueerror](a-lookup-that-never-raises-catches-valueerror.md)
 for the other side of the same seam. What the guard does and does not cover is written down in
 `docs/decisions.md` ADR 5.
@@ -99,3 +109,13 @@ and failed with the `TypeError`s above. Inbox entries:
 `T-009-a-missing-dir-is-empty-but-a-file-where-a-dir-goes-raises.md`.
 `dispatcher/operator.py:_read_task` still catches only `(OSError, ValueError,
 KeyError)`.
+
+The second hit: `python3 -m pytest /data/.hive/tasks/T-014/probe_card_shape_test.py`
+against T-014 round 1 gave three failures, all
+`TypeError: string indices must be integers, not 'str'` out of
+`context_transfer.has_phase_section` and out of `learnings.drop_promoted`
+through it, and passed 3/3 unmodified once round 2 added `TypeError`. Inbox
+entry: `T-014-a-card-reader-must-catch-typeerror-not-just-valueerror.md`.
+`AttributeError` was deliberately left out there: `fm["task_id"]` is evaluated
+before any `fm.get`, so the subscript raises first for every non-mapping PyYAML
+returns — the `.get` clause above is for readers that reach one.
