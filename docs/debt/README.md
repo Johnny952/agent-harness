@@ -79,10 +79,12 @@ ruling were both already made.
 
 `T-014-D1` is `none` for the first reason above, and its cycle is worth a line
 because the row above it is about this exact failure mode. T-014's run ended for
-quota immediately after the revisor's round 2 approved, so the auditor phase was
-resumed by hand and `dispatcher/dispatcher.py:_file_accepted_debt` — which
-assigns the ids and opens the cards before the auditor runs — never ran. The id
-was handed to the resumed phase by the operator, the first free one in T-014's
-sequence, on the `T-010` and `T-012-D1` precedent. Nothing else about it is
-unusual: the implementador declared it `introduced` in round 1, the revisor
-accepted it in round 1 and re-verified it in round 2, and the auditor filed it.
+quota immediately after the revisor's round 2 approved, so its auditor was
+resumed by hand with `run-phase --final` instead of being run by the cycle. That
+path files debt the way the cycle does, off what the earlier phases left on
+disk: `dispatcher/dispatcher.py:_file_accepted_debt` runs before the phase, so
+this id was assigned by the dispatcher and handed to the auditor in a filing
+note — `T-011-D1` and `T-013-D1`'s path, not the hand-derived one the row above
+had to use. Nothing else about it is unusual: the implementador declared it
+`introduced` in round 1, the revisor accepted it in round 1 and re-verified it
+in round 2, and the auditor filed it.
