@@ -1077,31 +1077,31 @@ logins.
      That layer is the whole point: the shared `settings.json` lives in
      `claude_shared` and is symlinked into both accounts' config homes,
      so it counts as *user* settings for both — the two keys are read
-     from user or managed settings only, never from a project's
-     `.claude/settings.json`, and only the literal `false` counts. The
-     README's other candidates were checked and dropped.
-     `CLAUDE_CODE_SYNC_SKILLS` is an enable gate, not a kill switch.
-     Pruning `skills/synced/` at start is undone by the next sync.
-     Dropping `skills` from the entrypoint's shared allowlist only stops
-     each account from seeing the other's set; each container would
-     still pay for its own. The merge is additive (`setdefault`), so
-     `settings.json` doubles as the opt-in — an operator who wants
+     from user or managed settings only, never from a project's own
+     `/data/projects/<name>/.claude/settings.json`, and only the literal
+     `false` counts. The README's other candidates were checked and
+     dropped. `CLAUDE_CODE_SYNC_SKILLS` is an enable gate, not a kill
+     switch. Pruning `skills/synced/` at start is undone by the next
+     sync. Dropping `skills` from the entrypoint's shared allowlist only
+     stops each account from seeing the other's set; each container
+     would still pay for its own. The merge is additive (`setdefault`),
+     so `settings.json` doubles as the opt-in — an operator who wants
      their skills in the containers sets either key to `true` and the
      entrypoint stops arguing, printing a warning per key on each start
      while the sync is on. What the setting does to what was already
      downloaded took reading the compiled CLI: the prune that logs
-     `skills_sync_pruned_for_closed_gate` renames `skills/synced` to
-     `skills/.trash`, where `cleanupPeriodDays` deletes it, and both of
-     its call sites are gated on `skillsSyncVetoed()` — one of them on
-     the MCP-server path, so `claude mcp serve` triggers it locally
-     without spending quota, which is how this was verified. Live in
-     both agents: `skills/synced` down from 8.5M to 20K with zero
-     `SKILL.md` left, 20 of them in `skills/.trash`, and
-     `agent-cuenta2` reading the same two keys off the shared file.
-     Still open: the actual token saving in the system
-     prompt can only be measured by a prompted run, which costs quota
-     — the 13,535 bytes of name and description have no source left to
-     come from. 5 new unit tests, 257 in the suite.
+     `skills_sync_pruned_for_closed_gate` renames `synced` to `.trash`
+     under `/root/.claude/skills`, where `cleanupPeriodDays` deletes it,
+     and both of its call sites are gated on `skillsSyncVetoed()` — one
+     of them on the MCP-server path, so `claude mcp serve` triggers it
+     locally without spending quota, which is how this was verified.
+     Live in both agents: `skills/synced` down from 8.5M to 20K with
+     zero `SKILL.md` left, 20 of them in `/root/.claude/skills/.trash`,
+     and `agent-cuenta2` reading the same two keys off the shared file.
+     Still open: the actual token saving in the system prompt can only
+     be measured by a prompted run, which costs quota — the 13,535 bytes
+     of name and description have no source left to come from. 5 new
+     unit tests, 257 in the suite.
    - **The board's MCP surface was imagined, and its image can't be
      pulled.** Both fixed 2026-09-21 as chosen: make the board optional
      first, then rewrite the client against the surface V2 actually found.
