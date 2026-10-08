@@ -2513,3 +2513,61 @@ import after a clean install blocks, a missing runner is still a note after a
 clean install, a failed install is a note and the suite still runs, a red lint
 is a note, a lint-only index still runs, and the log holds every command that
 failed.
+
+## ADR 40 — the board's `rows` is memoised, and the `useMemo` that reads as redundant is the point
+
+**Status:** accepted (T-015, 2026-10-08). Narrows ADR 39's tally — which counted
+ten lint warnings on `main` and named one of them
+`react-hooks/exhaustive-deps` — and leaves that entry as written.
+
+**Context.** `front/src/routes/index.tsx:BoardPage` read its task rows as
+`const rows = tasks.data?.data ?? []`. The `?? []` is a fresh array identity on
+every render whenever the read has not answered, and `rows` is the first
+dependency of the `filtered` `useMemo` below it, so
+`react-hooks/exhaustive-deps` warned that the logical expression could make that
+memo's dependencies change on every render and asked for the initialization to
+be wrapped in a `useMemo` of its own. It was the one warning on this lint that
+is not `react-refresh/only-export-components`.
+
+The cost is not hypothetical. `useNow()` ticks at 2000 ms, so this screen
+re-renders every two seconds whether anything was read or not, and the filter
+ran on each tick rather than when the query, the search box or the account
+filter changed.
+
+**Decision.** *`rows` is wrapped in its own `useMemo`, keyed on `tasks.data`.*
+
+Not inlined into `filtered`. `rows` has three other readers on the screen — the
+`n of m` count, the empty state, and `unplaced`, whose rows become the per-task
+warnings — and inlining would give each of them its own copy of the default.
+
+The dependency is `tasks.data`, not `tasks.data?.data`, matching `debtByTask`
+immediately above it: that memo reads `debt.data?.data ?? []` against
+`[debt.data]` and draws no warning today, which is this file's own proof that
+the parent path satisfies the rule. React Query holds `data` identical between
+renders, so the memo recomputes when the read answers and not otherwise.
+
+A later reader will see `useMemo(() => tasks.data?.data ?? [], [tasks.data])`
+and take it for ceremony around a default — the one plausible way this gets
+undone without anyone meaning to undo a decision. It is not ceremony: the memo
+exists for the array's *identity*, not for the cost of `??`, and deleting it
+both restores the warning and un-memoises `filtered`. The reason is on the line
+in the file as well as here.
+
+**Consequences.** `bun run lint` reports nine warnings where it reported ten,
+every one of them `react-refresh/only-export-components`, and still exits zero.
+`docs/README.md` *Stack* carries the new count. The screen renders exactly what
+it rendered before: no state, no branch and no markup moved.
+
+`docs/charter.md` C-10 is not triggered by this. Its condition for promoting the
+lint from a note to a blocking gate is a clean tree, and nine warnings is not
+clean. The nine were left alone deliberately: each is a module exporting a
+component beside a non-component, which is a question about that route's shape
+rather than a lint fix, and the task that takes them is the one that would meet
+C-10's condition.
+
+Nothing asserts the memo. A test of referential stability across renders tests
+React rather than this screen, and the render is unchanged either way —
+`front/src/routes/-index.test.tsx` mounts `TaskCard` and never mounts
+`BoardPage`. The test gate's `tests-in-diff` check (ADR 31) will ask about a
+`front/src/**` change arriving with no `front/` test, and this paragraph is the
+answer to it.

@@ -60,7 +60,12 @@ function BoardPage() {
   const [accountFilter, setAccountFilter] = useState<string>("all");
   const [dense, setDense] = useState(false);
 
-  const rows = tasks.data?.data ?? [];
+  // `tasks.data?.data ?? []` is a fresh array on every render while the read has
+  // not answered, and `useNow` re-renders this screen every two seconds, so the
+  // filter below recomputed on every tick. The memo is here for the array's
+  // identity, not for the cost of `??`: deleting it un-memoises `filtered`.
+  // `docs/decisions.md` ADR 40.
+  const rows = useMemo(() => tasks.data?.data ?? [], [tasks.data]);
 
   const debtByTask = useMemo(() => {
     const map = new Map<string, number>();
