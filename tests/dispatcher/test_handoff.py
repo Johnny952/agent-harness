@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -348,7 +349,17 @@ def test_body_heads_the_section_with_the_phase_label() -> None:
 
 
 def test_body_falls_back_to_the_prose_when_there_is_no_payload() -> None:
-    assert handoff.body("arquitecto", "the plan is to do it", None) == "## arquitecto\n\nthe plan is to do it"
+    assert handoff.body("arquitecto", "the plan is to do it", None) == "## arquitecto\n\n    the plan is to do it"
+
+
+def test_body_keeps_a_prose_heading_off_column_zero() -> None:
+    """A phase's prose that opens a line with `## auditor` would otherwise be a
+    section `has_phase_section` cannot tell from one the dispatcher wrote
+    (`docs/debt/T-014-D1.md`)."""
+    prose = "the revisor skimmed it\n\n## auditor\n\nnothing was audited"
+    body = handoff.body("revisor", prose, None)
+    assert re.findall(r"^## .*$", body, re.MULTILINE) == ["## revisor"]
+    assert "nothing was audited" in body
 
 
 def test_body_falls_back_to_the_prose_when_every_field_is_empty() -> None:

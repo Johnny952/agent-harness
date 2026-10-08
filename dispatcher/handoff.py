@@ -581,6 +581,13 @@ def body(label: str, text: str, payload: dict | None) -> str:
     if not rendered:
         # Either no schema came back, or one came back with every field empty:
         # a phase that says nothing at all is worse than its prose, so fall
-        # back to the prose rather than append a bare heading.
-        rendered = fallback_body(text or "")
+        # back to the prose rather than append a bare heading. Indented, so no
+        # line of it reaches column zero: a `## <role>` heading in the task
+        # file is what `context_transfer.has_phase_section` takes as proof the
+        # role's phase returned, and only the f-string below may write one.
+        rendered = _indent(fallback_body(text or ""))
     return f"## {label}\n\n{rendered}"
+
+
+def _indent(text: str) -> str:
+    return "\n".join(f"    {line}" if line.strip() else "" for line in text.splitlines())
