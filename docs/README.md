@@ -53,11 +53,11 @@ the order install, test, lint. `install:` is there because a fresh worktree has
 no `node_modules`: it is git-ignored, and bun fills it from a cache on the
 projects mount in seconds. A failing install is a note, not a block. A failing
 `test:` entry blocks, the type check included. A failing `lint:` is only ever a
-note, which is `docs/charter.md` C-10's split: `eslint .` is red on `main`
-today with formatting errors nobody has fixed, and that is not the round's
-fault. No mapper writes `install:` or `lint:` — `dispatcher/project_docs.py`
-asks a mapper for `build:` and `test:` only — so they are added by hand, by
-whoever decides a project needs them.
+note, which is `docs/charter.md` C-10's split: a style finding is the revisor's
+to weigh, not the dispatcher's to enforce. `eslint .` exits zero on `main` since
+2026-10-08, with ten warnings it does not fail on. No mapper writes `install:`
+or `lint:` — `dispatcher/project_docs.py` asks a mapper for `build:` and `test:`
+only — so they are added by hand, by whoever decides a project needs them.
 
 That command names the toolchain **the agent container** has, not the one a
 human on the host has. On the host, use the `.venv` recipe in the top-level

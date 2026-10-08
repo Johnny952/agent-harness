@@ -2497,9 +2497,12 @@ worktree, on Node 24.21.0 and bun 1.3.12:
 a hardlink, so the two together take 454M. Each further worktree costs about
 13M, not 441M. A round now spends roughly 18 s on the gate with a warm cache.
 
-The lint is red on `main`. All 134 problems are `prettier/prettier`, so every
-task carries a `lint` note until someone formats `front/`. That is C-10's
-choice, and the note is cheap: the revisor reads it and nothing else is spent.
+The lint was red on `main` when this was measured: 124 `prettier/prettier`
+errors and 10 warnings, nine `react-refresh/only-export-components` and one
+`react-hooks/exhaustive-deps`. Later the same day the 20 files carrying the
+prettier errors were formatted, with nothing but layout changing, and `eslint .`
+now exits zero with the ten warnings, which do not fail it. A red lint stays a
+note under C-10 either way; on today's tree no task starts with one.
 
 The gate was not run end to end on a real task here. The clone the agents work
 on predates this frontmatter, so `_run_tests` there still reads one `test:`

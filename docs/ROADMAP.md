@@ -1923,8 +1923,8 @@ starts, not in stage 0.
     there. Measured on a fresh worktree in a recreated `agent-cuenta1`:
     install 5.1 s cold and 0.6 s warm, `bun run typecheck` green in 4.4 s,
     `bun run test` 23 tests green in 1.7 s, `bun run lint` red in 3.2 s
-    with 134 prettier problems (124 errors, 10 warnings), so every task
-    carries a `lint` note until `front/` is formatted. Memory was not
+    with 124 prettier errors and 10 warnings; the errors were formatted
+    away the same day, and the lint now exits zero. Memory was not
     measured against the 4 GB `mem_limit`. The gate itself has not yet run
     on a real task: the agents' clone predates the new frontmatter.
 
