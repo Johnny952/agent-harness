@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 
 from dispatcher import docker_exec, project_docs
 
@@ -368,13 +369,26 @@ def _run_tests(
         logger.info("gates: no `test:` in %s, skipping the test gate", project_docs.INDEX)
         return []
 
-    def execute(command: str) -> subprocess.CompletedProcess | None:
+    def execute(key: str, command: str) -> subprocess.CompletedProcess | None:
+        # One line per command, green or red. A green gate writes no log and
+        # no finding, so without this nothing says it ran at all — T-015's
+        # gate was proved only from file mtimes in `node_modules`.
+        started = time.monotonic()
         try:
-            return docker_exec.run_docker_exec(
+            proc = docker_exec.run_docker_exec(
                 container, workdir, ["sh", "-c", command], timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired:
+            logger.info(
+                "gates: %s `%s` in %s timed out after %ds",
+                key, command, workdir, timeout_seconds,
+            )
             return None
+        logger.info(
+            "gates: %s `%s` in %s exited %d after %.1fs",
+            key, command, workdir, proc.returncode, time.monotonic() - started,
+        )
+        return proc
 
     findings: list[Finding] = []
     failures: list[tuple[str, _Failure]] = []
@@ -382,7 +396,7 @@ def _run_tests(
     installs = commands.get("install", ())
     installed = True if installs else None
     for command in installs:
-        proc = execute(command)
+        proc = execute("install", command)
         if proc is None:
             findings.append(_timed_out(TESTS_RUN, command, timeout_seconds))
             installed = False
@@ -399,7 +413,7 @@ def _run_tests(
             break
 
     for command in tests:
-        proc = execute(command)
+        proc = execute("test", command)
         if proc is None:
             findings.append(_timed_out(TESTS_RUN, command, timeout_seconds))
             continue
@@ -420,7 +434,7 @@ def _run_tests(
         )))
 
     for command in lints:
-        proc = execute(command)
+        proc = execute("lint", command)
         if proc is None:
             findings.append(_timed_out(LINT, command, timeout_seconds))
             continue

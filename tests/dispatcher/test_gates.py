@@ -551,6 +551,38 @@ def test_every_command_the_index_lists_runs_in_order(monkeypatch) -> None:
     ]
 
 
+def test_every_command_leaves_a_line_with_its_exit_and_duration(monkeypatch, caplog) -> None:
+    """A green gate writes no log and no finding, so the dispatcher's own log
+    is the only place that says it ran. T-015's gate was proved only from
+    file mtimes in `node_modules`."""
+    worktree = _Worktree(index=INDEX_WITH_FRONT, shell={
+        "cd front && bun run lint": (1, "9 problems (0 errors, 9 warnings)\n"),
+    }).install(monkeypatch)
+
+    with caplog.at_level("INFO", logger=gates.__name__):
+        _run(worktree)
+
+    lines = [r.getMessage() for r in caplog.records if " exited " in r.getMessage()]
+    assert [line.split("`")[1] for line in lines] == _shell_commands(worktree)
+    assert lines[0].startswith("gates: install `cd front && bun install --frozen-lockfile`")
+    assert "/data/projects/myproj/worktrees/task-7" in lines[0]
+    assert " exited 0 after " in lines[1] and lines[1].endswith("s")
+    assert lines[3].startswith("gates: lint ") and " exited 1 after " in lines[3]
+
+
+def test_a_command_that_times_out_says_so_in_the_log(monkeypatch, caplog) -> None:
+    worktree = _Worktree(index=INDEX_WITH_TESTS, timeout=True).install(monkeypatch)
+
+    with caplog.at_level("INFO", logger=gates.__name__):
+        _run(worktree, test_timeout_seconds=30)
+
+    assert any(
+        r.getMessage().startswith("gates: test `npm test` in ")
+        and r.getMessage().endswith("timed out after 30s")
+        for r in caplog.records
+    )
+
+
 def test_a_broken_import_after_a_clean_install_blocks(monkeypatch) -> None:
     """`tsc` reports an import the change broke as "Cannot find module", the
     same words a worktree with no `node_modules` produces. Once the project's
