@@ -4945,3 +4945,192 @@ def test_the_picker_hands_out_an_account_the_reaper_just_freed(tmp_path) -> None
     _age_busy_since(cfg, "cuenta2", cfg.phase_timeout_seconds + 1)
 
     assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta2"
+
+
+def _update_outcome(status, detail="the project's checkout and origin/main agree"):
+    return dispatcher_mod.docker_exec.UpdateOutcome(status, detail)
+
+
+def test_run_task_cycle_updates_the_project_before_the_first_phase(tmp_path, monkeypatch) -> None:
+    """Once per task, and before anything has been cut from the base it moves.
+
+    The four roles share one branch and one writer worktree, so the only safe
+    moment is this one: after it, a fast-forward would move the ground under a
+    revisor reading what the implementador wrote.
+    """
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    order = []
+
+    def fake_update(container, projects_root, slug, **kwargs):
+        order.append(("update", container, projects_root, slug))
+        return _update_outcome(dispatcher_mod.docker_exec.UPDATED, "fast-forwarded main 3 commit(s)")
+
+    def fake_dispatch_phase(*args, **kwargs):
+        order.append(("phase", kwargs.get("role") or args[3]))
+        return _approving_dispatch_phase(*args, **kwargs)
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", fake_update)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert order[0] == ("update", "agent-cuenta1", cfg.projects_root, "myproj")
+    assert [step for step in order if step[0] == "update"] == [order[0]]
+    assert [step[1] for step in order if step[0] == "phase"][0] == "arquitecto"
+
+
+def test_run_task_cycle_leaves_the_remote_alone_when_the_operator_did_not_ask(tmp_path, monkeypatch) -> None:
+    """Off by default. The flag is the only thing that makes a task reach the
+    network, so a config that predates it behaves exactly as it did."""
+    cfg = _make_config(tmp_path)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the update ran without update_project_before_task")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", never)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    kanban = _FakeKanban()
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert (_ISSUE_ID, "done") in kanban.statuses
+
+
+def test_run_task_cycle_blocks_when_the_project_diverged_from_its_remote(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Two histories, and picking one is a merge nobody asked this run to make
+    — charter C-1. Nothing has been written yet, so stopping here costs a
+    dispatch and saves a branch cut from a base that was about to be rewritten.
+    """
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    detail = "main has 2 commit(s) ahead of origin and 3 behind: diverged"
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec,
+        "update_project_branch",
+        lambda *a, **kw: _update_outcome(dispatcher_mod.docker_exec.DIVERGED, detail),
+    )
+    roles = []
+
+    def fake_dispatch_phase(*args, **kwargs):
+        roles.append(kwargs.get("role") or args[3])
+        return _approving_dispatch_phase(*args, **kwargs)
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    kanban = _FakeKanban()
+    with caplog.at_level("WARNING"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert roles == []
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    # Blocked naming nothing is a task nobody can restart.
+    assert detail in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_run_task_cycle_starts_anyway_when_the_update_could_not_be_attempted(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """No credential, an ssh:// remote, a fetch that failed: the base is then
+    exactly as stale as it was before any of this existed, which is the
+    behaviour every run had until now. Warned about, not stopped — but it has to
+    be readable in the log afterwards, or a stale run looks like a clean one."""
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    detail = "no git credential file at /run/secrets/git-credentials; main left as it is"
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec,
+        "update_project_branch",
+        lambda *a, **kw: _update_outcome(dispatcher_mod.docker_exec.UNAVAILABLE, detail),
+    )
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    kanban = _FakeKanban()
+    with caplog.at_level("WARNING"):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert detail in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_run_task_cycle_does_not_warn_about_an_update_that_worked(tmp_path, monkeypatch) -> None:
+    """UNCHANGED is the common answer — a clone already level with its remote,
+    or one merge-task left ahead. A warning on it would train the operator to
+    stop reading them."""
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec,
+        "update_project_branch",
+        lambda *a, **kw: _update_outcome(dispatcher_mod.docker_exec.UNCHANGED),
+    )
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    records = []
+    monkeypatch.setattr(dispatcher_mod.logger, "warning", lambda *a, **kw: records.append(a))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert records == []
+
+
+def test_update_project_branch_restores_ownership_around_the_update(tmp_path, monkeypatch, fake_git) -> None:
+    """git writes to .git/ as root in the container, and that is the host's own
+    checkout — the same restore every other git call into a container does."""
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    seen = {}
+
+    def fake_update(container, projects_root, slug, credentials_path=None, **kwargs):
+        seen.update(container=container, projects_root=projects_root, slug=slug,
+                    credentials_path=credentials_path)
+        return _update_outcome(dispatcher_mod.docker_exec.UNCHANGED)
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", fake_update)
+
+    outcome = dispatcher_mod.update_project_branch(cfg, "myproj")
+
+    assert outcome.status == dispatcher_mod.docker_exec.UNCHANGED
+    assert seen["credentials_path"] == cfg.git_credentials_path
+    assert (f"{cfg.projects_root}/myproj", _FakeGit.owner) in fake_git.restored
+
+
+def test_update_project_branch_restores_ownership_even_when_the_update_raises(
+    tmp_path, monkeypatch, fake_git
+) -> None:
+    """A checkout left root-owned is a host the operator can no longer edit in."""
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("docker exec died")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", boom)
+
+    with pytest.raises(RuntimeError):
+        dispatcher_mod.update_project_branch(cfg, "myproj")
+
+    assert (f"{cfg.projects_root}/myproj", _FakeGit.owner) in fake_git.restored
+
+
+def test_update_project_branch_needs_no_particular_account(tmp_path, monkeypatch) -> None:
+    """Every agent bind-mounts the same projects root, so this runs in
+    cleanup_container's — which by then may be the only one not rate-limited."""
+    cfg = _make_pool_config(tmp_path, update_project_before_task=True)
+    containers = []
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec,
+        "update_project_branch",
+        lambda container, *a, **kw: containers.append(container)
+        or _update_outcome(dispatcher_mod.docker_exec.UNCHANGED),
+    )
+
+    dispatcher_mod.update_project_branch(cfg, "myproj")
+
+    assert containers == [dispatcher_mod.cleanup_container(cfg)]
+
+
+def test_update_project_branch_does_nothing_without_a_container(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, accounts=[], update_project_before_task=True)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the update ran with no container to run it in")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", never)
+
+    assert dispatcher_mod.update_project_branch(cfg, "myproj") is None

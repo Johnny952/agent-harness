@@ -17,6 +17,7 @@ from dispatcher.docker_exec import (
     restore_owner,
     run_docker_exec,
     task_worktrees_dir,
+    update_project_branch,
 )
 
 
@@ -1734,3 +1735,281 @@ def test_create_worktree_does_not_fail_a_phase_over_the_exclude_file(monkeypatch
     path = create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", "arquitecto")
 
     assert path == f"{_PROJECT}/worktrees/task-1/work"
+
+
+def _update_responder(
+    *,
+    branch=("main", 0),
+    credential=True,
+    url="https://github.com/me/proj.git",
+    url_rc=0,
+    fetch=(0, "", ""),
+    counts="0\t0\n",
+    counts_rc=0,
+    status_out="",
+    merge=(0, "", ""),
+):
+    """A docker exec that answers each of the update's probes separately.
+
+    Defaults describe the uninteresting case: on a branch, credential mounted,
+    https remote, fetch works, nothing to do. Each test spoils one of them.
+    """
+
+    def respond(args):
+        if args[:2] == ["test", "-f"]:
+            return (0 if credential else 1, "", "")
+        if args[:2] == ["git", "symbolic-ref"]:
+            name, rc = branch
+            return (rc, f"{name}\n" if name else "", "")
+        if args[:3] == ["git", "remote", "get-url"]:
+            return (url_rc, f"{url}\n", "")
+        if "fetch" in args:
+            return fetch
+        if "rev-list" in args:
+            return (counts_rc, counts, "")
+        if "rev-parse" in args:
+            return (0, "deadbee\n" if args[-1] == "FETCH_HEAD" else "0ldc0de\n", "")
+        if args[:2] == ["git", "status"]:
+            return (0, status_out, "")
+        if "merge" in args:
+            return merge
+        return (0, "", "")
+
+    return respond
+
+
+def _update(monkeypatch, calls=None, **spoil):
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls if calls is not None else [], _update_responder(**spoil)),
+    )
+    return update_project_branch(_CONTAINER, "/data/projects", "myproj")
+
+
+def _ff_merge(calls):
+    """The actual fast-forward out of a recorded run, or None."""
+    for args in map(_in_container, calls):
+        if "merge" in args:
+            return args
+    return None
+
+
+def test_update_project_branch_fast_forwards_a_branch_that_is_behind(monkeypatch) -> None:
+    calls = []
+
+    outcome = _update(monkeypatch, calls, counts="0\t3\n")
+
+    assert outcome.status == docker_exec_mod.UPDATED
+    assert outcome.updated and not outcome.blocking
+    assert "3 commit(s)" in outcome.detail and "deadbee" in outcome.detail
+    assert _ff_merge(calls)[-3:] == ["--ff-only", "--quiet", "FETCH_HEAD"]
+
+
+def test_update_project_branch_does_nothing_when_level_with_the_remote(monkeypatch) -> None:
+    calls = []
+
+    outcome = _update(monkeypatch, calls, counts="0\t0\n")
+
+    assert outcome.status == docker_exec_mod.UNCHANGED
+    assert not outcome.updated and not outcome.blocking
+    assert _ff_merge(calls) is None
+
+
+def test_update_project_branch_leaves_a_branch_that_is_only_ahead_alone(monkeypatch) -> None:
+    """The ordinary state of a clone merge-task has landed work into.
+
+    `merge_task_branch` merges --no-ff into this very checkout and nothing here
+    pushes, so "ahead" is the normal reading after any merge, not an anomaly. It
+    must neither be merged nor reported as a problem.
+    """
+    calls = []
+
+    outcome = _update(monkeypatch, calls, counts="2\t0\n")
+
+    assert outcome.status == docker_exec_mod.UNCHANGED
+    assert not outcome.blocking
+    assert "2 commit(s) ahead" in outcome.detail
+    assert _ff_merge(calls) is None
+
+
+def test_update_project_branch_blocks_on_a_real_divergence(monkeypatch) -> None:
+    """Ahead *and* behind. Reconciling it is a merge, and that is a decision."""
+    calls = []
+
+    outcome = _update(monkeypatch, calls, counts="2\t3\n")
+
+    assert outcome.status == docker_exec_mod.DIVERGED
+    assert outcome.blocking and not outcome.updated
+    assert "2 commit(s) ahead" in outcome.detail and "3 behind" in outcome.detail
+    assert _ff_merge(calls) is None
+
+
+def test_update_project_branch_fetches_a_public_repo_without_a_credential(monkeypatch) -> None:
+    """A public remote over https needs no credential, so a missing file is not a stop.
+
+    The operator who never wrote one still gets a fresh base; what the missing
+    file costs is the `credential.helper` argument, nothing else.
+    """
+    calls = []
+
+    outcome = _update(monkeypatch, calls, credential=False, counts="0\t2\n")
+
+    assert outcome.status == docker_exec_mod.UPDATED
+    fetch = _in_container(next(cmd for cmd in calls if "fetch" in _in_container(cmd)))
+    assert fetch[1] == "fetch"
+    assert not [part for part in fetch if "credential.helper" in part]
+
+
+def test_update_project_branch_names_the_missing_credential_in_a_refused_fetch(monkeypatch) -> None:
+    """A private remote and no credential: git's reason, plus the path we looked in."""
+    outcome = _update(
+        monkeypatch,
+        credential=False,
+        fetch=(128, "", "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n"),
+    )
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert not outcome.blocking
+    assert "terminal prompts disabled" in outcome.detail
+    assert docker_exec_mod.GIT_CREDENTIALS_PATH in outcome.detail
+
+
+def test_update_project_branch_asks_for_a_file_not_merely_a_path(monkeypatch) -> None:
+    """A bind mount whose host source is missing gets a directory created for it.
+
+    `test -e` would pass on that directory and the fetch would then name a
+    `credential.helper` pointing at something git's store helper cannot read.
+    """
+    calls = []
+
+    _update(monkeypatch, calls)
+
+    probe = next(args for args in map(_in_container, calls) if args[0] == "test")
+    assert probe == ["test", "-f", docker_exec_mod.GIT_CREDENTIALS_PATH]
+
+
+def test_update_project_branch_reports_an_ssh_remote_rather_than_rewriting_it(monkeypatch) -> None:
+    """The mounted credential only answers for https, and the image has no ssh."""
+    calls = []
+
+    outcome = _update(monkeypatch, calls, url="git@github.com:me/proj.git")
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "https://" in outcome.detail
+    assert not [args for args in map(_in_container, calls) if "fetch" in args]
+    assert not [args for args in map(_in_container, calls) if "set-url" in args]
+
+
+def test_update_project_branch_reports_a_missing_remote(monkeypatch) -> None:
+    outcome = _update(monkeypatch, url_rc=2)
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "no remote named origin" in outcome.detail
+
+
+def test_update_project_branch_reports_a_detached_head(monkeypatch) -> None:
+    outcome = _update(monkeypatch, branch=(None, 1))
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "not on a branch" in outcome.detail
+
+
+def test_update_project_branch_reports_a_failed_fetch_with_its_reason(monkeypatch) -> None:
+    outcome = _update(
+        monkeypatch, fetch=(128, "", "fatal: Authentication failed for 'https://github.com/me/proj.git/'\n")
+    )
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert not outcome.blocking
+    assert "Authentication failed" in outcome.detail
+
+
+def test_update_project_branch_does_not_let_a_missing_credential_become_a_prompt(monkeypatch) -> None:
+    """A prompt on a terminal nobody watches hangs until the phase timeout."""
+    calls = []
+
+    _update(monkeypatch, calls)
+
+    fetch = next(cmd for cmd in calls if "fetch" in _in_container(cmd))
+    assert "GIT_TERMINAL_PROMPT=0" in fetch
+
+
+def test_update_project_branch_passes_the_credential_as_a_store_file(monkeypatch) -> None:
+    """Not an env var: run_docker_exec puts env on the argv, where ps reads it."""
+    calls = []
+
+    _update(monkeypatch, calls)
+
+    fetch = _in_container(next(cmd for cmd in calls if "fetch" in _in_container(cmd)))
+    assert fetch[1] == "-c"
+    assert fetch[2] == f"credential.helper=store --file={docker_exec_mod.GIT_CREDENTIALS_PATH}"
+    assert not [part for part in next(cmd for cmd in calls if "fetch" in _in_container(cmd)) if "token" in part]
+
+
+def test_update_project_branch_measures_against_fetch_head(monkeypatch) -> None:
+    """What was just fetched, whatever refspec the clone happens to track."""
+    calls = []
+
+    _update(monkeypatch, calls, counts="0\t1\n")
+
+    counts = next(args for args in map(_in_container, calls) if "rev-list" in args)
+    assert counts[-1] == "HEAD...FETCH_HEAD"
+    assert _ff_merge(calls)[-1] == "FETCH_HEAD"
+
+
+def test_update_project_branch_refuses_to_fast_forward_a_dirty_tree(monkeypatch) -> None:
+    calls = []
+
+    outcome = _update(monkeypatch, calls, counts="0\t3\n", status_out=" M README.md\n")
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "uncommitted changes" in outcome.detail
+    assert _ff_merge(calls) is None
+
+
+def test_update_project_branch_reports_a_fast_forward_that_failed(monkeypatch) -> None:
+    outcome = _update(
+        monkeypatch, counts="0\t3\n", merge=(128, "", "fatal: Not possible to fast-forward, aborting.\n")
+    )
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "fast-forwarding main failed" in outcome.detail
+
+
+def test_update_project_branch_reports_an_unreadable_comparison(monkeypatch) -> None:
+    outcome = _update(monkeypatch, counts="not two numbers\n")
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "could not compare" in outcome.detail
+
+
+def test_update_project_branch_runs_in_the_project_not_a_worktree(monkeypatch) -> None:
+    """It moves the checkout the task's branch will be cut from."""
+    calls = []
+
+    _update(monkeypatch, calls, counts="0\t3\n")
+
+    assert all(cmd[cmd.index("-w") + 1] in (_PROJECT, "/") for cmd in calls)
+
+
+def test_update_project_branch_never_pushes(monkeypatch) -> None:
+    """The whole point of a read-only credential being enough."""
+    calls = []
+
+    _update(monkeypatch, calls, counts="0\t3\n")
+
+    assert not [args for args in map(_in_container, calls) if "push" in args]
+
+
+@pytest.mark.parametrize(
+    "projects_root, slug, remote",
+    [("", "myproj", "origin"), ("/data/projects", "", "origin"), ("/data/projects", "myproj", "")],
+)
+def test_update_project_branch_rejects_empty_path_components(monkeypatch, projects_root, slug, remote) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _update_responder()))
+
+    with pytest.raises(ValueError):
+        update_project_branch(_CONTAINER, projects_root, slug, remote)
+
+    assert calls == []

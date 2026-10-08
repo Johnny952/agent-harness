@@ -39,6 +39,21 @@ services:
       # here; the dispatcher is the only writer. Path matches config.yaml's
       # `hive_tasks_dir: /data/.hive/tasks`.
       - ../../.hive:/data/.hive
+      # Read-only credential for the project's own remote, used by the
+      # dispatcher's `update_project_before_task` to fast-forward a project's
+      # checkout before a task starts (dispatcher/docker_exec.py's
+      # update_project_branch). On the host and not in the image, because these
+      # containers are built to be thrown away and a file on the host outlives
+      # them and is shared by every account without logging each one in; a mount
+      # and not an environment variable, because run_docker_exec passes env as
+      # `-e KEY=value` on the `docker exec` argv, where any `ps` reads it. A
+      # public remote over https:// needs no credential and a missing file is
+      # not a stop, so this mount is allowed to point at nothing; but a bind
+      # mount with no source gets a directory created for it, so a file meant to
+      # be read has to exist BEFORE these come up, and an empty directory left
+      # at that path has to go first. It is gitignored (.gitignore ignores
+      # .data/), one line in git's `store` format, and needs no write scope.
+      - ../../.data/credentials/git-credentials:/run/secrets/git-credentials:ro
     depends_on:
       - dind-cuenta1
     networks:
@@ -76,6 +91,8 @@ services:
       - claude_creds_cuenta2:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
+      # See agent-cuenta1: the same host file, shared, read-only.
+      - ../../.data/credentials/git-credentials:/run/secrets/git-credentials:ro
     depends_on:
       - dind-cuenta2
     networks:

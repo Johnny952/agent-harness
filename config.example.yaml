@@ -210,6 +210,41 @@ phase_timeout_seconds: 7200
 # Optional; defaults to false.
 merge_on_done: false
 
+# Whether a task fetches the project's remote and fast-forwards the project's
+# own checkout before its first phase runs, so the branch it cuts is not taken
+# from a base that went stale while nobody was looking. Runs once per task, at
+# the only moment it is safe: before the first worktree exists. Off by default,
+# like merge_on_done and for a neighbouring reason — this one reaches the
+# network, and against a private remote it also needs a credential the operator
+# has to put on the host first (see git_credentials_path), without which every
+# task would open with a warning it cannot act on. Optional; defaults to false.
+#
+# It only ever fast-forwards. A checkout that is *ahead* of its remote is left
+# alone, because that is the ordinary state after merge_on_done or `merge-task`
+# landed a branch nobody has pushed yet. A checkout that is ahead *and* behind
+# has diverged, and reconciling that is a merge: the task ends `blocked` saying
+# so rather than inventing a decision nobody gave it. An update that could not
+# be attempted at all — an ssh:// remote, or a fetch that failed, a private
+# remote with no credential mounted for it among the ways it can — is a
+# warning and not a stop, because the base is then exactly as stale as it was
+# before any of this existed.
+update_project_before_task: false
+
+# Where update_project_before_task looks for a credential, inside the agent
+# container. A public remote over https:// needs none, and a missing file is
+# not a stop: it is probed, and git is told about it only when it is there. For
+# a private remote, one line in git's `store` format:
+#   https://<user>:<token>@github.com
+# Nothing here pushes, so a read-only (fine-grained, contents: read) token is
+# enough. The file lives on the host and is bind-mounted read-only into every
+# agent by docker-compose.agents.yml, which is both why the containers can be
+# thrown away without logging each one in again and why it must never be passed
+# as an environment variable: run_docker_exec puts env on the `docker exec`
+# argv, where any `ps` on the host reads it. The project's remote must be
+# https:// for this credential to answer for it — the agent image ships no ssh.
+# Optional; defaults to /run/secrets/git-credentials.
+git_credentials_path: /run/secrets/git-credentials
+
 # A project with no docs index (docs/README.md) gets one mapping phase before
 # the arquitecto: a read-only role that walks the checkout and writes the
 # index, docs/architecture.md and docs/business.md, so later tasks read the

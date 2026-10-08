@@ -2139,3 +2139,146 @@ separate commands, and a `_scope()` helper asserts on the grep invocation
 itself, because which docs are in scope *is* the ruling and a fake that answers
 the same whatever it is asked would prove nothing about it. The four pointer
 fixtures that predate this change are untouched and still pass.
+
+## ADR 36 — a task fast-forwards its project's checkout before it starts, with a credential mounted from the host
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-07).
+
+**Context.** The dispatcher clones a project once, into `projects_root`, and
+then never looks at its remote again. Measured before this change: no
+`git fetch`, no `git pull` and no `git push` anywhere in `dispatcher/*.py`. So
+the base a task starts from is whatever the clone was last left at, and nothing
+in a run says how old that is.
+
+That base is load-bearing. A task's branch is cut by `_add_writer_worktree`
+with `git worktree add -b`, whose `-b` form takes no commit-ish: the branch comes
+from the clone's HEAD, wherever that is. A week of commits pushed from somewhere
+else, and the arquitecto plans against a tree nobody else has, the implementador
+writes on top of it, and the divergence surfaces at `merge-task` or in whoever
+pulls next — the furthest possible point from the decision that caused it.
+
+It was also, until now, not merely unused but unreachable. `docker/agent/Dockerfile`
+installs `git`, `ca-certificates`, `python3`, `python3-requests` and
+`python3-venv` — no `ssh`, no `ssh-keygen`, no `/root/.ssh` — and this repo's own
+remote is `git@github.com:…`. A `git fetch` inside an agent answers
+`error: cannot run ssh: No such file or directory`. The dispatcher container
+does not mount `.data/projects` at all; every project git call it makes is a
+`docker exec` into an agent, which is where this one runs too.
+
+**Decision.**
+
+*Once per task, before the first worktree exists.* Not once per phase and not
+once per role. The four roles share `agent/task/<id>` and one writer worktree,
+and a fast-forward in the middle of a cycle moves the ground under a revisor
+reading what the implementador wrote — the failure `create_worktree`'s docstring
+already records in this codebase ("a reused checkout is exactly how the revisor
+ended up reviewing a tree with none of the implementador's work in it"). Before
+the first phase is the only moment where the base can still move without
+anything having been cut from it, and it is enough, because that is where the
+branch comes from.
+
+*It only ever fast-forwards, and it classifies rather than reconciles.*
+`update_project_branch` fetches, compares `HEAD` against `FETCH_HEAD` with
+`git rev-list --left-right --count`, and answers one of four things:
+
+| clone vs remote | status | what the cycle does |
+|---|---|---|
+| level | `unchanged` | starts |
+| behind | `updated` — `git merge --ff-only` | starts, on a fresh base |
+| ahead | `unchanged` | starts, and the local commits are left alone |
+| ahead *and* behind | `diverged` | does not start, and says why |
+| could not be attempted | `unavailable` | warns, and starts anyway |
+
+Ahead is not an anomaly here, it is the ordinary state: `merge_task_branch`
+merges `--no-ff` into this very checkout's `main` and nothing in this project
+pushes, so every `merge-task` leaves the clone ahead until a human pushes it. A
+blanket `git pull --ff-only` would therefore fail as routine rather than as a
+signal, which is how a check gets ignored.
+
+Diverged stops the task. Reconciling two histories is a merge, and a merge is a
+decision this task was never given — charter C-1, one step earlier than the
+phase it usually applies to. Nothing has been written yet, so stopping costs a
+dispatch and saves a branch cut from a base that was about to be rewritten.
+
+Unavailable — an `ssh://` remote, or a fetch that failed, a private remote with
+no credential mounted for it among the ways a fetch can fail — is a warning and
+not a stop, because the base is then exactly as stale as it was before any of
+this existed. That is the behaviour every run had until today, and refusing to
+run on it would turn an optional credential into a dead harness.
+
+*The credential is a file on the host, mounted read-only into every agent, and
+never an environment variable.* `docker-compose.agents.yml` bind-mounts
+`.data/credentials/git-credentials` at `/run/secrets/git-credentials:ro` on both
+agents, and git is pointed at it with
+`git -c credential.helper=store --file=…`. Three reasons, in the order they
+decide the shape:
+
+- **Not an env var**, because `run_docker_exec` builds its command as
+  `docker exec -w <dir> -e KEY=value <container> …`: anything passed as env ends
+  up on an argv that any `ps` on the host can read. A mounted file is readable
+  by whoever can already read the host path, and no wider.
+- **On the host and not in the image**, because these containers are built to be
+  thrown away. A file on the host outlives them, and one file is shared by every
+  account — no per-container login, and adding a third account adds a mount, not
+  a credential.
+- **Read-only scope is enough**, because nothing in `dispatcher/` pushes. A
+  fine-grained token with `contents: read` is the whole requirement, which is
+  also what makes mounting it into an agent that runs model-written code an
+  acceptable trade.
+
+The file is optional, and a missing one is not a reason to skip the fetch. It is
+probed, and `credential.helper` is named only when it is there: a public remote
+over `https://` needs no credential at all, and this runs against whatever
+project the operator put under `projects_root`. A private remote with nothing
+mounted for it is then refused by the remote rather than refused in advance, and
+reported in git's own words with the path that was looked for appended. The
+difference is not academic — the first version of this code returned
+`unavailable` without fetching whenever the file was absent, and the project it
+was written for, `Johnny952/agent-harness`, is public: it would have skipped a
+fetch that works, on every task, for a credential it never needed.
+
+The fetch carries `GIT_TERMINAL_PROMPT=0`. Without it a missing or wrong
+credential does not fail, it asks — on a terminal nobody is watching, until
+`phase_timeout_seconds`. With it, the refusal above costs a second.
+
+*Two small things that are easy to get wrong.* The credential is probed with
+`test -f` and not with `path_exists`'s `test -e`, because a bind mount whose host
+source does not exist gets a **directory** created for it by Docker: the
+operator who brings the agents up before writing the file has an empty directory
+at that path, and a directory is not something git's `store` helper can read, so
+`test -e` would pass on it and name a helper pointing at it — turning a fetch
+that would have worked into one that cannot. And the comparison is against
+`FETCH_HEAD`, not `refs/remotes/origin/<branch>`, so what is measured is what
+was just fetched rather than whatever refspec the clone happens to have
+configured.
+
+*Off by default.* `update_project_before_task: false` is the shape every config
+had before this existed and the behaviour they all got. Turning it on is the
+same kind of step as `merge_on_done` for a neighbouring reason: it reaches the
+network and it needs something the operator has to put on the host first.
+`git_credentials_path` is the second key, and both are explained in
+`config.example.yaml`, which `docs/README.md` names as the place a new key gets
+explained.
+
+**Consequences.** A project whose remote is `ssh://` or `git@…` is reported as
+`unavailable`, not rewritten. Rewriting a remote is a change to the operator's
+own checkout that no task asked for, and the agent image has no ssh to make the
+rewrite unnecessary; flipping the remote to `https://` is a one-line step the
+operator takes once, next to creating the token. Until both are done, a run with
+the flag on warns on every task and behaves exactly as it did before — which is
+the honest reading of its state, and is why `unavailable` is a warning that
+names the path it looked at.
+
+The credential file is gitignored (`.gitignore` ignores `.data/`), the same class
+as `.data/verify/dashboard-credentials`: it cannot be committed, and nothing in
+the repo contains it. Creating it is the operator's, by hand, before the agents
+come up — and only for a remote that asks for one: a public project needs
+neither the token nor the mount.
+
+Thirty-one tests, in `tests/dispatcher/test_docker_exec.py` and
+`tests/dispatcher/test_dispatcher.py`. Four of them assert the design rather
+than the behaviour, because the design is what a later edit would quietly undo:
+that the probe is `test -f`, that the fetch carries `GIT_TERMINAL_PROMPT=0`,
+that the credential travels as a `store` file and never as env, and that the
+whole path never issues a `push` — which is the claim the read-only token rests
+on.

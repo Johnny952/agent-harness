@@ -533,6 +533,222 @@ def merge_task_branch(
     return MergeOutcome(MERGED, target, f"merged {branch} into {target}")
 
 
+GIT_CREDENTIALS_PATH = "/run/secrets/git-credentials"
+"""Where a container is handed a credential for the project's remote.
+
+A read-only bind mount from the host, in git's `store` format: one
+`https://<user>:<token>@<host>` line. A mount rather than an environment
+variable because run_docker_exec passes env as `-e KEY=value` on the
+`docker exec` argv, where any `ps` on the host reads it. A mount rather than
+something baked into the image for the reason the Claude credentials are one
+too — containers are built to be thrown away, and a file on the host outlives
+them and is shared by every agent without logging each one in.
+"""
+
+UPDATED = "updated"
+UNCHANGED = "unchanged"
+DIVERGED = "diverged"
+UNAVAILABLE = "unavailable"
+
+
+@dataclasses.dataclass(frozen=True)
+class UpdateOutcome:
+    """What became of an attempt to bring the project's branch up to date.
+
+    Four outcomes, because three different things get called "it did not
+    update" and only one of them should stop a task:
+
+    * UPDATED — the branch was behind and was fast-forwarded.
+    * UNCHANGED — nothing to do. Either the branch is level with the remote,
+      or it is *ahead*, which is the ordinary state after `merge-task` landed
+      a branch and nobody has pushed yet. Being ahead is not a problem and
+      must not read like one.
+    * DIVERGED — ahead *and* behind. Reconciling that is a merge, and a merge
+      is a decision; the charter's C-1 says a phase that needs a decision the
+      task never gave it ends blocked and says so rather than inventing one.
+      This is the only blocking outcome.
+    * UNAVAILABLE — the update could not be attempted: no remote, an SSH remote
+      the mounted credential cannot serve, or a fetch that failed, a private
+      remote with no credential mounted for it among the reasons it can fail.
+      The base is then as stale as it was before any of this existed, which is
+      the behaviour every run had until now, so it is a warning and not a stop.
+    """
+
+    status: str
+    detail: str
+
+    @property
+    def updated(self) -> bool:
+        return self.status == UPDATED
+
+    @property
+    def blocking(self) -> bool:
+        return self.status == DIVERGED
+
+
+def _rev_parse_short(container: str, project_dir: str, rev: str) -> str:
+    """`rev` as a short sha, or the string itself when it cannot be resolved."""
+    proc = run_docker_exec(
+        container, project_dir, ["git", "rev-parse", "--short", rev], env=_GIT_ENV
+    )
+    if proc.returncode != 0:
+        return rev
+    return proc.stdout.strip() or rev
+
+
+def _ahead_behind(container: str, project_dir: str, other: str) -> tuple[int, int] | None:
+    """How many commits HEAD has that `other` does not, and the other way round."""
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "rev-list", "--left-right", "--count", f"HEAD...{other}"],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return None
+    fields = proc.stdout.split()
+    if len(fields) != 2:
+        return None
+    try:
+        return int(fields[0]), int(fields[1])
+    except ValueError:
+        return None
+
+
+def update_project_branch(
+    container: str,
+    projects_root: str,
+    slug: str,
+    remote: str = "origin",
+    credentials_path: str = GIT_CREDENTIALS_PATH,
+    timeout: float | None = None,
+) -> UpdateOutcome:
+    """Fast-forward the project's own checkout onto its remote, or say why not.
+
+    Called once per task, before the first worktree exists. That is the only
+    moment it is safe: a new task's branch is cut from this checkout's HEAD
+    (_add_writer_worktree's `-b` form takes no commit-ish), so moving HEAD here
+    is what gives the task a fresh base, while the four roles of a task already
+    under way share one worktree on one branch and moving the ground under them
+    mid-cycle is how the revisor once came to review a tree with none of the
+    implementador's work in it.
+
+    Nothing here pushes, so the credential it asks for only ever needs to read,
+    and a public remote needs none: the mounted file is named to git only when
+    it is there, and a fetch that then fails is reported rather than prevented.
+
+    The fetch is `--quiet` and the comparison is against FETCH_HEAD rather than
+    refs/remotes/<remote>/<branch>: what was just fetched is what we want to
+    measure, whatever the clone's refspec happens to be configured to track.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug, remote=remote)
+    project_dir = f"{projects_root}/{slug}"
+
+    branch = current_branch(container, project_dir)
+    if branch is None:
+        return UpdateOutcome(
+            UNAVAILABLE, f"{project_dir} is not on a branch; left as it is"
+        )
+    url = run_docker_exec(
+        container, project_dir, ["git", "remote", "get-url", remote], env=_GIT_ENV
+    )
+    if url.returncode != 0:
+        return UpdateOutcome(
+            UNAVAILABLE, f"{project_dir} has no remote named {remote}; {branch} left as it is"
+        )
+    if not url.stdout.strip().startswith("https://"):
+        # Said rather than fixed: rewriting someone's remote is a change to
+        # their clone, and the credential format mounted here can only answer
+        # for HTTPS. The agent image ships no ssh at all, so an SSH remote
+        # cannot be fetched from in here by any means.
+        return UpdateOutcome(
+            UNAVAILABLE,
+            f"{remote} is not an https:// remote, which is the only kind the "
+            f"mounted credential can serve; {branch} left as it is",
+        )
+
+    # `test -f` and not path_exists's `test -e`, because the thing most likely to
+    # be at this path is a directory: a bind mount whose host source does not
+    # exist gets one created for it, so the operator who brought the agents up
+    # before writing the credential file has an empty directory here, and a
+    # directory is not something git's store helper can read.
+    has_credential = (
+        run_docker_exec(container, "/", ["test", "-f", credentials_path]).returncode == 0
+    )
+    # A missing credential is not a reason to skip the fetch, only a reason not
+    # to name a helper. A public repo over https needs no credential at all, and
+    # this runs against whatever project the operator put under projects_root. A
+    # private remote refuses in a second instead, and comes back through the
+    # failure below in git's own words with the path that was looked for added.
+    helper = (
+        ["-c", f"credential.helper=store --file={credentials_path}"]
+        if has_credential
+        else []
+    )
+    fetched = run_docker_exec(
+        container, project_dir,
+        ["git", *helper, "fetch", "--quiet", remote, branch],
+        # Without this a credential git cannot find turns into a prompt on a
+        # terminal nobody is watching, and the call hangs until the phase
+        # timeout instead of failing in a second with a reason.
+        env={**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"},
+        timeout=timeout,
+    )
+    if fetched.returncode != 0:
+        why = _output_tail(fetched)
+        if not has_credential:
+            why = f"{why} (no credential file at {credentials_path})"
+        return UpdateOutcome(
+            UNAVAILABLE,
+            f"fetching {branch} from {remote} failed; {branch} left as it is: {why}",
+        )
+
+    counts = _ahead_behind(container, project_dir, "FETCH_HEAD")
+    if counts is None:
+        return UpdateOutcome(
+            UNAVAILABLE,
+            f"could not compare {branch} with {remote}/{branch}; {branch} left as it is",
+        )
+    ahead, behind = counts
+    remote_head = _rev_parse_short(container, project_dir, "FETCH_HEAD")
+    if behind == 0:
+        if ahead == 0:
+            return UpdateOutcome(UNCHANGED, f"{branch} is level with {remote}/{branch} at {remote_head}")
+        # The ordinary state of a clone that merge-task has landed work into.
+        return UpdateOutcome(
+            UNCHANGED,
+            f"{branch} is {ahead} commit(s) ahead of {remote}/{branch} and behind it "
+            f"by none; nothing to update",
+        )
+    if ahead:
+        return UpdateOutcome(
+            DIVERGED,
+            f"{branch} is {ahead} commit(s) ahead of {remote}/{branch} and {behind} behind: "
+            f"reconciling them is a merge nobody asked for, so this task does not start",
+        )
+
+    if _has_uncommitted_changes(container, project_dir):
+        return UpdateOutcome(
+            UNAVAILABLE,
+            f"{project_dir} has uncommitted changes, so {branch} cannot be "
+            f"fast-forwarded {behind} commit(s); left as it is",
+        )
+    before = _rev_parse_short(container, project_dir, "HEAD")
+    merged = run_docker_exec(
+        container, project_dir,
+        ["git", "merge", "--ff-only", "--quiet", "FETCH_HEAD"],
+        env=_GIT_ENV,
+    )
+    if merged.returncode != 0:
+        return UpdateOutcome(
+            UNAVAILABLE,
+            f"fast-forwarding {branch} failed; left as it is: {_output_tail(merged)}",
+        )
+    return UpdateOutcome(
+        UPDATED,
+        f"fast-forwarded {branch} {behind} commit(s) from {before} to {remote_head}",
+    )
+
+
 def _branch_exists(container: str, project_dir: str, branch: str) -> bool:
     proc = run_docker_exec(
         container, project_dir,

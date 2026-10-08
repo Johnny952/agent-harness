@@ -1277,6 +1277,38 @@ def cleanup_container(cfg: Config) -> str | None:
     return cfg.accounts[0].container if cfg.accounts else None
 
 
+def update_project_branch(cfg: Config, slug: str) -> docker_exec.UpdateOutcome | None:
+    """Bring a project's checkout up to date with its remote, once, per task.
+
+    Returns None when there is nothing to run it in or the operator has not
+    asked for it, and otherwise whatever the update came to — the caller
+    decides what a DIVERGED answer costs, because only a cycle knows whether a
+    task is about to start on the base this moves.
+
+    Runs in cleanup_container's container for cleanup_container's reason: every
+    agent bind-mounts the same projects root, so this does not need the account
+    the phases will run on. Ownership is read and restored around it the way
+    every other git call into a container is — git writes to .git/ as root in
+    there, and the host checkout is the same files.
+    """
+    if not cfg.update_project_before_task:
+        return None
+    container = cleanup_container(cfg)
+    if container is None:
+        return None
+    project_dir = f"{cfg.projects_root}/{slug}"
+    owner = docker_exec.read_owner(container, project_dir)
+    try:
+        return docker_exec.update_project_branch(
+            container,
+            cfg.projects_root,
+            slug,
+            credentials_path=cfg.git_credentials_path,
+        )
+    finally:
+        docker_exec.restore_owner(container, project_dir, owner)
+
+
 def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
     """Remove a finished task's reviewing checkouts, keeping the writers' one.
 
@@ -1699,6 +1731,25 @@ def run_task_cycle(
     completed = False
 
     try:
+        update = update_project_branch(cfg, slug)
+        if update is not None:
+            if update.blocking:
+                # Before any worktree exists, so nothing has been cut from the
+                # base this would have moved. A divergence is two histories and
+                # one of them is nobody's to pick here: the charter's C-1 has a
+                # phase that needs a decision the task never gave it end blocked
+                # and say so, and this is the same decision one step earlier.
+                logger.warning(
+                    "task %s: the project's own branch diverged from its remote: %s",
+                    task_id, update.detail,
+                )
+                _update_task_status(kanban, ctx.issue_id, "blocked")
+                return
+            # Said out loud either way: a task that started from a stale base is
+            # the thing this exists to prevent, and a run that could not reach
+            # the remote has to be readable as such afterwards.
+            log = logger.warning if update.status == docker_exec.UNAVAILABLE else logger.info
+            log("task %s: %s", task_id, update.detail)
         if _needs_mapping(cfg, slug):
             # Before the arquitecto, because what it writes is what the
             # arquitecto reads. Optional in both directions: the operator has

@@ -4,6 +4,8 @@ import dataclasses
 
 import yaml
 
+from dispatcher import docker_exec
+
 
 @dataclasses.dataclass
 class AccountConfig:
@@ -113,6 +115,15 @@ class Config:
     mapping_max_turns: int
     gates_enabled: bool
     gates_test_timeout_seconds: int
+    #: Whether a task fetches the project's remote and fast-forwards its own
+    #: checkout before its first phase runs. Off by default: it needs a
+    #: credential mounted into the agent containers that no existing setup has,
+    #: and without one every task would open with a warning it cannot act on.
+    #: False is the shape every config had before this existed, and it is the
+    #: behaviour they all got: the base is whatever the clone was last left at.
+    update_project_before_task: bool = False
+    #: Where that credential is read from, inside the container.
+    git_credentials_path: str = docker_exec.GIT_CREDENTIALS_PATH
     #: Which account the conversational thread runs under, or None for a flat
     #: pool. None is the shape every config had before this existed, and it
     #: keeps the picker's old behaviour exactly: no account is ranked last, no
@@ -454,6 +465,15 @@ def load_config(path: str) -> Config:
         # gate something else, and the gate says so and lets review proceed
         # rather than holding the task open for the rest of the afternoon.
         gates_test_timeout_seconds=gates_test_timeout_seconds,
+        # Off by default, like merge_on_done and for a neighbouring reason:
+        # this one reaches the network and needs a credential the operator has
+        # to put on the host first. Turned on, it runs once per task, before
+        # the first phase, and only ever fast-forwards — see
+        # docker_exec.update_project_branch for what each outcome means.
+        update_project_before_task=bool(raw.get("update_project_before_task", False)),
+        git_credentials_path=raw.get(
+            "git_credentials_path", docker_exec.GIT_CREDENTIALS_PATH
+        ),
         primary_account=primary_account,
         reserve_pct=reserve_pct,
         fallback_roles=_load_fallback_roles(raw),
