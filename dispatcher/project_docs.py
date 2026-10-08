@@ -45,6 +45,7 @@ LEARNINGS_INDEX = f"{LEARNINGS_DIR}/README.md"
 DEBT_DIR = f"{DOCS_DIR}/debt"
 DEBT_INDEX = f"{DEBT_DIR}/README.md"
 IMPLEMENTATIONS_DIR = f"{DOCS_DIR}/implementations"
+PLANS_DIR = f"{DOCS_DIR}/plans"
 
 #: The docs whose sentences are claims about the tree as it is now: an index of
 #: what exists, the rulings in force, the architecture, the business, the debt
@@ -58,12 +59,12 @@ PRESENT_DOCS = (
 #: The docs that record what was true when they were written, and go stale by
 #: design: DECISIONS is appended to and never rewritten, an implementation note
 #: describes a branch that has already landed, a learning names the file it was
-#: learned in. This project's own rule for a record that disagrees with the
-#: tree is to leave the sentence alone and record the disagreement somewhere
-#: newer (`docs/learnings/a-plans-present-tense-claim-is-a-citation.md`), so
-#: the only lines in here anybody owes an answer for are the ones a task has
-#: just added.
-RECORD_DOCS = (DECISIONS, IMPLEMENTATIONS_DIR, LEARNINGS_DIR)
+#: learned in, a plan predicts work that has since landed or not (ADR 38). This
+#: project's own rule for a record that disagrees with the tree is to leave the
+#: sentence alone and record the disagreement somewhere newer
+#: (`docs/learnings/a-plans-present-tense-claim-is-a-citation.md`), so the only
+#: lines in here anybody owes an answer for are the ones a task has just added.
+RECORD_DOCS = (DECISIONS, IMPLEMENTATIONS_DIR, LEARNINGS_DIR, PLANS_DIR)
 
 
 def _named_by(path: str, group: tuple[str, ...]) -> bool:

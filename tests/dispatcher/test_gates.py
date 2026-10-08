@@ -681,6 +681,35 @@ def test_a_doc_the_layout_does_not_name_is_not_this_gates_business(monkeypatch) 
     assert "docs/ROADMAP.md" not in _scope(worktree)
 
 
+def test_a_plan_is_read_for_the_lines_this_task_added(monkeypatch) -> None:
+    """A plan is written ahead of the work and survives it, so its old lines are
+    predictions nobody may rewrite (ADR 38). A line a task adds today is a claim
+    about today, and the task that wrote it is the one that can still fix it."""
+    worktree = _Worktree(
+        diff=("docs/plans/board.md",),
+        added={"docs/plans/board.md": ("The board lives in `observability/nope.py`.",)},
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "`docs/plans/board.md` points at `observability/nope.py`" in finding.detail
+    assert "docs/plans/board.md" not in _scope(worktree)
+
+
+def test_a_plan_this_task_wrote_from_scratch_is_read_whole(monkeypatch) -> None:
+    """The same rule as a new implementation note: untracked, so the diff never
+    sees it, and every line in it is this task's own claim."""
+    worktree = _Worktree(
+        untracked=("docs/plans/next.md",),
+        pointers=("docs/plans/next.md:`dispatcher/nope.py`",),
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "docs/plans/next.md" in _scope(worktree)
+    assert "`docs/plans/next.md` points at `dispatcher/nope.py`" in finding.detail
+
+
 def test_a_citation_that_lands_inside_a_subproject_is_not_broken(monkeypatch) -> None:
     """`front/` is a project of its own, and docs about it cite its files the way
     its own source imports them. A token that is the tail of a tracked path, on a

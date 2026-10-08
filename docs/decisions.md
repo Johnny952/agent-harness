@@ -2364,3 +2364,69 @@ One test per role — `test_every_role_is_told_the_remote_is_not_its_business`,
 parametrized over the four cycle roles and the mapper — asserting that the
 prompt each one gets names `git fetch`, `git pull`, `git rebase`, `do not push`
 and the handoff.
+
+## ADR 38 — a plan is a record: its new lines are checked, its old ones are not
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-08).
+
+**Context.** ADR 35 left `docs/plans/` out of the pointers gate because most of
+a plan is a prediction, and filed the question as the fourth fix of
+[`T-014-D2`](debt/T-014-D2.md): whether the Status paragraph each plan opens
+with is enough to put the file in `PRESENT_DOCS`. The row framed it as a binary,
+and predicted that the four stale pairs it had counted in `docs/plans/` would
+come back into scope with a yes.
+
+The gate offers three positions, not two, because `_broken_pointers` reads the
+lines a task added only for a doc `is_record` names, and skips every other one.
+A doc in neither group is not checked at all — not whole, and not the line a
+task writes into it today. That is where `docs/plans/` has been since ADR 35.
+A doc in `PRESENT_DOCS` is grepped whole on every task. A doc in `RECORD_DOCS`
+is read for the lines the task added, and read whole only when the task created
+it.
+
+Measured with the gate's own parser: the three plans yield 4 pairs that survive
+both excuses, three in the board plan and one in the console plan, and every one
+names the board or the dashboard ADR 32 retired. `docs/superpowers/plans/` adds
+three more of the same kind, all in the founding plan. All three files in
+`docs/plans/` open with a Status paragraph; of the two under `docs/superpowers/`,
+the founding plan does and the stage-0 plan does not.
+
+**Decision.** *`docs/plans/` is a record.* `PLANS_DIR` joins `RECORD_DOCS` in
+`dispatcher/project_docs.py`, beside the implementation notes, and nothing else
+in the gate changes.
+
+`PRESENT_DOCS` was the reading the row assumed, and it is the one this project
+has already ruled out. A plan in there would turn each of the four pairs into a
+finding on every task for ever, and the only way to clear one is to rewrite the
+plan to match the tree — which
+`docs/learnings/a-plans-present-tense-claim-is-a-citation.md` forbids by name in
+*What to do*, because it deletes the record of what was intended. A gate that
+asks every task to do what the project says nobody may do is the state ADR 35
+was written to leave.
+
+As a record, a plan is held to what the learning asks of its reader, made
+mechanical: a line written today is a claim about today, and the task that wrote
+it is the one that can still fix it, while a prediction that went stale is
+never asked again. A plan a task creates from scratch is untracked, so the diff
+never sees it and it is read whole, which is right for the same reason it is
+right for a new implementation note — every line in it is that task's own.
+
+*`docs/superpowers/` stays out.* No role is told to write there, the founding
+plan's own Status calls it a record rather than a worklist, and ADR 35's reason
+for leaving an unnamed doc unread holds unchanged: nobody owes an answer for it
+either way.
+
+**Consequences.** The row's prediction does not hold, and this is where that is
+said: none of the four pairs comes back into scope. They stay in the plans as
+written, and `T-014-D2` keeps the only account of them.
+
+What changes is the line a task adds. A phase that updates a plan's Status
+paragraph, or appends a phase to one, now has every citation in those lines
+checked, where until now nothing in the directory was read at all. On this tree
+the gate still reports nothing: the present half is the same six entries, and a
+diff that does not touch a plan reads none of it.
+
+Two tests in `tests/dispatcher/test_gates.py`, beside ADR 35's pair for the
+implementation notes: a citation added to an existing plan is reported while the
+plan itself stays out of grep's file list, and a plan written from scratch is in
+that list and reported. Both fail with `PLANS_DIR` taken back out.
