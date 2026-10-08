@@ -1,5 +1,7 @@
 # ia-harness Implementation Plan
 
+**Status (2026-10-08): delivered, and a record rather than a worklist.** This is the founding plan, written on 2026-09-13 and executed to the end; its checkboxes were never ticked, so an unticked box here says nothing about what is left to do. The files each task names are the files that were planned, and several have since moved or gone — Task 10's dashboard was split out, and the board that replaced it was itself retired (`docs/decisions.md` ADR 32). The plan is deliberately left as written: rewriting it to match the tree would delete the record of what was intended. `docs/ROADMAP.md` is the live tracker.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the Smart Dispatcher and its supporting infrastructure so a serial, 24/7 multi-agent Arquitecto→Implementador→Revisor→Auditor pipeline can run across multiple Claude Pro accounts in isolated Docker containers, orchestrated by `docker exec -w ...`, coordinated through Vibe Kanban's local MCP server, with quota-aware failover, dual context-transfer, hardened Docker-out-of-Docker sidecars, and hooks→HTTP→SQLite observability.

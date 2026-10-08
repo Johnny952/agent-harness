@@ -19,6 +19,12 @@ drive the dashboard app, because that was the app that had auth. Deleting the
 file on the strength of that sentence would have deleted `observability/auth.py`'s
 only coverage, with the suite still green.
 
+**As of 2026-10-08 the file this section names is gone.** T-010 deleted the
+dashboard and its test module in the same stroke that rehomed the seven auth
+tests, so the path above records what the arquitecto found in September and is
+not somewhere to look today. The sentence is left as written, which is what
+*What to do* below argues for.
+
 ## Why
 
 A plan is written ahead of the work and then survives it. A sentence that was a
