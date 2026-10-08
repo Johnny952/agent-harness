@@ -612,8 +612,10 @@ The first real `run-task`, with costs capped.
     prose instead falls back to its last `VERDICT:` line; note which path the
     run took.
   - The project's `docs/` gains what the duties in each role's prompt
-    ask for: an ADR appended to `docs/decisions.md` if the task decided
-    anything, `docs/implementations/T-001.md` from the implementador,
+    ask for. The project is `scratch`, so these live under
+    `.data/projects/scratch/docs/` and not in this repo: an ADR appended
+    to `decisions.md` if the task decided anything, an implementation
+    note named for the task — `T-001.md` here — from the implementador,
     and indexes written by the auditor alone, each row carrying its
     trigger. Record every phase that wrote none. The gates enforce the
     narrow end of this — a contract file moved with no `.md` beside it,

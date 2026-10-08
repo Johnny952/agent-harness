@@ -750,7 +750,7 @@ Queda documentado, sin diseñar en detalle:
     skill no toca. El único A/B de terceros sobre tareas reales de Claude
     Code (JetBrains, 86 tareas) midió 8,5% menos tokens de salida, cerca
     de 10% del costo, sin cambio de calidad, mientras que sus ~1K tokens de
-    reglas se releen en cada turno. Su propio `docs/HONEST-NUMBERS.md`
+    reglas se releen en cada turno. El `HONEST-NUMBERS.md` de caveman
     lista casos netos negativos y pide medirla con los totales del
     proveedor. Sus límites (código, commits, docs y PRs en prosa normal;
     claridad completa en advertencias de seguridad y acciones
