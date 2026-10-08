@@ -1845,8 +1845,8 @@ either.
      the packs exist. Pass the flag again on every `--resume`, a quota
      handoff included: whether a resumed session keeps the original
      call's plugins is unverified. A second image (`agent-web`) is only
-     worth it for heavy dependencies; the agent image (`node:20-slim`)
-     has no Chromium today.
+     worth it for heavy dependencies; the agent image
+     (`node:24-bookworm-slim`) has no Chromium today.
    - *Project default profile.* Most tasks in a project want the same
      packs, so the project carries default profiles and a task label adds
      to them: a phase gets the project's profiles plus the task's.

@@ -166,13 +166,30 @@ def _frontmatter(text: str) -> dict:
 
 
 #: The keys the index's frontmatter is asked for. Everything else in these
-#: docs is prose for a model to read; these two are for the dispatcher, which
-#: has to run them with no model in the loop at all.
-COMMAND_KEYS = ("build", "test")
+#: docs is prose for a model to read; these are for the dispatcher, which has
+#: to run them with no model in the loop at all. Each one is a command or a
+#: list of commands, run in order from the project root.
+COMMAND_KEYS = ("build", "install", "test", "lint")
+#: The two a mapper is asked to establish. `install` and `lint` are added by
+#: whoever decides a project needs them: what a fresh worktree must install
+#: before its suite can run, and what a gate should only ever report on.
+MAPPED_KEYS = ("build", "test")
 
 
-def read_commands(container: str, project_dir: str) -> dict[str, str]:
-    """The project's own build and test commands, as the index records them.
+def _command_list(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not value:
+        return ()
+    if not all(isinstance(item, str) and item.strip() for item in value):
+        # One unusable entry makes the whole key unusable: running the half of
+        # a list that parsed would report a suite as green that never ran.
+        return ()
+    return tuple(item.strip() for item in value)
+
+
+def read_commands(container: str, project_dir: str) -> dict[str, tuple[str, ...]]:
+    """The project's own commands, as the index records them.
 
     They live in YAML frontmatter at the top of the index, because the gate
     that runs the tests runs through `docker exec` without `claude`: a command
@@ -184,9 +201,9 @@ def read_commands(container: str, project_dir: str) -> dict[str, str]:
     fm = _frontmatter(proc.stdout)
     commands = {}
     for key in COMMAND_KEYS:
-        value = fm.get(key)
-        if isinstance(value, str) and value.strip():
-            commands[key] = value.strip()
+        listed = _command_list(fm.get(key))
+        if listed:
+            commands[key] = listed
     return commands
 
 

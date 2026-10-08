@@ -58,7 +58,7 @@ dispatch() {
     dispatcher --config /app/verify.yaml "$@"
 }
 
-# node:20-slim has no `ps`, and `docker top` shows host PIDs.
+# node:24-bookworm-slim has no `ps`, and `docker top` shows host PIDs.
 procs() {
   docker exec "$1" sh -c 'for p in /proc/[0-9]*; do
     c=$(tr "\0" " " < "$p/cmdline" 2>/dev/null); [ -n "$c" ] && echo "${p#/proc/} $c"
@@ -1854,6 +1854,15 @@ starts, not in stage 0.
     a note rather than a red suite, since no implementador can install
     dependencies from inside its own session. Until this gate is run and
     decided, that gate is simply inert on JS projects.
+  - Decided 2026-10-08 for `front/`, with bun rather than npm or pnpm:
+    install per worktree, out of a cache shared on the projects mount
+    (`docs/decisions.md` ADR 39). The cache and the worktrees share a
+    filesystem, so bun hardlinks rather than copies: 486 packages install
+    in 5.1 s cold and 0.6 s warm, and `node_modules` plus the cache take
+    454M together, each further worktree about 13M. An install recorded
+    as `install:` in the index's frontmatter now runs before the tests,
+    and once it succeeds only exit 127 still reads as could-not-run. The
+    rule above stays for a project that records no `install:`.
 - **D6 — Browser verification within limits** (item 5, no quota).
   - Run: a dev server plus headless Chromium (e.g. Playwright) in the agent
     container. Separately, the Playwright image in the dind sidecar
@@ -1908,6 +1917,16 @@ starts, not in stage 0.
   - Otherwise: keep the three scripts a human's step after editing, as
     `front/README.md` says, and leave D5's rule in force — a command that
     cannot start is a note, not a red suite.
+  - Done 2026-10-08, by hand on `main` (`docs/decisions.md` ADR 39). The
+    image ships `bun` 1.3.12 and moved to `node:24-bookworm-slim`, because
+    `front/`'s jsdom 30 refuses Node 20 and every test file failed to load
+    there. Measured on a fresh worktree in a recreated `agent-cuenta1`:
+    install 5.1 s cold and 0.6 s warm, `bun run typecheck` green in 4.4 s,
+    `bun run test` 23 tests green in 1.7 s, `bun run lint` red in 3.2 s
+    with 134 prettier problems (124 errors, 10 warnings), so every task
+    carries a `lint` note until `front/` is formatted. Memory was not
+    measured against the 4 GB `mem_limit`. The gate itself has not yet run
+    on a real task: the agents' clone predates the new frontmatter.
 
 ## Results log
 

@@ -84,8 +84,27 @@ def test_read_commands_reads_the_index_frontmatter(monkeypatch) -> None:
     monkeypatch.setattr(project_docs.docker_exec, "run_docker_exec", _fake_cat(index))
 
     assert project_docs.read_commands("agent-cuenta1", "/data/projects/myproj") == {
-        "build": "npm run build",
-        "test": "npm test -- --run",
+        "build": ("npm run build",),
+        "test": ("npm test -- --run",),
+    }
+
+
+def test_read_commands_reads_lists_and_the_keys_no_mapper_writes(monkeypatch) -> None:
+    index = (
+        "---\n"
+        "install: cd front && bun install --frozen-lockfile\n"
+        "test:\n"
+        "  - python3 -m pytest\n"
+        "  - cd front && bun run typecheck\n"
+        "lint: cd front && bun run lint\n"
+        "---\n"
+    )
+    monkeypatch.setattr(project_docs.docker_exec, "run_docker_exec", _fake_cat(index))
+
+    assert project_docs.read_commands("agent-cuenta1", "/p") == {
+        "install": ("cd front && bun install --frozen-lockfile",),
+        "test": ("python3 -m pytest", "cd front && bun run typecheck"),
+        "lint": ("cd front && bun run lint",),
     }
 
 
@@ -96,7 +115,7 @@ def test_read_commands_returns_only_the_keys_that_are_there(monkeypatch) -> None
         project_docs.docker_exec, "run_docker_exec", _fake_cat("---\ntest: pytest\n---\n"),
     )
 
-    assert project_docs.read_commands("agent-cuenta1", "/p") == {"test": "pytest"}
+    assert project_docs.read_commands("agent-cuenta1", "/p") == {"test": ("pytest",)}
 
 
 @pytest.mark.parametrize(
@@ -108,8 +127,14 @@ def test_read_commands_returns_only_the_keys_that_are_there(monkeypatch) -> None
         "---\ntest: 44\n---\n",                    # not a command string
         "---\ntest: '   '\n---\n",                 # blank
         "---\nbuild: make\n",                      # never closed
+        "---\ntest: []\n---\n",                   # an empty list
+        "---\ntest: [pytest, 44]\n---\n",         # a list with a non-string
+        "---\ntest: [pytest, '  ']\n---\n",       # a list with a blank
     ],
-    ids=["none", "malformed", "not-a-mapping", "not-a-string", "blank", "unterminated"],
+    ids=[
+        "none", "malformed", "not-a-mapping", "not-a-string", "blank", "unterminated",
+        "empty-list", "list-with-a-number", "list-with-a-blank",
+    ],
 )
 def test_read_commands_is_empty_when_the_index_says_nothing_runnable(monkeypatch, index: str) -> None:
     """The gate that runs these has no model in the loop: an unusable index
@@ -187,7 +212,7 @@ def test_the_mapper_is_told_what_to_write_and_not_to_touch_the_code() -> None:
     assert "Do not change its code" in mapper
     # The two keys the dispatcher parses back out, named in the prompt that
     # writes them.
-    for key in project_docs.COMMAND_KEYS:
+    for key in project_docs.MAPPED_KEYS:
         assert f"`{key}:`" in mapper
 
 

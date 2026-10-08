@@ -26,6 +26,7 @@ class _Worktree:
         untracked: tuple[str, ...] = (),
         index: str = INDEX_WITHOUT_TESTS,
         test: tuple[int, str] | None = None,
+        shell: dict[str, tuple[int, str]] | None = None,
         timeout: bool = False,
         pointers: tuple[str, ...] = (),
         present: tuple[str, ...] = (),
@@ -39,6 +40,7 @@ class _Worktree:
         self.untracked = untracked
         self.index = index
         self.test = test
+        self.shell = shell or {}
         self.timeout = timeout
         self.pointers = pointers
         self.present = set(present)
@@ -107,7 +109,9 @@ class _Worktree:
         if command[:2] == ["sh", "-c"]:
             if self.timeout:
                 raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
-            returncode, output = self.test or (0, "")
+            # `shell` answers a project command by its text, for the tests
+            # that run several; `test` answers whatever `shell` does not name.
+            returncode, output = self.shell.get(command[2]) or self.test or (0, "")
             return _done(command, returncode, stdout=output)
         if command[0] == "grep":
             if not self.pointers:
@@ -517,6 +521,112 @@ def test_a_suite_that_does_not_finish_is_a_note_too(monkeypatch) -> None:
 
     assert finding.level == gates.NOTE
     assert "30s" in finding.detail
+
+
+INDEX_WITH_FRONT = """---
+install: cd front && bun install --frozen-lockfile
+test:
+  - python3 -m pytest
+  - cd front && bun run typecheck
+lint: cd front && bun run lint
+---
+
+# myproj
+"""
+
+
+def _shell_commands(worktree: _Worktree) -> list[str]:
+    return [command[2] for command in worktree.commands if command[:2] == ["sh", "-c"]]
+
+
+def test_every_command_the_index_lists_runs_in_order(monkeypatch) -> None:
+    worktree = _Worktree(index=INDEX_WITH_FRONT).install(monkeypatch)
+
+    assert _run(worktree).findings == []
+    assert _shell_commands(worktree) == [
+        "cd front && bun install --frozen-lockfile",
+        "python3 -m pytest",
+        "cd front && bun run typecheck",
+        "cd front && bun run lint",
+    ]
+
+
+def test_a_broken_import_after_a_clean_install_blocks(monkeypatch) -> None:
+    """`tsc` reports an import the change broke as "Cannot find module", the
+    same words a worktree with no `node_modules` produces. Once the project's
+    own install has succeeded, only the second reading is gone."""
+    worktree = _Worktree(index=INDEX_WITH_FRONT, shell={
+        "cd front && bun run typecheck": (
+            2, "src/a.ts(1,1): error TS2307: Cannot find module './gone'.\n",
+        ),
+    }).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.TESTS_RUN)
+
+    assert finding.level == gates.BLOCKING
+    assert "TS2307" in finding.detail
+
+
+def test_a_missing_runner_is_still_a_note_after_a_clean_install(monkeypatch) -> None:
+    worktree = _Worktree(index=INDEX_WITH_FRONT, shell={
+        "cd front && bun run typecheck": (127, "sh: 1: bun: not found\n"),
+    }).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.TESTS_RUN)
+
+    assert finding.level == gates.NOTE
+    assert "missing dependencies" in finding.detail
+
+
+def test_a_failed_install_is_a_note_and_the_suite_still_runs(monkeypatch) -> None:
+    """The Python half of the suite needs nothing the install provides, so it
+    still runs; what does need it is judged by the markers, as before."""
+    worktree = _Worktree(index=INDEX_WITH_FRONT, shell={
+        "cd front && bun install --frozen-lockfile": (1, "error: lockfile had changes\n"),
+        "cd front && bun run typecheck": (2, "error TS2307: Cannot find module 'react'.\n"),
+    }).install(monkeypatch)
+
+    findings = _findings(_run(worktree), gates.TESTS_RUN)
+
+    assert [f.level for f in findings] == [gates.NOTE, gates.NOTE]
+    assert any("bun install" in f.detail and "lockfile had changes" in f.detail for f in findings)
+    assert "python3 -m pytest" in _shell_commands(worktree)
+
+
+def test_a_red_lint_is_a_note(monkeypatch) -> None:
+    worktree = _Worktree(index=INDEX_WITH_FRONT, shell={
+        "cd front && bun run lint": (1, "125 problems (125 errors, 0 warnings)\n"),
+    }).install(monkeypatch)
+
+    report = _run(worktree)
+
+    finding, = _findings(report, gates.LINT)
+    assert finding.level == gates.NOTE
+    assert "125 problems" in finding.detail
+    assert _findings(report, gates.TESTS_RUN) == []
+
+
+def test_lint_alone_still_runs(monkeypatch) -> None:
+    worktree = _Worktree(index="---\nlint: ruff check .\n---\n").install(monkeypatch)
+
+    _run(worktree)
+
+    assert _shell_commands(worktree) == ["ruff check ."]
+
+
+def test_the_log_holds_every_command_that_failed(monkeypatch, tmp_path) -> None:
+    worktree = _Worktree(index=INDEX_WITH_FRONT, shell={
+        "python3 -m pytest": (1, "FAILED tests/test_a.py::test_b\n"),
+        "cd front && bun run lint": (1, "prettier/prettier\n"),
+    }).install(monkeypatch)
+    log_path = str(tmp_path / "gates-round-1.log")
+
+    report = _run(worktree, test_log_path=log_path)
+
+    assert all(log_path in f.detail for f in report.findings)
+    written = (tmp_path / "gates-round-1.log").read_text()
+    assert written.startswith("$ python3 -m pytest\n\nFAILED tests/test_a.py::test_b")
+    assert "$ cd front && bun run lint\n\nprettier/prettier" in written
 
 
 def test_the_project_command_runs_the_way_the_project_expects(monkeypatch) -> None:

@@ -2430,3 +2430,83 @@ Two tests in `tests/dispatcher/test_gates.py`, beside ADR 35's pair for the
 implementation notes: a citation added to an existing plan is reported while the
 plan itself stays out of grep's file list, and a plan written from scratch is in
 that list and reported. Both fail with `PLANS_DIR` taken back out.
+
+## ADR 39 — the test gate runs `front/`: install, then test, then lint
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-08).
+
+**Context.** T-013 gave `front/` a `typecheck`, a `test` and a `lint`, and ADR 31
+made `tests-in-diff` ask about a `front/src/**` change, but no gate ran any of the
+three scripts: the frontmatter of `docs/README.md` held one string, `python3 -m
+pytest`, and that suite imports nothing under `front/`. The open half of
+[`T-013-D1`](debt/T-013-D1.md) and *Deferred gates* D8 of `docs/ROADMAP.md` were
+blocked on the image, which had no `bun`. What a red result costs was already
+ruled by `docs/charter.md` C-10: a red type check blocks, a red lint is a note.
+
+Two facts shaped the rest. A fresh worktree has no `node_modules`, because it is
+git-ignored, so something has to install before the scripts can run at all. And
+`front/`'s vitest pulls in jsdom 30, which refuses any Node below 22.22.2: under
+the image's `node:20-slim` every test file failed to load with `webidl.util.
+markAsUncloneable is not a function`, which the gate would have read as a red
+suite on every task. `bun --bun vitest run` failed too, on `EventTarget`.
+
+**Decision.** *The index's frontmatter names the commands, and the gate runs
+them in a fixed order with a fixed severity per key.*
+
+- `dispatcher/project_docs.py:COMMAND_KEYS` grows from `build`, `test` to
+  `build`, `install`, `test`, `lint`, and each key takes one command or a list.
+  A list with one unusable entry makes the whole key unusable, so a suite that
+  never ran cannot read as green. `MAPPED_KEYS` keeps a mapper asked for `build`
+  and `test` only; `install` and `lint` are added by whoever decides a project
+  needs them.
+- `gates._run_tests` runs install, then every test entry, then every lint
+  entry, each with the whole timeout. A failed install is a note and stops the
+  install list, and the tests still run. A red test entry blocks. A red lint is a
+  note under a new gate name, `lint`. Every command that failed gets its own
+  `$ command` section in the one log, each cut to its own tail.
+- Once an install has succeeded, only exit 127 still means the suite could not
+  run. The could-not-run markers stop applying, because `tsc` reports an import a
+  change broke as "Cannot find module", and that is the failure to block on.
+- `docker/agent/Dockerfile` copies `bun` 1.3.12 from the official image and sets
+  `BUN_INSTALL_CACHE_DIR=/data/projects/.cache/bun`. The cache sits on the same
+  mount as the worktrees, so bun hardlinks out of it instead of copying, and it
+  outlives a recreate.
+- The base image moves from `node:20-slim` to `node:24-bookworm-slim`. Debian is
+  spelled out so the comments that rely on bookworm do not move with the tag.
+- `docs/README.md` records `install: cd front && bun install --frozen-lockfile`,
+  three `test:` entries (`python3 -m pytest`, `cd front && bun run typecheck`,
+  `cd front && bun run test`) and `lint: cd front && bun run lint`.
+
+The install is per worktree, not shared. One `node_modules` symlinked across
+worktrees would be one lockfile for every branch, and a task that bumps a
+dependency would test against the old one.
+
+**Consequences.** Measured inside a recreated `agent-cuenta1` on a throwaway
+worktree, on Node 24.21.0 and bun 1.3.12:
+
+| Step | Result | Time |
+|---|---|---|
+| `bun install --frozen-lockfile`, cold cache | 486 packages | 5.1 s |
+| the same, warm cache | — | 0.6 s |
+| `bun run typecheck` | exit 0 | 4.4 s |
+| `bun run test` | exit 0, 2 files, 23 tests | 1.7 s |
+| `bun run lint` | exit 1, 134 problems (124 errors, 10 warnings) | 3.2 s |
+| `python3 -m pytest` | exit 0, 1125 passed, 10 skipped | 8.0 s |
+
+`node_modules` and the cache are 441M each, but every one of the 37356 files is
+a hardlink, so the two together take 454M. Each further worktree costs about
+13M, not 441M. A round now spends roughly 18 s on the gate with a warm cache.
+
+The lint is red on `main`. All 134 problems are `prettier/prettier`, so every
+task carries a `lint` note until someone formats `front/`. That is C-10's
+choice, and the note is cheap: the revisor reads it and nothing else is spent.
+
+The gate was not run end to end on a real task here. The clone the agents work
+on predates this frontmatter, so `_run_tests` there still reads one `test:`
+string. Each command was run by hand in the container, and the order and
+severities are pinned by seven tests in `tests/dispatcher/test_gates.py` and one
+in `tests/dispatcher/test_project_docs.py`: the commands run in order, a broken
+import after a clean install blocks, a missing runner is still a note after a
+clean install, a failed install is a note and the suite still runs, a red lint
+is a note, a lint-only index still runs, and the log holds every command that
+failed.

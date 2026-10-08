@@ -2,7 +2,13 @@
 # Build context: repo root (the hook scripts under hooks/ are copied in), e.g.
 #   docker build -f docker/agent/Dockerfile -t ia-harness-agent .
 FROM docker:27-cli AS docker-cli
-FROM node:20-slim
+FROM oven/bun:1.3.12 AS bun
+# Node 24, not 20: the test gate runs front/'s vitest under this node, and the
+# jsdom it pulls in (30.x) refuses anything below 22.22.2 — on 20 every test
+# file fails to load, which the gate would read as a red suite on every task.
+# bookworm is spelled out so the Debian the comments below rely on does not
+# move with the tag.
+FROM node:24-bookworm-slim
 
 # python3-requests comes from apt: it is what /usr/bin/python3 needs for the
 # observability hook, which runs as bare `python3` and must keep working even
@@ -45,6 +51,23 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
         "pytest>=8.0"
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
+# bun, for the gate that runs front/'s typecheck, test and lint scripts (see
+# docs/README.md's `install:`, `test:` and `lint:`). front/ is a bun project —
+# bunfig.toml holds the release-age floor and the lockfile is bun's text one —
+# so `npm install` would ignore both. Copied as a binary from the official
+# image rather than curl-piped: the version is pinned by tag, and the binary
+# is all bun is. Keep it in step with the version front/ is developed on.
+#
+# The install cache lives on the projects mount, beside the worktrees: bun
+# hardlinks out of its cache when the two share a filesystem and copies when
+# they do not, which is ~450MB per worktree for front/ alone. It also outlives
+# a recreate, so the first round after one does not refetch everything. Image
+# env, for the same reason as CLAUDE_CONFIG_DIR below: `docker exec` sessions
+# inherit nothing an entrypoint exports.
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx
+ENV BUN_INSTALL_CACHE_DIR=/data/projects/.cache/bun
 
 # Every git command the agents run works on /data/projects, a bind mount owned
 # by the host user, so without this each one dies with `fatal: detected

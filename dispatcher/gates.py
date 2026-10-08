@@ -16,8 +16,8 @@ Findings come at three levels, because the answers are not equally cheap:
 - `ASK` — code changed and no test in the same language did. Worth one
   `--resume` into the session that just ended, asking for a test or a reason,
   and the reason travels to the revisor, which is the thing that can judge it.
-- `NOTE` — everything else. It rides along in the task file for the revisor and
-  the auditor to weigh, and costs no extra call.
+- `NOTE` — everything else, a red lint included. It rides along in the task
+  file for the revisor and the auditor to weigh, and costs no extra call.
 
 Every gate errs toward saying nothing. A false finding costs a round of real
 quota and teaches the roles to argue with the dispatcher; a missed one costs
@@ -42,6 +42,7 @@ NOTE = "note"
 #: Gate names, as they appear in the task file and in the logs.
 TESTS_IN_DIFF = "tests-in-diff"
 TESTS_RUN = "tests-run"
+LINT = "lint"
 CONTRACT_DOCS = "contract-docs"
 POINTERS = "pointers"
 
@@ -260,10 +261,10 @@ def _tests_in_diff(changed: list[str]) -> list[Finding]:
 # Gate 2 — the project's own tests pass
 # --------------------------------------------------------------------------
 
-#: Output that means the suite never ran, rather than ran and failed. A fresh
-#: worktree has no `node_modules` and no virtualenv (the deferred "dependencies
-#: in fresh worktrees" gate), and blocking a round on that would burn real
-#: quota on a problem no implementador can fix from inside its session.
+#: Output that means the suite never ran, rather than ran and failed. A project
+#: that records no `install:` gets a fresh worktree with no `node_modules` and
+#: no virtualenv, and blocking a round on that would burn real quota on a
+#: problem no implementador can fix from inside its session.
 _COULD_NOT_RUN_MARKERS = (
     "command not found",
     "cannot find module",
@@ -279,33 +280,66 @@ _LOG_TAIL_BYTES = 20000
 _INLINE_TAIL_CHARS = 500
 
 
-def _could_not_run(returncode: int, output: str) -> bool:
+def _could_not_run(returncode: int, output: str, installed: bool | None = None) -> bool:
     if returncode == 127:
         return True
+    if installed:
+        # Once the project's own install has succeeded the markers are the
+        # suite talking, not the worktree: `tsc` reports an import the change
+        # broke as "Cannot find module", and that is the failure to block on.
+        return False
     lowered = output.lower()
     return any(marker in lowered for marker in _COULD_NOT_RUN_MARKERS)
 
 
-def _write_log(log_path: str | None, command: str, output: str) -> bool:
-    """Park the test output where a later round can read it by path.
+def _write_log(log_path: str | None, sections: list[tuple[str, str]]) -> bool:
+    """Park the failing output where a later round can read it by path.
 
     It goes to the task's scratch directory, which the dispatcher and the
     agents mount at the same path, so a finding can cite it and the next
     implementador can open it. The repo cannot hold it — a reviewing
     checkout is rebuilt every round — and the handoff cannot carry it.
+    Every command that failed gets its own `$ command` section, in the order
+    they ran, each cut to its tail on its own so one noisy linter cannot
+    push a failing test out of the file.
     """
-    if not log_path:
+    if not log_path or not sections:
         return False
-    if len(output) > _LOG_TAIL_BYTES:
-        output = f"[… {len(output) - _LOG_TAIL_BYTES} chars omitted …]\n" + output[-_LOG_TAIL_BYTES:]
+    parts = []
+    for command, output in sections:
+        if len(output) > _LOG_TAIL_BYTES:
+            output = f"[… {len(output) - _LOG_TAIL_BYTES} chars omitted …]\n" + output[-_LOG_TAIL_BYTES:]
+        parts.append(f"$ {command}\n\n{output}")
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "w") as f:
-            f.write(f"$ {command}\n\n{output}")
+            f.write("\n\n".join(parts))
     except OSError as exc:
         logger.warning("gates: could not write %s: %s", log_path, exc)
         return False
     return True
+
+
+@dataclasses.dataclass(frozen=True)
+class _Failure:
+    """A command that ran and came back red, waiting on the log to be cited."""
+
+    gate: str
+    level: str
+    lead: str
+    output: str
+
+
+def _timed_out(gate: str, command: str, timeout_seconds: int) -> Finding:
+    # A NOTE, not a block: three rounds of implementador quota is a steep
+    # price for a suite that is merely slow, and the revisor is told either
+    # way. If this shows up often, the timeout is the thing to move.
+    return Finding(
+        gate,
+        f"`{command}` did not finish within {timeout_seconds}s, so whether it "
+        "passes is unknown. Check it yourself.",
+        NOTE,
+    )
 
 
 def _run_tests(
@@ -315,48 +349,101 @@ def _run_tests(
     timeout_seconds: int,
     log_path: str | None,
 ) -> list[Finding]:
-    command = project_docs.read_commands(container, project_dir).get("test")
-    if not command:
+    """Install what the project says to, run its tests, then its linters.
+
+    Each key is a list run in order, and each command gets the whole timeout:
+    a fresh install and a type check are different jobs and neither should
+    eat the other's time. A red test blocks. A red install or a red lint is
+    a NOTE — the first is the worktree's problem rather than the change's,
+    and the second is a project's style, which the revisor can weigh and the
+    dispatcher should not enforce.
+    """
+    commands = project_docs.read_commands(container, project_dir)
+    tests = commands.get("test", ())
+    lints = commands.get("lint", ())
+    if not tests and not lints:
         # No command recorded means no gate, not a failure: a project nobody
         # mapped has nothing to run, and inventing a command would be worse
         # than running none.
         logger.info("gates: no `test:` in %s, skipping the test gate", project_docs.INDEX)
         return []
-    try:
-        proc = docker_exec.run_docker_exec(
-            container, workdir, ["sh", "-c", command], timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired:
-        # A NOTE, not a block: three rounds of implementador quota is a steep
-        # price for a suite that is merely slow, and the revisor is told either
-        # way. If this shows up often, the timeout is the thing to move.
-        return [Finding(
-            TESTS_RUN,
-            f"`{command}` did not finish within {timeout_seconds}s, so whether it "
-            "passes is unknown. Check it yourself.",
-            NOTE,
-        )]
-    if proc.returncode == 0:
-        return []
 
-    output = (proc.stdout or "") + (proc.stderr or "")
-    if _could_not_run(proc.returncode, output):
-        return [Finding(
-            TESTS_RUN,
-            f"`{command}` could not run in this worktree (exit {proc.returncode}); it "
-            "looks like missing dependencies rather than a failing test, so it is "
-            "not being treated as one.",
-            NOTE,
-        )]
+    def execute(command: str) -> subprocess.CompletedProcess | None:
+        try:
+            return docker_exec.run_docker_exec(
+                container, workdir, ["sh", "-c", command], timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return None
 
-    detail = f"`{command}` failed (exit {proc.returncode})"
-    if _write_log(log_path, command, output):
-        detail += f". The output is at `{log_path}`"
-    else:
-        # No log to point at, so the finding carries the end of the output
-        # itself — the tail, because that is where a runner prints what failed.
-        detail += f": {output.strip()[-_INLINE_TAIL_CHARS:]}"
-    return [Finding(TESTS_RUN, detail + ".", BLOCKING)]
+    findings: list[Finding] = []
+    failures: list[tuple[str, _Failure]] = []
+
+    installs = commands.get("install", ())
+    installed = True if installs else None
+    for command in installs:
+        proc = execute(command)
+        if proc is None:
+            findings.append(_timed_out(TESTS_RUN, command, timeout_seconds))
+            installed = False
+            break
+        if proc.returncode != 0:
+            failures.append((command, _Failure(
+                TESTS_RUN,
+                NOTE,
+                f"`{command}` failed (exit {proc.returncode}), so what ran after it "
+                "ran without what it installs",
+                (proc.stdout or "") + (proc.stderr or ""),
+            )))
+            installed = False
+            break
+
+    for command in tests:
+        proc = execute(command)
+        if proc is None:
+            findings.append(_timed_out(TESTS_RUN, command, timeout_seconds))
+            continue
+        if proc.returncode == 0:
+            continue
+        output = (proc.stdout or "") + (proc.stderr or "")
+        if _could_not_run(proc.returncode, output, installed):
+            findings.append(Finding(
+                TESTS_RUN,
+                f"`{command}` could not run in this worktree (exit {proc.returncode}); "
+                "it looks like missing dependencies rather than a failing test, so "
+                "it is not being treated as one.",
+                NOTE,
+            ))
+            continue
+        failures.append((command, _Failure(
+            TESTS_RUN, BLOCKING, f"`{command}` failed (exit {proc.returncode})", output,
+        )))
+
+    for command in lints:
+        proc = execute(command)
+        if proc is None:
+            findings.append(_timed_out(LINT, command, timeout_seconds))
+            continue
+        if proc.returncode == 0:
+            continue
+        failures.append((command, _Failure(
+            LINT,
+            NOTE,
+            f"`{command}` reported problems (exit {proc.returncode}); lint is "
+            "reported, not enforced",
+            (proc.stdout or "") + (proc.stderr or ""),
+        )))
+
+    logged = _write_log(log_path, [(command, f.output) for command, f in failures])
+    for _, failure in failures:
+        if logged:
+            detail = f"{failure.lead}. The output is at `{log_path}`"
+        else:
+            # No log to point at, so the finding carries the end of the output
+            # itself — the tail, because that is where a runner prints what failed.
+            detail = f"{failure.lead}: {failure.output.strip()[-_INLINE_TAIL_CHARS:]}"
+        findings.append(Finding(failure.gate, detail + ".", failure.level))
+    return findings
 
 
 # --------------------------------------------------------------------------
