@@ -2282,3 +2282,85 @@ that the probe is `test -f`, that the fetch carries `GIT_TERMINAL_PROMPT=0`,
 that the credential travels as a `store` file and never as env, and that the
 whole path never issues a `push` — which is the claim the read-only token rests
 on.
+
+## ADR 37 — a phase is told not to move its base, in the prompt and in the skill
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-08).
+
+**Context.** ADR 36 settles a task's base once, before the first worktree exists,
+and that is the whole of what it settles. It says nothing to the role, and there
+is nothing in `dispatcher/` that could: the role is the one with a shell in the
+worktree, every git call the dispatcher makes is a `docker exec` of its own, and
+a `git pull` run inside a phase is invisible from this side until the diff turns
+up in a review.
+
+It is also a reasonable-looking thing for a role to do. The four phases share
+`agent/task/<id>` and one writer worktree, so a tree can genuinely look older
+than the handoff that describes it — that is the ordinary symptom of a base
+settled before the first phase rather than at the start of this one. And the
+skill all four roles are given, `systematic-debugging`, opens Phase 1 with a
+step literally called "Check Recent Changes", which is the moment where reaching
+for the remote looks most like following instructions.
+
+**Decision.** Say it twice, and split the halves on the criterion this repo
+already states twice: a skill is method and travels between projects, while
+anything about the harness in front of the role rides in the dispatcher-composed
+prompt.
+
+*The harness half is a prompt constant.* `_REMOTE_IS_NOT_YOURS` in
+`dispatcher/dispatcher.py`, appended by `_role_prompt` for every role, next to
+the docs duties: the base was settled before this task's first phase and does
+not move while the task runs — no `git fetch`, no `git pull`, no `git rebase`,
+no merge from a remote branch, and no push — and a rebase additionally rewrites
+commits the phases before it already handed on. It also spells out the half a
+prohibition alone would leave the role to invent: a tree that looks older than
+the work it was handed, or something missing from it, is a finding for the
+handoff and not its to repair, because the dispatcher owns the remote and a base
+that really did diverge ends the task.
+
+Every role, the mapper included. The mapper reads the whole tree before anything
+has been cut from it, which is where a pull looks most harmless and is the one
+place where it would move the branch every later phase inherits.
+
+*The portable half goes in the skill.* `systematic-debugging`, inside Phase 1's
+"check recent changes", where it answers the step rather than sitting beside it:
+`git log`, `git diff` and `git show` are reads and tell you what changed, while
+fetching moves the one variable whose movement moves every other one at once, so
+the reproduction before it and the one after are not the same bug. With a red
+flag ("Let me pull the latest and see if it still happens") and a row in Common
+Rationalizations, because those two lists are what a role actually
+pattern-matches itself against, and recorded in `skills/NOTICE.md` like every
+other change to a vendored skill.
+
+*`do not push` is only in the prompt half.* Not pushing is this harness's policy
+— charter C-5 — and not a method for debugging anything. `skills/README.md`
+forbids role-specific content in a `SKILL.md`, and the skill travels to projects
+where pushing is the job.
+
+**Consequences.** The halves arrive at different times. The prompt is composed
+per call, so that one lands on the next dispatch; the skills are baked into the
+agent image at `/opt/ia-harness/skills`, so that one reaches a container only on
+the next build. For whatever window that is, the roles have the half that names
+this harness, which is the better half to arrive first.
+
+Nothing enforces it. This is instruction and not a guard: a phase that fetches
+anyway is not stopped, and it surfaces as ADR 36's `diverged` on a later task,
+or as a review reading a diff that is partly someone else's. The detectable form
+would be the worktree's `HEAD` recorded before a phase and compared after it,
+which nothing does today; this is the place to start from if it ever turns out
+to be needed.
+
+The duplication is the cost. One rule in two wordings drifts apart unless
+something says which half owns what, which is what the criterion above is for: a
+change about how this harness runs a task edits the constant, a change about how
+to investigate a bug edits the skill.
+
+`claude plugin details` now measures `systematic-debugging` at about 4.1k tokens
+on invoke, over the 3.6k ceiling `skills/README.md` documented, so that range
+moved with the edit. The always-on cost is unchanged at about 53 tokens: the
+frontmatter was not touched.
+
+One test per role — `test_every_role_is_told_the_remote_is_not_its_business`,
+parametrized over the four cycle roles and the mapper — asserting that the
+prompt each one gets names `git fetch`, `git pull`, `git rebase`, `do not push`
+and the handoff.
