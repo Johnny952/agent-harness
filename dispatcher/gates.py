@@ -551,9 +551,26 @@ def _cited(
     return pairs
 
 
-def _in_a_subproject(
-    container: str, workdir: str, tokens: set[str],
-) -> set[str]:
+def _tracked(container: str, workdir: str) -> list[str]:
+    """Every path this repo keeps, which two of the excuses below read.
+
+    One listing, two questions: which token is the tail of a tracked path, and
+    which directories hold a project's own ignore rules. Asking git twice for
+    the same answer is the only thing this exists to avoid.
+    """
+    proc = docker_exec.run_docker_exec(
+        container, workdir, ["git", "ls-files", "--cached"], env=_C_LOCALE,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "gates: git ls-files --cached failed: %s",
+            proc.stderr.strip()[:200],
+        )
+        return []
+    return [line.strip() for line in proc.stdout.splitlines()]
+
+
+def _in_a_subproject(tracked: list[str], tokens: set[str]) -> set[str]:
     """Which of these land inside a project that has its own root.
 
     `front/` is a project of its own — the charter says the console is that
@@ -564,20 +581,25 @@ def _in_a_subproject(
     broken, and a tracked path that was deleted is still reported, because
     `ls` already said it is not there.
     """
-    proc = docker_exec.run_docker_exec(
-        container, workdir, ["git", "ls-files", "--cached"], env=_C_LOCALE,
-    )
-    if proc.returncode != 0:
-        logger.warning(
-            "gates: git ls-files --cached failed: %s",
-            proc.stderr.strip()[:200],
-        )
-        return set()
-    tracked = [line.strip() for line in proc.stdout.splitlines()]
     return {
         token for token in tokens
         if any(path.endswith(f"/{token}") for path in tracked)
     }
+
+
+def _subproject_roots(tracked: list[str]) -> list[str]:
+    """Where a project inside this one starts: whatever keeps its own ignore
+    rules.
+
+    A `.gitignore` below the repo root is that directory's own statement about
+    what it does not keep, so its parent is a root a citation can be spelled
+    from. The repo's own ignore file is not in here on purpose: a bare token is
+    already read from the repo root.
+    """
+    suffix = "/.gitignore"
+    return sorted(
+        {path[: -len(suffix)] for path in tracked if path.endswith(suffix)}
+    )
 
 
 def _ignored(container: str, workdir: str, tokens: list[str]) -> set[str]:
@@ -604,6 +626,33 @@ def _ignored(container: str, workdir: str, tokens: list[str]) -> set[str]:
             line.strip() for line in proc.stdout.splitlines() if line.strip()
         )
     return ignored
+
+
+def _ignored_by_a_subproject(
+    container: str, workdir: str, roots: list[str], tokens: set[str],
+) -> set[str]:
+    """Which of these a project inside this one deliberately does not keep.
+
+    The two excuses above compose, and a doc about `front/` citing what
+    `front/` builds needs both halves at once: nothing tracks
+    `.output/server/ssr.mjs`, and `git check-ignore` reads the path it is given
+    from the repo root, so it never reaches the rule in `front/.gitignore` that
+    covers it. Spelled from the root that owns the rule, it does.
+
+    Only the tokens the other two excuses left standing are asked, and only
+    from a root that keeps its own ignore file, so a project with no
+    subprojects pays nothing and a mis-spelled citation is still reported:
+    `assets/pool.js` is not `front/`'s build output under any root, and nothing
+    here invents one for it.
+    """
+    if not roots or not tokens:
+        return set()
+    candidates = {
+        f"{root}/{token}": token
+        for root in roots for token in sorted(tokens)
+    }
+    named = _ignored(container, workdir, sorted(candidates))
+    return {candidates[path] for path in named if path in candidates}
 
 
 def _broken_pointers(
@@ -654,8 +703,12 @@ def _broken_pointers(
         # Only now, and only about what already looks broken: a docs tree with
         # nothing wrong in it pays for none of this.
         tokens = {token for _, token in broken}
-        excused = _in_a_subproject(container, workdir, tokens) | _ignored(
+        tracked = _tracked(container, workdir)
+        excused = _in_a_subproject(tracked, tokens) | _ignored(
             container, workdir, sorted(tokens),
+        )
+        excused |= _ignored_by_a_subproject(
+            container, workdir, _subproject_roots(tracked), tokens - excused,
         )
         broken = [pair for pair in broken if pair[1] not in excused]
     if not broken:

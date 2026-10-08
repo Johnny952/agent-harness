@@ -719,6 +719,40 @@ def test_a_tracked_path_that_was_deleted_is_still_reported(monkeypatch) -> None:
     assert "`docs/README.md` points at `docs/architecture.md`" in finding.detail
 
 
+def test_a_citation_of_what_a_subproject_does_not_keep_is_not_broken(
+    monkeypatch,
+) -> None:
+    """The two excuses compose, and a doc about `front/` citing what `front/`
+    builds needs both halves: nothing tracks `.output/server/ssr.mjs`, and the
+    rule that covers it lives in `front/.gitignore`, which `git check-ignore`
+    never reaches from the repo root. Asked from the root that owns the rule,
+    it answers."""
+    worktree = _Worktree(
+        pointers=("docs/architecture.md:`.output/server/ssr.mjs`",),
+        tracked=("front/.gitignore", "front/src/router.tsx"),
+        ignored=("front/.output/server/ssr.mjs",),
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.POINTERS) == []
+
+
+def test_a_path_no_subproject_ignores_either_is_still_reported(monkeypatch) -> None:
+    """The counterweight to that widening, because an excuse that is asked more
+    broadly can swallow a real finding. `front/` builds into `front/dist/`, so a
+    doc citing `assets/pool.js` has the path wrong wherever it is read from —
+    and the gate says so after asking every root."""
+    worktree = _Worktree(
+        pointers=("docs/architecture.md:`assets/pool.js`",),
+        tracked=("front/.gitignore", "front/src/router.tsx"),
+        ignored=("front/.output/server/ssr.mjs",),
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "`docs/architecture.md` points at `assets/pool.js`" in finding.detail
+    assert worktree.ran(["git", "check-ignore", "--", "front/assets/pool.js"])
+
+
 def test_without_a_fork_point_the_present_tense_docs_are_still_read(monkeypatch) -> None:
     """The diff gates need a base and this one does not: a pointer that breaks is
     usually in a file nobody opened, because what moved was the thing it pointed
