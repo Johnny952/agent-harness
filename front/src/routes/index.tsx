@@ -261,7 +261,12 @@ function Column({
   );
 }
 
-function TaskCard({
+/**
+ * Exported only so a test can mount it: the `depends_on` guard below is the
+ * one malformed payload on this screen that renders instead of throwing, and
+ * `-index.test.tsx` is where that difference is written down.
+ */
+export function TaskCard({
   task,
   now,
   dense,
