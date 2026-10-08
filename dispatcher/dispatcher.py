@@ -473,6 +473,28 @@ def revisor_approved(result_text: str, payload: dict | None = None) -> bool:
     return bool(_VERDICT_RE.fullmatch(lines[-1]))
 
 
+# Why a role is told this at all, when nothing in `dispatcher/` fetches during a
+# cycle: the role is the one with a shell in the worktree, and reaching for the
+# remote is a helpful-looking thing to do when a tree looks older than expected.
+# ADR 36 settles the base once, before the first worktree exists, precisely
+# because the four phases share `agent/task/<id>`; a phase that re-settles it
+# halfway through undoes that, and the failure lands on whoever reviews next. It
+# rides in the prompt rather than in a vendored skill for the same reason the
+# docs duties do: a skill is method and travels between projects, while this is
+# about how this harness runs a task.
+_REMOTE_IS_NOT_YOURS = (
+    "One standing rule about git. The base you are on was settled before this task's first "
+    "phase and does not move while the task runs: do not run `git fetch`, `git pull`, "
+    "`git rebase`, or a merge from a remote branch, and do not push. Every phase of this task "
+    "works on the same branch in the same worktree, so a base that moves mid-task is how a "
+    "review ends up reading a diff that is partly someone else's, and a rebase rewrites "
+    "commits the phases before you already handed on. If the tree looks older than the work "
+    "you were handed, or something you need is missing from it, that is a finding for your "
+    "handoff and not yours to repair: the dispatcher owns the remote, and a base that really "
+    "did diverge ends the task rather than being reconciled inside it."
+)
+
+
 def _role_prompt(
     role: str,
     task_id: str,
@@ -508,6 +530,10 @@ def _role_prompt(
         )
         if round_num is not None:
             prompt += f" This is revision round {round_num}."
+    # Every role, the mapper included: it is the one that reads the whole tree
+    # before anything has been cut from it, which is the moment a pull looks
+    # most reasonable.
+    prompt += f"\n\n{_REMOTE_IS_NOT_YOURS}"
     # What this role owes the project's own docs. Here rather than in a
     # vendored skill because a skill is method and travels between projects,
     # while this is about the docs of the project in front of it.

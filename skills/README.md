@@ -83,7 +83,7 @@ without spending a token of quota.
 ## Cost
 
 Measured with `plugin details`, per skill: ~40–80 always-on tokens for the
-frontmatter line the model always sees, and 1.3k–3.6k on-invoke for the body
+frontmatter line the model always sees, and 1.3k–4.1k on-invoke for the body
 it reads when the skill fires. Always-on totals per role, at the table above:
 
 | Role | Always-on |

@@ -3456,6 +3456,33 @@ def test_the_mapper_is_told_the_task_is_context_not_its_job() -> None:
     assert "12 turns and no more" in prompt
 
 
+@pytest.mark.parametrize(
+    "role", ["arquitecto", "implementador", "revisor", "auditor", project_docs.MAPPER_ROLE],
+)
+def test_every_role_is_told_the_remote_is_not_its_business(role) -> None:
+    """ADR 36 settles the base once, before the first worktree exists, because
+    the four phases share one branch and one worktree. The role is the one with
+    a shell in there, so it is told — and the mapper too, since it reads the
+    tree before anything has been cut from it."""
+    prompt = dispatcher_mod._role_prompt(
+        role,
+        "task-1",
+        "myproj",
+        "/data/.hive/tasks/task-1.md",
+        _DESCRIPTION,
+        "/data/.hive/scratch/task-1",
+        "/data/.hive/tasks",
+    )
+
+    assert "git fetch" in prompt
+    assert "git pull" in prompt
+    assert "git rebase" in prompt
+    assert "do not push" in prompt
+    # Not a thing for the phase to fix on its own: the alternative to pulling is
+    # saying so, which is the half a role would otherwise have to invent.
+    assert "finding for your handoff" in prompt
+
+
 def test_run_task_cycle_hands_every_role_its_duty_to_the_project_docs(
     tmp_path, monkeypatch,
 ) -> None:

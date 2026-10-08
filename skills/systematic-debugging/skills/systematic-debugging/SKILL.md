@@ -72,6 +72,17 @@ You MUST complete each phase before proceeding to the next.
    - Git diff, recent commits
    - New dependencies, config changes
    - Environmental differences
+   - **Read the history; do not move the tree.** `git log`, `git diff` and
+     `git show` are reads and tell you what changed. `git fetch`, `git pull`,
+     `git rebase` and a merge from a remote branch are not: they change the
+     code you are investigating. That is the one variable whose movement moves
+     every other one at once, so the reproduction you had and the one you have
+     after it are not the same bug, and a rebase additionally rewrites commits
+     whoever handed you this task has already seen. Whoever runs this pipeline
+     settled the base before your phase started. If the tree looks older than
+     the work you were handed, or something you were told is there is missing
+     from it, that is evidence about the task and belongs in your handoff: it
+     is a finding, not a prerequisite for you to go and fix.
 
 4. **Gather Evidence in Multi-Component Systems**
 
@@ -230,6 +241,7 @@ If you catch yourself thinking:
 - "It's probably X, let me fix that"
 - "I don't fully understand but this might work"
 - "Pattern says X but I'll adapt it differently"
+- "Let me pull the latest and see if it still happens"
 - "Here are the main problems: [lists fixes without investigation]"
 - Proposing solutions before tracing data flow
 - **"One more fix attempt" (when already tried 2+)**
@@ -261,6 +273,7 @@ If you catch yourself thinking:
 | "Multiple fixes at once saves time" | Can't isolate what worked. Causes new bugs. |
 | "Reference too long, I'll adapt the pattern" | Partial understanding guarantees bugs. Read it completely. |
 | "I see the problem, let me fix it" | Seeing symptoms ≠ understanding root cause. |
+| "The tree looks stale, let me update it first" | Updating changes the subject mid-investigation. Stale is a finding, not a prerequisite. |
 | "One more fix attempt" (after 2+ failures) | 3+ failures = architectural problem. Question pattern, don't fix again. |
 
 ## Quick Reference
