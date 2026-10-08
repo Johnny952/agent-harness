@@ -2571,3 +2571,312 @@ React rather than this screen, and the render is unchanged either way —
 `BoardPage`. The test gate's `tests-in-diff` check (ADR 31) will ask about a
 `front/src/**` change arriving with no `front/` test, and this paragraph is the
 answer to it.
+
+## ADR 41 — `/api/learnings` serves the hive's entries, project-filtered, in the phase table's own order
+
+**Status:** accepted (T-016, 2026-10-08). Builds the second of the two routes
+ADR 19 sorted into "routes this api may grow" and `docs/plans/front.md` tier 2
+names; `/api/phases` was the first (ADR 27). The console's half is ADR 42.
+
+**Context.** The traps a run discovers are files under
+`<hive>/learnings/{inbox,harness}/*.md`, one per entry, written by the phases
+themselves and parsed by `dispatcher/learnings.py` into `Entry` — frontmatter as
+the dict it was read as, plus the body's `## Symptom`, `## Why`, `## Rule` and
+`## Evidence` sections. `duties()` renders a table of them into every phase's
+prompt, capped at `learnings.MAX_ROWS`. Nothing outside the dispatcher could
+read any of it: the console's `listLearnings` returned `mockLearnings()`, whose
+`L-01` ids exist nowhere in this harness, and the console's own forward refused
+`/api/learnings` as not one of the six routes it carried.
+
+The api already mounts the whole hive: the repository's `.hive` directory,
+read-only, at the path the dispatcher uses, in both compose files. So this route
+needs no mount, no environment key and no change to either compose file.
+
+**Decision.** *`GET /api/learnings` answers one row per entry in the hive's
+`inbox/` and `harness/`, filtered to the project whose phases would be shown
+them, in the order those phases see, with the api's judgement on which rows
+reach a phase at all.*
+
+Eight parts, each with its own reason.
+
+**1. The parser is the dispatcher's, and three selectors are lifted, not
+copied.** The route reads through `learnings.read_dir`, which is already public
+and takes the root and one directory. Three functions are added to
+`dispatcher/learnings.py`, each of them code that already existed inside
+`table()` and `duties()`, so neither side can drift from the other:
+
+- `eligible(entries, project)` — `applicable()` minus the refuted ones, which is
+  the cut `duties` makes before `table` orders anything.
+- `ordered(entries, harness)` — the sort `table()` does: confirmed first and
+  refuted last, stale after fresh inside each band, `ref` as the tie-break.
+- `handed(entries, harness)` — `ordered(...)` cut to `MAX_ROWS`, which is
+  exactly the rows a phase's prompt carries.
+
+`table()` is rewritten to call the last two and renders the same bytes it
+rendered before; `duties()` calls `eligible`. A fourth function, `unreadable`,
+answers the `.md` files in one directory that `read_dir` skipped — the
+`LocalBoardClient.unreadable()` shape (ADR 3, ADR 4, `docs/debt/T-008-D2.md`),
+for the same reason: a reader that silently drops what it cannot parse leaves
+the one caller whose contract is "report the damage" nothing to report. It
+re-reads the directory rather than widening `read_dir`'s return, because
+`read_dir` has four callers inside the dispatcher that want entries and nothing
+else.
+
+**2. `?project=` is the only parameter, on `/api/debt`'s rule.** Optional where
+`projects_root` holds one checkout, required where it holds several, 404 for a
+slug it does not hold — `_project` unchanged. The filter is `learnings.applicable`,
+which is what a phase of that project is shown: everything a human has promoted
+into `harness/`, plus everything that project discovered itself. Another
+project's unreviewed entry is not served, because it is not something this
+project's phases can be handed, and this screen's whole subject is what they
+are handed. The slug is the right key because `dispatcher/dispatcher.py` passes
+the same `slug` to `duties()`, and the console's forward already sends
+`CONSOLE_PROJECT` on `/api/debt`.
+
+An entry whose `project:` frontmatter names a project with no checkout under
+`projects_root` is therefore invisible to this route. That is deliberate: a
+misspelled filter answering everything is the failure `_reject_unknown_parameters`
+exists against, and `_project`'s 404 names the checkouts that do exist.
+
+**3. `docs/learnings/` is not in this read.** The filed index in a project's
+checkout is a different object from the hive inbox: it is permanent, committed,
+per-project, written by the auditor, and read by a phase out of the repo. The
+hive inbox is live, shared by every project, drained when a branch merges, and
+read into the prompt by `duties()`. Serving them as one list would merge two
+lifecycles into one table and make the 40-row cap meaningless.
+
+It is also the only option that needs a second parser. `/api/debt` can read
+`docs/debt/README.md` because `dispatcher/debt.py:index_rows` exists; nothing
+anywhere parses `docs/learnings/README.md`, and writing that parser in
+`observability/` is what this module's docstring refuses — "a parser this
+service needs and does not have is one to make reachable in `dispatcher/`". A
+later task that wants the filed index serves it under its own route, with its
+parser in `dispatcher/`.
+
+**4. `dropped/` and `archive/` stay invisible.** The route reads `inbox/` and
+`harness/` and nothing else, because that is what `read_all` enumerates. ADR 33
+made the invisibility of `dropped/` the property that keeps a wrong drop
+recoverable for free, and `docs/debt/T-012-D1.md` names teaching any reader to
+enumerate it as the one thing that landed half depends on. This route does not.
+
+**5. What a row carries: ten keys.** Every one of them is rendered by the
+console (ADR 42); the sort is field by field, ADR 17's rule.
+
+| Key | Source | Why |
+|---|---|---|
+| `ref` | `Entry.ref` | `inbox/<slug>.md` — the pointer every prompt, every `learnings` CLI verb and every `refutes:` line already uses. It is the identity, not a surrogate, and it carries which side of the human review the entry is on |
+| `task` | `Entry.task` | Which task found the trap. The provenance a reader asks for first, and the key the task detail's region joins on (ADR 42) |
+| `carried_by` | `Entry.carried_by` | The task whose auditor is due to file it. With `task` it is `learnings.droppable`'s own relation, so the console and `merge-task` mean the same thing by "this task's entries" |
+| `scope` | `Entry.scope` | `project` or `harness` — one trap in one codebase, or one in what every project shares |
+| `status` | `Entry.status` | `confirmed`, `unconfirmed`, `refuted`. The confirmation rule is the dispatcher's and this route reports it |
+| `when` | `Entry.when` | The trigger line: when this applies, as a condition the next agent can check. The console's fixture called it `trigger` |
+| `rule` | `Entry.rule` | The one line the harness's own table shows — the first non-blank line of `## Rule`, falling back to `when`. Not the body: see below |
+| `stale` | `Entry.stale(harness)` | Written under a permission surface this harness no longer has, so it is shown and not counted as evidence. The api's judgement, against the fingerprint of the config it holds |
+| `in_phase_table` | `handed(eligible(…))` | Whether this row reaches a running phase right now. The screen's central claim, and not something a client can derive |
+| `phase_table_cap` | `learnings.MAX_ROWS` | The cap the row above is measured against, repeated per row because the envelope has no slot beside `data` for a collection-wide fact (ADR 20's shape) |
+
+Served and left out, with the reason:
+
+- **`body`**, the whole entry. Nothing in the console renders it, `rule` is the
+  line the dispatcher's own table shows, and a per-row field of unbounded length
+  multiplied by every row is the shape `docs/debt/T-011-D1.md` was. An operator
+  who wants the Symptom opens the file the `ref` names.
+- **`path`**, the absolute path inside the api container. It publishes a mount
+  layout, and `ref` is the pointer everything else in this harness cites.
+- **`project`**. Every served row is already this project's or the shared
+  store's, by part 2, so the column would read one value or blank. A later task
+  that renders provenance for a promoted entry adds it.
+- **`reviewed`**, which is `ref`'s own directory prefix.
+- **`harness`**, the fingerprint itself — twelve hex characters that answer
+  nothing a human can read. `stale` is the judgement over it, on ADR 10's rule
+  that this service derives a fact rather than publishing the input.
+- **`refutes` and `refuted_by`**. Real and unrendered. They are the next thing
+  this route grows if a screen ever explains *why* a row is refuted.
+- **`fingerprint`** and **`orphaned_from`**, which are the reconcile pass's
+  bookkeeping and mean nothing to a reader.
+
+**6. Damage is a warning, never a 500, and it is per directory.** Three
+warnings, on the shape the other reads use:
+
+- A `.md` file `read_dir` skipped — unreadable, or with no usable frontmatter —
+  is named, on `_read_cards`' wording: it is in no row and the rest of the list
+  still comes back.
+- A directory that exists and will not list is named, and the *other* directory
+  is still read. `read_dir` guards with `os.path.isdir` and then calls
+  `os.listdir`, which still raises for a directory it cannot read, and this
+  route lists two —
+  `docs/learnings/a-per-item-listing-in-a-never-500-read-needs-its-own-guard.md`
+  is the same shape one level up. The guard is at this caller and `read_dir`
+  keeps raising, because its dispatcher callers need the raise.
+- A missing learnings root is `[]` plus one warning naming it, on
+  `_no_events_warning`'s model. `ensure_dirs` makes the tree on every
+  `run-task`, so its absence means no run has happened here — and an operator
+  reading an empty Learnings screen is owed the difference between "no entry has
+  been written" and "the api is not looking where the dispatcher writes". A root
+  that exists with nothing in it is empty and silent.
+
+There is no per-row `try` and no `app.json.dumps` round, unlike `/api/tasks` and
+`/api/phases`, and that is a property of the row rather than a relaxation of the
+rule: every value above comes through `Entry`'s own accessors, which coerce with
+`str()`, or is a `bool` or `MAX_ROWS`. No file content reaches the envelope
+un-coerced, so there is nothing a YAML document could put in a row that JSON
+cannot serialise. **A later field read straight off `meta` reopens this**, and
+takes the guard and the serialisation round with it.
+
+**7. The order served is the phase table's, and the answer is capped.** Rows
+come back in `ordered()`'s order, so the first row is the first row a phase
+sees and the last is the first to fall off the end of the cap. `MAX_LEARNINGS =
+500` bounds the answer on `MAX_PHASES`' model, with the clamp named in
+`warnings`: the inbox is drained at merge and holds seventeen entries today, so
+nothing in this harness is clamped, and the cap exists so this is not the next
+thing this service answers with no bound at all. It bounds a count and not
+bytes, which is enough while `rule` and `when` are one line each.
+
+**8. The fingerprint is computed once, in `create_app`.** `harness_fingerprint`
+takes `cfg.permission_mode`, `cfg.allowed_tools` and
+`docker_exec.WRITER_ROLES`, the same three the dispatcher passes at
+`dispatcher/dispatcher.py` — so the api's answer to *stale* is the answer a
+phase dispatched now would get. It comes off the one `Config` `create_app`
+holds, never a second `load_config` in a view
+(`docs/learnings/a-new-field-on-an-api-row-has-two-questions.md`).
+`dispatcher/docker_exec.py` becomes an explicit import of this module for one
+frozenset; it is still never called, which is the sentence this module's
+docstring already carries.
+
+**Consequences.** Seven routes, not six. `observability/api/app.py`'s module
+docstring, `docs/README.md`'s `observability/api/` row and the console's forward
+all carry a count that moves, and the console's own rejection message —
+pinned in `front/src/lib/api/forward.test.ts` — moves with them.
+
+`in_phase_table` and `stale` are recomputed on every request, so an operator who
+changes `permission_mode` or `allowed_tools` in `config.yaml` sees this screen
+move at the next poll. That is the intent: both are facts about the harness as
+configured now, not about when the entry was written.
+
+A refuted row is served with `in_phase_table: false`, because `eligible` drops
+it before the cap is applied. The console shows it and says so; the point of
+retiring an entry is to stop it costing turns, not to hide that it was written.
+
+The route is read-only like every other: no `ensure_dirs`, no `reconcile`, no
+`stamp`, and nothing that would write into a `:ro` mount. The suite pins that
+the hive is byte-identical after a request, the way it pins it for the task
+endpoints.
+
+## ADR 42 — the console reads the learnings tree, and the detail's region shows what the task filed
+
+**Status:** accepted (T-016, 2026-10-08). The console half of ADR 41. Narrows
+ADR 18 on `LEARNING_TABLE_CAP` and ADR 27 on the learnings join, and leaves both
+entries as written.
+
+**Context.** `listLearnings` returned `mockLearnings()`; the Learnings screen
+drew that fixture and the task detail's learnings region drew an `EmptyState`
+naming `/api/learnings` as the route it was waiting for, per ADR 19 and
+`docs/ui.md` *A region with no route says which route, and when*. ADR 27 said
+the join that region wanted "travels as `handoff.learnings`" and waited only on
+this route.
+
+It does not. `dispatcher/handoff.py`'s schema makes `learnings` a list of
+strings described as "proposed learnings: something true of this project that
+the next task would want to know", and the handoff files on disk are prose: *"A
+handoff is written when a phase ends, so the newest file names the role that
+finished"*. Some lines happen to quote a ref inside the sentence and most do
+not. There is no key to join on, and there never was one to wait for.
+
+**Decision.** *The Learnings screen renders the served rows in the order they
+were served; the detail's region shows the entries this task filed or carries;
+and the console stops holding the harness's numbers.*
+
+**The type.** `LearningEntry` becomes ADR 41's ten keys under the api's own
+names — `ref`, `task`, `carried_by`, `scope`, `status`, `when`, `rule`, `stale`,
+`in_phase_table`, `phase_table_cap`. The fixture's `id`, `trigger`, `body` and
+`retired` are gone: `id` was a surrogate where the harness has a pointer,
+`trigger` and `body` were its words for `when` and `rule`, and `retired` was a
+second axis beside `status` that nothing on disk records. ADR 17's closing rule
+holds — the route's name is the harness's word for the thing, and the console
+renames nothing here.
+
+`mockLearnings` is **kept and conformed** to the served shape rather than
+deleted, which is ADR 25 and
+`docs/learnings/narrowing-a-served-type-is-also-a-fixture-edit.md`: a fixture
+typed against the served interface is what makes a typecheck catch a type that
+drifts from the route. Its paragraph in `front/src/lib/api/mock/fixtures.ts`
+moves from the fixtures that still back a screen to the ones that back nothing.
+
+**`LEARNING_TABLE_CAP` is deleted in favour of `phase_table_cap`.** ADR 18 kept
+it as "the console's own layout decision and nobody else's", which was true of a
+console with no route: a number of rows to draw. It is not a layout number. It
+is `learnings.MAX_ROWS`, the dispatcher's cap on the table a phase's prompt
+carries, and this screen's subject is which rows get there — so a literal in
+`types.ts` is the console asserting a dispatcher constant it cannot see change.
+This is `HEARTBEAT_STALE_S`'s fate in ADR 18 and the same reasoning, applied to
+the one constant that entry kept.
+
+**The screen sorts nothing.** The api answers in the order a phase sees, so the
+screen's `statusRank` comparator and its `retired`-first tie-break go, and the
+search filter is all that stands between the rows and the table. `listPhases`
+already took this position for the same reason — the boundary does not reorder
+what the route decided — and the task detail's `byCycle` remains the one
+screen-side sort in the console, with its reason written on it.
+
+Three renders follow from the served fields:
+
+- The *in table* column is `in_phase_table`, not an index into the screen's own
+  sort. A refuted row reads *refuted — not handed to phases*, a row with
+  `in_phase_table` reads *in table*, and the rest read *over the
+  `phase_table_cap` cap*.
+- `stale` is a qualifier beside the status pill, the way `learnings.table`
+  renders `confirmed (stale)`. It is served, never computed, which is
+  `docs/ui.md` *Staleness is served, never computed* applied to its second
+  instance.
+- `when` and `rule` are empty strings for an entry whose frontmatter or body
+  does not carry them, and an empty string renders through `Absent` — the
+  harness recorded nothing there, which is a fact and not a blank cell.
+  `scope` and `status` are `_str`-derived on the api side and so may hold any
+  string: an unknown value renders verbatim rather than keying a tone table,
+  the way `PhaseRow` renders an unknown role
+  (`docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md`).
+
+**The detail's learnings region changes subject.** It shows the rows whose
+`task` or `carried_by` is this task id — what this task filed, and what its
+auditor is due to file — which is `learnings.droppable`'s own relation and the
+one task-scoped question the tree can answer.
+
+It is not "learnings handed to these phases", and that is the half that cannot
+be built: the table a phase was handed is computed at dispatch from the
+directory as it stood, the harness fingerprint of the day and the cap, and
+nothing writes it down. By `docs/ui.md` *A region with no route says which
+route, and when*, that makes it the third sentence — *nothing records that* —
+and a region in that state names the record and not a route, and names what it
+shows instead. The region does both: it shows what the task filed, and its copy
+says the handed set is recomputed per dispatch and recorded nowhere, with each
+phase's own proposed-learnings prose in the timeline above.
+
+The region is a secondary read on a discrete block, so a failed read takes the
+region and not the screen — an `ErrorState` inside it, like the debt region
+beside it — and its warnings join the one banner at the top of the screen in the
+order the api sent them.
+
+**Consequences.** `/api/learnings` becomes the forward's seventh route, carrying
+no browser parameter and taking `?project=` from `CONSOLE_PROJECT` the way
+`/api/debt` does. The forward's "not one of the six routes" message becomes
+seven, and the `forward.test.ts` case that used `/api/learnings` as its example
+of a path the console refuses is retargeted at a route ADR 19 says is never
+coming.
+
+`listLearnings` returns `ApiResult<LearningEntry[]>` like the other six wired
+reads, so `learnings.data` is the envelope and its two callers — the Learnings
+screen and the task detail — unwrap `.data` and carry `warnings` to a banner.
+That is ADR 16's shape, unchanged.
+
+The Learnings screen's empty state stays one state, the way `debt.tsx`'s does:
+a filter that matches nothing still reads as an empty inbox. That is a
+cross-screen wording gap rather than this screen's bug — two wired screens have
+it — and it is declared rather than fixed here, because an entry in
+`docs/ui.md` would bind every filtered screen in the console and this task
+touches one of them.
+
+What the console still cannot show about an entry is its Symptom, its Why and
+its Evidence: ADR 41 serves `rule` and not `body`, so the screen is an index and
+the file the `ref` names is the document. A screen that wants the body asks that
+route to grow a detail form, which is the same shape as `/api/tasks` and
+`/api/tasks/<id>`.
