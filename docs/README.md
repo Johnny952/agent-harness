@@ -57,7 +57,8 @@ note, which is `docs/charter.md` C-10's split: a style finding is the revisor's
 to weigh, not the dispatcher's to enforce. `eslint .` exits zero on `main` since
 2026-10-08, with nine warnings it does not fail on — ten until T-015 made the
 board's `rows` referentially stable (`docs/decisions.md` ADR 40), and all nine
-are `react-refresh/only-export-components`. No mapper writes `install:`
+are `react-refresh/only-export-components`, left as they are and filed as
+`docs/debt/T-015-D1.md`. No mapper writes `install:`
 or `lint:` — `dispatcher/project_docs.py` asks a mapper for `build:` and `test:`
 only — so they are added by hand, by whoever decides a project needs them.
 
