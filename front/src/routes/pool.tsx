@@ -54,9 +54,7 @@ function PoolPage() {
     (a, b) => Number(a.is_primary) - Number(b.is_primary) || a.name.localeCompare(b.name),
   );
 
-  const byTaskId = new Map<string, Task>(
-    (tasks.data?.data ?? []).map((t) => [t.task_id, t]),
-  );
+  const byTaskId = new Map<string, Task>((tasks.data?.data ?? []).map((t) => [t.task_id, t]));
   // A failed read carries no `warnings`, so the banner below stays silent for it:
   // broken and partial are different states and they are reported separately.
   // The join failing does not take the screen — the pool itself still answered.
@@ -84,11 +82,11 @@ function PoolPage() {
           button: `release-account` already refuses on exactly the two conditions the
           tooltip described, so nothing an operator could do here goes away with it. */}
       <Banner tone="info">
-        Releasing an account back to the pool is a write and this console only reads, so the
-        control is not here rather than here and inert. It waits on the write surface — tier 3
-        of <Mono>docs/plans/front.md</Mono>. Until then it is{" "}
-        <Mono>dispatcher release-account --name &lt;account&gt;</Mono> on the host, which
-        refuses while the lock is live or a refusal is still inside its cooldown.
+        Releasing an account back to the pool is a write and this console only reads, so the control
+        is not here rather than here and inert. It waits on the write surface — tier 3 of{" "}
+        <Mono>docs/plans/front.md</Mono>. Until then it is{" "}
+        <Mono>dispatcher release-account --name &lt;account&gt;</Mono> on the host, which refuses
+        while the lock is live or a refusal is still inside its cooldown.
       </Banner>
 
       <BrokenBanner reads={brokenReads} />
@@ -226,8 +224,9 @@ function AccountCard({
 
       {parked && (
         <p className="mt-2 rounded-sm border border-warning/50 bg-warning/10 px-2 py-1 text-[11px] text-warning">
-          Parked over the local {account.is_primary ? account.reserve_pct : account.quota_threshold_pct}%
-          threshold. This self-heals — a re-probe runs every 60s, no action needed.
+          Parked over the local{" "}
+          {account.is_primary ? account.reserve_pct : account.quota_threshold_pct}% threshold. This
+          self-heals — a re-probe runs every 60s, no action needed.
         </p>
       )}
       {refused && (

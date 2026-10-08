@@ -2,8 +2,20 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
-import { Banner, EmptyState, ErrorState, PageHeader, RoleBadge } from "@/components/console/primitives";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Banner,
+  EmptyState,
+  ErrorState,
+  PageHeader,
+  RoleBadge,
+} from "@/components/console/primitives";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import * as api from "@/lib/api/client";
 import { actionBackendQuery, modelOptionsQuery, roleModelsQuery } from "@/lib/api/queries";
 import type { Role } from "@/lib/api/types";
@@ -40,14 +52,28 @@ function ModelsPage() {
 
   return (
     <AppShell>
-      <PageHeader title="Role models" subtitle="Changes apply to the next phase each role starts; running phases keep their model." right={<RefreshedAt at={cfg.dataUpdatedAt} />} />
-      {backendUp === false && <Banner tone="danger">The action backend is unreachable, so model changes cannot be saved right now.</Banner>}
+      <PageHeader
+        title="Role models"
+        subtitle="Changes apply to the next phase each role starts; running phases keep their model."
+        right={<RefreshedAt at={cfg.dataUpdatedAt} />}
+      />
+      {backendUp === false && (
+        <Banner tone="danger">
+          The action backend is unreachable, so model changes cannot be saved right now.
+        </Banner>
+      )}
       {cfg.isError || opts.isError ? (
-        <ErrorState title="Model configuration could not be read" body="The harness API returned an error. Roles keep running on their last saved model." />
+        <ErrorState
+          title="Model configuration could not be read"
+          body="The harness API returned an error. Roles keep running on their last saved model."
+        />
       ) : cfg.isLoading || opts.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading configuration…</p>
       ) : !cfg.data?.length ? (
-        <EmptyState title="No role has a model configured" body="Pick a model for each role below the harness can start phases." />
+        <EmptyState
+          title="No role has a model configured"
+          body="Pick a model for each role below the harness can start phases."
+        />
       ) : (
         <div className="p-4">
           <table className="panel w-full text-xs">
@@ -67,7 +93,9 @@ function ModelsPage() {
                   <tr key={role} className="border-b border-border last:border-0">
                     <td className="px-3 py-2">
                       <RoleBadge role={role} />
-                      {role === "revisor" && <p className="mt-0.5 text-[10px] text-muted-foreground">read-only role</p>}
+                      {role === "revisor" && (
+                        <p className="mt-0.5 text-[10px] text-muted-foreground">read-only role</p>
+                      )}
                     </td>
                     <td className="px-3 py-2">
                       <Select
@@ -80,12 +108,16 @@ function ModelsPage() {
                         </SelectTrigger>
                         <SelectContent>
                           {(opts.data ?? []).map((o) => (
-                            <SelectItem key={o.id} value={o.id} className="mono text-[11px]">{o.label}</SelectItem>
+                            <SelectItem key={o.id} value={o.id} className="mono text-[11px]">
+                              {o.label}
+                            </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     </td>
-                    <td className="mono px-3 py-2 tabular-nums text-muted-foreground">{opt ? `${opt.context_k}k` : "—"}</td>
+                    <td className="mono px-3 py-2 tabular-nums text-muted-foreground">
+                      {opt ? `${opt.context_k}k` : "—"}
+                    </td>
                     <td className="px-3 py-2 text-muted-foreground">
                       {row?.updated_at ? `${formatAge(agoSeconds(row.updated_at))} ago` : "never"}
                     </td>

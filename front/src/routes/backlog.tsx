@@ -21,7 +21,11 @@ export const Route = createFileRoute("/backlog")({
   head: () => ({
     meta: [
       { title: "Backlog — harness operations console" },
-      { name: "description", content: "Prioritized backlog of tasks and epics: priority order, creation date, completion state and category." },
+      {
+        name: "description",
+        content:
+          "Prioritized backlog of tasks and epics: priority order, creation date, completion state and category.",
+      },
       { property: "og:title", content: "Backlog — harness operations console" },
       { property: "og:description", content: "Every pending task and epic, ordered by priority." },
       { property: "og:type", content: "website" },
@@ -31,7 +35,15 @@ export const Route = createFileRoute("/backlog")({
   component: BacklogPage,
 });
 
-const CATEGORIES: BacklogCategory[] = ["harness", "pool", "gates", "learnings", "debt", "docs", "infra"];
+const CATEGORIES: BacklogCategory[] = [
+  "harness",
+  "pool",
+  "gates",
+  "learnings",
+  "debt",
+  "docs",
+  "infra",
+];
 
 function BacklogPage() {
   const q = useQuery(backlogQuery);
@@ -41,7 +53,8 @@ function BacklogPage() {
   const [showCompleted, setShowCompleted] = useState(true);
 
   const toggle = useMutation({
-    mutationFn: (v: { id: string; completed: boolean }) => api.setBacklogCompleted(v.id, v.completed),
+    mutationFn: (v: { id: string; completed: boolean }) =>
+      api.setBacklogCompleted(v.id, v.completed),
     onSuccess: (item) => {
       toast.success(`${item.id} ${item.completed ? "completado" : "reabierto"}`);
       void qc.invalidateQueries({ queryKey: backlogQuery.queryKey });
@@ -68,7 +81,8 @@ function BacklogPage() {
         />
         {backendUp === false && (
           <Banner tone="danger">
-            El backend de acciones no responde: puedes consultar el backlog pero no marcar elementos como completados.
+            El backend de acciones no responde: puedes consultar el backlog pero no marcar elementos
+            como completados.
           </Banner>
         )}
         <div className="flex items-center gap-3 border-b border-border px-4 py-2">
@@ -157,7 +171,12 @@ function Row({
   return (
     <tr className={cn("border-b border-border/60 align-top", b.completed && "opacity-50")}>
       <td className="px-4 py-2">
-        <Mono className={cn("text-[11px] font-semibold", b.priority <= 3 ? "text-warning" : "text-muted-foreground")}>
+        <Mono
+          className={cn(
+            "text-[11px] font-semibold",
+            b.priority <= 3 ? "text-warning" : "text-muted-foreground",
+          )}
+        >
           P{b.priority}
         </Mono>
       </td>
@@ -168,7 +187,9 @@ function Row({
         <span
           className={cn(
             "rounded-sm border px-1 text-[10px] uppercase tracking-wider",
-            b.kind === "epic" ? "border-info/50 text-info" : "border-border-strong text-muted-foreground",
+            b.kind === "epic"
+              ? "border-info/50 text-info"
+              : "border-border-strong text-muted-foreground",
           )}
         >
           {b.kind === "epic" ? "épica" : "tarea"}
@@ -184,12 +205,18 @@ function Row({
       <td className="px-2 py-2 text-[11px] text-muted-foreground">
         {formatAge(agoSeconds(b.created_at))}
         {b.completed && b.completed_at && (
-          <span className="block text-[10px]">hecho hace {formatAge(agoSeconds(b.completed_at))}</span>
+          <span className="block text-[10px]">
+            hecho hace {formatAge(agoSeconds(b.completed_at))}
+          </span>
         )}
       </td>
       <td className="px-2 py-2">
         {b.task_id ? (
-          <Link to="/tasks/$taskId" params={{ taskId: b.task_id }} className="mono text-[11px] underline">
+          <Link
+            to="/tasks/$taskId"
+            params={{ taskId: b.task_id }}
+            className="mono text-[11px] underline"
+          >
             {b.task_id}
           </Link>
         ) : (
@@ -203,7 +230,13 @@ function Row({
           disabled={disabled}
           onChange={(e) => onToggle(e.target.checked)}
           className="accent-current"
-          title={disabled ? "El backend de acciones no responde" : b.completed ? "Reabrir" : "Marcar como completado"}
+          title={
+            disabled
+              ? "El backend de acciones no responde"
+              : b.completed
+                ? "Reabrir"
+                : "Marcar como completado"
+          }
         />
       </td>
     </tr>

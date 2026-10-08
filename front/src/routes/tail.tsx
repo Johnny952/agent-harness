@@ -173,7 +173,10 @@ function TailPage() {
         />
         <Picker label="source" value={source} onChange={setSource} options={["all", ...sources]} />
         <Picker label="type" value={type} onChange={setType} options={["all", ...types]} />
-        <div className="ml-auto flex items-end gap-[2px]" title="events per minute, last 20 minutes">
+        <div
+          className="ml-auto flex items-end gap-[2px]"
+          title="events per minute, last 20 minutes"
+        >
           {perMinute.map((v, i) => (
             <span
               key={i}

@@ -296,9 +296,16 @@ export async function listTokens(): Promise<ContainerToken[]> {
   await latency();
   // A pending device-code login completes after ~10s in the mock.
   tokenState = tokens().map((t) =>
-    t.state === "reauthenticating" && t.last_refreshed_at && Date.now() - Date.parse(t.last_refreshed_at) > 10_000
-      ? { ...t, state: "valid", device_code: null, last_error: null,
-          expires_at: new Date(Date.now() + 7 * 86400_000).toISOString() }
+    t.state === "reauthenticating" &&
+    t.last_refreshed_at &&
+    Date.now() - Date.parse(t.last_refreshed_at) > 10_000
+      ? {
+          ...t,
+          state: "valid",
+          device_code: null,
+          last_error: null,
+          expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
+        }
       : t,
   );
   return tokenState;
@@ -307,7 +314,10 @@ export async function listTokens(): Promise<ContainerToken[]> {
 export async function reauthContainer(container: string): Promise<ContainerToken> {
   await latency();
   if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
-  const code = Math.random().toString(36).slice(2, 6).toUpperCase() + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+  const code =
+    Math.random().toString(36).slice(2, 6).toUpperCase() +
+    "-" +
+    Math.random().toString(36).slice(2, 6).toUpperCase();
   let updated: ContainerToken | undefined;
   tokenState = tokens().map((t) => {
     if (t.container !== container) return t;
@@ -332,7 +342,10 @@ export async function listApprovals(): Promise<Approval[]> {
   return approvals();
 }
 
-export async function decideApproval(id: string, decision: "approved" | "rejected"): Promise<Approval> {
+export async function decideApproval(
+  id: string,
+  decision: "approved" | "rejected",
+): Promise<Approval> {
   await latency();
   if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
   const a = approvals().find((x) => x.id === id);
@@ -353,7 +366,10 @@ export async function listRoleModels(): Promise<RoleModelConfig[]> {
   return models();
 }
 
-export async function setRoleModel(role: RoleModelConfig["role"], model: string): Promise<RoleModelConfig> {
+export async function setRoleModel(
+  role: RoleModelConfig["role"],
+  model: string,
+): Promise<RoleModelConfig> {
   await latency();
   if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
   const next = { role, model, updated_at: new Date().toISOString() };

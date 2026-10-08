@@ -74,7 +74,7 @@ function BoardPage() {
   const filtered = useMemo(() => {
     return rows.filter((t) => {
       if (accountFilter !== "all" && t.owner !== accountFilter) return false;
-      if (q && !(`${t.task_id} ${t.description}`.toLowerCase().includes(q.toLowerCase())))
+      if (q && !`${t.task_id} ${t.description}`.toLowerCase().includes(q.toLowerCase()))
         return false;
       return true;
     });

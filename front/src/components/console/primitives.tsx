@@ -182,7 +182,11 @@ export function Gauge({
   tone?: "default" | "warning" | "danger";
 }) {
   const color =
-    tone === "danger" ? "var(--destructive)" : tone === "warning" ? "var(--warning)" : "var(--info)";
+    tone === "danger"
+      ? "var(--destructive)"
+      : tone === "warning"
+        ? "var(--warning)"
+        : "var(--info)";
   return (
     <div className="relative h-2 w-full overflow-hidden rounded-full bg-surface-2">
       <div
@@ -251,9 +255,7 @@ export function Banner({
     danger: "border-destructive/50 bg-destructive/10 text-destructive",
     info: "border-border-strong bg-surface-2 text-muted-foreground",
   }[tone];
-  return (
-    <div className={cn("mx-4 mt-3 rounded-md border px-3 py-2 text-xs", cls)}>{children}</div>
-  );
+  return <div className={cn("mx-4 mt-3 rounded-md border px-3 py-2 text-xs", cls)}>{children}</div>;
 }
 
 /**

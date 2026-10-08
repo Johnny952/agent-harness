@@ -7,7 +7,10 @@ export function Markdown({ source }: { source: string }) {
         if (!line.trim()) return <div key={i} className="h-1" />;
         if (line.startsWith("### "))
           return (
-            <h4 key={i} className="pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <h4
+              key={i}
+              className="pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+            >
               {line.slice(4)}
             </h4>
           );

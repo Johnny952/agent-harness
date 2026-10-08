@@ -14,7 +14,11 @@ export const Route = createFileRoute("/tokens")({
   head: () => ({
     meta: [
       { title: "Session tokens — harness operations console" },
-      { name: "description", content: "Provider session token status per agent container, with one-click re-authentication." },
+      {
+        name: "description",
+        content:
+          "Provider session token status per agent container, with one-click re-authentication.",
+      },
       { property: "og:title", content: "Session tokens — harness operations console" },
       { property: "og:description", content: "Which containers can still talk to their provider." },
       { property: "og:type", content: "website" },
@@ -53,11 +57,17 @@ function TokensPage() {
         right={<RefreshedAt at={tokens.dataUpdatedAt} />}
       />
       {tokens.isError ? (
-        <ErrorState title="Token status could not be read" body="The harness API returned an error. Containers may still be working; retrying automatically." />
+        <ErrorState
+          title="Token status could not be read"
+          body="The harness API returned an error. Containers may still be working; retrying automatically."
+        />
       ) : tokens.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading tokens…</p>
       ) : !tokens.data?.length ? (
-        <EmptyState title="No containers reported a token" body="Bootstrap a project from the Queue to create agent containers." />
+        <EmptyState
+          title="No containers reported a token"
+          body="Bootstrap a project from the Queue to create agent containers."
+        />
       ) : (
         <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
           {tokens.data.map((t) => (
@@ -75,7 +85,17 @@ function TokensPage() {
   );
 }
 
-function TokenCard({ t, busy, disabled, onReauth }: { t: ContainerToken; busy: boolean; disabled: boolean; onReauth: () => void }) {
+function TokenCard({
+  t,
+  busy,
+  disabled,
+  onReauth,
+}: {
+  t: ContainerToken;
+  busy: boolean;
+  disabled: boolean;
+  onReauth: () => void;
+}) {
   const now = useNow(2000);
   const expIn = t.expires_at ? Math.round((Date.parse(t.expires_at) - now) / 1000) : null;
   return (
@@ -85,24 +105,60 @@ function TokenCard({ t, busy, disabled, onReauth }: { t: ContainerToken; busy: b
           <Mono className="text-xs font-semibold">{t.container}</Mono>
           <p className="text-[11px] text-muted-foreground">{t.account}</p>
         </div>
-        <span className={cn("rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider", tone[t.state])}>{t.state}</span>
+        <span
+          className={cn(
+            "rounded-sm border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+            tone[t.state],
+          )}
+        >
+          {t.state}
+        </span>
       </div>
       <dl className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px]">
         <dt className="text-muted-foreground">Expires</dt>
         <dd className="mono tabular-nums">
-          {expIn === null ? <Absent label="no expiry recorded" /> : expIn > 0 ? `in ${formatAge(expIn)}` : `${formatAge(-expIn)} ago`}
+          {expIn === null ? (
+            <Absent label="no expiry recorded" />
+          ) : expIn > 0 ? (
+            `in ${formatAge(expIn)}`
+          ) : (
+            `${formatAge(-expIn)} ago`
+          )}
         </dd>
         <dt className="text-muted-foreground">Last refresh</dt>
         <dd className="mono tabular-nums">
-          {t.last_refreshed_at ? `${formatAge(agoSeconds(t.last_refreshed_at, now))} ago` : <Absent label="never" />}
+          {t.last_refreshed_at ? (
+            `${formatAge(agoSeconds(t.last_refreshed_at, now))} ago`
+          ) : (
+            <Absent label="never" />
+          )}
         </dd>
       </dl>
-      {t.last_error && <p className="mono rounded-sm bg-destructive/10 px-2 py-1 text-[11px] text-destructive">{t.last_error}</p>}
+      {t.last_error && (
+        <p className="mono rounded-sm bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+          {t.last_error}
+        </p>
+      )}
       {t.device_code && (
         <div className="rounded-sm border border-info/40 bg-info/10 p-2 text-[11px]">
-          <p>Open <a className="underline" href={t.device_code.verification_url} target="_blank" rel="noreferrer">{t.device_code.verification_url}</a> and enter:</p>
-          <p className="mono mt-1 text-base font-semibold tracking-widest">{t.device_code.user_code}</p>
-          <p className="mt-1 text-muted-foreground">Waiting for the provider to confirm — this card updates on its own.</p>
+          <p>
+            Open{" "}
+            <a
+              className="underline"
+              href={t.device_code.verification_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {t.device_code.verification_url}
+            </a>{" "}
+            and enter:
+          </p>
+          <p className="mono mt-1 text-base font-semibold tracking-widest">
+            {t.device_code.user_code}
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            Waiting for the provider to confirm — this card updates on its own.
+          </p>
         </div>
       )}
       <button

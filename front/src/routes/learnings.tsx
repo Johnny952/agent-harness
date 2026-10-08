@@ -64,8 +64,8 @@ function LearningsPage() {
       {active.length > LEARNING_TABLE_CAP && (
         <Banner tone="warning">
           {active.length} active rows, but a phase only ever receives {LEARNING_TABLE_CAP}. The{" "}
-          {active.length - LEARNING_TABLE_CAP} lowest-ranked rows are not reaching any phase — retire
-          or confirm some to control which ones do.
+          {active.length - LEARNING_TABLE_CAP} lowest-ranked rows are not reaching any phase —
+          retire or confirm some to control which ones do.
         </Banner>
       )}
 
@@ -142,7 +142,9 @@ function LearningsPage() {
                     ) : inTable ? (
                       <Mono className="text-[10px] text-success">in table</Mono>
                     ) : (
-                      <span className="text-[10px] text-warning">over the {LEARNING_TABLE_CAP} cap</span>
+                      <span className="text-[10px] text-warning">
+                        over the {LEARNING_TABLE_CAP} cap
+                      </span>
                     )}
                   </td>
                 </tr>

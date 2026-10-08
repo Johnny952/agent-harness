@@ -105,7 +105,11 @@ function TaskDetailPage() {
               <StatusPill status={t.status} />
             </Field>
             <Field label="owner">
-              {t.owner ? <Mono className="text-[11px]">{t.owner}</Mono> : <Absent label="no owner" />}
+              {t.owner ? (
+                <Mono className="text-[11px]">{t.owner}</Mono>
+              ) : (
+                <Absent label="no owner" />
+              )}
             </Field>
             <Field label="lock heartbeat">
               <HeartbeatDot
@@ -310,8 +314,22 @@ function DependencyGraph({ task }: { task: Task }) {
               stroke="var(--border-strong)"
               strokeWidth={1}
             />
-            <rect x={10} y={nodeY(i) - 11} width={110} height={22} rx={4} fill="var(--surface-2)" stroke="var(--border)" />
-            <text x={20} y={nodeY(i) + 4} fill="var(--muted-foreground)" fontSize={11} fontFamily="var(--font-mono)">
+            <rect
+              x={10}
+              y={nodeY(i) - 11}
+              width={110}
+              height={22}
+              rx={4}
+              fill="var(--surface-2)"
+              stroke="var(--border)"
+            />
+            <text
+              x={20}
+              y={nodeY(i) + 4}
+              fill="var(--muted-foreground)"
+              fontSize={11}
+              fontFamily="var(--font-mono)"
+            >
               {d}
             </text>
           </g>

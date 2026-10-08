@@ -46,8 +46,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     function onKey(e: KeyboardEvent) {
       const el = e.target as HTMLElement | null;
       const typing =
-        el &&
-        (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+        el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
 
       if (e.key === "Escape") {
         if (typing) (el as HTMLElement).blur();

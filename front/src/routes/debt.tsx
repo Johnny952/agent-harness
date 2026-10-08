@@ -178,11 +178,7 @@ function DebtTable({ rows }: { rows: DebtEntry[] }) {
                 row's is the literal `none`. Linking it to /tasks/$taskId was a
                 guess that the two ids were the same thing. */}
             <td className="mono px-3 py-1.5">
-              {d.card && d.card !== "none" ? (
-                d.card
-              ) : (
-                <Absent label="no card" />
-              )}
+              {d.card && d.card !== "none" ? d.card : <Absent label="no card" />}
             </td>
           </tr>
         ))}

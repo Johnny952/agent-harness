@@ -53,8 +53,7 @@ const FORWARDED: Record<string, readonly string[]> = {
 const TASK_DETAIL = /^\/api\/tasks\/([^/]+)$/;
 
 type Resolution =
-  | { kind: "forward"; target: string }
-  | { kind: "reject"; status: number; error: string };
+  { kind: "forward"; target: string } | { kind: "reject"; status: number; error: string };
 
 /**
  * The api's answer to a request the console forwards, or `null` for a request

@@ -94,7 +94,9 @@ function QueuePage() {
           <button
             key={v}
             disabled={backendUp === false}
-            onClick={() => setPending({ verb: v, args: argText.trim().split(/\s+/).filter(Boolean) })}
+            onClick={() =>
+              setPending({ verb: v, args: argText.trim().split(/\s+/).filter(Boolean) })
+            }
             className={cn(
               "mono rounded-sm border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
               v === "cleanup-task"
@@ -237,7 +239,9 @@ function ActionRow({
         <Mono>{commandLine(action.verb, action.args)}</Mono>
         <span
           className="ml-auto inline-flex items-center gap-1 text-[10px] text-muted-foreground"
-          title={action.enqueued_by === "operator" ? "Enqueued by the operator" : "Enqueued by an agent"}
+          title={
+            action.enqueued_by === "operator" ? "Enqueued by the operator" : "Enqueued by an agent"
+          }
         >
           <Icon className="size-3" />
           {action.enqueued_by} · {formatAge(agoSeconds(action.enqueued_at, now))} ago

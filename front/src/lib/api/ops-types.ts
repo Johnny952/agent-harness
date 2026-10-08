@@ -33,7 +33,8 @@ export interface ContainerToken {
   device_code: { user_code: string; verification_url: string; expires_at: string } | null;
 }
 
-export type ApprovalKind = "push" | "merge-task" | "cleanup-task" | "tool-permission" | "budget-override";
+export type ApprovalKind =
+  "push" | "merge-task" | "cleanup-task" | "tool-permission" | "budget-override";
 export type ApprovalState = "pending" | "approved" | "rejected";
 
 export interface Approval {
@@ -68,7 +69,8 @@ export interface RoleModelConfig {
 }
 
 export type BacklogKind = "task" | "epic";
-export type BacklogCategory = "harness" | "pool" | "gates" | "learnings" | "debt" | "docs" | "infra";
+export type BacklogCategory =
+  "harness" | "pool" | "gates" | "learnings" | "debt" | "docs" | "infra";
 
 export interface BacklogItem {
   id: string;

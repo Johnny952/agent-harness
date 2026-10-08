@@ -3,7 +3,13 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Pause, Play } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
-import { EmptyState, ErrorState, Mono, PageHeader, RoleBadge } from "@/components/console/primitives";
+import {
+  EmptyState,
+  ErrorState,
+  Mono,
+  PageHeader,
+  RoleBadge,
+} from "@/components/console/primitives";
 import * as api from "@/lib/api/client";
 import { POLL_MS, sessionsQuery } from "@/lib/api/queries";
 import type { SessionLogLine } from "@/lib/api/ops-types";
@@ -102,7 +108,12 @@ function SessionsPage() {
         <div className="flex flex-wrap gap-1.5 border-b border-border px-4 py-2">
           <button
             onClick={() => setContainer("all")}
-            className={cn("rounded-sm border px-2 py-0.5 text-[11px]", container === "all" ? "border-ring bg-surface-2" : "border-border text-muted-foreground")}
+            className={cn(
+              "rounded-sm border px-2 py-0.5 text-[11px]",
+              container === "all"
+                ? "border-ring bg-surface-2"
+                : "border-border text-muted-foreground",
+            )}
           >
             all sessions
           </button>
@@ -112,18 +123,33 @@ function SessionsPage() {
               onClick={() => setContainer(s.container)}
               className={cn(
                 "flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-[11px]",
-                container === s.container ? "border-ring bg-surface-2" : "border-border text-muted-foreground",
+                container === s.container
+                  ? "border-ring bg-surface-2"
+                  : "border-border text-muted-foreground",
               )}
             >
-              <span className={cn("size-1.5 rounded-full", s.live ? "bg-success" : "bg-muted-foreground/40")} />
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  s.live ? "bg-success" : "bg-muted-foreground/40",
+                )}
+              />
               <Mono>{s.container}</Mono>
-              {s.task_id ? <Mono className="text-muted-foreground">{s.task_id}</Mono> : <span className="italic">idle</span>}
+              {s.task_id ? (
+                <Mono className="text-muted-foreground">{s.task_id}</Mono>
+              ) : (
+                <span className="italic">idle</span>
+              )}
               {s.role && <RoleBadge role={s.role} compact />}
             </button>
           ))}
         </div>
         <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-          <select value={level} onChange={(e) => setLevel(e.target.value)} className="rounded-sm border border-border bg-surface px-2 py-1 text-[11px]">
+          <select
+            value={level}
+            onChange={(e) => setLevel(e.target.value)}
+            className="rounded-sm border border-border bg-surface px-2 py-1 text-[11px]"
+          >
             <option value="all">all levels</option>
             <option value="debug">debug</option>
             <option value="info">info</option>
@@ -148,17 +174,28 @@ function SessionsPage() {
           </button>
         </div>
         {error && (
-          <ErrorState title="The session stream stopped answering" body={`Last error: ${error}. Lines already shown are kept; the stream retries every ${POLL_MS / 1000}s.`} />
+          <ErrorState
+            title="The session stream stopped answering"
+            body={`Last error: ${error}. Lines already shown are kept; the stream retries every ${POLL_MS / 1000}s.`}
+          />
         )}
         {stale && !error && (
           <p className="border-b border-warning/40 bg-warning/10 px-4 py-1 text-[11px] text-warning">
-            No new lines for over {(POLL_MS * 4) / 1000}s — the stream may be stuck. Check the container is still running on the Pool screen.
+            No new lines for over {(POLL_MS * 4) / 1000}s — the stream may be stuck. Check the
+            container is still running on the Pool screen.
           </p>
         )}
         {shown.length === 0 && !error ? (
-          <EmptyState title="No log lines match" body="Either no session is running or your filters hide everything. Clear the filters or start a task from the Queue." />
+          <EmptyState
+            title="No log lines match"
+            body="Either no session is running or your filters hide everything. Clear the filters or start a task from the Queue."
+          />
         ) : (
-          <div ref={scrollRef} onScroll={onScroll} className="mono min-h-0 flex-1 overflow-y-auto bg-background px-4 py-2 text-[11px] leading-5">
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="mono min-h-0 flex-1 overflow-y-auto bg-background px-4 py-2 text-[11px] leading-5"
+          >
             {shown.map((l) => (
               <div key={l.seq} className="flex gap-2 whitespace-pre-wrap">
                 <span className="shrink-0 text-muted-foreground/60">{formatClock(l.ts)}</span>
