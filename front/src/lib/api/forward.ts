@@ -35,7 +35,21 @@ const FORWARDED: Record<string, readonly string[]> = {
   "/api/phases": ["task_id"],
 };
 
-/** The detail route. No second segment: `/api/tasks/a/b` is not this route. */
+/**
+ * The detail route. No second segment: `/api/tasks/a/b` is not this route.
+ *
+ * And no dot-segment guard either, though the segment looks like somewhere one
+ * belongs. A url parser resolves `.` and `..` away while it reads the path, in
+ * every spelling the standard counts as a dot segment (`.`, `%2e`, `..`,
+ * `.%2e`, `%2e.`, `%2e%2e`, upper or lower case), so by the time a request
+ * reaches this module `/api/tasks/..` is already `/api/` and `/api/tasks/.` is
+ * already `/api/tasks/`: both miss this regex and land on the whitelist's 404
+ * below. A `%2f` inside the segment is a different matter -- it survives
+ * parsing, and is re-encoded rather than resolved, so it crosses as part of one
+ * id for the api to reject. A test per spelling is in `forward.test.ts`, since
+ * what makes a guard here dead code is a fact about the parser that nothing in
+ * this file would otherwise record.
+ */
 const TASK_DETAIL = /^\/api\/tasks\/([^/]+)$/;
 
 type Resolution =
