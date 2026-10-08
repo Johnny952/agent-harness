@@ -168,9 +168,18 @@ permission_mode: acceptEdits
 # may run is a decision about that project, so nothing is assumed — but note
 # that leaving it empty means the test gate is the only thing that ever runs
 # the code.
+#
+# The `bun` entries are front/'s `install:`, `test:` and `lint:` keys in this
+# repo's own docs/README.md; drop them if no project under `projects_root`
+# has a front/. Install is the frozen-lockfile form only, because a fresh
+# worktree has no node_modules and a phase should not change the lockfile.
 allowed_tools:
   - Bash(node --test*)
   - Bash(python3 -m pytest*)
+  - Bash(bun install --frozen-lockfile*)
+  - Bash(bun run typecheck*)
+  - Bash(bun run test*)
+  - Bash(bun run lint*)
 
 # Cap on implementador/revisor rounds per task: after arquitecto hands off,
 # implementador and revisor alternate until the revisor's response ends with
