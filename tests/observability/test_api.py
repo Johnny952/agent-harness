@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from dispatcher import context_transfer, state_machine
-from dispatcher.config import LocalBoardConfig
+from dispatcher import context_transfer, docker_exec, learnings, state_machine
+from dispatcher.config import LocalBoardConfig, load_config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import LocalBoardClient
 from observability.api import app as api_app
@@ -40,6 +40,7 @@ ROUTES = [
     "/api/events",
     "/api/debt",
     "/api/phases",
+    "/api/learnings",
 ]
 
 
@@ -115,6 +116,7 @@ def _harness(
     app = create_app(str(config_path), db_path, "admin", PASSWORD_HASH, token)
     return types.SimpleNamespace(
         client=app.test_client(),
+        config_path=str(config_path),
         state_dir=str(state_dir),
         tasks_dir=str(tasks_dir),
         projects_root=projects_root,
@@ -1521,6 +1523,324 @@ def test_the_answer_is_clamped_and_the_clamp_names_itself(
     assert len(body["data"]) == 2
     assert "3 phase records" in body["warnings"][0]
     assert "?task_id=" in body["warnings"][0]
+
+
+# --- learnings ------------------------------------------------------------
+
+
+def _learning(
+    tasks_dir: str,
+    name: str,
+    *,
+    directory: str = learnings.INBOX_NAME,
+    scope: str = learnings.SCOPE_PROJECT,
+    status: str = learnings.UNCONFIRMED,
+    when: str = "the suite talks to a database",
+    rule: str | None = "Start postgres before the suite, not with it.",
+    project: str = "ia-harness",
+    task: str = "T-1",
+    **meta,
+) -> Path:
+    """One entry file, in the shape the phases' prompt tells them to write.
+
+    Written as text and not through the module, for the reason
+    `tests/dispatcher/test_learnings.py:_entry` gives: there is no public writer
+    for these — the phases write them by hand — so a test that went through one
+    would be exercising a path nothing on this harness takes. `rule=None` leaves
+    the `## Rule` section out entirely, which is the entry whose served `rule`
+    falls back to `when`.
+
+    The tree is a **sibling** of `hive_tasks_dir` and not under it, so this
+    makes it rather than assuming `_harness` did: `_harness` writes only what it
+    is passed (`docs/learnings/the-api-test-harness-writes-only-what-it-is-passed.md`),
+    and a case that wants no tree at all has to be able to get one.
+    """
+    frontmatter = {
+        "project": project,
+        "task": task,
+        "phase": "implementador",
+        "scope": scope,
+        "status": status,
+        "when": when,
+    }
+    frontmatter.update(meta)
+    path = Path(learnings.ensure_dirs(tasks_dir)) / directory / name
+    body = (
+        "## Symptom\n\n```\nECONNREFUSED 127.0.0.1:5432\n```\n\n"
+        "## Why\n\nThe fixture assumed a server that nothing starts.\n\n"
+    )
+    if rule is not None:
+        body += f"## Rule\n\n{rule}\n\n"
+    body += "## Evidence\n\n`pytest -q tests/db` in the writers' worktree.\n"
+    path.write_text("---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n\n" + body)
+    return path
+
+
+def _fingerprint(harness: types.SimpleNamespace) -> str:
+    """The surface the api holds, as the api computes it.
+
+    Off the same `config.yaml` the app was created from, so the three inputs
+    are `cfg.permission_mode`, `cfg.allowed_tools` and
+    `docker_exec.WRITER_ROLES` — the three `dispatcher/dispatcher.py` passes. A
+    hex literal here would stop pinning anything the day
+    `dispatcher/config.py`'s permission defaults move, and spelling the two
+    defaults out as literals has the same fault one level in.
+    """
+    cfg = load_config(harness.config_path)
+    return learnings.harness_fingerprint(
+        cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES
+    )
+
+
+def test_learnings_reports_the_ten_keys_an_entry_carries(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "T-1-db.md", task="T-1", carried_by="T-2")
+    _learning(harness.tasks_dir, "T-2-pool.md", task="T-2", status=learnings.CONFIRMED)
+    _learning(
+        harness.tasks_dir,
+        "shared.md",
+        directory=learnings.HARNESS_NAME,
+        scope=learnings.SCOPE_HARNESS,
+        status=learnings.CONFIRMED,
+        project="someone-else",
+        task="T-9",
+        when="you reach for docker in a phase",
+        rule="Plan it as a human's row instead.",
+    )
+
+    body = _get(harness, "/api/learnings").get_json()
+
+    assert body["warnings"] == []
+    # The phase table's own order: confirmed first, `ref` as the tie-break.
+    assert [row["ref"] for row in body["data"]] == [
+        "harness/shared.md",
+        "inbox/T-2-pool.md",
+        "inbox/T-1-db.md",
+    ]
+    assert body["data"][2] == {
+        "ref": "inbox/T-1-db.md",
+        "task": "T-1",
+        "carried_by": "T-2",
+        "scope": "project",
+        "status": "unconfirmed",
+        "when": "the suite talks to a database",
+        "rule": "Start postgres before the suite, not with it.",
+        "stale": False,
+        "in_phase_table": True,
+        "phase_table_cap": learnings.MAX_ROWS,
+    }
+
+
+def test_an_entry_with_no_rule_section_serves_its_trigger_line_instead(tmp_path: Path) -> None:
+    # `Entry.rule` is the first non-blank line of `## Rule` and falls back to
+    # `when`: the served `rule` is the one line the dispatcher's own table
+    # shows, not the body, so it is never empty for an entry that has a trigger.
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "ruled.md", rule="  - Start postgres first.\n\nAnd more.")
+    _learning(harness.tasks_dir, "unruled.md", rule=None, when="you have no rule section")
+
+    rows = {row["ref"]: row for row in _get(harness, "/api/learnings").get_json()["data"]}
+
+    assert rows["inbox/ruled.md"]["rule"] == "Start postgres first."
+    assert rows["inbox/unruled.md"]["rule"] == "you have no rule section"
+
+
+def test_an_entry_with_no_frontmatter_is_a_warning_and_not_a_missing_list(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "good.md")
+    stray = Path(learnings.inbox_dir(harness.tasks_dir)) / "note.md"
+    stray.write_text("no frontmatter, just prose\n")
+
+    resp = _get(harness, "/api/learnings")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [row["ref"] for row in body["data"]] == ["inbox/good.md"]
+    assert body["warnings"] == [f"{stray}: unreadable learning entry; it is in no row"]
+
+
+def test_a_learnings_directory_that_will_not_list_is_a_warning_and_not_a_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `read_dir` guards with `os.path.isdir` and then calls `os.listdir`, which
+    # still raises for a directory that exists and cannot be read — and this
+    # route lists two, so one such directory must not cost the other its rows.
+    # Not reachable through a chmod in this suite, which may run as root;
+    # monkeypatched because what is pinned is the guard, on
+    # `test_a_handoffs_directory_that_will_not_list_is_a_warning_and_not_a_500`'s
+    # model.
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "inboxed.md")
+    _learning(
+        harness.tasks_dir,
+        "shared.md",
+        directory=learnings.HARNESS_NAME,
+        project="someone-else",
+    )
+    inbox = learnings.inbox_dir(harness.tasks_dir)
+    real = learnings.read_dir
+
+    def refuse(root: str, path: str):
+        if path == inbox:
+            raise PermissionError(13, "Permission denied")
+        return real(root, path)
+
+    monkeypatch.setattr(learnings, "read_dir", refuse)
+
+    resp = _get(harness, "/api/learnings")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [row["ref"] for row in body["data"]] == ["harness/shared.md"]
+    assert len(body["warnings"]) == 1
+    assert body["warnings"][0].startswith(f"{inbox}: unreadable learnings directory:")
+
+
+def test_no_learnings_tree_at_all_is_an_empty_list_and_a_warning_naming_it(tmp_path: Path) -> None:
+    # `ensure_dirs` runs on every `run-task`, so an absent tree means no task
+    # has run against this hive — different news from an empty inbox, and the
+    # difference is what an operator reading an empty screen is owed.
+    harness = _harness(tmp_path)
+
+    body = _get(harness, "/api/learnings").get_json()
+
+    assert body["data"] == []
+    assert len(body["warnings"]) == 1
+    assert learnings.root_dir(harness.tasks_dir) in body["warnings"][0]
+
+
+def test_a_learnings_tree_with_nothing_in_it_is_empty_and_silent(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    learnings.ensure_dirs(harness.tasks_dir)
+
+    assert _get(harness, "/api/learnings").get_json() == {"data": [], "warnings": []}
+
+
+def test_learnings_project_is_optional_with_one_checkout_and_required_with_two(
+    tmp_path: Path,
+) -> None:
+    one = _harness(tmp_path / "one", projects=("ia-harness",))
+    _learning(one.tasks_dir, "ours.md")
+    two = _harness(tmp_path / "two", projects=("ia-harness", "scratch"))
+    _learning(two.tasks_dir, "ours.md", project="scratch")
+
+    assert _get(one, "/api/learnings").status_code == 200
+
+    resp = _get(two, "/api/learnings")
+    assert resp.status_code == 400
+    assert "scratch" in resp.get_json()["error"]
+    assert _get(two, "/api/learnings?project=scratch").status_code == 200
+    assert _get(two, "/api/learnings?project=nope").status_code == 404
+
+
+def test_another_projects_unreviewed_entry_is_not_served_and_a_promoted_one_is(
+    tmp_path: Path,
+) -> None:
+    # The filter is `learnings.applicable`, which is what a phase of that
+    # project is shown: everything a human promoted into `harness/`, plus
+    # everything the project discovered itself. `docs/decisions.md` ADR 41.
+    harness = _harness(tmp_path, projects=("ia-harness", "scratch"))
+    _learning(harness.tasks_dir, "ours.md", project="ia-harness")
+    _learning(harness.tasks_dir, "theirs.md", project="scratch")
+    _learning(
+        harness.tasks_dir,
+        "shared.md",
+        directory=learnings.HARNESS_NAME,
+        project="scratch",
+    )
+
+    ours = _get(harness, "/api/learnings?project=ia-harness").get_json()["data"]
+    theirs = _get(harness, "/api/learnings?project=scratch").get_json()["data"]
+
+    assert [row["ref"] for row in ours] == ["harness/shared.md", "inbox/ours.md"]
+    assert [row["ref"] for row in theirs] == ["harness/shared.md", "inbox/theirs.md"]
+
+
+def test_a_refuted_entry_is_served_and_says_it_reaches_no_phase(tmp_path: Path) -> None:
+    # Retiring an entry is about it no longer costing turns, not about hiding
+    # that it was written: `eligible` drops it before the cap is applied, so it
+    # comes back with `in_phase_table: false` and the console says so.
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "retired.md", status=learnings.REFUTED)
+    _learning(harness.tasks_dir, "live.md")
+
+    rows = {row["ref"]: row for row in _get(harness, "/api/learnings").get_json()["data"]}
+
+    assert rows["inbox/retired.md"]["in_phase_table"] is False
+    assert rows["inbox/retired.md"]["status"] == "refuted"
+    assert rows["inbox/live.md"]["in_phase_table"] is True
+
+
+def test_a_row_past_the_phase_table_cap_says_it_reaches_no_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cap is the dispatcher's, not this service's, and it travels on the row
+    # so the console measures against the number the dispatcher is using rather
+    # than a literal of its own. ADR 41, ADR 42.
+    monkeypatch.setattr(learnings, "MAX_ROWS", 2)
+    harness = _harness(tmp_path)
+    for name in ("a.md", "b.md", "c.md"):
+        _learning(harness.tasks_dir, name)
+
+    rows = _get(harness, "/api/learnings").get_json()["data"]
+
+    assert [(row["ref"], row["in_phase_table"]) for row in rows] == [
+        ("inbox/a.md", True),
+        ("inbox/b.md", True),
+        ("inbox/c.md", False),
+    ]
+    assert {row["phase_table_cap"] for row in rows} == {2}
+
+
+def test_stale_is_the_apis_judgement_against_the_surface_it_is_configured_with(
+    tmp_path: Path,
+) -> None:
+    # Both fingerprints have to be there: an entry from before the stamp existed
+    # is not stale, it is unknown, and treating unknown as stale would retire
+    # the whole inbox the first time this ran.
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "foreign.md", harness="oldoldoldold")
+    _learning(harness.tasks_dir, "current.md", harness=_fingerprint(harness))
+    _learning(harness.tasks_dir, "unstamped.md")
+
+    rows = {row["ref"]: row for row in _get(harness, "/api/learnings").get_json()["data"]}
+
+    assert rows["inbox/foreign.md"]["stale"] is True
+    assert rows["inbox/current.md"]["stale"] is False
+    assert rows["inbox/unstamped.md"]["stale"] is False
+
+
+def test_the_learnings_answer_is_clamped_and_the_clamp_names_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing in this harness is clamped — the inbox is drained at merge — and
+    # the cap is there so this is not the next thing the service answers with no
+    # bound at all. ADR 41 part 7, on `MAX_PHASES`' model.
+    monkeypatch.setattr(api_app, "MAX_LEARNINGS", 2)
+    harness = _harness(tmp_path)
+    for name in ("a.md", "b.md", "c.md"):
+        _learning(harness.tasks_dir, name)
+
+    body = _get(harness, "/api/learnings").get_json()
+
+    assert [row["ref"] for row in body["data"]] == ["inbox/a.md", "inbox/b.md"]
+    assert "3 learning entries" in body["warnings"][0]
+    assert "at most 2" in body["warnings"][0]
+
+
+def test_reading_the_learnings_route_writes_nothing(tmp_path: Path) -> None:
+    # No `ensure_dirs`, no `reconcile`, no `stamp`: the hive is mounted `:ro`,
+    # and the three dispatcher paths that would rewrite an entry are all
+    # reachable from this module's import of `learnings`.
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "db.md")
+    root = Path(learnings.root_dir(harness.tasks_dir))
+    before = {path: path.read_bytes() for path in root.rglob("*.md")}
+
+    _get(harness, "/api/learnings")
+
+    assert {path: path.read_bytes() for path in before} == before
+    assert sorted(path.name for path in root.iterdir()) == ["harness", "inbox"]
 
 
 # --- what this service must never do --------------------------------------

@@ -326,6 +326,33 @@ def read_dir(root: str, path: str) -> list[Entry]:
     return entries
 
 
+def unreadable(path: str) -> list[str]:
+    """The `.md` files in one directory `read_dir` skipped.
+
+    `LocalBoardClient.unreadable()`'s shape (`docs/decisions.md` ADR 3, ADR 4,
+    `docs/debt/T-008-D2.md`), and it exists for the same reason: a reader that
+    silently drops what it cannot parse leaves the one caller whose whole
+    contract is "report the damage" — `observability/api/app.py`'s
+    `/api/learnings` — nothing to report. `read_dir`'s own four callers inside
+    the dispatcher want entries and nothing else, so this re-reads the
+    directory rather than widening that return.
+
+    `os.listdir` raises here the way it does in `read_dir`: a directory that
+    exists and will not list is the caller's to guard, and this module does not
+    widen it for them.
+    """
+    if not os.path.isdir(path):
+        return []
+    # `path` stands in for the root in the `_read_entry` call because only the
+    # `None` matters here: the entry it would otherwise have built is thrown
+    # away, so the `ref` it would have carried is never read.
+    return [
+        os.path.join(path, name)
+        for name in sorted(os.listdir(path))
+        if name.endswith(".md") and _read_entry(path, os.path.join(path, name)) is None
+    ]
+
+
 def read_inbox(hive_dir: str) -> list[Entry]:
     return read_dir(root_dir(hive_dir), inbox_dir(hive_dir))
 
@@ -732,6 +759,38 @@ def applicable(entries: list[Entry], project: str) -> list[Entry]:
     return [entry for entry in entries if entry.reviewed or entry.project == project]
 
 
+def eligible(entries: list[Entry], project: str) -> list[Entry]:
+    """Everything this project's phases are eligible to be shown.
+
+    `applicable` minus the retired ones, which is the cut `duties` makes before
+    `table` orders anything. Lifted out of it so that the one other caller that
+    has to answer "does this row reach a phase at all" —
+    `observability/api/app.py`'s `/api/learnings` — asks the same question and
+    cannot drift from this one (`docs/decisions.md` ADR 41).
+    """
+    return [entry for entry in applicable(entries, project) if entry.status != REFUTED]
+
+
+def ordered(entries: list[Entry], harness: str = "") -> list[Entry]:
+    """The order a phase's table is in.
+
+    Confirmed first, so that a table cut off at `MAX_ROWS` keeps the entries
+    something independent has already backed, and refuted last so those are the
+    first rows to fall off the end; fresh before stale within each band, for
+    the same reason. Ref last, so the order is stable between two phases of the
+    same task.
+    """
+    return sorted(
+        entries,
+        key=lambda e: (_STATUS_ORDER.get(e.status, 1), e.stale(harness), e.ref),
+    )
+
+
+def handed(entries: list[Entry], harness: str = "") -> list[Entry]:
+    """The rows a phase's prompt actually carries: `ordered`, cut at the cap."""
+    return ordered(entries, harness)[:MAX_ROWS]
+
+
 def _cell(text: str) -> str:
     flat = " ".join((text or "").split()).replace("|", "\\|")
     return flat if len(flat) <= _CELL_CHARS else f"{flat[:_CELL_CHARS - 1]}…"
@@ -744,25 +803,21 @@ def table(entries: list[Entry], harness: str = "") -> str:
     nothing is stale, which is what the human listing wants when it is asked
     about a hive it is not currently running.
     """
-    # Confirmed first, so that a table cut off at MAX_ROWS keeps the entries
-    # something independent has already backed, and refuted last so those are
-    # the first rows to fall off the end; stale before fresh within each band,
-    # for the same reason. Ref last, so the order is stable between two phases
-    # of the same task.
-    ordered = sorted(
-        entries,
-        key=lambda e: (_STATUS_ORDER.get(e.status, 1), e.stale(harness), e.ref),
-    )
+    # The order and the cut are `handed`, which is also what the api asks when
+    # it answers whether a row reaches a phase: one selector, so the column on
+    # that screen cannot disagree with the table rendered here. The reason for
+    # the order is written on `ordered`.
+    shown = handed(entries, harness)
     rows = [
         f"| `{entry.ref}` | {_cell(entry.rule)} | {_cell(entry.when)} | "
         f"{entry.status + ' (stale)' if entry.stale(harness) else entry.status} |"
-        for entry in ordered[:MAX_ROWS]
+        for entry in shown
     ]
     lines = ["| # | Learning | When it applies | Status |", "|---|---|---|---|", *rows]
-    if len(ordered) > MAX_ROWS:
+    if len(entries) > len(shown):
         lines.append("")
         lines.append(
-            f"{len(ordered) - MAX_ROWS} more are in the directory but not in this table; "
+            f"{len(entries) - len(shown)} more are in the directory but not in this table; "
             "the grep finds them."
         )
     return "\n".join(lines)
@@ -851,10 +906,7 @@ def duties(
     # Refuted rows are gone from the phases' table but still on disk and still
     # in the human's listing: the point of retiring one is to stop it costing
     # turns, not to hide that it was ever written.
-    rows = [
-        entry for entry in applicable(read_all(hive_dir), project)
-        if entry.status != REFUTED
-    ]
+    rows = eligible(read_all(hive_dir), project)
     if rows:
         parts.append(
             f"Entries that apply here, by file under `{root}/`:\n\n{table(rows, harness)}"

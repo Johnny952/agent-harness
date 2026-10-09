@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Six console paths map one-to-one onto
- * the six api routes; anything else under `/api/` is a JSON 404 from the console
+ * **It is a whitelist and not a proxy.** Seven console paths map one-to-one onto
+ * the seven api routes; anything else under `/api/` is a JSON 404 from the console
  * and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -33,7 +33,20 @@ const FORWARDED: Record<string, readonly string[]> = {
   // on both sides. The api takes it as optional and the console always sends it:
   // nothing here polls the unfiltered form (`docs/decisions.md` ADR 27, ADR 28).
   "/api/phases": ["task_id"],
+  // `project` is absent here too, and for the same reason as `/api/debt`'s: the
+  // slug is the console's own configuration and the search box on the Learnings
+  // screen filters rows the api already sent (`docs/decisions.md` ADR 41, ADR 42).
+  "/api/learnings": [],
 };
+
+/**
+ * The routes whose `?project=` comes from `CONSOLE_PROJECT` and never from the
+ * browser. Both are project-scoped reads on an api that may hold several
+ * checkouts, where the parameter is optional for one and required for two —
+ * `docs/decisions.md` ADR 24 for why it is set here, ADR 41 part 2 for the rule
+ * the api applies to it.
+ */
+const PROJECT_SCOPED = new Set(["/api/debt", "/api/learnings"]);
 
 /**
  * The detail route. No second segment: `/api/tasks/a/b` is not this route.
@@ -123,7 +136,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the six.
+      // `%zz` and friends. A path the console cannot read is not one of the seven.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -138,7 +151,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the six routes the console forwards.`,
+      error: `${path} is not one of the seven routes the console forwards.`,
     };
   }
 
@@ -149,7 +162,7 @@ function resolveTarget(url: URL): Resolution {
     // legal and sending nothing is clearer.
     if (value) target.searchParams.set(name, value);
   }
-  if (path === "/api/debt" && CONSOLE_PROJECT) {
+  if (PROJECT_SCOPED.has(path) && CONSOLE_PROJECT) {
     target.searchParams.set("project", CONSOLE_PROJECT);
   }
   return { kind: "forward", target: target.toString() };

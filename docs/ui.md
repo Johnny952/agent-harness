@@ -268,18 +268,37 @@ the task it is running, which is a join the console does across two routes it
 already calls — ADR 17 — and an account with no current task renders `Absent`
 rather than a dot.
 
-**Set by:** T-012. Source of truth:
-`front/src/components/console/primitives.tsx` (`HeartbeatDot`),
-`front/src/lib/format.ts`.
+A learning entry has a staleness of its own and it obeys the same rule.
+`stale` on a `/api/learnings` row means the entry was written under a permission
+surface this harness no longer has, which is the dispatcher's own
+`learnings.Entry.stale` judged against the fingerprint of the config the api
+holds — so the Learnings screen renders it as a qualifier beside the status
+pill, the way a phase's prompt reads `confirmed (stale)`, and never derives it
+from a date. Whether a row still reaches a running phase is the same kind of
+served judgement: `in_phase_table`, against the `phase_table_cap` on the row,
+and no screen re-ranks the rows to work it out
+(`docs/decisions.md` ADR 41 and ADR 42).
+
+**Set by:** T-012; the learnings tree's two served judgements by T-016. Source
+of truth: `front/src/components/console/primitives.tsx` (`HeartbeatDot`),
+`front/src/lib/format.ts`, `front/src/routes/learnings.tsx`.
 
 ### A region with no route says which route, and when
 
 A region whose query has no route behind it renders an `EmptyState` whose body
-names the missing route and the tier it lands in — "`/api/learnings`, tier 2
-of `docs/plans/front.md`" — and never a fixture, never a blank, and never the
+names the missing route and the tier it lands in — the form is "`<route>`, tier
+2 of `docs/plans/front.md`" — and never a fixture, never a blank, and never the
 wording of an empty harness. `docs/decisions.md` ADR 19 is the rule; this entry
 is what it looks like, because more than one screen has such a region and an
 operator must never be unable to tell a quiet harness from an unwired console.
+
+The shipped instance of that first form was the task detail's learnings region,
+which named `/api/learnings` until T-016 built the route
+(`docs/decisions.md` ADR 41 and ADR 42). It now shows real entries, and what it
+still cannot show falls under the third sentence below. So the first form has no
+instance in the console today and the rule is unchanged: it binds the next
+region wired against a route that is not there yet, of which the configuration
+read behind Role models is the nearest tier-2 candidate.
 
 The distinction to hold on to: *this harness has not done that yet* and *this
 console cannot see it yet* are different sentences, and only the first one is an
@@ -308,7 +327,11 @@ operator something is available when it is not.
 **Set by:** T-012; the paragraph on a control with nothing to act on applied to
 the pool's `Release` button by the by-hand review of T-012, which removed it;
 the *nothing records that* case by T-013, which landed `/api/phases` and found
-the Board's lanes waiting on a fact rather than on a route. Source of truth:
+the Board's lanes waiting on a fact rather than on a route; the first form's
+last instance discharged by T-016, which landed `/api/learnings` and found the
+detail's learnings region waiting on a record too — which table a phase was
+handed is recomputed at every dispatch and written down nowhere. Source of
+truth:
 `front/src/components/console/primitives.tsx` (`EmptyState`, `Banner`),
 `front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
 `front/src/routes/tasks.$taskId.tsx`.

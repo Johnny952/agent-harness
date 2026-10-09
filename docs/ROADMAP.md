@@ -184,8 +184,8 @@ login.
   (`docs/decisions.md` ADR 32). Nothing answers on 8790 now and
   `docker compose build board` has no service to build, so this check cannot be
   re-run and is not meant to be. The block is left as written below because it
-  is what the passing row attests to. V0.6c and V0.6d are the checks that cover
-  those screens from here on.
+  is what the passing row attests to. V0.6c, V0.6d and V0.6e are the checks that
+  cover those screens from here on.
 - A new id rather than a re-use of `V0.6`: that id belongs to the events
   dashboard's auth on 8788, which T-010 deleted, so the
   `2026-09-16 | V0.6 | PASS` row in the results log is that superseded check
@@ -324,6 +324,74 @@ login.
     not one of the six routes the forward carries.
   - The detail screen's learnings region still names `/api/learnings`. Parity is
     not reached and this check does not claim it.
+
+**V0.6e The Learnings screen, the detail's learnings region, and `/api/learnings`.**
+- A new id beside V0.6d rather than a change to it or to V0.6c. Both of those
+  have PASS rows in the Results log, and both assert the state *before* this
+  route landed: V0.6c step 3 wants the detail screen to show an empty state
+  naming `/api/learnings`, V0.6d step 4 wants the console to answer a JSON 404
+  for that path, and V0.6d's last Pass bullet says the region still names it.
+  All three are now false, and all three stay exactly as written — they are a
+  true record of what T-012 and T-013 shipped
+  (`docs/learnings/retargeting-a-roadmap-check-keeps-its-id.md`, and V0.6d's own
+  opening paragraph is the model). This one checks the delta T-016 added.
+- **No phase can write its results row**, but not for V0.6c's `node_modules`
+  reason: a phase *can* run `bun install`, `typecheck`, `test` and `lint` where
+  its task grants them, and T-016's did
+  (`/data/.hive/learnings/inbox/T-016-bun-runs-in-a-phase-when-the-task-grants-it.md`).
+  What no phase can do is open a browser or bring up the container half, which
+  is a human's row (`/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`).
+  An operator can, on this host, since T-013's by-hand install on 2026-10-04 —
+  see V0.6c.
+- Setup is V0.6c's steps 0 and 1 unchanged — the api up **on an image built
+  after T-016 merged**, and the console started on the host with the three
+  un-prefixed names. The api image is the trap V0.6c's own row recorded: a
+  container from before the merge answers 404 on the new route and reads exactly
+  like a console bug. `docker exec compose-api-1 grep -c api/learnings
+  /app/observability/api/app.py` is `1` on a current image and `0` on a stale
+  one.
+- Run:
+  1. Through the console, not the api:
+     `curl -si 127.0.0.1:3000/api/learnings` (whatever port `bun run dev`
+     prints). Then `curl -si 127.0.0.1:3000/api/threads`, which is the path
+     V0.6d's step 4 used to use and the one ADR 19 says is never coming.
+  2. `/learnings` in a browser, against this hive's real tree. Seventeen or so
+     entries live under `.hive/learnings/inbox/` with none yet in `harness/`, so
+     every `ref` should read `inbox/<slug>.md`.
+  3. On that screen, one entry stamped with a foreign `harness:` fingerprint —
+     several of the T-008 and T-010 entries are — and one `status: refuted` if
+     the tree holds one.
+  4. `/tasks/T-015` and `/tasks/T-013`, which both filed entries, then
+     `/tasks/T-001`, which filed none.
+  5. With the console still up, `docker stop compose-api-1`, reload `/learnings`,
+     then `docker start compose-api-1` and reload again.
+- Pass:
+  - Step 1's first request answers `200` with `{"data": […], "warnings": []}` and
+    the rows carry `?project=ia-harness`'s filter — this host's `projects_root`
+    holds `ia-harness` and `scratch`, so an unfiltered request to the api
+    directly would 400 and the console's own must not, because the forward adds
+    the slug from `CONSOLE_PROJECT` (ADR 41 part 2, ADR 24). The second answers
+    a JSON `404` from the console naming **seven** routes.
+  - Step 2's rows are this hive's, in the dispatcher's own order — confirmed
+    before unconfirmed, fresh before stale, `ref` as the tie-break — and no row
+    carries a fixture's `L-01` id. Each row shows its `ref`, its task, its scope,
+    its status, its trigger line, its rule and whether it is in the phase table.
+  - Step 3's stale entry reads `<status> (stale)` beside the pill and never as a
+    recoloured pill or a date; the refuted one reads *refuted — not handed to
+    phases* in the **in table** column, and is shown rather than hidden. If the
+    tree holds more than `learnings.MAX_ROWS` eligible entries, the over-cap
+    banner names the count and the cap, and the cap it names is 40 because that
+    is `MAX_ROWS` — not a number in `types.ts`, which no longer holds one.
+  - Step 4's two wired tasks each list the entries whose `task` or `carried_by`
+    is that id, with a `carried` marker on a row another task found.
+    `/tasks/T-001` shows the region's own sentence about nothing being filed, and
+    **no screen anywhere names `/api/learnings` as a route being waited for**.
+    The region's copy says the handed table is recomputed per dispatch and
+    recorded nowhere — that is `docs/ui.md`'s third sentence and ADR 42, and it
+    must not read as a route that is missing.
+  - Step 5 shows an `ErrorState` inside the region on the detail screen and over
+    the content on `/learnings`, never an empty state, and recovers on the second
+    reload. The other regions of the detail screen keep their rows.
 
 **V0.7 Docker-in-docker.**
 - Run:
@@ -1987,3 +2055,4 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-10-04 | V0.6d (phase timeline and the phases read) | PASS | `bun` 1.3.12, Vite 8.1.5 dev server on **8080**; `compose-api:latest` `c5345956dbea` rebuilt this day, `compose-api-1` on 8789; collector on 8787; Google Chrome 154.0.8037.57 headless `--dump-dom`; harness at `3615ddd` | The first walk of this check, by the assistant against the same merged stack and the same dev server -- no quota, no dispatch. Method and port as in the V0.6c row above: headless Chrome `--dump-dom` on 8080, `API_TOKEN` read into a shell variable and never echoed. **Step 1** PASS: `/tasks/T-011` shows four phase rows, `arquitecto ended 15:31:24 · 78h 17m ago` through `auditor ended 15:55:05 · 77h 54m ago`, in cycle order; `/tasks/T-012` shows two and `/tasks/T-013` four. The revisor row on T-011 carries five lists rather than six because that role returned no `changed`. The forbidden-field clause -- no byte bar, no gate chips, no account, no model, no commit -- is clean on all three. A trap for the next walker: a loose `[0-9a-f]{7,40}` over a timeline produces a false positive, and it matched once in the T-013 dump inside a phase's own prose, not a commit. Read every regex hit in context. **Step 2** PASS: `/tasks/T-003` shows the harness empty state ("No phase of this task has left a handoff") with no route named anywhere in the timeline region. **Step 3** PASS: the board banner names the missing *record*, does not name `/api/phases`, and In progress is one column (ADR 28). **Step 4** PASS: `?task_id=T-011` answers 200 with 4 rows and `warnings: []`, `?task_id=a/b` answers 400 from the api naming `task_id`, and `/api/learnings` answers 404 from the console -- the replacement for the stale V0.6c step 6a. **A defect in the check, not in the console**, fully confirmed on disk: the Pass text's dates were wrong as walked. It said T-011's four rows and T-012's two are "on 2026-10-03", and step 2 said the handoff-less tasks are "ten of the thirteen on 2026-10-03"; both T-011 and T-012 are **2026-10-01**. T-013's "own cycle closed on 2026-10-04" is correct, and every count -- four, two, three of thirteen, ten of thirteen -- is correct. Only the dates are wrong. Measured inventory, authoritative: exactly three of thirteen task dirs hold `handoffs/` -- T-011 with 4 files, T-012 with 2, T-013 with 4 -- and T-001 through T-010 have none. The ten `saved_at` are all `+00:00`: T-011 `2026-10-01T15:31:24`, `15:35:34`, `15:42:39`, `15:55:05`; T-012 `2026-10-01T21:48:14`, `22:13:44`; T-013 `2026-10-03T19:43:02`, `20:03:45`, `20:14:06`, and `2026-10-04T13:41:24`. Decision: PASS stands, all four steps passing on their own criteria. The wrong dates were corrected in place against that inventory -- step 1's "on 2026-10-03" to 2026-10-01, and step 2's to 2026-10-04 with `T-001` through `T-010` named -- because a stale date in a Pass criterion reads to the next walker as a count that failed, and the measurement above stays here as the evidence. The UTC-with-no-suffix gap in `docs/ui.md` noted in the V0.6c row above is what makes the `15:31:24`-style times in step 1 read as local when they are not; that gap is now written down in that file's *Times are absolute, ages are relative, and ages tick* section, the suffix itself left to a task that owns the screens. |
 | 2026-10-08 | D8 (the `front/` test gate on a real task, T-015) | PASS | `bun` 1.3.12, node v24.21.0 (`node:24-bookworm-slim`); harness at `d6b7754` for the run; every phase on cuenta2 | T-015 (memoise the board's `rows`, ADR 40) ran 15:25–15:55 -03 and finished rc 0. The gate ran install → test → lint twice between implementador and revisor — proved by `node_modules` and vitest mtimes, because a green gate logged nothing then — and its `tests-in-diff` finding was answered in the implementation note. Re-run by hand on the merged tree: typecheck 0, 51 tests green, lint 0 errors and 9 warnings (was 10), pytest 1179 passed. The run found that phases are refused `bun`: `338e065` adds `cd front && bun …` to the phase allowlist, and a sonnet probe in `agent-cuenta1` approved that form and refused `bun run --cwd front …`. `22d749e` makes each gate command log its exit and duration. Memory against `mem_limit` still not measured. Merged as `Merge agent/task/T-015`. Evidence: `.data/verify/d8-t015-gate.md`, `probe-bun-allowlist.md`, `t015-run.log`. |
 | 2026-10-08 | D8 (gate memory against `mem_limit`) | PASS | `bun` 1.3.12, node v24.21.0; `agent-cuenta1`, `memory.max` 4 GiB; harness at `2f1e797` | The one D8 measurement left open. A fresh worktree at `2f1e797`, the gate's four steps by hand, the container cgroup's `memory.current` sampled every 100 ms (page cache included, so upper bounds): install 94 MiB peak (warm cache), typecheck 729 MiB, test 320 MiB, lint 616 MiB, all rc 0. The container's lifetime `memory.peak` was 735 MiB, and it started before T-015, so that covers the real run too: about 18 % of the limit. No change to `mem_limit`. Evidence: `.data/verify/d8-t015-gate.md`. |
+| 2026-10-09 | V0.6e (the Learnings screen and `/api/learnings`) | NOT RUN | — | Written by T-016 alongside the route it checks, and not walked: every step needs a browser against a running console, and no phase can open one. Not V0.6c's `node_modules` reason, which no longer holds: T-016's own phases filled `front/node_modules` and ran every `front/` script (`/data/.hive/learnings/inbox/T-016-bun-runs-in-a-phase-when-the-task-grants-it.md`). What remains is the browser and the container — a phase can open neither, and the container half is a human's row (`/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`). What a phase *could* run, and T-016's implementador and auditor both did, is the suite behind it: `cd front && bun install --frozen-lockfile` (512 installs, no changes), `bun run typecheck` exit 0, `bun run test` 60 passed in 5 files, `bun run lint` 0 errors and 9 warnings, `python3 -m pytest` 1200 passed and 10 skipped. That covers the route's shape, the forward's allowlist and the two served judgements as units; it covers nothing about what an operator sees. The one thing a walker should check before blaming the console: the api image has to postdate this merge, because a stale `compose-api-1` answers 404 on the new route and reads exactly like a forward bug — V0.6c's own PASS row hit that trap with `/api/phases`. |

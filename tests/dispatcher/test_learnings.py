@@ -455,6 +455,64 @@ def test_another_projects_unreviewed_entry_is_held_back(tmp_path: Path) -> None:
     ]
 
 
+def test_eligible_is_applicable_without_the_retired_rows(tmp_path: Path) -> None:
+    """The cut `duties` makes before the table orders anything, and the one the
+    api asks when it answers whether a row reaches a phase. One selector, so
+    the two cannot disagree (`docs/decisions.md` ADR 41)."""
+    rows = [
+        _row("inbox/ours.md", project="myproj"),
+        _row("inbox/retired.md", project="myproj", status=learnings.REFUTED),
+        _row("inbox/theirs.md", project="otherproj"),
+        _row("harness/reviewed.md", project="otherproj"),
+    ]
+
+    assert [entry.ref for entry in learnings.eligible(rows, "myproj")] == [
+        "inbox/ours.md",
+        "harness/reviewed.md",
+    ]
+
+
+def test_handed_cuts_at_the_cap_and_keeps_what_is_backed_and_fresh() -> None:
+    """Exactly the rows a phase's prompt carries, which is the claim
+    `/api/learnings` serves as `in_phase_table`."""
+    rows = [
+        _row("inbox/stale.md", status=learnings.CONFIRMED, harness="oldoldoldold"),
+        _row("inbox/fresh.md", status=learnings.CONFIRMED, harness="newnewnewnew"),
+        _row("inbox/open.md", status=learnings.UNCONFIRMED),
+    ]
+
+    assert [entry.ref for entry in learnings.ordered(rows, "newnewnewnew")] == [
+        "inbox/fresh.md",
+        "inbox/stale.md",
+        "inbox/open.md",
+    ]
+    assert [entry.ref for entry in learnings.handed(rows, "newnewnewnew")] == [
+        "inbox/fresh.md",
+        "inbox/stale.md",
+        "inbox/open.md",
+    ]
+    wide = [_row(f"inbox/{index:02d}.md") for index in range(learnings.MAX_ROWS + 5)]
+    assert len(learnings.handed(wide)) == learnings.MAX_ROWS
+
+
+def test_unreadable_names_the_files_read_dir_skipped_and_nothing_else(tmp_path: Path) -> None:
+    """A reader that drops what it cannot parse leaves the one caller whose
+    contract is "report the damage" nothing to report — `docs/debt/T-008-D2.md`
+    one level up, and why this exists at all."""
+    hive = tmp_path / "hive"
+    good = _entry(hive, "db.md")
+    inbox = Path(learnings.inbox_dir(str(hive)))
+    stray = inbox / "note.md"
+    stray.write_text("no frontmatter, just prose\n")
+    scalar = inbox / "scalar.md"
+    scalar.write_text("---\nTODO write this up\n---\n\nbody\n")
+    (inbox / "notes.txt").write_text("not markdown\n")
+
+    assert learnings.unreadable(str(inbox)) == [str(stray), str(scalar)]
+    assert str(good) not in learnings.unreadable(str(inbox))
+    assert learnings.unreadable(str(hive / "learnings" / "nope")) == []
+
+
 def test_the_table_puts_confirmed_rows_first_and_stops_at_the_cap() -> None:
     """A prompt that grows with the inbox taxes every phase of every task, so
     the table is capped — and what survives the cut is what a second task has

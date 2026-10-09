@@ -88,3 +88,31 @@ cite the entry and move it up, or drop the row.
   phase row *is* and ADR 28 decides that no file says which phase is *running*,
   but neither addresses a phase that ran and left no record. A human should say
   whether "never recorded" and "not yet" are the same answer.
+
+## Unconfirmed — inferred from the code by T-016
+
+- **A learning stops being something the harness shows once it has been
+  promoted into a project's own index: "the learnings" means the hive's inbox
+  and `harness/` tree, and nothing else.** `/api/learnings` reads
+  `dispatcher/learnings.py`'s two directories under the hive, so the Learnings
+  screen shows the traps a phase is about to be handed and never the entries
+  under `docs/learnings/` — which are the ones a human has already ruled on,
+  and the larger set. Read off the readers rather than from any doc:
+  `dispatcher/learnings.py` has no parser for `docs/learnings/README.md`,
+  `dispatcher/debt.py` does have one for the debt index, and the asymmetry is
+  not stated anywhere. `docs/decisions.md` **ADR 41** rules the project's own
+  index out of this read on the implementation ground that including it would
+  mean a second parser, which is a true reason and not a product decision. A
+  human should say whether an operator looking at "Learnings" is owed the
+  promoted entries beside the pending ones — and, if so, whether that is this
+  route widening or a second one.
+- **An entry nobody has reviewed is still handed to a phase; only a *refuted*
+  entry is withheld, and only another project's unreviewed entries are hidden.**
+  `dispatcher/learnings.py:applicable` admits anything `reviewed` or belonging
+  to this project, and `eligible` removes only `status == refuted` — so
+  `unconfirmed` is a label on a row a phase reads, not a gate on it, and the
+  prompts say "read it, do not plan around it" rather than withholding it. The
+  rule is legible in those two functions and their docstrings, which is why it
+  is listed here rather than as a defect; what no doc settles is whether an
+  operator should be able to see another project's unreviewed entries on this
+  screen, which today they cannot, by the same filter.

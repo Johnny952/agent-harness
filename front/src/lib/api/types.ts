@@ -50,13 +50,45 @@ export interface GateFinding {
   detail: string;
 }
 
+/**
+ * The ten keys `/api/learnings` answers: one row per trap entry in the hive.
+ *
+ * An entry *is* a file — `<hive>/learnings/{inbox,harness}/<slug>.md`, written by
+ * the phase that hit the trap — so `ref` is the identity, the same pointer every
+ * prompt, every `learnings` CLI verb and every `refutes:` line already cites.
+ *
+ * The fixture's `id`, `trigger`, `body` and `retired` are gone. `id` was a
+ * surrogate where the harness has a pointer; `trigger` and `body` were its words
+ * for `when` and `rule`; and `retired` was a second axis beside `status` that
+ * nothing on disk records. The entry body — its Symptom, its Why, its Evidence —
+ * is not served at all: `rule` is the one line the dispatcher's own table shows,
+ * and the file the `ref` names is the document. `docs/decisions.md` ADR 41 has
+ * the table field by field, and ADR 42 the console's half.
+ *
+ * `scope` and `status` are `str()`-derived on the api side and so may hold any
+ * string: a value outside the ones below renders verbatim rather than keying a
+ * tone table, the way `PhaseRow` renders an unknown role.
+ */
 export interface LearningEntry {
-  id: string;
-  scope: "project" | "harness";
-  status: "confirmed" | "unconfirmed" | "refuted";
-  trigger: string;
-  body: string;
-  retired: boolean;
+  /** `inbox/<slug>.md` or `harness/<slug>.md` — the identity, and which side of the human review it is on. */
+  ref: string;
+  /** The task that found the trap. */
+  task: string;
+  /** The task whose auditor is due to file it; `learnings.droppable`'s own relation. */
+  carried_by: string;
+  /** One trap in one codebase, or one in what every project shares. */
+  scope: "project" | "harness" | string;
+  status: "confirmed" | "unconfirmed" | "refuted" | string;
+  /** The trigger line: when this applies, as a condition the next agent can check. */
+  when: string;
+  /** The first non-blank line of `## Rule`, falling back to `when`. Empty if the entry carries neither. */
+  rule: string;
+  /** Written under a permission surface this harness no longer has. Served, never computed. */
+  stale: boolean;
+  /** Whether this row reaches a running phase right now — `handed(eligible(…))`, not an index into any sort. */
+  in_phase_table: boolean;
+  /** `learnings.MAX_ROWS`, the cap the field above is measured against, repeated per row (ADR 20's shape). */
+  phase_table_cap: number;
 }
 
 /**
@@ -84,7 +116,14 @@ export interface HandoffPayload {
   verified?: string[];
   pending?: string[];
   risks?: string[];
-  /** Inbox filenames as the role wrote them, not ids: the join needs `/api/learnings`. */
+  /**
+   * Proposed learnings as the role wrote them: free prose, one sentence each, not
+   * refs. `dispatcher/handoff.py`'s schema asks for "something true of this
+   * project that the next task would want to know", and the files on disk answer
+   * in sentences — some happen to quote a ref inside one and most do not. There
+   * is no key here to join against `/api/learnings`, and there never was one
+   * (`docs/decisions.md` ADR 42).
+   */
   learnings?: string[];
   paths?: { path: string; holds: string }[];
   subagents?: { id: string; doing: string }[];
@@ -109,8 +148,9 @@ export interface HandoffPayload {
  * is when the phase **ended**, so no screen may label it a start or difference
  * two of them into a duration — and `bytes_budget` is a denominator whose
  * numerator is not served. `gate_findings` is prose in the task body, on the
- * detail route. `learning_ids` travels as `handoff.learnings` and the join
- * still waits for `/api/learnings`.
+ * detail route. `learning_ids` has no successor at all: `handoff.learnings` is
+ * prose and not refs, so there is no join to make — the task detail joins
+ * `/api/learnings` on `task` and `carried_by` instead (ADR 42).
  * `docs/decisions.md` ADR 27 has the whole table, field by field, and a later
  * task that wants one of them reaches it before reaching for the api.
  *
@@ -252,6 +292,9 @@ export interface ChatThread {
 // answers `lock_expired`. Raising a threshold is one edit in `config.yaml` now,
 // and the console follows without a rebuild.
 //
-// `LEARNING_TABLE_CAP` stays: it is the console's own layout decision and nobody
-// else's.
-export const LEARNING_TABLE_CAP = 40;
+// `LEARNING_TABLE_CAP` went the same way, by ADR 42. ADR 18 kept it as "the
+// console's own layout decision and nobody else's", which was true of a console
+// with no route: a number of rows to draw. It is not a layout number — it is
+// `dispatcher/learnings.py:MAX_ROWS`, the cap on the table a phase's prompt
+// carries, and the Learnings screen's whole subject is which rows get there. It
+// arrives per row now as `phase_table_cap`.

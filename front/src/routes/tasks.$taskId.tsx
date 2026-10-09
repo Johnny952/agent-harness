@@ -18,7 +18,8 @@ import {
 } from "@/components/console/primitives";
 import { Markdown } from "@/components/console/markdown";
 import { PhaseList, PhasePill, asPathLine } from "@/components/console/payload";
-import { debtQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
+import { InPhaseTable, LearningStatus } from "@/components/console/learnings";
+import { debtQuery, learningsQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
 import { ROLES } from "@/lib/api/types";
 import type { Phase, Task } from "@/lib/api/types";
 import { agoSeconds, formatAge, formatClock, roleColorVar } from "@/lib/format";
@@ -49,6 +50,7 @@ function TaskDetailPage() {
   const task = useQuery(taskQuery(taskId));
   const debt = useQuery(debtQuery);
   const phases = useQuery(phasesQuery(taskId));
+  const learnings = useQuery(learningsQuery);
 
   // Broken is a query that failed, and it never degrades into an empty state:
   // `docs/ui.md` *Absent, empty and broken are three different things*. A 404 and
@@ -66,17 +68,26 @@ function TaskDetailPage() {
   }
 
   const t = task.data?.data ?? null;
-  // One banner, every warning, in the order the api sent them — three reads
-  // concatenated rather than three banners stacked. `docs/ui.md` *A degraded
+  // One banner, every warning, in the order the api sent them — four reads
+  // concatenated rather than four banners stacked. `docs/ui.md` *A degraded
   // backend is a banner, not a blank screen*.
   const warnings = [
     ...(task.data?.warnings ?? []),
     ...(debt.data?.warnings ?? []),
     ...(phases.data?.warnings ?? []),
+    ...(learnings.data?.warnings ?? []),
   ];
   // Debt ids are shaped `T-011-D1`, and `task_id` is that split. ADR 17.
   const taskDebt = (debt.data?.data ?? []).filter((d) => d.task_id === taskId);
   const timeline = byCycle(phases.data?.data ?? []);
+  // What this task found, plus what its auditor is due to file: the last of
+  // `learnings.droppable`'s four conditions, applied alone. `droppable` also
+  // wants an unreviewed inbox entry with `scope: project`, so `merge-task`
+  // drops a subset of these rows, not all of them (ADR 42). No sort — the api answers in the phase table's
+  // order and that is the order worth keeping (ADR 42).
+  const taskLearnings = (learnings.data?.data ?? []).filter(
+    (l) => l.task === taskId || l.carried_by === taskId,
+  );
 
   return (
     <AppShell>
@@ -216,14 +227,56 @@ function TaskDetailPage() {
             )}
           </section>
 
-          <section>
-            <h2 className="label-xs mb-2">learnings handed to these phases</h2>
-            {/* Still waiting, and on one route now rather than two: ADR 19 says
-                this names what is missing, and only /api/learnings is. */}
-            <EmptyState
-              title="Learnings handed to a phase are waiting on /api/learnings"
-              body="Tier 2 of docs/plans/front.md, and the half of the join that does not exist yet. The timeline above carries each phase's own learnings lines, which name inbox filenames rather than ids; the records on the other end of those names need that route. The learnings tree is on disk either way."
-            />
+          <section className="panel px-3 py-3">
+            <h2 className="label-xs mb-2">learnings this task filed or carries</h2>
+            {/* Not "learnings handed to these phases", which is the half that
+                cannot be built: the table a phase was handed is computed at
+                dispatch from the directory as it stood, the harness fingerprint
+                of the day and the cap, and nothing writes it down. So this names
+                the record that is missing rather than a route, and names what it
+                shows instead — `docs/ui.md` *A region with no route says which
+                route, and when*, third sentence, and ADR 42. */}
+            <p className="mb-2 text-[11px] text-muted-foreground">
+              What this task&apos;s phases filed, and what its auditor is due to file. Which table a
+              phase was actually handed is recomputed at every dispatch and recorded nowhere — each
+              phase&apos;s own proposed-learnings prose is in the timeline above.
+            </p>
+            {/* A secondary read on a discrete block, so Broken takes the region
+                and not the screen, like the debt region above it. */}
+            {learnings.isError ? (
+              <ErrorState
+                title="The learnings tree did not answer"
+                body="/api/learnings could not be read, so what this task filed is unknown rather than absent. Everything above comes from the task card and is unaffected; the entries themselves are files under the hive's learnings tree."
+              />
+            ) : taskLearnings.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No learning entry names this task. A phase files one when a trap costs it time, and
+                the auditor of the task that carries it promotes it into the project&apos;s own
+                index.
+              </p>
+            ) : (
+              <ul className="space-y-1.5">
+                {taskLearnings.map((l) => (
+                  <li key={l.ref} className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <Mono className="text-muted-foreground">{l.ref}</Mono>
+                    <LearningStatus entry={l} />
+                    {/* The two halves of the task-id relation are
+                        two different facts: a carried row was found by another
+                        task and this task's auditor is the one due to file it. */}
+                    {l.task !== taskId && (
+                      <span
+                        className="rounded-sm border border-border-strong px-1 text-[10px] uppercase text-muted-foreground"
+                        title={`Found by ${l.task || "an unrecorded task"}; this task's auditor is due to file it.`}
+                      >
+                        carried
+                      </span>
+                    )}
+                    <span>{l.rule || <Absent label="no rule" />}</span>
+                    <InPhaseTable entry={l} />
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
         </div>
       )}

@@ -1,14 +1,15 @@
 # observability/api/app.py
 """A read API over the state this harness already keeps on disk.
 
-Phase 1 of `docs/plans/board.md`. Four readers existed and none was reachable
+Phase 1 of `docs/plans/board.md`. Five readers existed and none was reachable
 from outside the container holding it: `dispatcher/context_transfer.py` turns a
 task file into a `TaskFile`, `dispatcher/state_machine.py` answers what an
-account is doing, `observability/collector/db.py` lists events, and
-`dispatcher/debt.py` parses the debt index. This is an HTTP surface over those,
-and nothing more: every route is a `GET`, every mount is `:ro`, and there is no
-second copy of any file format here — a parser this service needs and does not
-have is one to make reachable in `dispatcher/`, not one to rewrite.
+account is doing, `observability/collector/db.py` lists events,
+`dispatcher/debt.py` parses the debt index, and `dispatcher/learnings.py` parses
+the hive's trap entries. This is an HTTP surface over those, and nothing more:
+every route is a `GET`, every mount is `:ro`, and there is no second copy of any
+file format here — a parser this service needs and does not have is one to make
+reachable in `dispatcher/`, not one to rewrite.
 
 Two rules shape the whole module:
 
@@ -26,8 +27,9 @@ Two rules shape the whole module:
 
 It writes nothing, anywhere: `db.init_db` is never called (it runs
 `CREATE TABLE` and the events volume is read-only), the board client is only
-ever read from, and there is no docker socket on this service —
-`dispatcher/docker_exec.py` arrives as an import and is never called.
+ever read from, the learnings read calls neither `ensure_dirs` nor `reconcile`,
+and there is no docker socket on this service — `dispatcher/docker_exec.py`
+arrives as an import, for one frozenset, and is never called.
 """
 from __future__ import annotations
 
@@ -39,7 +41,14 @@ from pathlib import Path
 import yaml
 from flask import Flask, jsonify, request
 
-from dispatcher import context_transfer, debt, project_docs, state_machine
+from dispatcher import (
+    context_transfer,
+    debt,
+    docker_exec,
+    learnings,
+    project_docs,
+    state_machine,
+)
 from dispatcher.config import Config, load_config
 from dispatcher.vibe_kanban_client import LocalBoardClient
 from observability import auth
@@ -111,6 +120,16 @@ MAX_BODY_BYTES = 128 * 1024
 #: `docs/decisions.md` ADR 27.
 MAX_PHASES = 100
 
+#: The most learning entries one `/api/learnings` answer carries. Five hundred
+#: because the hive inbox is drained when a task's branch merges and holds
+#: seventeen entries today, so nothing in this harness is clamped: the cap
+#: exists so this is not the next thing this service answers with no bound at
+#: all, on `MAX_PHASES`' model and `MAX_EVENT_LIMIT`'s before it. The clamp
+#: reports itself in `warnings`. It bounds a count and not bytes, which is
+#: enough while `rule` and `when` are one line each — a row that ever carries
+#: the entry body is a different bound. `docs/decisions.md` ADR 41.
+MAX_LEARNINGS = 500
+
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
 #: on how much a caller may ask for — `MAX_EVENT_LIMIT` is that, and it clamps
@@ -161,6 +180,16 @@ def create_app(
     cfg = load_config(config_path)
     app = Flask(__name__)
     requires_auth = auth.requires_auth(username, password_hash, realm=REALM, token=token)
+    # What a phase dispatched right now would be allowed to do, as one string.
+    # The same three inputs `dispatcher/dispatcher.py` passes, so this service's
+    # answer to *stale* is the answer that dispatch would get — and computed
+    # here, off the one `Config` this function loaded, never by a second
+    # `load_config` inside a view
+    # (`docs/learnings/a-new-field-on-an-api-row-has-two-questions.md`).
+    # `docs/decisions.md` ADR 41 part 8.
+    harness = learnings.harness_fingerprint(
+        cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES
+    )
 
     @app.get("/api/tasks")
     @requires_auth
@@ -420,6 +449,102 @@ def create_app(
             rows = rows[:MAX_PHASES]
         return _envelope([row for _, row in rows], warnings)
 
+    @app.get("/api/learnings")
+    @requires_auth
+    def learnings_index():
+        rejected = _reject_unknown_parameters(frozenset({"project"}))
+        if rejected is not None:
+            return rejected
+        slug, rejected = _project(cfg, request.args.get("project") or None)
+        if rejected is not None:
+            return rejected
+        root = learnings.root_dir(cfg.hive_tasks_dir)
+        if not os.path.isdir(root):
+            # `ensure_dirs` makes this tree on every `run-task`, so its absence
+            # means no run has happened against this hive — which is different
+            # news from an empty inbox, and an operator reading an empty screen
+            # is owed the difference. `_no_events_warning`'s model.
+            return _envelope(
+                [],
+                [
+                    f"{root}: no learnings tree yet: the dispatcher makes it on every "
+                    "run-task, so no task has run against this hive"
+                ],
+            )
+        entries: list[learnings.Entry] = []
+        warnings: list[str] = []
+        for directory in (
+            learnings.inbox_dir(cfg.hive_tasks_dir),
+            learnings.harness_dir(cfg.hive_tasks_dir),
+        ):
+            # Per directory, each in its own guard, because this route lists two
+            # and one that will not list must not cost the other its rows.
+            # `read_dir` guards with `os.path.isdir` and then calls `os.listdir`,
+            # which still raises for a directory it cannot read; the guard is at
+            # this caller and `read_dir` keeps raising, because its four
+            # dispatcher callers need the raise.
+            # `docs/learnings/a-per-item-listing-in-a-never-500-read-needs-its-own-guard.md`
+            # is the same shape one level up.
+            try:
+                entries += learnings.read_dir(root, directory)
+                # The damage the parser drops silently, on `_read_cards`'
+                # wording: named, in no row, and the rest of the list still
+                # comes back. ADR 41 part 6.
+                warnings += [
+                    f"{path}: unreadable learning entry; it is in no row"
+                    for path in learnings.unreadable(directory)
+                ]
+            except OSError as exc:
+                warnings.append(f"{directory}: unreadable learnings directory: {exc}")
+        # What a phase of this project is shown, which is this screen's whole
+        # subject: everything a human promoted into `harness/`, plus everything
+        # this project discovered itself. ADR 41 part 2.
+        served = learnings.applicable(entries, slug)
+        # Not an index into the order below: whether a row reaches a running
+        # phase is `handed(eligible(…))`, the dispatcher's own two selectors, so
+        # a refuted row and a row past the cap are both `false` for their own
+        # reason and neither is a fact a client could derive.
+        reaching = {
+            entry.ref
+            for entry in learnings.handed(learnings.eligible(served, slug), harness)
+        }
+        # No per-row `try` and no `app.json.dumps` round, unlike `/api/tasks` and
+        # `/api/phases`. That is a property of the row and not a relaxation of
+        # the rule: every value here comes through `Entry`'s own accessors, which
+        # coerce with `str()`, or is a `bool` or `MAX_ROWS`, so no file content
+        # reaches the envelope un-coerced and there is nothing a YAML document
+        # could put in a row that JSON cannot serialise. A later field read
+        # straight off `meta` reopens this and takes the guard and the
+        # serialisation round with it. ADR 41 part 6.
+        rows = [
+            {
+                "ref": entry.ref,
+                "task": entry.task,
+                "carried_by": entry.carried_by,
+                "scope": entry.scope,
+                "status": entry.status,
+                "when": entry.when,
+                "rule": entry.rule,
+                "stale": entry.stale(harness),
+                "in_phase_table": entry.ref in reaching,
+                # Repeated per row because the envelope has no slot beside
+                # `data` for a collection-wide fact — ADR 20's shape, the way
+                # an account row carries the pool's three thresholds.
+                "phase_table_cap": learnings.MAX_ROWS,
+            }
+            # The order a phase sees, so the first row is the first row handed
+            # and the last is the first to fall off the end of the cap.
+            for entry in learnings.ordered(served, harness)
+        ]
+        if len(rows) > MAX_LEARNINGS:
+            warnings.append(
+                f"{len(rows)} learning entries matched and this service answers at most "
+                f"{MAX_LEARNINGS}: the first {MAX_LEARNINGS} in the phase table's own "
+                "order are served. The rest are files under the hive's learnings tree."
+            )
+            rows = rows[:MAX_LEARNINGS]
+        return _envelope(rows, warnings)
+
     return app
 
 
@@ -432,7 +557,7 @@ def _envelope(data, warnings: list[str]):
     `warnings` names files and the caller's own parameters, never states —
     `docs/decisions.md` ADR 5, widened by ADR 11 to admit the `limit` clamp.
     Every 200 funnels through here, which is why the cap lives here and not in
-    the five views that build the lists.
+    the six views that build the lists.
     """
     return jsonify({"data": data, "warnings": _capped(warnings)})
 
