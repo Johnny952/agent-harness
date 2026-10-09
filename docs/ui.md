@@ -117,13 +117,38 @@ verdict, which `/api/phases` serves inside the handoff payload
   `Absent`, in muted type, reading *not recorded* by default. It is never `—`,
   never `null`, never an empty cell, and never zero: a blank cell and a
   recorded zero are different facts and the console does not merge them.
-- **Empty** is a query that succeeded and matched nothing. It renders through
-  `EmptyState`, and its body names *what would have been here* — "no debt
-  declared yet", not "no results". An empty state that does not name its own
-  subject is a bug.
+- **Empty** is a query that succeeded and the collection it read holds
+  nothing. It renders through `EmptyState`, and its body names *what would have
+  been here* — "no debt declared yet", not "no results". An empty state that
+  does not name its own subject is a bug.
+- **No match** is Empty's other half rather than a state of its own: the same
+  successful query, a collection that holds rows, and a filter the operator
+  typed which removed every one of them. It renders through `EmptyState` too,
+  and its subject is the filter and never the harness. It says what was
+  filtered on, verbatim, and the control that brings the rows back — *No
+  learning entry matches "obserability". Clear the filter box to see all 41
+  entries again.* It may not say what Empty says: *no phase has written a
+  learning entry* is false while a filter is the reason the table is bare, and
+  the operator who reads it goes looking for a harness that has lost its
+  entries.
 - **Broken** is a query that failed. It renders through `ErrorState` with what
   failed and what the operator can do, and it never degrades into an empty
   state: a screen that shows "nothing to see" when the api refused is lying.
+
+Empty and No match are two tests over two lists, in that order: the collection
+as the read served it, and then the filter's own result. A screen that tests
+only the filtered list has merged them and will tell an operator who mistyped a
+query that the harness is empty. The order is the half that is easy to lose —
+a collection that really is empty keeps Empty's sentence with a query still in
+the box, because the filter is not why there is nothing there. A screen with
+more than one filter names every control it would take to bring the rows back
+rather than the query alone, which is the Board's form over its search box and
+its account `Select`. Naming the control is words and not a button: no filtered
+screen ships a clear control today, and adding one is a change to all of them at
+once rather than to whichever screen a task is holding. The pair binds a filter
+over a **wired** read. Over a fixture it is unreachable, because a fixture is
+never empty — `front/src/routes/sessions.tsx` conflates the two sentences for
+that reason and inherits this entry in the task that wires it.
 
 Which read broke decides how much of the screen it takes. A screen's *own*
 read — the one the screen exists to show — takes the screen, and that is
@@ -155,10 +180,15 @@ to one paragraph.
 **Set by:** the `front/` import; the partial added by T-012 under
 `docs/decisions.md` ADR 16; the secondary-read rule and `BrokenBanner` by the
 by-hand review of T-012, which found four such reads on three screens failing
-into silence. Source of truth:
+into silence; **No match** by T-017 under `docs/decisions.md` ADR 43, which
+split Empty into the collection and the filter after two wired screens had
+shipped the collection's sentence for both (`docs/debt/T-016-D1.md`). Source of
+truth:
 `front/src/components/console/primitives.tsx` (`ErrorState`, `BrokenBanner`),
 `front/src/routes/index.tsx`, `front/src/routes/pool.tsx`,
-`front/src/routes/tasks.$taskId.tsx`.
+`front/src/routes/tasks.$taskId.tsx`, and for No match
+`front/src/routes/learnings.tsx`, `front/src/routes/debt.tsx`,
+`front/src/routes/tail.tsx`.
 
 ### A value of the wrong shape is named, not rendered and not dropped
 

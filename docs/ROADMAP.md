@@ -393,6 +393,49 @@ login.
     the content on `/learnings`, never an empty state, and recovers on the second
     reload. The other regions of the detail screen keep their rows.
 
+**V0.6f A filter that matches nothing, on the three screens that have one.**
+- A new id beside V0.6e rather than a step added to it. V0.6e, V0.6d and V0.6c
+  all assert what a screen says when a *collection* is empty, and every one of
+  those sentences is still correct; what T-017 added is the second sentence, for
+  a collection that holds rows and a filter that removed them all
+  (`docs/ui.md` *Absent, empty and broken are three different things*, **No
+  match**; `docs/decisions.md` ADR 43). The old steps stay as written
+  (`docs/learnings/retargeting-a-roadmap-check-keeps-its-id.md`).
+- **No phase can write its results row**, for V0.6e's reason and not V0.6c's: a
+  phase can run every `front/` script where its task grants them, and T-017's
+  did; what no phase can do is open a browser. The whole subject of this check
+  is a sentence an operator reads, so the suite behind it is the weaker half by
+  construction.
+- Setup is V0.6c's steps 0 and 1 unchanged: the api up on a current image, the
+  console started on the host. No api change is involved, so a stale
+  `compose-api-1` is not this check's trap — the three screens' reads all
+  predate it.
+- Run, on `/learnings`, `/debt` and `/tail`, in a browser:
+  1. With the filter box empty, note how many rows each screen shows.
+  2. Type a string nothing can match — `obserability` is the card's own example
+     — into each screen's filter box.
+  3. On `/tail` only, put the filter box back to empty and set the `source`
+     picker to a value no buffered event carries, if one is offered.
+  4. Clear each filter box again.
+- Pass:
+  - Step 2 shows, on `/learnings` and `/debt`, an empty state whose title
+    quotes the string just typed and whose body offers to clear the filter box
+    and names how many rows that brings back. Neither screen says *no phase has
+    written a learning entry* or *the debt index is empty*, and **no sentence on
+    either screen mentions the harness, a phase or the api**.
+  - Step 2 on `/tail` shows *No event matches these filters*, naming the payload
+    filter and the two pickers, over a region that is not blank — the silent
+    empty region is what this check exists to catch, and it is what shipped
+    before T-017.
+  - Step 3 reaches the same state through a picker rather than the box, which is
+    the case the wording has to cover without quoting a query.
+  - Step 4 restores every row counted in step 1 on all three screens.
+  - `/sessions` is **not** part of this check and its one conflated sentence is
+    expected: it is fixture-backed, so the state is unreachable there (ADR 43).
+  - A collection that is genuinely empty is V0.6d step 2 and V0.6e step 4's
+    business and must still read as it did: this check must not have changed
+    those sentences.
+
 **V0.7 Docker-in-docker.**
 - Run:
   - `docker exec agent-cuenta1 docker info`
