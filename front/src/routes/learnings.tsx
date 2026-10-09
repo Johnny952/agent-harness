@@ -100,13 +100,11 @@ function LearningsPage() {
       ) : learnings.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading learnings…</p>
       ) : rows.length === 0 ? (
-        // About the harness and not about the console: the route is wired, so an
-        // empty list means no phase of this project has written an entry.
-        // `docs/ui.md` *Absent, empty and broken are three different things*.
-        <EmptyState
-          title="No phase has written a learning entry"
-          body="A phase files one when a trap costs it time, and the auditor of the task that carries it promotes it into the project's own index. Nothing has been filed against this project yet."
-        />
+        // Two facts and two sentences: the route is wired, so an empty served
+        // collection is about the harness, while a filter that removed every row
+        // is about the query in the box above. `docs/ui.md` *Absent, empty and
+        // broken are three different things* — Empty and No match, in that order.
+        <LearningsEmpty served={served.length} query={q} />
       ) : (
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-background">
@@ -166,5 +164,34 @@ function LearningsPage() {
         </table>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * Which of the two bare states this screen is in, over the served collection and
+ * not over the filtered list.
+ *
+ * `served` is the count `/api/learnings` answered with, so the tests are in the
+ * order `docs/ui.md` fixes: a collection that really holds nothing keeps Empty's
+ * sentence even with a query still in the box, because the filter is not why
+ * there is nothing there. Exported, and taking the two numbers rather than the
+ * query result, so the branch can be rendered without a router or a query client
+ * (`docs/decisions.md` ADR 43).
+ */
+export function LearningsEmpty({ served, query }: { served: number; query: string }) {
+  if (served === 0)
+    return (
+      <EmptyState
+        title="No phase has written a learning entry"
+        body="A phase files one when a trap costs it time, and the auditor of the task that carries it promotes it into the project's own index. Nothing has been filed against this project yet."
+      />
+    );
+  // The query verbatim and the control that brings the rows back, and nothing
+  // about the harness: the operator typed the reason this table is bare.
+  return (
+    <EmptyState
+      title={`No learning entry matches “${query}”`}
+      body={`Clear the filter box to see ${served === 1 ? "the one entry" : `all ${served} entries`} again. The filter reads the entry, the task, the trigger line and the rule.`}
+    />
   );
 }
