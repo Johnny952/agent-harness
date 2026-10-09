@@ -2891,3 +2891,64 @@ its Evidence: ADR 41 serves `rule` and not `body`, so the screen is an index and
 the file the `ref` names is the document. A screen that wants the body asks that
 route to grow a detail form, which is the same shape as `/api/tasks` and
 `/api/tasks/<id>`.
+
+## ADR 43 — agent containers carry a headless Chromium, and QA reads the screenshots its own run made
+
+**Status:** accepted (operator, 2026-10-09). Not built: `docs/plans/browser.md`
+is the plan, and its first two steps are the next infrastructure task. Narrows
+the sentence in `docs/ROADMAP.md`'s V0.6e block that no phase can open a
+browser, and leaves that block as written.
+
+**Context.** `docker/agent/Dockerfile` ships no browser, so every console check
+has been a human's or the operator's row. V0.6e was walked on 2026-10-09 by the
+operator, with a Playwright script from the host, and found the detail screen's
+error state flickering with "Reading task…" — a defect no phase could have
+seen. The work this harness exists for happens inside the agent containers,
+and the front a task builds talks to services there, so a browser that only
+the host has cannot see what the task built where it runs. Some checks are
+also visual: a truncated label, an overlap, a banner that never appears. Those
+need a screenshot, and the model reads images directly; one screenshot at
+1280×800 is on the order of 1.4k tokens, paid once.
+
+**Decision.** *Every agent container can drive a headless Chromium. The browser
+build lives in `.data/ms-playwright/`, filled by a one-shot install service and
+mounted read-only at `/ms-playwright`; the image carries only a pinned Node
+Playwright client and Chromium's system libraries, with one version declared
+once for both.*
+
+*A phase that touches a screen walks it with a script it writes (option A in
+`docs/plans/browser.md`).* The implementador writes the script; it asserts the
+states the task promises and, where the task promises something visual, takes
+screenshots at a fixed viewport, of the element or region the task touched
+rather than the whole page. The revisor and the auditor rerun the script and
+read the screenshots their own run produced, never the implementador's, which
+may be stale. A task that promises nothing visual needs assertions and no
+screenshots.
+
+*A phase walks against the dev server with `/api/**` answered by route
+fixtures by default*, because fixtures reach states real data does not (empty,
+error, over the cap, a filter matching nothing). It may walk against a live
+service running in its own container when that service needs no bearer. What
+needs the harness api's bearer or docker stays the operator's, and so does a
+judgement of taste about how a screen looks; a visual defect a screenshot
+shows is QA's.
+
+*`playwright-cli` and its skills (option B) wait until a phase needs to explore
+a screen before scripting it, and are adopted only after reading their
+`SKILL.md` and pinning a version. Playwright MCP (option C) is not used in
+phases*: every action returns a page snapshot into context, which is the cost
+`docs/plans/token-economy.md` shows compounding. Anthropic's `webapp-testing`
+skill (option D) is not adopted, because it needs Python Playwright in the
+image.
+
+**Consequences.** Until the browser is built, the operator walks console rows
+from the host, as on 2026-10-09; that is the interim, not the model. A Results
+log row walked by a phase says so — "walked by T-0xx's implementador, headless,
+against route fixtures" — and its script and screenshots live under
+`/data/.hive/tasks/T-0xx/verify/`, not in the repo. A console check can split
+into a phase's row against fixtures and the operator's row against the live
+api. The phases' allowlist gains the one command the walk runs, as the
+operator's edit. The agent image grows by Chromium's libraries; the browser's
+version moves with one build arg and one run of the install service. Memory
+under the 4 GB `mem_limit` with Chromium and the dev server both running is
+measured once, as D8 was, before it is trusted.

@@ -1,6 +1,8 @@
 # Browser — giving the phases a headless Chromium, shared from one volume
 
-**Status:** proposal, nothing built. Written 2026-10-09 by the operator, after
+**Status:** decided, nothing built. `docs/decisions.md` **ADR 43** records the
+decision; this page is the plan for building it, and where the two differ the
+ADR wins. Written 2026-10-09 by the operator, after
 walking `docs/ROADMAP.md` **V0.6e** with a Playwright script from the host
 (the Results log row of that date; scripts and screenshots in
 `.data/verify/v06e/`). That walk took about forty lines of Python and found a
@@ -23,7 +25,9 @@ What still needs a human or the operator after this change:
 - anything that stops or starts a container (V0.6e step 5's literal "stop the
   api" is one);
 - anything against the real api with its bearer, which a phase must not hold;
-- a judgement about how a screen *looks*, as opposed to what it says.
+- a judgement of taste about how a screen *looks*. A visual defect a
+  screenshot shows (a truncated label, an overlap, a banner that never
+  appears) is not taste, and moves to QA with the screenshots (section 4).
 
 ## Proposal
 
@@ -100,6 +104,10 @@ the phase writes. That is what V0.6e step 5's region check needed anyway:
 today's walk had to fail `/api/learnings` alone, with the rest of the api up,
 and only a route mock can do that.
 
+A phase may also walk against a live service running in its own container,
+when that service needs no bearer: the work a task does happens there, and the
+front it builds talks to it.
+
 This splits a console check into two rows:
 
 - **the phase's row**: the screen against fixture answers, including empty,
@@ -115,8 +123,13 @@ This splits a console check into two rows:
   for a human's.
 - Screenshots and the script go under `/data/.hive/tasks/T-0xx/verify/`, not
   into the repo. The row cites them.
-- The revisor reruns the script; it does not re-read the screenshots. A walk
-  is a script, so it is reproducible, and that is the point of moving it.
+- The revisor reruns the script, and so does the auditor. A walk is a script,
+  so it is reproducible, and that is the point of moving it.
+- Where the task promises something visual, the script takes screenshots at a
+  fixed viewport, of the element or region the task touched rather than the
+  whole page. QA reads the screenshots *its own run* produced, never the
+  implementador's, which may be stale. One 1280×800 screenshot is on the order
+  of 1.4k tokens, paid once; a task that promises nothing visual takes none.
 
 ### 5. Permissions
 
@@ -125,27 +138,17 @@ for example `Bash(playwright-cli:*)` or `Bash(node /data/…/walk.mjs)`. That is
 the operator's edit, outside any task, like the `bun` grants were. No new
 network access is needed: the dev server is on the container's own loopback.
 
-## ADR sketch
+## Decision
 
-To be appended to `docs/decisions.md` by the task that builds this, not here.
+Recorded as `docs/decisions.md` **ADR 43** on 2026-10-09, by the operator,
+before anything was built: the browser is part of the agent container rather
+than an optional later step, and QA reads screenshots its own run made. Until
+it is built, the operator walks console rows from the host.
 
-> **ADR n — phases get a headless Chromium from a shared read-only volume**
->
-> *Context.* Console checks need a browser, and the agent image has none, so
-> every one has been a human's or the operator's row, and V0.6e's flicker was
-> found only when the operator walked it by hand.
->
-> *Decision.* The agent image ships a pinned Playwright client and Chromium's
-> system libraries. The browser build lives in `.data/ms-playwright/`, filled
-> by a one-shot `playwright-install` service and mounted read-only into every
-> agent at `/ms-playwright`. Phases walk console screens against the dev server
-> with `/api/**` answered by route fixtures; walks against the live api stay
-> the operator's.
->
-> *Consequences.* The image grows by Chromium's libraries only. A version bump
-> is one build arg plus one run of the install service. A phase can now claim a
-> console check, and the Results log says it was a phase. The bearer stays out
-> of the phases. Container checks remain a human's.
+The client is Node, not Python: the console is TypeScript, the image already
+has Node 24, and `playwright-cli` is Node too, so one pinned client means one
+Chromium revision in the volume. The V0.6e walk's Python script was a host
+one-off.
 
 ## Skills: the ways an agent can drive Playwright
 
