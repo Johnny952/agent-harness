@@ -1,7 +1,9 @@
 # Plan: wiring the console in `front/`
 
-Status: **tier 1 and tier 2 are both built on both sides and closed, and the
-Jinja board is retired.** The api's tier-1 share landed with
+Status: **tier 1 is built on both sides and closed, and the Jinja board is
+retired; tier 2's two routes are built on both sides and its *Done when* is
+reached, with the configuration read behind Role models the one tier-2 piece
+left, the Role models task's to answer.** The api's tier-1 share landed with
 T-011; the console's —
 the five served reads in `front/src/lib/api/client.ts`, the server-side bearer
 forward, and the warning banner on every screen that lists rows — landed with
