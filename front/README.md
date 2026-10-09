@@ -13,8 +13,9 @@ it duplicated against the real api; those four now do, so it was deleted on
 2026-10-04 (`docs/decisions.md` ADR 32). It is no longer the tie-breaking
 reference, and `git log` is where it went.
 
-**Six reads are live.** The board, the task detail, the pool, the debt index, the
-live tail and the task detail's phase timeline read `observability/api/` through
+**Seven reads are live.** The board, the task detail, the pool, the debt index,
+the live tail, the task detail's phase timeline and the learnings inbox read
+`observability/api/` through
 this console's own server half; every other screen still reads mock fixtures, and
 says so on itself where a region is waiting for a route. See *What is real and
 what is not* below.
@@ -99,7 +100,7 @@ the Node entry — a static build behind nginx cannot serve it.
   `src/lib/api/forward.ts` is the whitelist that presents it. `src/server.ts` calls
   the forward before SSR — that import is also the boot-time refusal, so do not
   make it lazy. `src/start.ts`'s CSRF middleware filters
-  `handlerType === "serverFn"`; the forward is not a server function and all six
+  `handlerType === "serverFn"`; the forward is not a server function and all seven
   calls are reads, so its comment stays true. A write that ever goes this way
   re-opens that sentence.
 - **Query keys and intervals are central.** `src/lib/api/queries.ts` holds
@@ -123,11 +124,12 @@ the Node entry — a static build behind nginx cannot serve it.
 
 ## What is real and what is not
 
-Of the twelve screens, five now read the api: **Board, task detail, Pool, Debt
-and the live tail** — the task detail over two routes since T-013, the task card
-and the phase timeline. The other seven are built against `ops-types.ts` or against
-routes that do not exist, and have no backend of any kind: **Learnings,
-Approvals, Tokens, Session logs, Role models, Backlog and Queue.** Writes are the
+Of the twelve screens, six now read the api: **Board, task detail, Pool, Debt,
+the live tail and Learnings** — the task detail over three routes, the task card
+and the phase timeline since T-013 and its learnings region since T-016. The
+other six are built against `ops-types.ts` or against
+routes that do not exist, and have no backend of any kind: **Approvals, Tokens,
+Session logs, Role models, Backlog and Queue.** Writes are the
 same story; `docs/plans/front.md` tier 3 puts the write surface in a different
 service, for reasons that are about blast radius rather than convenience.
 
@@ -138,10 +140,14 @@ T-013 added the sixth, `/api/phases`, which fills the task detail's phase
 timeline. **Parity is reached and the board is gone**: the four screens it had —
 the board, a task's detail, debt and the events tail — all read the real api, so
 C-8's condition fired and `observability/board/` was deleted on 2026-10-04
-(`docs/decisions.md` ADR 32). The detail screen's learnings region still wants
-`/api/learnings`, which is tier 2 and does not exist, and it names that route on
-screen instead of showing a fixture — but the board never had a learnings region,
-so that is tier 2 arriving late, not tier 1 left open.
+(`docs/decisions.md` ADR 32).
+
+Tier 2's second route, `/api/learnings`, landed with T-016 (ADR 41 and ADR 42):
+the Learnings screen reads the hive's trap entries in the order a phase's own
+prompt table is in, and the detail's learnings region shows the entries the task
+filed or carries. What that region still cannot show is which table a phase was
+*handed* — that is recomputed at every dispatch and written down nowhere — so it
+names the missing record rather than a route.
 
 The Board is no longer waiting on a route, and its banner no longer says it is.
 Its five role lanes wanted the role of the phase *running*, and no file in the

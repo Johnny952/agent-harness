@@ -1,24 +1,27 @@
 # Plan: wiring the console in `front/`
 
-Status: **tier 1 is built on both sides and closed, tier 2's first route is
-built, and the Jinja board is retired.** The api's tier-1 share landed with
+Status: **tier 1 and tier 2 are both built on both sides and closed, and the
+Jinja board is retired.** The api's tier-1 share landed with
 T-011; the console's —
 the five served reads in `front/src/lib/api/client.ts`, the server-side bearer
 forward, and the warning banner on every screen that lists rows — landed with
 T-012, whose decisions are [`decisions.md`](../decisions.md) ADR 22–26. T-013
 built `/api/phases` and wired it: the task detail's phase timeline renders real
-handoff records, and *What a phase row is* below is answered by ADR 27.
+handoff records, and *What a phase row is* below is answered by ADR 27. T-016
+built `/api/learnings` and wired it: the Learnings screen and the task detail's
+learnings region both read the hive's trap entries, and *What a learning row is*
+below is answered by ADR 41, with the console's half in ADR 42.
 
 Parity, as *Parity, and what it retires* defines it below, **is** reached: the
 four screens the Jinja board had — tasks, a task's detail, debt and the events
 tail — all read the real api, so on 2026-10-04 `observability/board/` was
 deleted together with its compose service and its tests, which is what
 [`docs/charter.md`](../charter.md) C-8 made it stay for
-(`docs/decisions.md` ADR 32). The detail screen's learnings region still wants
-`/api/learnings`, which is tier 2 and unbuilt, and it names that route on screen
+(`docs/decisions.md` ADR 32). The detail screen's learnings region wanted
+`/api/learnings`, which was tier 2 and unbuilt, and named that route on screen
 rather than showing a fixture — but the board never had a learnings region, so
-that is tier 2 arriving late, not tier 1 left open. ADR 32 is where that
-reading is written down.
+that was tier 2 arriving late, not tier 1 left open. ADR 32 is where that
+reading is written down, and T-016 discharged it.
 
 One thing tier 2 was expected to settle and did not: the Board's five role lanes.
 ADR 26 bound them to `/api/phases`, and ADR 28 found the route cannot answer them
@@ -410,7 +413,8 @@ is the detail screen's learnings region: the board had no such region, so
 
 ADR 19 sorted five of the then-unbacked reads. `/api/phases` and
 `/api/learnings` are routes this api may grow — both are `GET`s over files on a
-`:ro` mount with the parser already in `dispatcher/`. `/api/actions` and
+`:ro` mount with the parser already in `dispatcher/`. Both are built: T-013 and
+T-016. `/api/actions` and
 `enqueueAction` never land there. `/api/threads` stays undecided as C-8 left it.
 
 Seven reads arrived after that sweep and are sorted here the same way.
@@ -451,7 +455,9 @@ and a lifecycle has a store, and no store exists.
 
 That leaves tier 2 as a short list: `/api/phases`, `/api/learnings`, and a
 configuration read behind Role models. Everything else the fixtures imply is
-either Phase 5's or tier 3's.
+either Phase 5's or tier 3's. **The first two are built** — T-013 and T-016 —
+so the configuration read is all of tier 2 that is left, and it is the next
+region in the console wired against a route that is not there yet.
 
 ### Decisions this tier's tasks make
 
@@ -466,11 +472,25 @@ Bound to the **Role models task**:
 - **Where the model list comes from**, given that the fixture's is foreign to
   this harness.
 
-Bound to the **Learnings task**:
+Bound to the **Learnings task** — T-016, and it found three open where this plan
+saw none. All three are **decided**, in ADR 41 and ADR 42:
 
-- Nothing open that this plan can see. `dispatcher/learnings.py` already parses
-  the tree into entries with frontmatter and a status, and `LEARNING_TABLE_CAP`
-  is explicitly the console's own layout decision by ADR 18.
+- **What a learning row is.** `dispatcher/learnings.py` parses the tree, but
+  `Entry` is frontmatter-as-read plus four body sections, and nothing said which
+  of that a route serves. ADR 41 part 5 sorts it field by field under ADR 17's
+  rule: ten keys, with `body`, `path`, `project`, `reviewed`, `harness`,
+  `refutes`, `refuted_by`, `fingerprint` and `orphaned_from` left out and the
+  reason written on each. `LearningEntry`'s `id`, `trigger`, `body` and `retired`
+  went with it (ADR 42).
+- **Whether `docs/learnings/` is in this read.** It is not: the filed index in a
+  project's checkout is a different object from the hive inbox — permanent,
+  committed, per-project — and serving them as one list would merge two
+  lifecycles into one table and need a second parser (ADR 41 part 3).
+- **`LEARNING_TABLE_CAP` was not the console's layout decision.** ADR 18 kept it
+  as one and that was true of a console with no route. It is
+  `dispatcher/learnings.py:MAX_ROWS`, the cap on the table a phase's prompt
+  carries, and this screen's subject is which rows get there — so it is deleted
+  and arrives per row as `phase_table_cap` (ADR 42, narrowing ADR 18).
 
 Bound to the **Phases task**:
 
@@ -483,6 +503,16 @@ Bound to the **Phases task**:
 Task detail shows real phases, Learnings reads the real tree, and every screen
 with no route behind it names what it is waiting for instead of drawing a
 fixture.
+
+**Reached**, for the two routes: T-013 for the phases, T-016 for the learnings
+tree. The Role models configuration read is the one piece of this tier still
+open, and it is a screen with its own undecided questions above rather than a
+route waiting to be written. One caveat on the third clause, and it is a finding
+rather than a gap: the detail's learnings region could not be made to show
+"learnings handed to these phases" at all — that table is recomputed at every
+dispatch and recorded nowhere — so it names the missing *record* and shows what
+the task filed instead, which is `docs/ui.md` *A region with no route says which
+route, and when*'s third sentence (ADR 42).
 
 ## Tier 3 — the write surface
 

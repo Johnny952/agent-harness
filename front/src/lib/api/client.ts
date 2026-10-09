@@ -1,22 +1,23 @@
 /**
  * Typed API client. One function per endpoint.
  *
- * **Six of them are real.** `listTasks`, `getTask`, `listAccounts`, `listEvents`,
- * `listDebt` and `listPhases` read `observability/api/` through the console's own
+ * **Seven of them are real.** `listTasks`, `getTask`, `listAccounts`,
+ * `listEvents`, `listDebt`, `listPhases` and `listLearnings` read
+ * `observability/api/` through the console's own
  * origin — `lib/api/forward.ts` is the server half that holds the bearer, so
  * nothing here carries a credential and every URL below is relative. They resolve
  * to `ApiResult<T>`: `data` unwrapped into the rows a screen takes, `warnings`
  * riding beside it. `docs/decisions.md` ADR 16, with ADR 25 for the type.
  *
  * Everything else still resolves from `./mock/fixtures` and `./mock/ops-fixtures`,
- * because the routes behind them are tier 2 and tier 3 of `docs/plans/front.md`:
- * `listLearnings` waits for `/api/learnings`, and `listActions`, `enqueueAction`
- * and `listThreads` are never coming here at all — ADR 19 puts the write surface
+ * because the routes behind them are tier 3 of `docs/plans/front.md`:
+ * `listActions`, `enqueueAction` and `listThreads` are never coming here at
+ * all — ADR 19 puts the write surface
  * in another service with its own credential, and C-1 has not ruled on the chat
  * dock. A screen reading one of those says so on itself rather than looking
  * finished; `docs/ui.md` *A region with no route says which route, and when*.
  *
- * Relative URLs mean these six may only be called from the browser: a relative
+ * Relative URLs mean these seven may only be called from the browser: a relative
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
  * `useEffect` today, and ADR 24 names moving one into a route loader as the case
  * that has to answer the base-URL question again.
@@ -33,7 +34,7 @@ import type {
   Task,
   TaskDetail,
 } from "./types";
-import { mockActions, mockLearnings, mockThreads } from "./mock/fixtures";
+import { mockActions, mockThreads } from "./mock/fixtures";
 
 export class ApiError extends Error {
   constructor(
@@ -58,8 +59,8 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  */
 const actionBackendDown = false;
 
-/* ── The six wired reads ──────────────────────────────────────────────────
- * One boundary function, and every one of the six goes through it: ADR 7's
+/* ── The seven wired reads ────────────────────────────────────────────────
+ * One boundary function, and every one of the seven goes through it: ADR 7's
  * "one boundary function per call", inherited by the console under ADR 16.
  */
 
@@ -209,12 +210,24 @@ export function listPhases(taskId?: string): Promise<ApiResult<Phase[]>> {
   return readEnvelope<Phase[]>(path);
 }
 
-/* ── Still fixtures: tier 2, tier 3, and the ones that never land ────────── */
-
-export async function listLearnings(): Promise<LearningEntry[]> {
-  await latency();
-  return mockLearnings();
+/**
+ * Every trap entry in the hive this project's phases could be handed.
+ *
+ * No mapping and no sort: the api answers in the order a phase's own table is
+ * in — confirmed before unconfirmed, fresh before stale, `ref` as the tie-break
+ * — and that order is the Learnings screen's subject, so reordering it here
+ * would be the boundary contradicting the route (`docs/decisions.md` ADR 42).
+ * Both of its callers filter rather than re-sort.
+ *
+ * The project slug is added by the forward, server-side, from `CONSOLE_PROJECT`,
+ * the way `/api/debt`'s is: `?project=` is the one parameter this route takes and
+ * it is not the browser's to choose. ADR 24.
+ */
+export function listLearnings(): Promise<ApiResult<LearningEntry[]>> {
+  return readEnvelope<LearningEntry[]>("/api/learnings");
 }
+
+/* ── Still fixtures: tier 3, and the ones that never land ───────────────── */
 
 export async function listActions(): Promise<QueuedAction[]> {
   await latency();

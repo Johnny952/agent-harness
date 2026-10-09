@@ -81,12 +81,15 @@ describe("the whitelist", () => {
     });
   });
 
+  // `/api/threads` and not `/api/learnings`, which was the example until T-016
+  // forwarded it: ADR 19 puts the chat dock's route in no tier at all, so this
+  // is a path the console refuses and will go on refusing.
   it("404s a path it does not serve, without asking the api", async () => {
     const fetchMock = stubApi();
-    const answer = await forwardApiRequest(get("/api/learnings"));
+    const answer = await forwardApiRequest(get("/api/threads"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/learnings is not one of the six routes the console forwards.",
+      error: "/api/threads is not one of the seven routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -111,6 +114,15 @@ describe("the whitelist", () => {
     const fetchMock = stubApi();
     await forwardApiRequest(get("/api/debt?project=some-other-project"));
     expect(target(fetchMock)).toBe(`${BASE}/api/debt?project=ia-harness`);
+  });
+
+  // Both project-scoped reads, and the slug is the console's own configuration
+  // on each: the api takes `?project=` as optional with one checkout and
+  // required with several (`docs/decisions.md` ADR 41 part 2).
+  it("sends its own ?project= on the learnings route too", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/learnings?project=some-other-project"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/learnings?project=ia-harness`);
   });
 });
 
