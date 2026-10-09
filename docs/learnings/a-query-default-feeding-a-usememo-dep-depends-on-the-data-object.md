@@ -6,13 +6,20 @@ React Query read with a `?? []` or `?? {}` default — or
 `react-hooks/exhaustive-deps` is telling you that a logical expression could
 make a hook's dependencies change on every render.
 
-**Status:** unconfirmed — the rule's behaviour is read off three in-tree
+**Status:** confirmed — the rule's behaviour was read off three in-tree
 precedents that a real lint run left unwarned (`docs/decisions.md` ADR 39's
-ten-warning tally), but T-015's own instance was never executed: no phase of
-that task could run `bun run lint`, and the nine-against-ten count it asserts
-was observed only by the dispatcher's test gate. Shared-inbox entries:
-`/data/.hive/learnings/inbox/T-015-bun-is-refused-in-a-phase.md` and
-`/data/.hive/learnings/inbox/T-015-node-is-allowed-but-node-modules-is-still-out-of-reach.md`.
+ten-warning tally), and T-015's own instance went unexecuted by any phase of
+that task, which is why this entry was filed `unconfirmed`. T-016 executed it:
+`cd front && bun run lint` in a phase, at `617c7f3`, printed
+`9 problems (0 errors, 9 warnings)` with every warning
+`react-refresh/only-export-components` and not one
+`react-hooks/exhaustive-deps` — so the memo in `front/src/routes/index.tsx` and
+the three precedents are all unwarned under a real run. The reason no phase
+could observe it then, and can now, is
+`/data/.hive/learnings/inbox/T-016-bun-runs-in-a-phase-when-the-task-grants-it.md`,
+which refutes `T-015-bun-is-refused-in-a-phase.md` and
+`T-015-node-is-allowed-but-node-modules-is-still-out-of-reach.md` (harness
+scope, still unconfirmed: read all three).
 
 ## Symptom
 

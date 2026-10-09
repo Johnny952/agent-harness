@@ -42,16 +42,28 @@ unformatted line rides to `main` and the next task inherits a red gate.
 One thing prettier will not do for you: it does not rewrap comments. A comment
 block you write at 120 columns stays at 120 columns and is not an error either,
 because `printWidth` is a target for code prettier reformats rather than a
-hard limit it enforces on prose.
+hard limit it enforces on prose. That exception is comments only — prose inside
+JSX *is* reflowed, and
+[`prettier-rewraps-jsx-text-children`](prettier-rewraps-jsx-text-children.md)
+is what that costs.
 
 ## What to do
 
 Count the columns of any line you add under `front/src/`, including the closing
 `;`, and keep code under 100 — by reading the file with the `Read` tool, since
-`awk` over a file is refused in a phase and `bun run prettier` is not reachable
-either (no phase of this project can run a `front/` script: see
-`/data/.hive/learnings/inbox/T-015-bun-is-refused-in-a-phase.md`). Match the
-four `.prettierrc` settings by hand: semicolon, double quotes, trailing comma.
+`awk` over a file is refused in a phase. Match the four `.prettierrc` settings
+by hand: semicolon, double quotes, trailing comma.
+
+The sentence this paragraph used to carry — that no phase of this project can
+run a `front/` script — was falsified on 2026-10-09 by T-016, whose task
+description granted `cd front && bun install --frozen-lockfile`, `bun run
+typecheck`, `bun run test` and `bun run lint` and whose phases ran all four
+(`/data/.hive/learnings/inbox/T-016-bun-runs-in-a-phase-when-the-task-grants-it.md`,
+which refutes `T-015-bun-is-refused-in-a-phase.md`; still unconfirmed, and
+harness-scoped, so read it before planning around either). Read your own task's
+command grant: where it names those scripts, run the lint and work from its
+output instead of counting columns. `bunx prettier --write` and `eslint --fix`
+are a separate matter and are still refused.
 
 When you declare what green means for a `front/` change, state the exit code
 *and* the warning count separately, because they fail independently. T-015's
