@@ -433,6 +433,39 @@ export function mockLearnings(): LearningEntry[] {
       phase_table_cap: 40,
     },
     {
+      ref: "inbox/T-015-a-paused-heartbeat-writer-is-not-a-dead-container.md",
+      task: "T-015",
+      carried_by: "T-015",
+      scope: "project",
+      status: "unconfirmed",
+      // The entry whose frontmatter carries neither, which renders as `Absent`.
+      when: "",
+      rule: "",
+      stale: false,
+      in_phase_table: true,
+      phase_table_cap: 40,
+    },
+  ];
+  for (let i = 1; i <= 36; i++) {
+    base.push({
+      ref: `inbox/T-016-observation-${String(i).padStart(2, "0")}.md`,
+      task: "T-016",
+      carried_by: "T-016",
+      scope: i % 3 === 0 ? "harness" : "project",
+      status: "unconfirmed",
+      when: `phase ${i} touches the pool module`,
+      rule: `Observation ${i}: recorded after a gate finding.`,
+      stale: false,
+      in_phase_table: true,
+      phase_table_cap: 40,
+    });
+  }
+  // In `ordered`'s order: confirmed, then unconfirmed and fresh, then stale,
+  // then refuted, by `ref` within each band. 41 rows are eligible against a cap
+  // of 40, so the stale one is the single row past the cap — the over-cap
+  // banner's own count — and the refuted one is out of the table regardless.
+  base.push(
+    {
       ref: "inbox/T-014-land-the-schema-task-before-its-dependent.md",
       task: "T-014",
       carried_by: "T-014",
@@ -443,7 +476,7 @@ export function mockLearnings(): LearningEntry[] {
       // and not counted as evidence.
       rule: "Land the schema task first or the dependent blocks on contract-docs.",
       stale: true,
-      in_phase_table: true,
+      in_phase_table: false,
       phase_table_cap: 40,
     },
     {
@@ -459,36 +492,7 @@ export function mockLearnings(): LearningEntry[] {
       in_phase_table: false,
       phase_table_cap: 40,
     },
-    {
-      ref: "inbox/T-015-a-paused-heartbeat-writer-is-not-a-dead-container.md",
-      task: "T-015",
-      carried_by: "T-015",
-      scope: "project",
-      status: "unconfirmed",
-      // The entry whose frontmatter carries neither, which renders as `Absent`.
-      when: "",
-      rule: "",
-      stale: false,
-      in_phase_table: false,
-      phase_table_cap: 40,
-    },
-  ];
-  // Past the cap: `ordered` put these last, so they are the rows the phase table
-  // does not reach, which is the over-cap banner's own count.
-  for (let i = 1; i <= 36; i++) {
-    base.push({
-      ref: `inbox/T-016-observation-${String(i).padStart(2, "0")}.md`,
-      task: "T-016",
-      carried_by: "T-016",
-      scope: i % 3 === 0 ? "harness" : "project",
-      status: "unconfirmed",
-      when: `phase ${i} touches the pool module`,
-      rule: `Observation ${i}: recorded after a gate finding.`,
-      stale: false,
-      in_phase_table: i <= 36 - 3,
-      phase_table_cap: 40,
-    });
-  }
+  );
   return base;
 }
 

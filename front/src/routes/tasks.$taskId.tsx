@@ -80,9 +80,10 @@ function TaskDetailPage() {
   // Debt ids are shaped `T-011-D1`, and `task_id` is that split. ADR 17.
   const taskDebt = (debt.data?.data ?? []).filter((d) => d.task_id === taskId);
   const timeline = byCycle(phases.data?.data ?? []);
-  // `learnings.droppable`'s own relation, so this region and `merge-task` mean
-  // the same thing by "this task's entries": what this task found, plus what
-  // its auditor is due to file. No sort — the api answers in the phase table's
+  // What this task found, plus what its auditor is due to file: the last of
+  // `learnings.droppable`'s four conditions, applied alone. `droppable` also
+  // wants an unreviewed inbox entry with `scope: project`, so `merge-task`
+  // drops a subset of these rows, not all of them (ADR 42). No sort — the api answers in the phase table's
   // order and that is the order worth keeping (ADR 42).
   const taskLearnings = (learnings.data?.data ?? []).filter(
     (l) => l.task === taskId || l.carried_by === taskId,
@@ -259,7 +260,7 @@ function TaskDetailPage() {
                   <li key={l.ref} className="flex flex-wrap items-center gap-2 text-[11px]">
                     <Mono className="text-muted-foreground">{l.ref}</Mono>
                     <LearningStatus entry={l} />
-                    {/* The two halves of `learnings.droppable`'s relation are
+                    {/* The two halves of the task-id relation are
                         two different facts: a carried row was found by another
                         task and this task's auditor is the one due to file it. */}
                     {l.task !== taskId && (

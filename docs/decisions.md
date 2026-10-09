@@ -2666,7 +2666,7 @@ console (ADR 42); the sort is field by field, ADR 17's rule.
 |---|---|---|
 | `ref` | `Entry.ref` | `inbox/<slug>.md` — the pointer every prompt, every `learnings` CLI verb and every `refutes:` line already uses. It is the identity, not a surrogate, and it carries which side of the human review the entry is on |
 | `task` | `Entry.task` | Which task found the trap. The provenance a reader asks for first, and the key the task detail's region joins on (ADR 42) |
-| `carried_by` | `Entry.carried_by` | The task whose auditor is due to file it. With `task` it is `learnings.droppable`'s own relation, so the console and `merge-task` mean the same thing by "this task's entries" |
+| `carried_by` | `Entry.carried_by` | The task whose auditor is due to file it. With `task` it is the last of `learnings.droppable`'s four conditions; the console applies that one alone, so the rows it shows for a task are a superset of what `merge-task` drops (ADR 42) |
 | `scope` | `Entry.scope` | `project` or `harness` — one trap in one codebase, or one in what every project shares |
 | `status` | `Entry.status` | `confirmed`, `unconfirmed`, `refuted`. The confirmation rule is the dispatcher's and this route reports it |
 | `when` | `Entry.when` | The trigger line: when this applies, as a condition the next agent can check. The console's fixture called it `trigger` |
@@ -2748,10 +2748,15 @@ docstring, `docs/README.md`'s `observability/api/` row and the console's forward
 all carry a count that moves, and the console's own rejection message —
 pinned in `front/src/lib/api/forward.test.ts` — moves with them.
 
-`in_phase_table` and `stale` are recomputed on every request, so an operator who
-changes `permission_mode` or `allowed_tools` in `config.yaml` sees this screen
-move at the next poll. That is the intent: both are facts about the harness as
-configured now, not about when the entry was written.
+`in_phase_table` and `stale` are recomputed on every request against the
+directory as it stands, so a new, refuted or promoted entry moves this screen at
+the next poll. The harness fingerprint they are compared against does not move:
+`create_app` loads one `Config` at boot and computes `harness` from it once
+(part 8, and `docs/learnings/a-new-field-on-an-api-row-has-two-questions.md`),
+so an operator who changes `permission_mode` or `allowed_tools` in
+`config.yaml` sees `stale` change only after `compose-api-1` restarts. The
+dispatcher reads `config.yaml` per run, so until that restart the screen can
+disagree with what the next phase is handed.
 
 A refuted row is served with `in_phase_table: false`, because `eligible` drops
 it before the cap is applied. The console shows it and says so; the point of
@@ -2838,8 +2843,14 @@ Three renders follow from the served fields:
 
 **The detail's learnings region changes subject.** It shows the rows whose
 `task` or `carried_by` is this task id — what this task filed, and what its
-auditor is due to file — which is `learnings.droppable`'s own relation and the
-one task-scoped question the tree can answer.
+auditor is due to file — every served row naming this task, harness-scoped and
+promoted entries included. That is the last of `learnings.droppable`'s four
+conditions and not its whole: `droppable` also requires an inbox entry, not yet
+reviewed, with `scope: project`. So `merge-task` drops a subset of this region,
+and on this hive, where most inbox entries are `scope: harness`, a small one. The
+region keeps the wider set on purpose — a harness-scoped entry a task filed is
+still something that task found — and it is the one task-scoped question the
+tree can answer.
 
 It is not "learnings handed to these phases", and that is the half that cannot
 be built: the table a phase was handed is computed at dispatch from the
