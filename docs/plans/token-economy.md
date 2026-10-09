@@ -138,13 +138,20 @@ surface count: "the median ia-harness implementador costs X% of a window".
 **P6 — Don't trust a `/usage` snapshot past its own reset.** `/usage` is
 local: it reads the counters the CLI stored at the account's last API call.
 An account parked by `_recheck_cooling_accounts` makes no calls, so its
-snapshot can only move if the CLI zeroes it at the reset. If the CLI
-doesn't, the account stays parked forever. That is a deadlock nothing in the
-code breaks, because the reset timestamps are parsed but never used. The fix
-is to treat a reading as stale once its reset time has passed: mark the
-account IDLE and let a real dispatch refresh the counter. Whether the
-deadlock actually happens is unverified. It will show at cuenta2's reset at
-17:30 UTC today, in `.data/verify/t016-wait.log`.
+snapshot can only move if the CLI zeroes it at the reset. If the CLI did not,
+the account would stay parked forever, and nothing in the code would break
+that deadlock, because the reset timestamps are parsed but never used.
+
+**Checked 2026-10-09: the deadlock does not happen.** cuenta2 made no API call
+after 13:08 UTC. Its snapshot read 91% at every 15-minute probe up to 17:22
+UTC, then 0% at the first probe after its 17:30 UTC reset, at 17:37 UTC. The
+dispatcher moved it from PRE_COOLDOWN to IDLE on that probe and dispatched
+revisor round 2 to it a second later (`.data/verify/t016-wait.log`,
+`.data/verify/t016-rev2.log`). So the CLI applies the reset to a stored
+snapshot without a fresh call. The fix is now a guard rather than a repair:
+it would rest on the dispatcher's own reading of the reset time instead of
+on that CLI behaviour, which is observed on one version (2.1.273), not documented. It
+is optional, and comes after P7.
 
 **P7 — A cycle that stops for lack of an account exits non-zero.** Today it
 exits `rc=0`. That happened twice on 2026-10-09, so a script or an operator
