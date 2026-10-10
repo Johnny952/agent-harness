@@ -163,10 +163,10 @@ browser bundle. See *The three environment variables* above and
 `docs/decisions.md` ADR 15.
 
 **The loop runs all three.** `docs/README.md`'s frontmatter names them —
-`install: cd front && bun install --frozen-lockfile`, `cd front && bun run
-typecheck` and `cd front && bun run test` among its `test:` entries, and
-`lint: cd front && bun run lint` — and the dispatcher's test gate has run them
-in the order install, test, lint since 2026-10-08 (`docs/decisions.md` ADR 39).
+`install: cd front && bun install --frozen-lockfile`, then `cd front && bun run
+typecheck`, `cd front && bun run test` and `cd front && bun run lint` among its
+`test:` entries — and the dispatcher's test gate has run them since 2026-10-08
+(`docs/decisions.md` ADR 39); the lint was a `lint:` entry until 2026-10-10 (ADR 50).
 So a green test gate on a commit touching `front/src/` does say something about
 it; `python3 -m pytest` still imports nothing under this directory and is no
 longer the whole gate. **Run the three yourself as well, when your card grants
@@ -184,8 +184,8 @@ it just stopped looking once it had found any test at all. The gate that
 [`docs/debt/T-013-D1.md`](../docs/debt/T-013-D1.md) step 3, blocked on an agent
 image with `bun` in it; both landed on 2026-10-08 and that row is resolved.
 What a red result costs is ruled:
-[`docs/charter.md`](../docs/charter.md) **C-10** — the typecheck blocks the
-phase, the lint rides along as a note.
+[`docs/charter.md`](../docs/charter.md) **C-11**, which superseded C-10 on
+2026-10-10 — a red typecheck, test or lint blocks the phase.
 
 ### Writing a test
 

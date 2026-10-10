@@ -245,7 +245,7 @@ because a task finds the history constraint inconvenient.
 
 ---
 
-### C-10 — a red `front/` lint is a note; a red `front/` typecheck blocks
+### ~~C-10 — a red `front/` lint is a note; a red `front/` typecheck blocks~~ — superseded by C-11
 
 **Ruled:** 2026-10-04, when `front/` got a `typecheck`, a `lint` and a `test`
 script and the question of what a gate should do with each one came up.
@@ -270,3 +270,26 @@ to buy.
 This is not a ruling that the 125 are acceptable. Clearing them is a task of
 its own, and once the tree is clean, promoting the lint to blocking is a later
 entry here — not a judgement call made inside a phase.
+
+---
+
+### C-11 — a red `front/` lint blocks, like its typecheck
+
+**Ruled:** 2026-10-10, when `eslint .` reached zero problems on `main` — no
+errors since 2026-10-08, no warnings since T-015-D1 closed — which is the
+condition C-10 set for promoting it.
+**Trigger:** you are changing which of `front/`'s commands a dispatcher gate
+runs, or at what level a red one lands.
+
+A red `bun run lint` under `front/` now blocks the phase, the same as a red
+`bun run typecheck` or `bun run test`. C-10's reason for keeping it a note was
+that the tree was already red before any phase touched it; that reason is
+gone. On a clean tree a red lint means the phase in front of you introduced
+it, which is the same argument that made the typecheck blocking.
+
+This promotes `front/`'s lint only. The dispatcher's `lint:` key stays what
+it is for every other project — reported, not enforced — and `front/`'s
+command moves to the index's `test:` list, which is where a blocking check
+already lives. A rule a phase cannot satisfy without silencing it (an
+`eslint-disable` with no reason, a rule turned off in the config) is not a
+fix: say so in the phase's `risks`, as with any charter entry.
