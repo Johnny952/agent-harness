@@ -70,3 +70,58 @@ describe("the Live tail with a payload filter that matches none of its events", 
     expect(document.body.textContent).not.toContain("No events yet");
   });
 });
+
+// The no-match arm and the scroller share one ternary, so rendering the arm
+// unmounts the scrolling div while `scrollTop` — `TailPage` state — outlives it.
+// Paused, nothing scrolls the remounted div to the bottom, so a stale offset
+// would leave the window pointing into the middle of the buffer while the DOM
+// sits at the top: rows translated out of view. `docs/debt/T-017-D3.md`.
+//
+// jsdom has no layout: `scrollTop`, `clientHeight` and `scrollHeight` are always
+// 0 there. They are stubbed on the scroller instance with
+// `Object.defineProperty`, and the `scroll` event is fired by hand, which is all
+// the screen's `onScroll` reads. The remounted div is a new element and carries
+// no stub, so its `scrollTop` is jsdom's 0, as a real remount's is.
+describe("the Live tail, paused, after a filter that matched nothing is cleared", () => {
+  it("renders the window from the top of the remounted scroller", async () => {
+    const ROWS = 300;
+    const event = (id: number) => ({
+      id,
+      source_app: "dispatcher",
+      event_type: "phase_start",
+      payload: { task: `T-${id}` },
+      created_at: "2026-10-10T12:00:00Z",
+    });
+    // The api serves newest first; `listEvents` reverses it to ascending.
+    const served = Array.from({ length: ROWS }, (_, i) => event(ROWS - i));
+    await renderRoute(Route, "/tail", { "/api/events": { data: served } });
+    const first = await screen.findByText('{"task":"T-1"}');
+
+    // Scroll to row 200, away from the bottom: `onScroll` reads the offset into
+    // state and pauses the screen, which is the path the debt is about.
+    // The scroller is the nearest scrolling ancestor of a row; the shell's own
+    // content pane also scrolls, and sits further out.
+    const scroller = first.closest<HTMLDivElement>(".overflow-y-auto")!;
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 200 * 24 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 600 });
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: ROWS * 24 });
+    fireEvent.scroll(scroller);
+    expect(await screen.findByText("resume")).toBeTruthy();
+    expect(screen.queryByText('{"task":"T-1"}')).toBeNull();
+
+    const filter = screen.getByPlaceholderText(/^Filter payload/);
+    fireEvent.change(filter, { target: { value: "zzz" } });
+    await screen.findByText("No event matches these filters");
+    fireEvent.change(filter, { target: { value: "" } });
+
+    // A fresh div, at DOM `scrollTop` 0: the window has to start at row 0 with
+    // no translation, so the first event is on screen.
+    const again = await screen.findByText('{"task":"T-1"}');
+    const remounted = again.closest<HTMLDivElement>(".overflow-y-auto")!;
+    expect(remounted).not.toBe(scroller);
+    expect(remounted.scrollTop).toBe(0);
+    const rows = remounted.firstElementChild!.firstElementChild as HTMLElement;
+    expect(rows.style.transform).toBe("translateY(0px)");
+    expect(screen.getByText("resume")).toBeTruthy();
+  });
+});
