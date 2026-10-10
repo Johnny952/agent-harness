@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { agoSeconds, formatAge, roleColorVar, roleGlyph } from "@/lib/format";
+import { agoSeconds, formatAge, gateTone, roleColorVar, roleGlyph } from "@/lib/format";
 import type { GateFinding, Role, TaskStatus } from "@/lib/api/types";
 
 export function Mono({ children, className }: { children: ReactNode; className?: string }) {
@@ -135,19 +135,6 @@ export function HeartbeatDot({
       {withLabel ? formatAge(age) : null}
     </span>
   );
-}
-
-export const gateTone = {
-  note: "text-muted-foreground border-border-strong bg-surface-2",
-  warning: "text-warning border-warning/50 bg-warning/10",
-  blocking: "text-destructive border-destructive/60 bg-destructive/15",
-} as const;
-
-export function worstGate(findings: GateFinding[]): GateFinding["level"] | null {
-  if (findings.some((f) => f.level === "blocking")) return "blocking";
-  if (findings.some((f) => f.level === "warning")) return "warning";
-  if (findings.length) return "note";
-  return null;
 }
 
 export function GateChip({

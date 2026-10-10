@@ -14,15 +14,21 @@ import {
   RoleBadge,
   StatusPill,
   WarningBanner,
-  gateTone,
 } from "@/components/console/primitives";
 import { Markdown } from "@/components/console/markdown";
-import { PhaseList, PhasePill, asPathLine } from "@/components/console/payload";
+import { PhaseList, PhasePill } from "@/components/console/payload";
 import { InPhaseTable, LearningStatus } from "@/components/console/learnings";
 import { debtQuery, learningsQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
 import { ROLES } from "@/lib/api/types";
 import type { Phase, Task } from "@/lib/api/types";
-import { agoSeconds, formatAge, formatClock, roleColorVar } from "@/lib/format";
+import {
+  agoSeconds,
+  asPathLine,
+  formatAge,
+  formatClock,
+  gateTone,
+  roleColorVar,
+} from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 

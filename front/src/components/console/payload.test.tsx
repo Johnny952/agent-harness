@@ -9,7 +9,8 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
-import { PhaseList, PhasePill, asPathLine } from "./payload";
+import { PhaseList, PhasePill } from "./payload";
+import { asPathLine } from "@/lib/format";
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup —
 // which registers itself only if there is a global `afterEach` to register

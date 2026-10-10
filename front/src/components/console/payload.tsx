@@ -8,8 +8,10 @@
  * ADR 30 moved them for a reason that was false — a test file beside that route
  * is allowed, as `-<name>.test.tsx`, because `routeFileIgnorePrefix` defaults
  * to `-`. ADR 45 keeps them here for the reason that holds: `asPathLine` is not
- * a component, and exporting it beside a route's `Route` would cost a tenth
- * `react-refresh/only-export-components` warning (`docs/debt/T-015-D1.md`).
+ * a component, and exporting it beside a route's `Route` would cost a
+ * `react-refresh/only-export-components` warning. The same reason keeps it out
+ * of this file too: exported beside `PhaseList` it was this file's own warning,
+ * so it lives in `@/lib/format` (`docs/debt/T-015-D1.md`).
  */
 import { Malformed } from "./primitives";
 import { cn } from "@/lib/utils";
@@ -105,17 +107,4 @@ export function PhaseList({
 /** A plain list item. The payload says a line of text; anything else is not. */
 function asLine(item: unknown): string | null {
   return typeof item === "string" ? item : null;
-}
-
-/**
- * A `paths` item, which is the one key of the six whose items are objects.
- * `dispatcher/handoff.py:_pairs` drops a non-dict item and a dict missing
- * either key; this says so instead, because the dispatcher is feeding a prompt
- * and the console is answering an operator asking what the role returned.
- */
-export function asPathLine(item: unknown): string | null {
-  if (item === null || typeof item !== "object") return null;
-  const { path, holds } = item as { path?: unknown; holds?: unknown };
-  if (typeof path !== "string" || typeof holds !== "string") return null;
-  return `${path} — ${holds}`;
 }

@@ -46,4 +46,5 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 );
 Button.displayName = "Button";
 
+// eslint-disable-next-line react-refresh/only-export-components -- vendored shadcn/ui: `buttonVariants` beside `Button` is the library's export shape, not this project's (docs/debt/T-015-D1.md)
 export { Button, buttonVariants };
