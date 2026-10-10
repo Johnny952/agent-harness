@@ -568,6 +568,20 @@ docker compose -f docker/compose/docker-compose.yml --profile dispatcher \
 `bootstrap-project` only creates the directory; cloning the actual project
 repository into it is still a manual, one-time step.
 
+`run-task`'s exit code says how the cycle ended (`docs/decisions.md` ADR 52):
+
+| Code | The cycle | What to do |
+|---|---|---|
+| 0 | finished: the auditor closed the task, whether or not `merge_on_done` merged it | read the result |
+| 75 | held: no account could take a phase the task needs (all tried, cooling, or over their quota) | run the same command again once an account resets |
+| 1 | blocked: a phase failed or blocked, the rounds ran out, another run holds the lock, or the project branch diverged | read the log; a person decides |
+| 2 | a usage error, from argparse | fix the command line |
+
+75 is sysexits.h's `EX_TEMPFAIL`, "try again later". The card is blocked
+either way, so it is the code and the log, not the board, that tell held from
+blocked. A refused merge after a finished cycle is still 0: the task is done,
+and `merge-task`'s exit code is the one that reports a merge.
+
 Every worktree is checked out under `<project>/worktrees/`, inside the
 repository being worked on, so the first one the dispatcher creates also adds
 `/worktrees/` to that checkout's `.git/info/exclude`. It goes there rather
@@ -664,7 +678,10 @@ different when there was a record to file from. Without it the
 task stays `pending` and the entries this run wrote go back to being
 unowned, which is what every phase before the last one should do. A phase
 that did not land exits non-zero and blocks the card, so a hand-driven cycle
-stops rather than running the next phase over the top of it.
+stops rather than running the next phase over the top of it. The codes are
+`run-task`'s: 1 for a phase that failed, 75 for one that never ran because no
+account could take it, so a loop can wait out the second and stop on the
+first.
 
 The verb only resumes; it does not start. A task with no stored description
 is a usage error naming `run-task`, and there is no `--description`: a task

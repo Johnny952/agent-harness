@@ -10,6 +10,7 @@ from pathlib import Path
 from dispatcher import context_transfer, docker_exec, learnings, operator, project_docs, role_skills
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
+    CycleOutcome,
     cleanup_container,
     close_resolved_debt,
     container_for,
@@ -29,6 +30,16 @@ from dispatcher.vibe_kanban_client import (
 #: because a typo in --role should be a usage error and not a full-price run
 #: of a role nothing knows how to prompt.
 _PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
+
+#: A run that stopped and needs a person: a blocked task, a refused merge, an
+#: entry that is not there. The code every other refusal here already uses.
+EXIT_BLOCKED = 1
+#: A run that stopped only because no account could take its next phase. Not
+#: 1, because nothing is wrong with the task and the answer is to wait for a
+#: reset, not to read a log; not 2, which argparse owns for usage errors. 75 is
+#: sysexits.h's EX_TEMPFAIL, "try again later", which is exactly this
+#: (`docs/decisions.md` ADR 52).
+EXIT_HELD = 75
 
 
 def _resolve_description(
@@ -399,7 +410,19 @@ def main() -> None:
         # No vibe_kanban block, no board: the cycle runs exactly as before and
         # says nothing about a board it was never given.
         kanban = _kanban(cfg)
-        run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
+        outcome = run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
+        # Before ADR 52 every one of these exited 0, so a cycle that never got
+        # an account looked, to whatever ran it, like one that shipped.
+        if outcome is CycleOutcome.HELD:
+            print(
+                f"task {args.task_id} is held: no account could take its next phase; "
+                "run it again once one resets",
+                file=sys.stderr,
+            )
+            raise SystemExit(EXIT_HELD)
+        if outcome is CycleOutcome.BLOCKED:
+            print(f"task {args.task_id} is blocked; the log above says why", file=sys.stderr)
+            raise SystemExit(EXIT_BLOCKED)
     elif args.command == "run-phase":
         if args.round_num is not None and args.round_num < 1:
             parser.error("--round counts from 1")
@@ -426,7 +449,16 @@ def main() -> None:
             # not land is an exit code, so the operator driving a cycle by hand
             # does not run the next one over the top of it.
             print(f"phase {args.role} did not finish; task {args.task_id} is blocked", file=sys.stderr)
-            raise SystemExit(1)
+            raise SystemExit(EXIT_BLOCKED)
+        if result.no_account:
+            # The same split as run-task's: the phase never ran, and the same
+            # command will run it once an account resets.
+            print(
+                f"phase {args.role} is held: no account could take it; "
+                f"run it again once one resets",
+                file=sys.stderr,
+            )
+            raise SystemExit(EXIT_HELD)
         print(f"phase {args.role} finished; {context_transfer.task_file_path(cfg.hive_tasks_dir, args.task_id)} has its handoff")
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the

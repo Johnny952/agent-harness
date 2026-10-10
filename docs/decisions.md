@@ -3587,3 +3587,45 @@ judgement moves to the api with it, the console reads the served field, and
 the constant and this exception go. The probe's age is now read through
 `front/src/lib/format.ts:agoEpochSeconds`, the same helper T-021 introduced
 for `rate_limited_at`.
+
+## ADR 52 — `run-task` says how it ended: 0 finished, 75 held, 1 blocked
+
+**Status:** accepted (T-023, 2026-10-10). Builds `docs/plans/token-economy.md`
+P7. Supersedes nothing; `run-phase`'s exit 1 for a phase that did not land is
+unchanged.
+
+**Context.** `run_task_cycle` returned None on every way out, and `cli.py`
+ignored it, so a cycle exited 0 whether the auditor closed the task, the
+revisor ran out of rounds, or no account was free for the next phase. On
+2026-10-09 two cycles stopped for lack of an account and exited 0, which reads
+as a pass to anything that only sees the code. The CLI already exits 1 for a
+refused merge, a phase that did not land and an unknown learnings entry, and
+argparse exits 2 for a usage error.
+
+**Decision.** `run_task_cycle` returns `CycleOutcome`: `FINISHED`, `HELD` or
+`BLOCKED`. `cli.py` maps it to 0, `EXIT_HELD` = 75 and `EXIT_BLOCKED` = 1. The
+held code is 75, sysexits.h's `EX_TEMPFAIL` ("temporary failure; retry
+later"). It is not 1, because a held task needs a wait and a blocked one needs
+a person, and a script has to be able to tell them apart; it is not 2, which is
+argparse's; and it is a code with a published meaning rather than one picked
+here. Held is decided where it happens: the one no-account return in
+`dispatch_phase` sets `DispatchResult.no_account`, `run_phase` copies it to
+`CycleContext.held` when a phase the task depends on stops on it, and the cycle
+returns `HELD` from any stop after that. An optional phase (the mapper) that
+finds no account does not hold the run, because the task goes on without it.
+`run-phase` uses the same split: `run_single_phase` returns the unsuccessful
+result, `no_account` set, instead of None, and the CLI exits 75 on it.
+An explicit field was taken over reading `account == ""`, which other failures
+share. An outcome returned to the CLI was taken over an exception raised from
+the dispatcher, because every stop already returns through `close_cycle`'s
+`finally` and the CLI is the only place an exit code means anything.
+
+**Consequences.** A blocked cycle now exits 1 where it exited 0: rounds
+exhausted, a blocked arquitecto, a revisor block disguised as debt, a foreign
+lock, a diverged project branch, a missing description and a failed phase.
+That is the same mechanism and the same code `run-phase` already used, so it
+was taken with the held case rather than left to contradict it. A refused merge
+at the end of a finished cycle still exits 0: the task is done, and `merge-task`
+is the verb whose exit code reports a merge. The card is blocked on a hold as
+before, so the board does not tell held from blocked; the exit code and the log
+line do.
