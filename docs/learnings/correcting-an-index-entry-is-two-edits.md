@@ -39,8 +39,22 @@ Read the prose around the table too, not only the rows. Any sentence that
 false the moment the next task files a row, and the task that files it is the
 only one positioned to notice.
 
+The same holds for prose that says *why* an entry stands or *how much* of it
+is left. Marking a row resolved falsifies the index's sentence explaining why
+it was left standing, and closing a step falsifies a *Fix* lead-in that counts
+the steps still open: both are present-tense claims about the entry, read by
+a phase that never opens the body, and neither is in a row.
+
 ## Evidence
 
 `grep -rn "one client only" --include="*.md" .` after round 2 of T-009: one hit
 in the rewritten learning, one in the untouched index row; fixed as F8 in round
 3. Inbox entry `T-009-a-corrected-learning-leaves-its-index-row-behind.md`.
+
+T-019 resolved `T-018-D1` and found two more of the same kind. Correcting the
+`T-015-D1` paragraph falsified the index's closing paragraph on `T-018-D1`,
+which said that paragraph was left standing because the other half of the
+claim sat in an append-only ADR; and `T-013-D1`'s *Fix* lead-in said one half
+of step 3 "is still open" while both halves carried a `Done` block. Proposed
+by its arquitecto and implementador, and separately by its revisor;
+`docs/implementations/T-019.md` *What the index now says about the row*.
