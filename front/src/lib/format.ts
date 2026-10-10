@@ -1,4 +1,4 @@
-import { type Role } from "./api/types";
+import { type GateFinding, type Role } from "./api/types";
 
 /**
  * How long ago, in whole seconds, or `null` when there is nothing to subtract
@@ -108,3 +108,47 @@ export const roleGlyph: Record<Role, string> = {
   revisor: "◉",
   auditor: "✓",
 };
+
+/**
+ * The tone of a gate finding's level. Here and not in
+ * `front/src/components/console/primitives.tsx` beside `GateChip`, which reads
+ * it, because an object exported beside a component is a
+ * `react-refresh/only-export-components` warning: `allowConstantExport` in
+ * `front/eslint.config.js` excuses a primitive constant and not a map
+ * (`docs/debt/T-015-D1.md`). `routes/tasks.$taskId.tsx` reads it as well.
+ */
+export const gateTone = {
+  note: "text-muted-foreground border-border-strong bg-surface-2",
+  warning: "text-warning border-warning/50 bg-warning/10",
+  blocking: "text-destructive border-destructive/60 bg-destructive/15",
+} as const;
+
+/**
+ * The worst level among a set of gate findings, or `null` for none. Moved out
+ * of `primitives.tsx` with `gateTone` and for the same reason; it has no caller.
+ */
+export function worstGate(findings: GateFinding[]): GateFinding["level"] | null {
+  if (findings.some((f) => f.level === "blocking")) return "blocking";
+  if (findings.some((f) => f.level === "warning")) return "warning";
+  if (findings.length) return "note";
+  return null;
+}
+
+/**
+ * A `paths` item, which is the one key of the six whose items are objects.
+ * `dispatcher/handoff.py:_pairs` drops a non-dict item and a dict missing
+ * either key; this says so instead, because the dispatcher is feeding a prompt
+ * and the console is answering an operator asking what the role returned.
+ *
+ * `routes/tasks.$taskId.tsx` hands it to `PhaseList` as the line renderer. It
+ * lives here and not beside `PhaseList` in
+ * `front/src/components/console/payload.tsx` because a function exported beside
+ * a component is a `react-refresh/only-export-components` warning
+ * (`docs/debt/T-015-D1.md`).
+ */
+export function asPathLine(item: unknown): string | null {
+  if (item === null || typeof item !== "object") return null;
+  const { path, holds } = item as { path?: unknown; holds?: unknown };
+  if (typeof path !== "string" || typeof holds !== "string") return null;
+  return `${path} — ${holds}`;
+}

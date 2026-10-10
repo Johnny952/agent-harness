@@ -108,7 +108,9 @@ re-learn what amber means per screen is reading three products.
 vocabulary and the tone of `pending`, and by T-013 for a phase's own status and
 verdict, which `/api/phases` serves inside the handoff payload
 (`docs/decisions.md` ADR 27). Source of truth:
-`front/src/components/console/primitives.tsx` (`StatusPill`, `gateTone`),
+`front/src/components/console/primitives.tsx` (`StatusPill`) and
+`front/src/lib/format.ts` (`gateTone`, moved out of `primitives.tsx` by
+`docs/debt/T-015-D1.md`),
 `dispatcher/handoff.py` (`_STATUS_VALUES`, `APPROVED`, `CHANGES_REQUESTED`).
 
 ### Absent, empty and broken are three different things

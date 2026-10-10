@@ -55,10 +55,11 @@ projects mount in seconds. A failing install is a note, not a block. A failing
 `test:` entry blocks, the type check included. A failing `lint:` is only ever a
 note, which is `docs/charter.md` C-10's split: a style finding is the revisor's
 to weigh, not the dispatcher's to enforce. `eslint .` exits zero on `main` since
-2026-10-08, with nine warnings it does not fail on — ten until T-015 made the
-board's `rows` referentially stable (`docs/decisions.md` ADR 40), and all nine
-are `react-refresh/only-export-components`, left as they are and filed as
-`docs/debt/T-015-D1.md`. No mapper writes `install:`
+2026-10-08, and with no warnings at all since 2026-10-10 — ten until T-015 made
+the board's `rows` referentially stable (`docs/decisions.md` ADR 40), then nine
+`react-refresh/only-export-components`, filed as `docs/debt/T-015-D1.md` and
+resolved by the operator out of cycle. A clean tree does not make the lint
+blocking by itself: promoting it is C-10's, and a human's. No mapper writes `install:`
 or `lint:` — `dispatcher/project_docs.py` asks a mapper for `build:` and `test:`
 only — so they are added by hand, by whoever decides a project needs them.
 
