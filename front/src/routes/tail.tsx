@@ -273,7 +273,7 @@ export function TailNoMatch({ buffered }: { buffered: number }) {
   return (
     <EmptyState
       title="No event matches these filters"
-      body={`Clear the payload filter, or set source and type back to all, to see the ${buffered} events this tail has buffered again.`}
+      body={`Clear the payload filter, or set source and type back to all, to see ${buffered === 1 ? "the one event" : `the ${buffered} events`} this tail has buffered again.`}
     />
   );
 }

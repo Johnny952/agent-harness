@@ -207,6 +207,16 @@ tree constrain where that can be:
   when it finds a global `afterEach` — without that line every render in a file
   stacks in one document.
 
+A component test cannot see what its screen hands it. To assert that — which
+count a route passes its empty state, say — render the route whole with
+`renderRoute(Route, path, served)` from
+[`src/test/render-route.tsx`](src/test/render-route.tsx): it stubs `fetch` with
+the `{data, warnings}` envelope per api path, answers 404 for any path not
+served, and mounts the route's component under a memory-history router of its
+own. Wait on what the screen draws (`findByText`), not on the call.
+`docs/debt/T-017-D1.md` *How it was resolved* says why the seam is `fetch` and
+not a seeded query cache.
+
 The config is a file of its own rather than a `test` key in `vite.config.ts`,
 for the same C-9 reason; vitest prefers it over `vite.config.ts` and does not
 merge the two, so it repeats the `tsconfigPaths()` and `react()` plugins.

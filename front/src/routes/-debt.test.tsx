@@ -8,8 +8,9 @@
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
-import { DebtEmpty } from "./debt";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { DebtEmpty, Route } from "./debt";
+import { renderRoute } from "@/test/render-route";
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
 // never runs, and every render would stack in one document.
@@ -56,5 +57,34 @@ describe("a debt filter that matched nothing", () => {
     const { container } = render(<DebtEmpty served={1} query="zzz" />);
     expect(container.textContent).toContain("the one row");
     expect(container.textContent).not.toContain("1 rows");
+  });
+});
+
+// The tests above hand `DebtEmpty` its count; this one lets the screen pass it.
+// `rows.length` would type-check there too, and with a query that matches nothing
+// it is 0 — the empty index's sentence, said over three served rows.
+// `docs/debt/T-017-D1.md`.
+describe("the Debt screen with a query that matches none of its rows", () => {
+  it("says no row matches, and counts what was served", async () => {
+    const row = (id: string) => ({
+      id,
+      what: "w",
+      where: "x",
+      fix: "f",
+      card: "none",
+      resolved: false,
+    });
+    await renderRoute(Route, "/debt", {
+      "/api/debt": { data: [row("T-001-D1"), row("T-002-D1"), row("T-003-D1")] },
+    });
+    await screen.findByText("T-002-D1");
+
+    fireEvent.change(screen.getByPlaceholderText(/^Filter debt/), {
+      target: { value: "T-099-D9" },
+    });
+
+    expect(await screen.findByText("No debt row matches “T-099-D9”")).toBeTruthy();
+    expect(document.body.textContent).toContain("all 3 rows");
+    expect(document.body.textContent).not.toContain("The debt index is empty");
   });
 });

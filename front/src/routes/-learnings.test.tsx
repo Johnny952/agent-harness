@@ -21,8 +21,9 @@
  * console.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
-import { LearningsEmpty } from "./learnings";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { LearningsEmpty, Route } from "./learnings";
+import { renderRoute } from "@/test/render-route";
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
 // never runs, and every render would stack in one document.
@@ -62,5 +63,36 @@ describe("a learnings filter that matched nothing", () => {
     const { container } = render(<LearningsEmpty served={1} query="zzz" />);
     expect(container.textContent).toContain("the one entry");
     expect(container.textContent).not.toContain("1 entries");
+  });
+});
+
+// The tests above hand `LearningsEmpty` its count; this one lets the screen pass
+// it. `docs/debt/T-017-D1.md`, and `-debt.test.tsx`'s twin.
+describe("the Learnings screen with a query that matches none of its rows", () => {
+  it("says no entry matches, and counts what was served", async () => {
+    const entry = (slug: string) => ({
+      ref: `inbox/${slug}.md`,
+      task: "T-001",
+      carried_by: "T-002",
+      scope: "project",
+      status: "confirmed",
+      when: "w",
+      rule: "r",
+      stale: false,
+      in_phase_table: true,
+      phase_table_cap: 30,
+    });
+    await renderRoute(Route, "/learnings", {
+      "/api/learnings": { data: [entry("a"), entry("b"), entry("c")] },
+    });
+    await screen.findByText("inbox/b.md");
+
+    fireEvent.change(screen.getByPlaceholderText(/^Filter learnings/), {
+      target: { value: "zzz" },
+    });
+
+    expect(await screen.findByText("No learning entry matches “zzz”")).toBeTruthy();
+    expect(document.body.textContent).toContain("all 3 entries");
+    expect(document.body.textContent).not.toContain("No phase has written a learning entry");
   });
 });
