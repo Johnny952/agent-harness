@@ -209,6 +209,12 @@ function TailPage() {
           title="The event stream is unavailable"
           body="Nothing can be tailed right now. The other read-only screens still work."
         />
+      ) : filtered.length === 0 ? (
+        // The buffer holds events and the filters removed every one of them,
+        // which is neither of the two states above: this screen had no sentence
+        // at all for it and showed an empty scroller. `docs/ui.md` *Absent, empty
+        // and broken are three different things*, No match.
+        <TailNoMatch buffered={events.length} />
       ) : (
         <div
           ref={scrollRef}
@@ -252,6 +258,23 @@ function TailPage() {
         </div>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * No match, for a tail that has three filters rather than one query.
+ *
+ * It names every control it would take to bring the rows back instead of quoting
+ * a query, which is what `docs/ui.md` asks of a screen with more than one filter
+ * — the payload box, and the two `Picker`s. The count is the unfiltered buffer,
+ * because that is what clearing them all restores.
+ */
+export function TailNoMatch({ buffered }: { buffered: number }) {
+  return (
+    <EmptyState
+      title="No event matches these filters"
+      body={`Clear the payload filter, or set source and type back to all, to see the ${buffered} events this tail has buffered again.`}
+    />
   );
 }
 

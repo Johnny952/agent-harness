@@ -184,8 +184,8 @@ login.
   (`docs/decisions.md` ADR 32). Nothing answers on 8790 now and
   `docker compose build board` has no service to build, so this check cannot be
   re-run and is not meant to be. The block is left as written below because it
-  is what the passing row attests to. V0.6c, V0.6d and V0.6e are the checks that
-  cover those screens from here on.
+  is what the passing row attests to. V0.6c, V0.6d, V0.6e and V0.6f are the
+  checks that cover those screens from here on.
 - A new id rather than a re-use of `V0.6`: that id belongs to the events
   dashboard's auth on 8788, which T-010 deleted, so the
   `2026-09-16 | V0.6 | PASS` row in the results log is that superseded check
@@ -392,6 +392,70 @@ login.
   - Step 5 shows an `ErrorState` inside the region on the detail screen and over
     the content on `/learnings`, never an empty state, and recovers on the second
     reload. The other regions of the detail screen keep their rows.
+
+**V0.6f A filter that matches nothing, on the three screens that have one.**
+- A new id beside V0.6e rather than a step added to it. V0.6e, V0.6d and V0.6c
+  all assert what a screen says when a *collection* is empty, and every one of
+  those sentences is still correct; what T-017 added is the second sentence, for
+  a collection that holds rows and a filter that removed them all
+  (`docs/ui.md` *Absent, empty and broken are three different things*, **No
+  match**; `docs/decisions.md` ADR 44). The old steps stay as written
+  (`docs/learnings/retargeting-a-roadmap-check-keeps-its-id.md`).
+- **No phase can write its results row**, for V0.6e's reason and not V0.6c's: a
+  phase can run every `front/` script where its task grants them, and T-017's
+  did; what no phase can do is open a browser. The whole subject of this check
+  is a sentence an operator reads, so the suite behind it is the weaker half by
+  construction.
+- Setup is V0.6c's steps 0 and 1 unchanged: the api up on a current image, the
+  console started on the host. No api change is involved, so a stale
+  `compose-api-1` is not this check's trap — the three screens' reads all
+  predate it.
+- Run, on `/learnings`, `/debt` and `/tail`, in a browser:
+  1. With the filter box empty, note how many rows each screen shows.
+  2. Type a string nothing can match — `obserability` is the card's own example
+     — into each screen's filter box.
+  3. On `/tail` only, put the filter box back to empty and set the `source` and
+     `type` pickers to a **pair** that no single buffered event carries — a
+     `source` taken from one row together with a `type` only other rows carry.
+     It has to be a pair: `front/src/routes/tail.tsx` builds both option lists
+     out of the unfiltered buffer, so every value either picker offers matches
+     at least one buffered event on its own, and no single-picker setting can
+     ever reach this state. Read the `source` and `type` columns of the rows on
+     screen in step 1 to pick the pair. A buffer whose rows happen to cover
+     every source-type combination offers no such pair either; if that is what
+     is on screen, record step 3 as not applicable to this buffer rather than
+     failing it, and say which sources and types were offered.
+  4. Clear each filter box again, and put `/tail`'s `source` and `type` pickers
+     back to `all` — step 3 left one of them off `all`, and the boxes alone do
+     not restore that screen.
+- Pass:
+  - Step 2 shows, on `/learnings` and `/debt`, an empty state whose title
+    quotes the string just typed and whose body offers to clear the filter box
+    and names how many rows that brings back. Neither screen says *no phase has
+    written a learning entry* or *the debt index is empty*, and **neither
+    sentence of the empty state itself mentions the harness, a phase or the
+    api**. That clause is about the state's own title and body and must not be
+    read as being about the whole screen: step 2 needs a collection with rows in
+    it, and with rows served `/learnings`' `PageHeader` subtitle always names a
+    phase — *in the order a phase sees them* — and its over-cap `Banner` names
+    the dispatcher. Both are correct and neither fails this check;
+    `docs/ui.md` *Absent, empty and broken are three different things* binds the
+    No-match state's two sentences, not every sentence around them.
+  - Step 2 on `/tail` shows *No event matches these filters*, naming the payload
+    filter and the two pickers, over a region that is not blank — the silent
+    empty region is what this check exists to catch, and it is what shipped
+    before T-017.
+  - Step 3 reaches the same state through the two pickers rather than the box,
+    which is the case the wording has to cover without quoting a query — or is
+    recorded as not applicable on a buffer that offers no non-covering pair,
+    which is a fact about the rows and not about the console.
+  - Step 4 restores every row counted in step 1 on all three screens, pickers
+    included.
+  - `/sessions` is **not** part of this check and its one conflated sentence is
+    expected: it is fixture-backed, so the state is unreachable there (ADR 44).
+  - A collection that is genuinely empty is V0.6d step 2 and V0.6e step 4's
+    business and must still read as it did: this check must not have changed
+    those sentences.
 
 **V0.7 Docker-in-docker.**
 - Run:
@@ -2057,3 +2121,5 @@ Add one row per check run, newest at the bottom. Link longer output
 | 2026-10-08 | D8 (gate memory against `mem_limit`) | PASS | `bun` 1.3.12, node v24.21.0; `agent-cuenta1`, `memory.max` 4 GiB; harness at `2f1e797` | The one D8 measurement left open. A fresh worktree at `2f1e797`, the gate's four steps by hand, the container cgroup's `memory.current` sampled every 100 ms (page cache included, so upper bounds): install 94 MiB peak (warm cache), typecheck 729 MiB, test 320 MiB, lint 616 MiB, all rc 0. The container's lifetime `memory.peak` was 735 MiB, and it started before T-015, so that covers the real run too: about 18 % of the limit. No change to `mem_limit`. Evidence: `.data/verify/d8-t015-gate.md`. |
 | 2026-10-09 | V0.6e (the Learnings screen and `/api/learnings`) | NOT RUN | — | Written by T-016 alongside the route it checks, and not walked: every step needs a browser against a running console, and no phase can open one. Not V0.6c's `node_modules` reason, which no longer holds: T-016's own phases filled `front/node_modules` and ran every `front/` script (`/data/.hive/learnings/inbox/T-016-bun-runs-in-a-phase-when-the-task-grants-it.md`). What remains is the browser and the container — a phase can open neither, and the container half is a human's row (`/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`). What a phase *could* run, and T-016's implementador and auditor both did, is the suite behind it: `cd front && bun install --frozen-lockfile` (512 installs, no changes), `bun run typecheck` exit 0, `bun run test` 60 passed in 5 files, `bun run lint` 0 errors and 9 warnings, `python3 -m pytest` 1200 passed and 10 skipped. That covers the route's shape, the forward's allowlist and the two served judgements as units; it covers nothing about what an operator sees. The one thing a walker should check before blaming the console: the api image has to postdate this merge, because a stale `compose-api-1` answers 404 on the new route and reads exactly like a forward bug — V0.6c's own PASS row hit that trap with `/api/phases`. |
 | 2026-10-09 | V0.6e (the Learnings screen and `/api/learnings`) | PARTIAL | harness at `3a4168f`; console `bun run dev` on :8080 against `compose-api-1`; Playwright 1.63.0 headless, `channel="chrome"` | Walked by the operator with a Playwright script from the host, not by a human at a browser; scripts, screenshots and timings in `.data/verify/v06e/`. Steps 1–4 PASS. Step 2: 27 rows (T-017's inbox added two), no `L-01`, every ref `inbox/…`, order confirmed → unconfirmed fresh → unconfirmed stale → refuted. Step 3: stale rows marked, T-015's two refuted entries visible and labelled "not handed to phases"; 27 is under the cap of 40, so the over-cap banner was not reachable. Step 4: T-015 lists 3 entries, T-013 1, T-001 the no-entry line; the only cross-task `carried_by` in the data is T-014's entry carried by T-016, and `/tasks/T-016` marks it CARRIED while `/tasks/T-014` does not, as it should — T-015 and T-013 have none to show. Step 5 PARTIAL: with the api stopped `/learnings` shows its ErrorState and recovers on `docker start`; the detail screen's region ErrorState was reached only by failing `/api/learnings` alone (`page.route`, a deviation from the step's literal stop), because stopping the whole api fails `/api/tasks/<id>` too. **Finding:** a query that has never succeeded and carries `refetchInterval` flickers — react-query v5 resets it to `pending` on every interval refetch, so `/tasks/T-015` shows "Reading task…" for ~7 s (three retries) and its ErrorState for ~2.5 s, repeating (`step5-flicker.txt`); the learnings region does the same on a 5 s cycle. A short look reads as "loading", so an outage can pass for a slow read — close to the confusion ADR 16 exists to prevent, though ADR 16 names "empty", not "loading". Not filed as debt here. Setup notes: the dev server needed `CHOKIDAR_USEPOLLING=true` (inotify ENOSPC on this host); the api-image grep count read 2, where the step expects 1. |
+| 2026-10-09 | V0.6f (a filter that matches nothing, on three screens) | NOT RUN | — | Written by T-017 beside the change it checks, and not walked, for V0.6e's reason: every step is a sentence in a browser and no phase can open one (`/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`). What the task's phases could run, and did: `cd front && bun install --frozen-lockfile` (512 installs, no changes), `bun run typecheck` exit 0, `bun run test` 73 passed in 8 files (60 in 5 before this task), `bun run lint` 0 errors and 9 warnings, `python3 -m pytest` 1200 passed and 10 skipped. Those tests pin both branches of the two screens the defect was on, and the tail's new third arm, which is the whole of what a suite can say here: the subject of this check is what an operator reads, and the empty-state copy is reachable in a browser only. No api image is involved — the three reads all predate this change — so a stale `compose-api-1` is not this check's trap. |
+| 2026-10-10 | V0.6f (a filter that matches nothing, on three screens) | PASS | branch `agent/task/T-017` at `d2285d8`; console `bun run dev` on :3017 against `compose-api-1`; Playwright 1.61.1 headless Chromium | Walked by the operator with a Playwright script from the host before the merge, not by a human at a browser. `/learnings`: 28 rows; `obserability` gives "No learning entry matches “obserability”" and a body that tells the reader to clear the box to see all 28 again — no harness, phase or api wording in the state (the screen's subtitle names a phase, which the check allows); clearing restores 28. `/debt`: 16 rows; the same shape, "No debt row matches “obserability”", "see all 16 rows again, open and resolved"; clearing restores 16. `/tail` (100 events buffered): step 2 shows "No event matches these filters" with the clear-the-payload-or-reset-the-pickers sentence and a non-blank region — but with `zqxjv-no-such-payload`, because `obserability` matched 3 real events: T-017's own phase payloads carry the check's example string, so on `/tail` the example is not an unmatched filter. Step 3 not applicable: the buffer had one source (`agent-cuenta2`) and no source + type pair reached no-match. Step 4: rows return and both pickers read `all`. No console errors. |

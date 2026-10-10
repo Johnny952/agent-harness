@@ -46,6 +46,11 @@ function DebtPage() {
     [debt.data, q],
   );
 
+  // The collection as the read served it, which is what decides between the two
+  // bare states below. Plain and unmemoised: it feeds no hook dependency, so a
+  // fresh `?? []` array on each render costs nothing here.
+  const served = debt.data?.data ?? [];
+
   // The partition is over `resolved` and there is no severity: the index has no
   // such column, and `docs/decisions.md` ADR 17 already refused to grow one — the
   // four-state lifecycle this screen used to colour by is a debt's life inside one
@@ -83,10 +88,9 @@ function DebtPage() {
       ) : debt.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading debt…</p>
       ) : rows.length === 0 ? (
-        <EmptyState
-          title="The debt index is empty"
-          body="No phase has declared debt. When one knowingly leaves something unfinished it will show here with a fix and a card."
-        />
+        // An empty index and a filter that matched nothing are two facts.
+        // `docs/ui.md` *Absent, empty and broken are three different things*.
+        <DebtEmpty served={served.length} query={q} />
       ) : (
         <div className="space-y-4 p-4">
           <Partition title="Open" rows={open} />
@@ -94,6 +98,30 @@ function DebtPage() {
         </div>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * Which of the two bare states this screen is in, over the served index and not
+ * over the filtered list — the order `docs/ui.md` fixes, and the same shape as
+ * `LearningsEmpty` in `./learnings`. Exported so the branch renders without a
+ * router or a query client (`docs/decisions.md` ADR 44).
+ */
+export function DebtEmpty({ served, query }: { served: number; query: string }) {
+  if (served === 0)
+    return (
+      <EmptyState
+        title="The debt index is empty"
+        body="No phase has declared debt. When one knowingly leaves something unfinished it will show here with a fix and a card."
+      />
+    );
+  // Both partitions, because a resolved row stays in the index and clearing the
+  // box brings it back too.
+  return (
+    <EmptyState
+      title={`No debt row matches “${query}”`}
+      body={`Clear the filter box to see ${served === 1 ? "the one row" : `all ${served} rows`} again, open and resolved. The filter reads the id, the what, the where and the card.`}
+    />
   );
 }
 

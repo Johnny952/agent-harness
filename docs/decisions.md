@@ -2952,3 +2952,99 @@ operator's edit. The agent image grows by Chromium's libraries; the browser's
 version moves with one build arg and one run of the install service. Memory
 under the 4 GB `mem_limit` with Chromium and the dev server both running is
 measured once, as D8 was, before it is trusted.
+
+## ADR 44 — a filter that matched nothing is Empty's other half, and the collection is tested first
+
+**Status:** accepted (T-017, 2026-10-09). Answers the closing paragraph of
+**ADR 42**, which declared this gap rather than fixing it, and leaves that entry
+as written — `docs/decisions.md` is append-only, so the sentence there stays
+true of the day it was written and this number is where it was answered. Closes
+`docs/debt/T-016-D1.md`.
+
+**Context.** `docs/ui.md` *Absent, empty and broken are three different things*
+had one empty state, defined as "a query that succeeded and matched nothing".
+Two wired screens with a filter box tested the **filtered** list against it:
+`front/src/routes/learnings.tsx` told an operator who mistyped a slug that no
+phase has ever written a learning entry, and `front/src/routes/debt.tsx` that
+the project has filed no debt. Both sentences are about the harness; the true
+statement was about the characters the operator had just typed. The Board had
+already split the branch — `rows.length === 0` then `filtered.length === 0`,
+with *No task matches these filters* — so the console held two answers to one
+question, and the one with no entry behind it was the one two screens used.
+
+**Decision.** *The vocabulary gains the second state, the collection is tested
+before the filter, and every filtered screen over a wired read transcribes it.*
+
+`docs/ui.md` gains **No match** as a bullet beside *Absent*, *Empty* and
+*Broken*, worded as Empty's other half rather than as a fourth state: the
+heading's count is unchanged because a filter that matched nothing is a
+successful query over a collection that is not empty, which is Empty's own
+sentence with a different subject. What it may say is the query and the control
+that clears it; what it may not say is anything about the harness.
+
+Four things follow that a later task could otherwise undo without knowing they
+were decided:
+
+- **The order is the collection, then the filter**, and the collection is read
+  off what the api served rather than off the filtered list. A collection that
+  really is empty keeps Empty's sentence even with a query in the box: the
+  filter is not why there is nothing there, and a screen that answers the
+  filter first would tell an operator their query is at fault for an empty
+  harness. This is the Board's shipped order, generalised.
+- **Naming the control is words, not a button.** No filtered screen in the
+  console ships a clear control, and the entry asks for the sentence that names
+  the box — *clear the filter box* — rather than an affordance. A clear button
+  is a change to every filtered screen at once and to *A region with no route
+  says which route, and when*'s rule about controls, not something a task
+  holding one screen adds to it.
+- **There is no new primitive.** `EmptyState` is the shared one already and it
+  takes two strings; the subject noun differs per screen — a learning entry, a
+  debt row, an event — so a component would be parameterised down to the
+  wording it was meant to hold. What binds the wording is the `docs/ui.md`
+  entry, which is the point of filing it there. Each route instead exports the
+  small component holding its own two branches, which is what makes the branch
+  testable with a plain `render` and no router or query client — the shape
+  `front/src/routes/-index.test.tsx` already uses for `TaskCard`.
+- **The query is console state and reaches no route.** Nothing about a filter
+  is served, so this decision has no api half, and an entry that could only be
+  honoured by changing a route would have been filed in the wrong place
+  (`docs/plans/front.md` *What `docs/ui.md` may decide, and what it may not*).
+
+**Which screens.** Three screens have a filter box over a wired read.
+`learnings.tsx` and `debt.tsx` are the two defects and get the split.
+`front/src/routes/tail.tsx` is the third: its empty state tests the unfiltered
+`events`, so it never claims the collection is empty when it is not, but a
+filter that matches nothing leaves a silent region with no sentence at all, and
+the entry asks for one. It is in this task because a known divergence on the
+day an entry lands is how the console ends up with two answers again — the
+condition this ADR exists to end — and its filters are three, so it names its
+controls the way the Board does rather than quoting one query. `index.tsx`
+already conforms and is not touched. `front/src/routes/sessions.tsx` has the
+conflation in one sentence — *Either no session is running or your filters hide
+everything* — and is **out of scope**: `listSessions` returns a fixture, a
+fixture is never empty, and the state is unreachable until the screen is wired.
+The entry says so, so the task that wires it inherits the split rather than
+discovering it.
+
+**Consequences.** `docs/debt/T-016-D1.md` is resolved and its row in
+`docs/debt/README.md` is marked resolved in place, which is two edits
+(`docs/learnings/correcting-an-index-entry-is-two-edits.md`); the row stays,
+because a fix can be reverted. Each of the three screens grows a second
+`EmptyState` and an exported component beside its route, and the `front/` suite
+grows tests for both branches on both of the two defective screens — the count
+the suite prints is quoted from `bun run test` and never derived by counting
+`it(` blocks
+(`docs/learnings/counting-it-blocks-undercounts-the-front-suite.md`).
+
+What this task cannot verify is the only thing the change is about: a sentence
+an operator reads. `docs/ROADMAP.md` **V0.6f** is the walk — a nonsense query
+in each of the three filter boxes, and `/tail`'s picker for the case with no
+query to quote — written beside the change and `NOT RUN`, for V0.6e's reason:
+a phase can run every `front/` script its task grants and cannot open a
+browser.
+
+The next filtered screen is bound by the entry and not by these three
+transcriptions, which is the difference between this and fixing `learnings.tsx`
+alone. A screen that genuinely needs one state for both cases — a region where
+the collection and the filter cannot be told apart — changes the `docs/ui.md`
+entry and owes an ADR, because by then three shipped screens rely on it.
