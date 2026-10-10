@@ -3483,6 +3483,31 @@ def test_every_role_is_told_the_remote_is_not_its_business(role) -> None:
     assert "finding for your handoff" in prompt
 
 
+@pytest.mark.parametrize(
+    "role", ["arquitecto", "implementador", "revisor", "auditor", project_docs.MAPPER_ROLE],
+)
+def test_every_role_is_told_one_operation_per_bash_call(role) -> None:
+    """T-017, T-018 and T-019 each lost turns to a Bash call refused whole for
+    chaining two operations. Every role has a shell under the same permission
+    check, the mapper too, so every role is told the shape before it tries one."""
+    prompt = dispatcher_mod._role_prompt(
+        role,
+        "task-1",
+        "myproj",
+        "/data/.hive/tasks/task-1.md",
+        _DESCRIPTION,
+        "/data/.hive/scratch/task-1",
+        "/data/.hive/tasks",
+    )
+
+    assert dispatcher_mod._ONE_OPERATION_PER_CALL in prompt
+    assert "one operation per call" in prompt
+    assert "`$?`" in prompt
+    # The exception has to be named, or a role would refuse its own card's grant.
+    assert "`cd <dir> && <granted command>`" in prompt
+    assert "Read tool with its absolute path" in prompt
+
+
 def test_run_task_cycle_hands_every_role_its_duty_to_the_project_docs(
     tmp_path, monkeypatch,
 ) -> None:

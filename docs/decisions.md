@@ -3322,3 +3322,32 @@ No source, test or configuration file changes. `front/vite.config.ts` is
 untouched (`docs/charter.md` C-9), and nothing about the gate moves: ADR 39
 already runs the three scripts, and this entry only writes down what a phase
 may do with them itself.
+
+## ADR 47 — every phase is told one operation per Bash call, in the prompt and not in the learnings
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-10). **Extends
+ADR 37 and does not supersede it**: a second constant rides beside
+`_REMOTE_IS_NOT_YOURS`, appended at the same place for the same five roles,
+and ADR 37 itself is left as written.
+
+**Context.** T-017, T-018 and T-019 each lost turns to a Bash call the CLI's
+permission check refused whole, in a different shape every time — a trailing
+`; echo "EXIT=$?"`, an expansion, two `cd`s, a `cd` before `git` — although
+every piece of each call was allowed on its own. The evidence is
+`.hive/learnings/harness/T-019-a-trailing-echo-exit-refuses-the-whole-call.md`,
+which names the siblings it retired. A learnings table reaches a phase as a
+list of traps, which it reads only once it has already walked into one.
+
+**Decision.** `_role_prompt` appends `_ONE_OPERATION_PER_CALL` to every role's
+prompt, the mapper included: one operation per Bash call — no `;`, `&&`, `||`
+or pipe to chain a status echo, no `$?`, `$(...)`, `${...}` or loops — the exit
+read from the command's own output, the card's own
+`cd <dir> && <granted command>` as the one exception, and the Read tool with an
+absolute path for a file outside the worktree. Same criterion as ADR 37: it is
+about the permission check this harness runs its phases under, not a method, so
+it belongs in the prompt and not in a vendored skill.
+
+**Consequences.** Every phase pays a few sentences of prompt for it. Its test is
+`test_every_role_is_told_one_operation_per_bash_call`, parametrized over the
+four cycle roles and the mapper. No config changes: `allowed_tools` grants
+exactly what it did.
