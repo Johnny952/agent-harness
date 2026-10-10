@@ -49,16 +49,13 @@ the whole suite green — `docs/debt/T-017-D1.md`.
 Export the component, take the decided-on values as props, and put the test
 beside the route with a `-` prefix on the filename.
 
-`front/README.md` *Writing a test* will tell you the opposite — *Not under
-`src/routes/`*, with "a renderer worth a test moves to
-`src/components/console/` instead" and `docs/decisions.md` **ADR 30** behind it.
-That bullet names the wrong knob: `routeFileIgnorePattern` has no default and is
-not set anywhere in this repo, but `routeFileIgnorePrefix` defaults to `-` and
-is what the four `-*.test.tsx` files under `src/routes/` rely on. It was already
-false before T-017 — `bc93b1d` added `-index.test.tsx` — so the sentence is
-nobody's to correct in passing: reconciling it with ADR 30 and ADR 44 is a
-decision and wants an ADR. Until then, read this entry and the header of
-`front/src/routes/-index.test.tsx` over that bullet.
+`docs/decisions.md` **ADR 45** is the decision behind it, and `front/README.md`
+*Writing a test* has agreed with it since T-018: `routeFileIgnorePrefix`
+defaults to `-` and nothing in this repo sets `routeFileIgnorePattern`, the
+knob **ADR 30** named. Read ADR 45 for when a component still moves to
+`src/components/console/` instead — a second screen draws it, or the thing
+worth a test is not a component and would cost a tenth lint warning beside
+`Route`.
 
 Then say out loud, in the handoff and in the implementation note, that the call
 site is not covered, and name the argument. A comment above the call site is

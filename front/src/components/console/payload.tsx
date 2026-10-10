@@ -4,12 +4,12 @@
  * and `observability/api/app.py:_phase` passes it through verbatim, so every
  * key of it arrives at a render as `unknown` and is guarded here. ADR 29.
  *
- * Here and not in `routes/tasks.$taskId.tsx`, the one screen that draws them,
- * because a test cannot reach them there: the TanStack route generator scans
- * every file under `src/routes/` and tries to make a route out of it, and the
- * knob that would excuse a `.test.tsx` — `routeFileIgnorePattern` — has no
- * default and lives in the Lovable-generated `vite.config.ts`, which
- * `docs/charter.md` C-9 keeps off-limits to a hand edit. ADR 30.
+ * Here and not in `routes/tasks.$taskId.tsx`, the one screen that draws them.
+ * ADR 30 moved them for a reason that was false — a test file beside that route
+ * is allowed, as `-<name>.test.tsx`, because `routeFileIgnorePrefix` defaults
+ * to `-`. ADR 45 keeps them here for the reason that holds: `asPathLine` is not
+ * a component, and exporting it beside a route's `Route` would cost a tenth
+ * `react-refresh/only-export-components` warning (`docs/debt/T-015-D1.md`).
  */
 import { Malformed } from "./primitives";
 import { cn } from "@/lib/utils";
