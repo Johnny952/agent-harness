@@ -233,10 +233,13 @@ login.
   `observability/board/`, which C-8 kept until the console reached parity — it
   has since been deleted (`docs/decisions.md` ADR 32) — and both services read
   the same api with the same token. This one has never been
-  run, **and no phase can run it**: a phase works in a fresh worktree, where
-  `front/node_modules` is gitignored and absent and `bun install` is not a
-  role's call — and `/data/.hive/learnings/inbox/T-010-docker-is-refused-in-a-phase.md`
-  says the container half is a human's row too. **An operator can, as of
+  run, **and no phase can run it**: step 0 brings the api up with
+  `docker compose`, and `docker` is not in `config.yaml`'s `allowed_tools`
+  (ruled by the operator on 2026-10-10;
+  `/data/.hive/learnings/harness/T-011-python3-heredoc-is-refused-like-python3-c.md`
+  carries the refusal). The install half this bullet used to give is gone:
+  `docs/decisions.md` ADR 46 lets any phase whose card grants it run
+  `cd front && bun install --frozen-lockfile`. **An operator can, as of
   2026-10-04**: T-013 ran step 1's `bun install` by hand on `main`, so on this
   host that half is already done and what is left is a browser. It was first
   walked on 2026-10-04 by the assistant — see the Results log, where every
@@ -290,8 +293,9 @@ login.
   including steps 3 and 6, which describe the console *before* `/api/phases`
   landed and are a true record of what T-012 shipped. This one checks the delta
   T-013 added, and it inherits V0.6c's reason why **no phase can write its
-  results row**: no phase can run it, because a phase's worktree has no
-  `front/node_modules` and `bun install` is not a role's call. An operator can,
+  results row**: no phase can run it, because its setup brings the api up with
+  `docker compose` and `docker` is not a granted tool (the install half this
+  bullet used to give was retired by `docs/decisions.md` ADR 46). An operator can,
   on this host, since T-013's by-hand install on 2026-10-04 — see V0.6c. The
   assistant walked it on that date; the Results log row is PASS.
 - Setup is V0.6c's steps 0 and 1 unchanged — the api up, the console started on
