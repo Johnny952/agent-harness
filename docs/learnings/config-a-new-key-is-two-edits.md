@@ -31,6 +31,14 @@ Adding a key to `Config` is two edits: the dataclass in
 construction site. If the field is optional, put it last and default it to
 `None` — that is what `Config.local_board` does.
 
+Only a **required** field costs the second edit. A field that is defaulted
+*and* last is one edit: T-020 added `pace_primary_week: bool = True` at the end
+of the dataclass and touched no test helper, and the whole suite stayed green —
+`_make_config` spells out every key it knows and simply does not mention this
+one, so the default applies. A test that wants the other value passes it as an
+override. Both halves have to hold: a defaulted field that is *not* last is a
+`TypeError` at import on the fields after it.
+
 ## Evidence
 
 `python3 -m pytest tests/dispatcher/test_dispatcher.py -q -x`, with
