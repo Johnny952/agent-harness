@@ -162,21 +162,28 @@ server-side, never under a `VITE_` prefix, so Vite cannot inline it into the
 browser bundle. See *The three environment variables* above and
 `docs/decisions.md` ADR 15.
 
-**Nothing under `front/` runs in the loop.** There is a `typecheck`, a `lint`
-and a `test` since T-013, but the harness's `python3 -m pytest` does not see
-this directory and no gate in `dispatcher/gates.py` *runs* any of the three —
-so a green test gate on a commit that touches `front/src/` still says nothing
-about it. **Run `bun run typecheck`, `bun run lint` and `bun run test` by hand
-after editing.**
+**The loop runs all three.** `docs/README.md`'s frontmatter names them —
+`install: cd front && bun install --frozen-lockfile`, `cd front && bun run
+typecheck` and `cd front && bun run test` among its `test:` entries, and
+`lint: cd front && bun run lint` — and the dispatcher's test gate has run them
+in the order install, test, lint since 2026-10-08 (`docs/decisions.md` ADR 39).
+So a green test gate on a commit touching `front/src/` does say something about
+it; `python3 -m pytest` still imports nothing under this directory and is no
+longer the whole gate. **Run the three yourself as well, when your card grants
+them** — a phase can: `front/node_modules` is git-ignored and absent from a
+fresh worktree, and `cd front && bun install --frozen-lockfile` fills it in
+under a second from bun's install cache on the projects mount
+(`docs/decisions.md` ADR 46).
 
-The gate does at least know this directory exists. Since T-013 `tests-in-diff`
+The gate also knows which language a test is in. Since T-013 `tests-in-diff`
 pairs a changed file with a test in the **same language**, so a `front/src/**`
 edit arriving beside nothing but a Python test is asked about instead of
 cleared (`docs/decisions.md` ADR 31) — it never was blind to `.ts` and `.tsx`,
-it just stopped looking once it had found any test at all. Making a gate
-*execute* the three scripts is the open half of
-[`docs/debt/T-013-D1.md`](../docs/debt/T-013-D1.md) step 3, and it is blocked
-on an agent image with `bun` in it. What a red result costs is already ruled:
+it just stopped looking once it had found any test at all. The gate that
+*executes* the three scripts was the open half of
+[`docs/debt/T-013-D1.md`](../docs/debt/T-013-D1.md) step 3, blocked on an agent
+image with `bun` in it; both landed on 2026-10-08 and that row is resolved.
+What a red result costs is ruled:
 [`docs/charter.md`](../docs/charter.md) **C-10** — the typecheck blocks the
 phase, the lint rides along as a note.
 

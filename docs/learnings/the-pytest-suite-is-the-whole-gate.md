@@ -4,15 +4,24 @@
 on, or you want to observe a value, an exception or a shell script's syntax and
 are reaching for something other than the declared test command.
 
-**Status:** confirmed — every phase of T-008 ran into one half of this.
+**Status:** confirmed — every phase of T-008 ran into one half of this,
+corrected 2026-10-10 by T-019 on the gate half.
 
 ## The gate
 
 `pyproject.toml` configures nothing but pytest (`[tool.pytest.ini_options]`,
-`testpaths = ["tests"]`). There is no linter, no formatter, no type checker and
-no `build:` key in `docs/README.md`'s frontmatter. So the suite is the entire
-automated opinion this project has about a change: nothing else will catch a
-style drift or an unused import for you, and nothing else has to be run.
+`testpaths = ["tests"]`), and there is no `build:` key in `docs/README.md`'s
+frontmatter. For Python that is still the whole automated opinion this project
+has: no linter, no formatter, no type checker, and nothing else to run.
+
+**It is not the whole gate any more.** Corrected 2026-10-10 by T-019: since
+2026-10-08 the frontmatter also carries `install:`, two `cd front && bun run …`
+`test:` entries and a `lint:`, and the test gate runs them in the order
+install, test, lint (`docs/decisions.md` ADR 39) — so a `front/` change is
+executed in the loop, a red typecheck or test blocks and a red lint is a note
+(`docs/charter.md` C-10). A phase whose card grants them can run the three
+itself, after `cd front && bun install --frozen-lockfile`
+(`docs/decisions.md` ADR 46).
 
 ## The interpreter
 

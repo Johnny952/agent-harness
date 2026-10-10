@@ -3220,11 +3220,16 @@ readable in this repository:
   are not merely runnable by a phase — they already run on every round, between
   implementador and revisor.
 - **Phases run it.** All four phases of T-018 and every phase of T-019 ran
-  `cd front && bun install --frozen-lockfile` in their own worktrees: `486
-  packages installed`, under a second with a warm cache. The install is per
-  worktree and not shared (ADR 39), so a previous phase's install does not
-  reach the next one
-  (`/data/.hive/learnings/inbox/T-018-each-phase-worktree-needs-its-own-bun-install.md`).
+  `cd front && bun install --frozen-lockfile`: `486 packages installed`, under
+  a second with a warm cache. The install is per worktree and not shared (ADR
+  39), and which phases share one is `dispatcher/docker_exec.py:create_worktree`
+  — the writer roles check the branch out at a persistent
+  `worktrees/<task-id>/work`, so the implementador inherits the arquitecto's
+  `node_modules`, while a reviewing role's path is rebuilt before every add and
+  never does
+  (`/data/.hive/learnings/inbox/T-019-only-the-revisor-gets-its-own-worktree.md`,
+  narrowing T-018's entry). Running it unconditionally is the cheap default:
+  13 ms when it is already filled.
 - **The inbox entry the clause agreed with is retired.**
   `/data/.hive/learnings/inbox/T-015-bun-is-refused-in-a-phase.md` carries
   `status: refuted` and `refuted_by: T-016`.
