@@ -240,6 +240,84 @@ def test_format_status_names_the_state_the_task_and_the_quota(tmp_path):
     assert "--probe" in text  # says how to get the part it did not fetch
 
 
+def test_format_status_names_both_of_a_paced_primarys_ceilings(tmp_path, monkeypatch):
+    """`status` is the one surface an operator reads without a browser, so it
+    must not label a paced week with the session's number (ADR 48). Recorded
+    text, and `now` is supplied, so this does not depend on the day it runs."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1", is_primary=True),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+        primary_account="cuenta1",
+        reserve_pct=60,
+    )
+    paced_week = (
+        "Current session: 12% used · resets 3pm\n"
+        "Current week (all models): 30% used · resets Oct 12, 12:00pm (UTC)"
+    )
+    monkeypatch.setattr(
+        operator_mod.docker_exec,
+        "exec_claude",
+        _FakeExec({
+            "agent-cuenta1": _usage_result(paced_week),
+            "agent-cuenta2": _usage_result(_CLEAN_USAGE),
+        }),
+    )
+
+    text = operator_mod.format_status(
+        cfg,
+        operator_mod.account_reports(cfg, probe=True),
+        [],
+        now=dt.datetime(2026, 10, 9, 12, 0, tzinfo=dt.timezone.utc),
+    )
+
+    # Three days out: the ramp is 52.5% and the ceiling 47.5%.
+    assert "session 60%, week ceiling 47.5%" in text
+    # A worker's row is untouched, one number for both windows.
+    assert "(threshold 90%)" in text
+
+
+def test_format_status_says_when_a_paced_primary_had_no_reset_to_read(tmp_path, monkeypatch):
+    """The fallback is visible rather than silent: the week reads 60% because
+    nothing could be paced, not because 60% is the paced answer."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[AccountConfig(name="cuenta1", container="agent-cuenta1", is_primary=True)],
+        primary_account="cuenta1",
+        reserve_pct=60,
+    )
+    monkeypatch.setattr(
+        operator_mod.docker_exec,
+        "exec_claude",
+        _FakeExec({"agent-cuenta1": _usage_result(_CLEAN_USAGE)}),
+    )
+
+    text = operator_mod.format_status(cfg, operator_mod.account_reports(cfg, probe=True), [])
+
+    assert "session 60%, week 60% — no reset read" in text
+
+
+def test_format_status_keeps_one_threshold_when_the_pacing_is_off(tmp_path, monkeypatch):
+    cfg = _make_config(
+        tmp_path,
+        accounts=[AccountConfig(name="cuenta1", container="agent-cuenta1", is_primary=True)],
+        primary_account="cuenta1",
+        reserve_pct=60,
+        pace_primary_week=False,
+    )
+    monkeypatch.setattr(
+        operator_mod.docker_exec,
+        "exec_claude",
+        _FakeExec({"agent-cuenta1": _usage_result(_CLEAN_USAGE)}),
+    )
+
+    text = operator_mod.format_status(cfg, operator_mod.account_reports(cfg, probe=True), [])
+
+    assert "(threshold 60%)" in text
+
+
 def test_format_status_calls_an_unheld_card_free_not_stale(tmp_path):
     # After a release the card is still in progress and still worth listing,
     # but there is no lock on it. STALE would send somebody looking for a

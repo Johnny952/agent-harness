@@ -3351,3 +3351,106 @@ it belongs in the prompt and not in a vendored skill.
 `test_every_role_is_told_one_operation_per_bash_call`, parametrized over the
 four cycle roles and the mapper. No config changes: `allowed_tools` grants
 exactly what it did.
+
+## ADR 48 — the primary's week is paced against its own reset; `reserve_pct` keeps the session
+
+**Status:** accepted (T-020, 2026-10-10), implementing
+`docs/plans/token-economy.md` **P8**. **Narrows ADR 20 and does not supersede
+it**: ADR 20's shape — `quota_threshold_pct`, `reserve_pct` and
+`quota_cooldown_seconds` as columns on every `/api/accounts` row — stands, and
+so does its *Decision*. What this entry narrows is the sentence ADR 20 reasons
+from, that "`dispatcher/dispatcher.py:_threshold_for` holds the primary to
+`reserve_pct`, so the ceiling that actually governs an account is already
+per-account" and a reader with both numbers and `is_primary` can work out which
+one applies. After this entry the primary is governed by two ceilings, and only
+one of them is a configured number. ADR 18's premise that three served
+thresholds are the numbers a console must show is narrowed the same way.
+
+**Context.** `reserve_pct` (60) was one number applied to two windows:
+`quota.exceeds_threshold` compares it with `session_pct` and `week_pct` alike.
+Against a weekly counter that is wrong in both directions, and both were
+observed. It is too loose just after a reset, where the harness may spend the
+operator's whole 60% on day one of seven; and too strict at the end, where
+cuenta1 was parked at 84% of its week on 2026-10-09 with the week resetting the
+next day, so about 40% of that week expired unspent. `docs/charter.md` **C-2**
+says the reserve is "a ceiling, not a partition", which is the property a fixed
+number cannot keep over a window that refills on a date.
+
+The date is readable. `/usage` prints it on the week line — `Current week (all
+models): 86% used · resets Oct 10, 4:59pm (UTC)` — and `UsageInfo.week_reset`
+has captured that clause since the parser was written, with nothing reading it.
+
+**Decision.** With *d* days from the probe to the reset `/usage` reported, the
+primary's week is held to `PACE_START_PCT` (10) for *d* > `PACE_RAMP_DAYS` (6),
+to `10 + PACE_RAMP_PCT × (6 − d) / 6` for 1 < *d* ≤ 6, and to `PACE_FINAL_PCT`
+(95) for *d* ≤ 1 — then lowered by `PACE_PROBE_MARGIN_PCT` (5). The five
+constants live beside the parser in `dispatcher/quota.py`; none of them is
+configuration, for the reason the next paragraph gives about the reset itself,
+and because a ramp whose shape an operator can edit is five more numbers to
+reconcile with `reserve_pct`.
+
+Four things that decision deliberately fixes:
+
+- **The primary only.** A worker exists to be spent and keeps
+  `quota_threshold_pct` on both windows; pacing one moves work in time without
+  adding any. This is `docs/plans/token-economy.md` P8 *Scope*.
+- **The session keeps `reserve_pct`.** The week is what resets on a date; the
+  five-hour session has its own counter, and C-2's reason for the reserve — a
+  fallback phase must not spend the console to the wall, because the operator
+  then loses the thread that would notice — is about the window a phase runs
+  in. So `_threshold_for` stays the primary's *session* ceiling and the
+  admission line `pick_idle_account` reports, and `_load_reserve_pct`'s
+  invariant (`reserve_pct` ≤ `quota_threshold_pct`) keeps governing something
+  real. No ADR argued for pacing the session and this entry does not.
+- **The margin is for the phase that has not run yet.** The probe runs between
+  phases, so a phase may overshoot the ceiling by its own whole cost. Five
+  points is a guess, and the one P8 *Failure mode* asks for until P5 records a
+  measured phase cost; it is a constant rather than a key so that replacing it
+  with a measurement is one edit and not a config migration.
+- **The reset is read at every probe, never configured and never predicted.** A
+  week starts at a moment set by the account's own history: the reset is not a
+  fixed weekday, and the one observation of a roll (cuenta2 between 13:08 and
+  17:37 UTC on 2026-10-09, next reset `Oct 16, 1:59pm (UTC)`) fits a seven-day
+  cadence from the previous reset but is a single sample. Recomputing the
+  ceiling on each probe is also what keeps it from stepping at midnight, and it
+  needs no scheduler: `_recheck_cooling_accounts` already probes every parked
+  account while none is IDLE, so a primary parked by the ceiling is released by
+  the ceiling rising past its `week_pct`.
+
+**The fallback.** The clause is free text with no year. `quota.parse_reset`
+accepts `%b %d, %I:%M%p` and `%b %d, %I%p` followed by a zone in parentheses,
+takes the year that puts the reset within the next seven days of the probe's
+`now`, and answers `None` on anything else — a missing clause (the CLI omits it
+from a 0% line), a shape it cannot read, a zone it cannot resolve. On `None` the
+primary's week falls back to `reserve_pct`, which is today's behaviour exactly,
+and the dispatcher logs that it fell back and which of those it was. The
+fallback is never more permissive than the code it replaces, so a parse failure
+can delay work but cannot wave an account through a line it would have parked
+on.
+
+**One decision, two readers.** `_quota_decision` is the only thing that
+compares a probe with a ceiling, and both `check_quota_ok` and
+`_recheck_cooling_accounts` call it. `_threshold_for`'s docstring already
+explains why they must agree — a recheck on a looser number waves an account
+straight back to IDLE the moment the gate parks it, and the two loop — and with
+a ceiling that moves, two expressions of the same rule is a flap waiting for
+the day they disagree.
+
+**The switch.** `pace_primary_week`, on by default, turns the pacing off and
+restores the fixed reserve on both windows. It exists because this changes when
+the operator's own account accepts work, and an operator who disagrees with the
+ramp needs one line rather than a patch. It is the only new key: the ramp's
+numbers are constants.
+
+**Consequences.** The primary refuses fallback work much earlier in its week
+than it used to — 5% of the week just after a reset — and much later in the
+last day, which is the trade P8 argues for and is visible the first time a
+cycle falls back. The park log names the ceiling, the days left and the reset it
+read, because a number that moves is not explained by the number alone.
+`/api/accounts` goes on serving `reserve_pct` per row (ADR 20), and after this
+entry that column is the primary's session ceiling and its weekly *fallback*,
+not its weekly ceiling: the console's pool screen can label it correctly only
+once something serves the paced value, which is filed as this task's debt and
+belongs to whichever task next touches that route. `dispatcher/operator.py`'s
+`status` listing is inside this task and does print both, so the one surface an
+operator reads without a browser is not wrong in the meantime.

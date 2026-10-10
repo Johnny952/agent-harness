@@ -137,10 +137,22 @@ class Config:
     #: fallback work out loud and says the pool is dry, which is the answer the
     #: operator actually needs; idleness is recoverable by waiting, a dead
     #: console is not.
+    #:
+    #: Since `docs/decisions.md` ADR 48 this governs the primary's *session*
+    #: window, and is its week's fallback rather than its week's ceiling — see
+    #: `pace_primary_week` and `quota.week_ceiling`.
     reserve_pct: int = 60
     fallback_roles: list[str] = dataclasses.field(
         default_factory=lambda: list(DEFAULT_FALLBACK_ROLES)
     )
+    #: Pace the primary's week against the reset `/usage` reports, instead of
+    #: holding it to the flat `reserve_pct` (ADR 48). On by default. `false`
+    #: restores exactly the older behaviour — `reserve_pct` on both of the
+    #: primary's windows — and exists because this changes when the operator's
+    #: own console accepts work, so disagreeing with the ramp should cost one
+    #: line rather than a patch. The ramp's own numbers are constants in
+    #: `dispatcher/quota.py`, not keys: see `PACE_START_PCT` and its neighbours.
+    pace_primary_week: bool = True
 
 
 def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
@@ -477,4 +489,8 @@ def load_config(path: str) -> Config:
         primary_account=primary_account,
         reserve_pct=reserve_pct,
         fallback_roles=_load_fallback_roles(raw),
+        # On by default, and no loader of its own: unlike reserve_pct there is
+        # no other key to check it against, so bool() beside gates_enabled is
+        # the whole reading.
+        pace_primary_week=bool(raw.get("pace_primary_week", True)),
     )

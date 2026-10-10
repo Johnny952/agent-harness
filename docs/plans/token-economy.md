@@ -1,6 +1,8 @@
 # Token economy — what one window buys, and sizing tasks to fit it
 
-**Status:** proposal, nothing built. Measured 2026-10-09 by the operator, out of
+**Status:** P8 is built — T-020, 2026-10-10, under `docs/decisions.md` ADR 48;
+the change is `docs/implementations/T-020.md`. P1–P7 are still proposals and
+none of them is approved. Measured 2026-10-09 by the operator, out of
 cycle, on T-016's first round. It feeds the root README's *Prioritized* item 2
 (Token economy) and item 5 (Task profiles), and does not replace either.
 Evidence: `.data/verify/token-usage-T-016-2026-10-09.txt` (aggregates only).
@@ -205,4 +207,22 @@ closes, before P1–P7.
 - **Needs** an ADR (it replaces ADR-level reserve semantics), a change to
   `config.py`, `quota.py` and the parking in `dispatcher.py`, and tests on
   the reset parser with the recorded `/usage` texts. One surface, per P4.
+
+**Built by T-020 (2026-10-10), as `docs/decisions.md` ADR 48.** The ramp is
+`quota.weekly_ceiling_pct`, in five named constants rather than one
+expression: 10% while more than six days remain, `10 + 85 × (6 − d) / 6`
+through the ramp, 95% from one day out, less a 5-point margin for the phase
+that runs after the probe. `quota.parse_reset` reads the week line's clause
+against the probe's own `now`, and `quota.week_ceiling` is what the primary's
+`week_pct` is compared with — recomputed every probe, never cached. The
+primary's session keeps `reserve_pct`, which is also what its week falls back
+to when no reset can be read; that fallback is the pre-ADR-48 behaviour
+exactly, so a parse failure can delay work but never admit a week the old code
+refused. `dispatcher._quota_decision` is the single comparison both
+`check_quota_ok` and `_recheck_cooling_accounts` go through, which is what
+releases a parked primary as the ceiling rises past its `week_pct` and not
+before. `pace_primary_week` (default `true`) is the only new key. The rule as
+measured: the probe this section was written from, cuenta1 at 86% of a week
+resetting in under a day, is inside a 90% ceiling where the flat 60% reserve
+parked it.
 

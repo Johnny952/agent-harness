@@ -4867,6 +4867,11 @@ def test_the_picker_returns_none_when_the_primary_is_out_too(tmp_path) -> None:
 
 
 def test_the_primary_is_held_to_the_reserve_and_a_worker_to_the_threshold(tmp_path) -> None:
+    """Since ADR 48 this is the primary's *session* ceiling and its week's
+    fallback, not the number its week parks on — the week's own ceiling is
+    `quota.week_ceiling`'s and moves with the reset. The assertions stand
+    because `_threshold_for` still answers exactly what it used to; what
+    changed is how much of the rule it is."""
     cfg = _make_pool_config(tmp_path)
 
     assert dispatcher_mod._threshold_for(cfg, "cuenta1") == cfg.reserve_pct
@@ -4883,7 +4888,13 @@ def test_an_unknown_account_answers_to_the_worker_threshold(tmp_path) -> None:
 
 def test_the_primary_parks_at_its_reserve_rather_than_the_worker_threshold(tmp_path, monkeypatch) -> None:
     """The reserve is a ceiling and not only an admission test: 70% is fine for
-    a worker and past the line for the console."""
+    a worker and past the line for the console.
+
+    Unchanged by ADR 48, and it now exercises the fallback as well: `resets
+    later` does not parse, so the week falls back to the 60% reserve exactly as
+    before, and the 70% session parks the account either way. The paced path is
+    `test_the_primarys_week_parks_on_the_paced_ceiling_alone`.
+    """
     cfg = _make_pool_config(tmp_path)
 
     def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
@@ -4900,6 +4911,147 @@ def test_the_primary_parks_at_its_reserve_rather_than_the_worker_threshold(tmp_p
 
     assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
     assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
+
+
+# --- the primary's paced weekly ceiling (ADR 48) -----------------------------
+#
+# Every probe below is recorded text and every clock is supplied, so none of
+# these tests depends on the day it runs on.
+
+#: The probe clock these tests measure from.
+_PACE_NOW = dt.datetime(2026, 10, 9, 12, 0, tzinfo=dt.timezone.utc)
+#: Five days to the reset, where the ramp is 24.17% and the ceiling 19.17%.
+_RESET_IN_5_DAYS = "Oct 14, 12:00pm (UTC)"
+#: A day and a half, where the ramp is 73.75% and the ceiling 68.75%.
+_RESET_IN_36_HOURS = "Oct 11, 12:00am (UTC)"
+#: Exactly a day, the step to the flat 95% and a 90% ceiling.
+_RESET_IN_1_DAY = "Oct 10, 12:00pm (UTC)"
+
+
+def _pace_probe(monkeypatch, session_pct, week_pct, reset_clause, now=_PACE_NOW):
+    """Hand both the probe and the clock to the dispatcher, recorded."""
+    week_line = f"Current week (all models): {week_pct}% used"
+    if reset_clause is not None:
+        week_line += f" · resets {reset_clause}"
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=f"Current session: {session_pct}% used\n{week_line}",
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(dispatcher_mod, "_utc_now", lambda: now)
+
+
+def test_the_primarys_week_parks_on_the_paced_ceiling_alone(tmp_path, monkeypatch, caplog) -> None:
+    """40% of a week with five days still to run is inside the old 60% reserve
+    and well past the paced ceiling, so the ceiling is the only thing parking
+    this account — and the log says which ceiling, with what left of the week."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    with caplog.at_level("WARNING"):
+        assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+    parked = [r.getMessage() for r in caplog.records if "parking it PRE_COOLDOWN" in r.getMessage()]
+    assert len(parked) == 1
+    # The ceiling, the days left and the reset it read: an operator reading
+    # this line can tell a paced refusal from a flat one without the config.
+    assert "19.2% weekly ceiling" in parked[0]
+    assert "5.0 days" in parked[0]
+    assert "2026-10-14 12:00 UTC" in parked[0]
+
+
+def test_the_paced_primary_is_released_when_the_ceiling_rises_past_its_week(
+    tmp_path, monkeypatch
+) -> None:
+    """The release has no new scheduler behind it: the same recheck loop probes
+    the parked account, and the ceiling it computes is simply higher the nearer
+    the reset is. At five days out 40% is over the line; at a day and a half it
+    is not."""
+    cfg = _make_pool_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.PRE_COOLDOWN)
+
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_36_HOURS)
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == ["cuenta1"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+
+
+def test_the_gate_and_the_recheck_are_one_decision_about_the_ceiling(
+    tmp_path, monkeypatch
+) -> None:
+    """The flap `_threshold_for`'s docstring warns about, pinned for a ceiling
+    that moves: against the same probe and the same clock that parked it, the
+    recheck must not hand the account straight back."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+
+
+def test_a_week_with_no_reset_clause_falls_back_to_the_reserve_and_says_so(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A 0% line carries no reset clause at all, so the fallback is an ordinary
+    path and not a drift. It is today's behaviour exactly — 70% of a week over
+    the 60% reserve still parks, which is also why a parse failure can never
+    wave through something the older code refused."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=70, reset_clause=None)
+
+    with caplog.at_level("WARNING"):
+        assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "falls back to the 60% reserve" in m and "no reset clause" in m for m in messages
+    )
+    assert any("the 60% reserve on both windows" in m for m in messages)
+
+
+def test_a_week_under_the_reserve_with_no_reset_clause_still_passes(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=50, reset_clause=None)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is True
+
+
+def test_the_pacing_switch_off_restores_the_flat_reserve(tmp_path, monkeypatch) -> None:
+    """The numbers that park a paced primary, with `pace_primary_week: false`:
+    40% of a week is under the 60% reserve, so the account is admitted."""
+    cfg = _make_pool_config(tmp_path, pace_primary_week=False)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is True
+
+
+def test_a_worker_is_not_paced(tmp_path, monkeypatch) -> None:
+    """A worker exists to be spent: it keeps `quota_threshold_pct` on both
+    windows, whatever its reset says."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
+    assert get_state(cfg.state_dir, "cuenta2") == AccountState.IDLE
+
+
+def test_the_paced_primarys_session_still_answers_to_the_reserve(tmp_path, monkeypatch) -> None:
+    """The two windows are checked separately: a session over the reserve parks
+    the account even with its week almost untouched and its ceiling at 90%."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=70, week_pct=1, reset_clause=_RESET_IN_1_DAY)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
 
 
 def test_a_phase_with_a_live_heartbeat_is_left_alone_however_long_it_runs(tmp_path) -> None:

@@ -39,6 +39,13 @@ finished, stating the contract in numbers and citing the ADRs that settled it.
 Appending to the section you completed is not the same move as rewriting a
 section somebody else will build.
 
+T-020 took the same move on `docs/plans/token-economy.md` **P8**, the section
+its card told it to implement, and its revisor approved it: the Status
+paragraph now says which phase is built and that P1–P7 are still proposals,
+and one appended paragraph names what the code does, in the plan's own numbers,
+citing ADR 48. Not one of P8's own bullets was rewritten — including the ones
+whose guesses the implementation refined.
+
 ## Evidence
 
 `docs/debt/T-008-D3.md`; `docs/plans/front.md` Status paragraph and *The api's
