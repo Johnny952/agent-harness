@@ -38,7 +38,12 @@ cite the entry and move it up, or drop the row.
   disagreeing would loop. `docs/charter.md` C-2 is the ruling behind it (a reserve
   is a ceiling, not a partition) and `docs/decisions.md` ADR 20 is why
   `/api/accounts` serves both numbers on every row with `is_primary` beside them:
-  the relation is not served, so the consumer applies it. Added by T-011, which
+  the relation is not served, so the consumer applies it. `docs/decisions.md`
+  ADR 48 narrows it further — the primary answers to two ceilings now, this one
+  on its five-hour session and `quota.week_ceiling`'s paced value on its week,
+  with this one as that week's fallback whenever the reset will not parse; the
+  paced value is computed per probe and served nowhere, which is why reading the
+  row as a pair is still the best a consumer can do. Added by T-011, which
   served the three fields and had to state which one governs.
 
 ## Unconfirmed — inferred from the code by T-009

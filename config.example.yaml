@@ -26,7 +26,8 @@ primary_account: cuenta1
 
 # Percentage of an account's quota usage at which the dispatcher stops
 # assigning it new work and lets it cool down. Applies to the workers; the
-# primary answers to reserve_pct below. Optional; defaults to 90.
+# primary's session answers to reserve_pct below, and its week to the paced
+# ceiling under that. Optional; defaults to 90.
 quota_threshold_pct: 90
 
 # The line below which the primary accepts fallback work at all, and the

@@ -59,7 +59,10 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   percentages are required and a missing one fails the probe loudly, while
   the `· resets <when>` clause beside each is optional, because the CLI
   drops it from a line reading 0% — and nothing schedules off those
-  timestamps anyway, since recovery is a re-probe.
+  timestamps anyway, since recovery is a re-probe. Since ADR 48 the week's
+  clause is nonetheless *read*: the paced ceiling above is computed from it
+  on every probe, so a missing or unparseable one costs the pacing — the
+  week falls back to `reserve_pct` — rather than costing the reading.
   What the probe cannot see is a refusal. `/usage` is a *local* slash
   command — it reads counters this machine wrote, for $0 and 641 ms, and
   never asks the service — so it says what the account has spent here,

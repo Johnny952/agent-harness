@@ -337,9 +337,7 @@ class _QuotaDecision:
     limit_phrase: str
 
 
-def _quota_decision(
-    cfg: Config, account: str, usage: quota.UsageInfo, now: dt.datetime | None = None,
-) -> _QuotaDecision:
+def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _QuotaDecision:
     """The only place in this module a probe is compared with a ceiling.
 
     `check_quota_ok` and `_recheck_cooling_accounts` both come through here, so
@@ -347,6 +345,11 @@ def _quota_decision(
     worker, and the primary with `pace_primary_week` off, get the one
     configured number on both windows. A paced primary keeps `reserve_pct` on
     its session and answers to `quota.week_ceiling` on its week (ADR 48).
+
+    The clock is `_utc_now` and not a parameter: a probe is always measured
+    against the moment it was taken, and `_utc_now` is the one seam a test
+    replaces, so a second injection point here would only be a way for the two
+    readers to be handed different days.
     """
     threshold = _threshold_for(cfg, account)
     if not cfg.pace_primary_week or not _is_primary(cfg, account):
@@ -354,7 +357,7 @@ def _quota_decision(
             exceeds=quota.exceeds_threshold(usage, threshold),
             limit_phrase=f"the {threshold}% threshold",
         )
-    ceiling = quota.week_ceiling(usage.week_reset, now or _utc_now(), cfg.reserve_pct)
+    ceiling = quota.week_ceiling(usage.week_reset, _utc_now(), cfg.reserve_pct)
     exceeds = usage.session_pct >= threshold or usage.week_pct >= ceiling.pct
     if ceiling.fallback_reason is not None:
         # Logged here rather than at the two call sites, so the gate and the
