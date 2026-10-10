@@ -218,6 +218,14 @@ _ANCHORS = (
     "pointer silently starts lying."
 )
 
+# Every turn re-reads the whole context so far, so a phase's cost grows with the
+# square of its turns, and serial reads were the largest saving T-016's
+# transcripts showed (`docs/plans/token-economy.md` P1).
+_BATCH = (
+    "Independent reads, greps and edits go in the same turn; every extra turn re-reads your "
+    "whole context."
+)
+
 _ARQUITECTO = (
     "This project's docs are in `docs/`, and about this project they outrank your skills and "
     f"any CLAUDE.md. Start at `{INDEX}` and follow it: the learnings and debt indexes carry a "
@@ -258,7 +266,14 @@ _IMPLEMENTADOR = (
     f"If this task resolved debt `{DEBT_INDEX}` already carries, put those entry ids in "
     "`resolved_debt`. That is what closes the entry, and its card, when the branch lands.\n\n"
     "Learnings and debt are proposals, not files: the auditor is the only phase that writes the "
-    "indexes."
+    "indexes.\n\n"
+    # What it just wrote is already in its context, and the Results log's rows
+    # run to thousands of characters: T-016's implementador read both whole
+    # (`docs/plans/token-economy.md` P2, P3).
+    "Check your scope with `git diff --stat`, not the full diff — that is the revisor's read — "
+    "and read only the region you need of a file with offset/limit. To append a row to "
+    "`docs/ROADMAP.md`'s Results log, read only its last row, with "
+    "`tail -n 1 docs/ROADMAP.md | cut -c1-400` run as written; never `sed` or `grep` whole rows."
 )
 
 _REVISOR = (
@@ -337,7 +352,7 @@ def duties(role: str, task_id: str, max_turns: int | None = None) -> str:
     to an error in the middle of a dispatch.
     """
     if role == MAPPER_ROLE:
-        return f"{_MAPPER.format(budget=_budget_line(max_turns))}\n\n{_ANCHORS}"
+        return f"{_MAPPER.format(budget=_budget_line(max_turns))}\n\n{_ANCHORS} {_BATCH}"
     body = {
         "arquitecto": _ARQUITECTO,
         "implementador": _IMPLEMENTADOR.format(implementation_doc=implementation_doc(task_id)),
@@ -346,4 +361,4 @@ def duties(role: str, task_id: str, max_turns: int | None = None) -> str:
     }.get(role)
     if body is None:
         return ""
-    return f"{body}\n\n{_ANCHORS}"
+    return f"{body}\n\n{_ANCHORS} {_BATCH}"

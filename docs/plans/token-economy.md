@@ -84,15 +84,33 @@ live: *"Independent reads, greps and edits go in the same turn; every extra
 turn re-reads your whole context."* Check the effect by measuring tool calls
 per turn on the next task.
 
+**Built by T-022 (2026-10-10).** The line is `project_docs._BATCH`, word for
+word, appended after `_ANCHORS` by `duties`. So it reaches every role that has
+a duties block: arquitecto, implementador, revisor, auditor and the cartografo.
+It has not been measured yet.
+
 **P2 — Never read the Results log to learn its format.** Add a rule to the
 same duties block: *"To append a Results log row, read its header and the
 last row with `tail -n 1 docs/ROADMAP.md | cut -c1-400`; never `sed` or `grep`
 whole rows."* Wrapping the existing rows would also work, but it is ruled out
 because the log is append-only.
 
+**Built by T-022 (2026-10-10), in `project_docs._IMPLEMENTADOR` only.** No
+role's prompt assigns the Results log; a task file does. The implementador is
+the role seen appending to it, the revisor's checkout is thrown away, and the
+auditor's duty is the indexes. The text says "read only its last row", not
+"its header and the last row", because `tail -n 1` returns no header and the
+last row already shows the columns. The command is marked "run as written"
+because it is a pipe, and `dispatcher._ONE_OPERATION_PER_CALL` tells every
+phase to avoid pipes except in a form it is handed.
+
 **P3 — Don't diff what you just wrote.** Add to the implementador's duties: use
 `git diff --stat` to check scope, and use offset/limit reads for files you only
 need a region of. The full diff is the revisor's read, not the implementador's.
+
+**Built by T-022 (2026-10-10).** It is one sentence in the same closing
+paragraph of `project_docs._IMPLEMENTADOR` as P2. No other role's block
+carries it: the revisor is the one meant to read the whole diff.
 
 **P4 — Size tasks to fit one cycle in one window.** This is the larger change,
 and the one the measurement argues for. Because cost is quadratic in a phase's

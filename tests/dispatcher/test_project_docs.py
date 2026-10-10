@@ -161,6 +161,35 @@ def test_every_role_with_a_docs_duty_is_told_how_to_cite(role: str) -> None:
     assert "never by line number" in project_docs.duties(role, "task-1")
 
 
+@pytest.mark.parametrize(
+    "role", ["cartografo", "arquitecto", "implementador", "revisor", "auditor"],
+)
+def test_every_role_with_a_docs_duty_is_told_to_batch_its_calls(role: str) -> None:
+    """Every turn re-reads the whole context, so a serial read costs every
+    role the same way (token-economy P1)."""
+    assert "go in the same turn" in project_docs.duties(role, "task-1")
+
+
+def test_only_the_implementador_is_told_to_check_scope_by_stat() -> None:
+    """The full diff is the revisor's read: told to skip it, the revisor would
+    review a summary (token-economy P3)."""
+    assert "git diff --stat" in project_docs.duties("implementador", "task-1")
+    assert "offset/limit" in project_docs.duties("implementador", "task-1")
+    for role in ("cartografo", "arquitecto", "revisor", "auditor"):
+        assert "git diff --stat" not in project_docs.duties(role, "task-1")
+
+
+def test_only_the_implementador_is_told_how_to_read_the_results_log() -> None:
+    """The one role seen appending a Results row, by reading 46k characters of
+    rows to learn the format (token-economy P2)."""
+    implementador = project_docs.duties("implementador", "task-1")
+
+    assert "`tail -n 1 docs/ROADMAP.md | cut -c1-400`" in implementador
+    assert "never `sed` or `grep` whole rows" in implementador
+    for role in ("cartografo", "arquitecto", "revisor", "auditor"):
+        assert "docs/ROADMAP.md" not in project_docs.duties(role, "task-1")
+
+
 def test_duties_are_empty_for_a_role_that_owes_the_docs_nothing() -> None:
     """A role added elsewhere degrades to saying nothing, not to a KeyError in
     the middle of a dispatch."""
