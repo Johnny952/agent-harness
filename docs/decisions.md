@@ -3208,8 +3208,8 @@ The install clause has been false since 2026-10-08, and every part of that is
 readable in this repository:
 
 - **The agent image ships `bun`.** `docker/agent/Dockerfile` copies the binary
-  out of `oven/bun:1.3.12` in its `bun` build stage, symlinks `bunx` beside it,
-  and sets `BUN_INSTALL_CACHE_DIR=/data/projects/.cache/bun` — the same mount
+  out of the official `bun` image at 1.3.12, in its `bun` build stage, symlinks
+  `bunx` beside it, and sets `BUN_INSTALL_CACHE_DIR=/data/projects/.cache/bun` — the same mount
   the worktrees sit on, so an install hardlinks out of the cache rather than
   fetching, and the cache outlives a container recreate (ADR 39).
 - **The index declares the commands.** `docs/README.md`'s frontmatter carries
@@ -3284,7 +3284,9 @@ with the surfaces T-019 corrects against it, none of them an ADR: the
 the paragraph above *Writing a test* in `front/README.md`; step 2's "Nothing of
 that is written yet" in `docs/debt/T-013-D1.md`, which is stale for the other
 reason — `front/src/routes/-index.test.tsx` has imported `TaskCard` and built a
-memory history since T-012; and two entries whose *What to do* rests on the
+memory history since T-012; the lead-in to that entry's *Fix*, which said one
+half of step 3 "is still open", stale for a reason other than the install
+clause too — step 3(b)'s gate landed on 2026-10-08; and two entries whose *What to do* rests on the
 false clause, `docs/learnings/the-pytest-suite-is-the-whole-gate.md` and
 `docs/learnings/a-docs-claim-about-a-dependency-is-a-claim-about-a-version.md`,
 each with its row in `docs/learnings/README.md`
