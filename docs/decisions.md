@@ -3520,3 +3520,35 @@ primary's row into the session's ceiling and the week's paced one, read from
 `last_probe` — and the debt stays open until it lands. A record is only as
 fresh as the last probe, and an IDLE account that nothing dispatches is not
 probed, so a consumer reads `probed_at` before it reads the numbers.
+
+---
+
+## ADR 50 — `front/`'s lint moves under `test:`, so a red one blocks
+
+**Status:** accepted (by hand on `main`, out of cycle, 2026-10-10). **Narrows ADR
+39 and does not supersede it**: install, then test, then lint is still the
+gate's order, and `lint:` still means a note. What changes is which key holds
+`front/`'s lint, because `docs/charter.md` C-11 superseded C-10 that day.
+
+**Context.** ADR 39 put `cd front && bun run lint` under `lint:` because C-10
+ruled a red lint a note: `eslint .` was red on `main` before any phase touched
+it. By 2026-10-10 it reports zero problems — errors cleared on 2026-10-08,
+warnings with T-015-D1 — which is the condition C-10 set, and C-11 promotes it.
+
+**Decision.** The command moves from the index's `lint:` key to the end of its
+`test:` list, after `bun run test`. `dispatcher/gates.py` does not change. A red
+`test:` entry already blocks, and `_could_not_run` already reads a command that could not
+start (exit 127, or missing-module output when the install did not succeed) as
+a note rather than a block, for the lint as much as for the suite. The alternative was a gate-level switch that made `lint:` blocking. It
+was not taken: it would change what `lint:` means for every project under
+`projects_root` to serve one project's ruling, and C-11 promotes `front/`'s
+lint only.
+
+**Consequences.** A red lint now reads `` `cd front && bun run lint` failed ``
+under the tests gate, not the lint gate. The command says what it is, and the
+finding loses only the label. This project has no `lint:` key now, so the
+lint loop in `run_gates` runs nothing here. It stays, for projects that keep
+one. The phases' `Bash(bun run lint*)` permission in `config.yaml` is
+unchanged. A phase that runs the lint itself before handing off now runs a
+check that can block its round.
+

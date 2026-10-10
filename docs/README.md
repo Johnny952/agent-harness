@@ -4,7 +4,7 @@ test:
   - python3 -m pytest
   - cd front && bun run typecheck
   - cd front && bun run test
-lint: cd front && bun run lint
+  - cd front && bun run lint
 ---
 
 # ia-harness
@@ -52,14 +52,15 @@ in order from the worktree root, and the dispatcher's test gate runs them in
 the order install, test, lint. `install:` is there because a fresh worktree has
 no `node_modules`: it is git-ignored, and bun fills it from a cache on the
 projects mount in seconds. A failing install is a note, not a block. A failing
-`test:` entry blocks, the type check included. A failing `lint:` is only ever a
-note, which is `docs/charter.md` C-10's split: a style finding is the revisor's
-to weigh, not the dispatcher's to enforce. `eslint .` exits zero on `main` since
+`test:` entry blocks, the type check and `front/`'s lint included. The lint sat
+under `lint:` as a note until 2026-10-10 (`docs/charter.md` C-10), while `eslint
+.` was red on lines no phase had touched; it exits zero on `main` since
 2026-10-08, and with no warnings at all since 2026-10-10 — ten until T-015 made
 the board's `rows` referentially stable (`docs/decisions.md` ADR 40), then nine
 `react-refresh/only-export-components`, filed as `docs/debt/T-015-D1.md` and
-resolved by the operator out of cycle. A clean tree does not make the lint
-blocking by itself: promoting it is C-10's, and a human's. No mapper writes `install:`
+resolved by the operator out of cycle — and C-11 moved it to `test:` that day
+(`docs/decisions.md` ADR 50). This project has no `lint:` key now; for any other
+project a failing `lint:` is still only a note. No mapper writes `install:`
 or `lint:` — `dispatcher/project_docs.py` asks a mapper for `build:` and `test:`
 only — so they are added by hand, by whoever decides a project needs them.
 
@@ -80,7 +81,7 @@ externally-managed.
 | `dispatcher/state_machine.py` | One JSON file per account: `IDLE`/`BUSY`/`PRE_COOLDOWN`/`COOLING_DOWN`, plus `rate_limited_at`, the only record of a refusal the harness can observe, and `last_probe`, the last `/usage` probe and the ceilings it was held to (ADR 49). |
 | `dispatcher/quota.py` | The `/usage` probe, the threshold that parks an account before a phase spends into a wall, and the primary's weekly ceiling paced against the reset that probe reports (ADR 48). |
 | `dispatcher/operator.py` | What the two read-and-repair verbs do: `status` reports the pool without writing to it, and `release-account` is the only way back from an account left `BUSY` by a crashed dispatcher. |
-| `dispatcher/gates.py` | The four checks that run between implementador and revisor with no model in the loop. Only the test gate blocks, and only on a red `test:` entry; installs, linters and the rest ride along as notes. |
+| `dispatcher/gates.py` | The four checks that run between implementador and revisor with no model in the loop. Only the test gate blocks, and only on a red `test:` entry; installs, `lint:` entries and the rest ride along as notes. |
 | `dispatcher/context_transfer.py` | `TaskFile`: the `.hive/tasks/<id>.md` card, its frontmatter, and the status block a resumed phase reads. |
 | `dispatcher/handoff.py` | What one role leaves the next, as pointers rather than prose, and the budgets that hold it to a size. |
 | `dispatcher/project_docs.py` | This contract. Where a project's docs live, what each role owes them, and the frontmatter above. |
@@ -92,7 +93,7 @@ externally-managed.
 | `observability/collector/` | A Flask endpoint and one SQLite table, `events`, fed by the agents' hooks. |
 | `observability/api/` | The read API: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`, `/api/events`, `/api/debt`, `/api/phases`, `/api/learnings`, every one `{"data", "warnings"}`. Writes nothing and parses nothing itself — it reads through the dispatcher's own readers, and `lock_expired`, `stale` and `in_phase_table` are the facts it derives. Phase 1 of the board plan; `docs/decisions.md` ADR 3–5, ADR 10 and ADR 41. |
 | `observability/auth.py` | The auth the observability services share: a human's Basic credential, a service's bearer token, one copy of each timing-safe comparison. |
-| `front/` | The operations console: a TanStack Start app in TypeScript, twelve screens, with the queue, the learnings table and a chat dock the board never had. Six of them read the real api — board, task detail, pool, debt and the live tail since T-012, through a bearer forward in the console's own server half (`docs/decisions.md` ADR 24), the task detail's phase timeline over a sixth route since T-013 (ADR 27), and the learnings table over a seventh since T-016 (ADR 41, ADR 42); the other six — approvals, tokens, session logs, role models, backlog and queue — have no backend at all and still read mock fixtures. In the repo since 2026-10-01, run with `bun`, not a compose service. It has a `typecheck`, a `lint` and a `test` since T-013, and the test gate runs all three through the frontmatter above since 2026-10-08 (`docs/decisions.md` ADR 39): a red type check or test blocks a round, a red lint is a note. `docs/charter.md` C-8 makes it the console; `front/README.md` is its own entry point. |
+| `front/` | The operations console: a TanStack Start app in TypeScript, twelve screens, with the queue, the learnings table and a chat dock the board never had. Six of them read the real api — board, task detail, pool, debt and the live tail since T-012, through a bearer forward in the console's own server half (`docs/decisions.md` ADR 24), the task detail's phase timeline over a sixth route since T-013 (ADR 27), and the learnings table over a seventh since T-016 (ADR 41, ADR 42); the other six — approvals, tokens, session logs, role models, backlog and queue — have no backend at all and still read mock fixtures. In the repo since 2026-10-01, run with `bun`, not a compose service. It has a `typecheck`, a `lint` and a `test` since T-013, and the test gate runs all three through the frontmatter above since 2026-10-08 (`docs/decisions.md` ADR 39): a red type check or test blocks a round, and so does a red lint since 2026-10-10 (`docs/charter.md` C-11, ADR 50). `docs/charter.md` C-8 makes it the console; `front/README.md` is its own entry point. |
 | `hooks/emit_event.py` | The Claude Code hook the agent containers POST from. |
 | `skills/` | The vendored role skills, trimmed from three MIT upstreams. `skills/README.md` says which and why. |
 | `docker/` | One Dockerfile per image and three compose files. `docker/agent/Dockerfile` is where the agent toolchain is pinned. |

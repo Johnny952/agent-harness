@@ -183,8 +183,8 @@ permission_mode: acceptEdits
 # that leaving it empty means the test gate is the only thing that ever runs
 # the code.
 #
-# The `bun` entries are front/'s `install:`, `test:` and `lint:` keys in this
-# repo's own docs/README.md; drop them if no project under `projects_root`
+# The `bun` entries are front/'s `install:` and `test:` commands in this
+# repo's own docs/README.md, its lint among the `test:` ones since C-11; drop them if no project under `projects_root`
 # has a front/. Install is the frozen-lockfile form only, because a fresh
 # worktree has no node_modules and a phase should not change the lockfile.
 allowed_tools:
