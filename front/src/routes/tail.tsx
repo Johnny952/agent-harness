@@ -126,6 +126,16 @@ function TailPage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [filtered.length, paused]);
 
+  // Nothing to show means no scroller: every arm above the rows unmounts it,
+  // and `scrollTop` is this component's state, so it outlives the div. The next
+  // div mounts at DOM `scrollTop` 0, and while paused the effect above does not
+  // move it, so a stale offset would point the window into the middle of the
+  // buffer with the rows translated out of view. Reset it with the scroller.
+  // `docs/debt/T-017-D3.md`.
+  useEffect(() => {
+    if (filtered.length === 0) setScrollTop(0);
+  }, [filtered.length]);
+
   const sources = Array.from(new Set(events.map((e) => e.source_app)));
   const types = Array.from(new Set(events.map((e) => e.event_type)));
 
