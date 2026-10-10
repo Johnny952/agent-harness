@@ -3180,3 +3180,145 @@ the build, which is a failure a reader cannot miss — unlike a plausible senten
 in a README, which sat there from T-013 to T-018. That is why the bullet points
 at this number instead of carrying the mechanism: the mechanism belongs to a
 version, and the decision does not.
+
+## ADR 46 — `front/node_modules` is installable by any phase whose card grants it, and no granted script regenerates the route tree
+
+**Status:** accepted (T-019, 2026-10-10). **Narrows ADR 24 and does not
+supersede it**: one parenthetical clause of ADR 24's *Context* is false, and
+both its decision and the conclusion that clause was there to support are
+untouched — so that entry keeps its number, its `**Status:**` line, its
+parenthetical and an unstruck heading
+(`docs/learnings/an-adrs-context-can-be-false-while-its-decision-stands.md`,
+and ADR 45's own shape, which narrowed ADR 30 the same way a day earlier).
+
+**Context.** The paragraph in ADR 24 that establishes the two facts the bearer
+forward rests on parenthesises that `front/node_modules` "does not exist in
+this repository and installing it is not authorised". That clause is the row
+[`T-018-D1`](debt/T-018-D1.md), and the same claim had reached three more
+documentation surfaces in other words: the closing paragraph on `T-015-D1` in
+`docs/debt/README.md` ("no phase of this project can run `bun` and a worktree
+has no `node_modules`"), the `T-013-D1` row in that index, which says "no gate
+*runs* any of the three scripts" in a cell that opens by saying the gate runs
+them, and the paragraph above *Writing a test* in `front/README.md`
+("**Nothing under `front/` runs in the loop**", "blocked on an agent image with
+`bun` in it"). One stale fact in four places, each citing another rather than
+the tree.
+
+The install clause has been false since 2026-10-08, and every part of that is
+readable in this repository:
+
+- **The agent image ships `bun`.** `docker/agent/Dockerfile` copies the binary
+  out of the official `bun` image at 1.3.12, in its `bun` build stage, symlinks
+  `bunx` beside it, and sets `BUN_INSTALL_CACHE_DIR=/data/projects/.cache/bun`
+  — the same mount the worktrees sit on, so an install hardlinks out of the
+  cache rather than fetching, and the cache outlives a container recreate
+  (ADR 39).
+- **The index declares the commands.** `docs/README.md`'s frontmatter carries
+  `install: cd front && bun install --frozen-lockfile`, two `test:` entries
+  spelled `cd front && bun run typecheck` and `cd front && bun run test`, and
+  `lint: cd front && bun run lint`. The dispatcher's test gate has run them in
+  the order install, test, lint since that date (ADR 39), so the three scripts
+  are not merely runnable by a phase — they already run on every round, between
+  implementador and revisor.
+- **Phases run it.** All four phases of T-018 and every phase of T-019 ran
+  `cd front && bun install --frozen-lockfile`: `486 packages installed`, under
+  a second with a warm cache. The install is per worktree and not shared (ADR
+  39), and which phases share one is `dispatcher/docker_exec.py:create_worktree`
+  — the writer roles check the branch out at a persistent
+  `worktrees/<task-id>/work`, so the implementador inherits the arquitecto's
+  `node_modules`, while a reviewing role's path is rebuilt before every add and
+  never does
+  (`/data/.hive/learnings/inbox/T-019-only-the-revisor-gets-its-own-worktree.md`,
+  narrowing T-018's entry). Running it unconditionally is the cheap default:
+  13 ms when it is already filled.
+- **The inbox entry the clause agreed with is retired.**
+  `/data/.hive/learnings/inbox/T-015-bun-is-refused-in-a-phase.md` carries
+  `status: refuted` and `refuted_by: T-016`.
+
+What makes the install reproducible rather than lucky is `front/bun.lock` plus
+`--frozen-lockfile`, which installs what the lockfile pins and fails instead of
+resolving anything new — so `front/bunfig.toml`'s `minimumReleaseAge` guard
+never has a resolution to apply to. The cache on the projects mount is what
+makes it fast; the lockfile is what makes it the same tree in every worktree.
+
+What is **not** false is the conclusion ADR 24 drew from the clause: a task
+here cannot run the route generator, so a shape needing a new entry in
+`front/src/routeTree.gen.ts` cannot ship complete from a phase. The commands a
+card grants are the install plus `front/package.json`'s `typecheck`
+(`tsc --noEmit`), `test` (`vitest run`) and `lint` (`eslint .`). None of them
+loads the generator: it arrives with the `tanstackStart` plugin that
+`front/vite.config.ts` pulls in through `@lovable.dev/vite-tanstack-config`,
+which only `dev`, `build`, `build:dev` and `preview` run — none of them
+granted — and `front/vitest.config.ts` exists so that a test run does not load
+that plugin, listing `plugins: [react()]` and nothing else, which its own
+docblock states as the reason. Measured rather than argued:
+`git status --porcelain` came back empty in this worktree after the install and
+all three scripts had run, with `routeTree.gen.ts` tracked.
+
+**Decision.** *`front/node_modules` is installable by any phase whose card
+grants it, `cd front && bun install --frozen-lockfile` is the form, and no
+command a card grants regenerates `front/src/routeTree.gen.ts`.*
+
+- **The card is the authority, and this file is not.** A phase reads its own
+  command grant and runs what it names. ADR 24's clause is not a standing
+  prohibition and has not been one since ADR 39; a card that does not grant the
+  install is a card whose task does not need it, which is not the same as a
+  rule that a phase may not install.
+- **The form is `cd front && bun install --frozen-lockfile`**, run from the
+  worktree root, once per phase, in that phase's own worktree.
+- **The lockfile is what makes it reproducible**, and the cache on the projects
+  mount is what makes it cheap. A task that needs a dependency *changed* moves
+  `front/bun.lock` and is a different decision; this entry is no licence for
+  that.
+- **ADR 24's conclusion stands.** No granted command runs the route generator,
+  so a change needing a new entry in `front/src/routeTree.gen.ts` still cannot
+  ship complete from a phase, and ADR 45's protection — a default whose change
+  breaks the build loudly — is unaffected.
+- **A doc saying a phase cannot run `bun` is wrong rather than dated.** Where
+  it is live prose, it is corrected and pointed at this number instead of
+  carrying its own copy of the mechanism
+  (`docs/learnings/a-docs-claim-about-a-dependency-is-a-claim-about-a-version.md`).
+
+**Consequences.** `docs/debt/T-018-D1.md` is resolved by this entry together
+with the surfaces T-019 corrects against it, none of them an ADR: the
+`T-015-D1` closing paragraph and the `T-013-D1` row in `docs/debt/README.md`;
+the paragraph above *Writing a test* in `front/README.md`; step 2's "Nothing of
+that is written yet" in `docs/debt/T-013-D1.md`, which is stale for the other
+reason — `front/src/routes/-index.test.tsx` has imported `TaskCard` and built a
+memory history since T-012; the lead-in to that entry's *Fix*, which said one
+half of step 3 "is still open", stale for a reason other than the install
+clause too — step 3(b)'s gate landed on 2026-10-08; and two entries whose
+*What to do* rests on the false clause,
+`docs/learnings/the-pytest-suite-is-the-whole-gate.md` and
+`docs/learnings/a-docs-claim-about-a-dependency-is-a-claim-about-a-version.md`,
+each with its row in `docs/learnings/README.md`
+(`docs/learnings/correcting-an-index-entry-is-two-edits.md`), `status`
+unchanged on both.
+
+Four surfaces are deliberately left, so that a later round does not re-raise
+them:
+
+- **ADR 24 itself**, append-only, unstruck, parenthetical intact. This entry is
+  the only correction it gets.
+- **The declaration-era sentences in `docs/debt/T-013-D1.md`** — *What*'s "A
+  phase may not run `bun install`", *Why it stays*, and the dated `Done …by
+  hand` blocks in *Fix* steps 1 and 3(b). They are that declaration as it was
+  made and measurements with their dates on them, so the entry takes one added
+  paragraph in its own idiom — the one it already uses for a wrong clause of
+  the declaration — rather than a rewrite.
+- **The implementation notes** that describe the retired condition:
+  `docs/implementations/T-012.md`, `T-013.md`, `T-016.md` and `T-018.md`. They
+  are records (`dispatcher/project_docs.py:RECORD_DOCS`), and this entry is the
+  newer record their disagreement is recorded in.
+- **`docs/ROADMAP.md` V0.6c and V0.6d**, whose "no phase can run it" bullets
+  give the install clause as half their reason. The conclusion stands on
+  grounds this task does not re-decide — those checks want a browser and the
+  compose stack — so the clause is declared as `found` debt instead of being
+  edited here, because rewriting the reason without ruling on the browser would
+  put a claim about what a phase can run into a doc whose whole job is saying
+  what has been verified.
+
+No source, test or configuration file changes. `front/vite.config.ts` is
+untouched (`docs/charter.md` C-9), and nothing about the gate moves: ADR 39
+already runs the three scripts, and this entry only writes down what a phase
+may do with them itself.

@@ -62,10 +62,12 @@ cd front && bun install --frozen-lockfile
 and then grep the package for the identifier — the zod schema is where a
 default is declared, and the function that consumes it is where the behaviour
 is. Two phases of T-018 did this independently and got the same four rows.
-`docs/decisions.md` **ADR 24** and `docs/debt/README.md` both still say a phase
-cannot do this; they are wrong and the row is
-[`docs/debt/T-018-D1.md`](../debt/T-018-D1.md), so read your own card's command
-grant first.
+`docs/decisions.md` **ADR 24** still reads as though a phase cannot do this,
+and **ADR 46** is the entry that narrows it: the install is any phase's whose
+card grants it, the form is above, and the row that asked for the narrowing is
+[`docs/debt/T-018-D1.md`](../debt/T-018-D1.md), resolved by T-019. Read your own
+card's command grant first either way — it, and not a doc, is what says whether
+you may install.
 
 Then write the doc so the mechanism lives in **one** place. T-018's bullet
 names the real knob and its `-` default and then points at
