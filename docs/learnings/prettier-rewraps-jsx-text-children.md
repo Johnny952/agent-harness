@@ -1,13 +1,22 @@
 # Prettier rewraps JSX text children, so editing one word of screen copy turns untouched lines red
 
-**When it applies:** you edited a sentence of copy inside JSX in `front/src/` —
-an `EmptyState` body, a `Banner`'s children, a `<p>` — and `bun run lint` is one
-of your gates.
+**When it applies:** you edited a sentence of copy sitting **between tags** in
+`front/src/` — a `Banner`'s children, a `<p>` — and `bun run lint` is one of
+your gates.
 
 **Status:** unconfirmed — reported by T-016's implementador, which hit it seven
 times across two files. It sharpens
 [`fronts-lint-turns-a-long-line-into-an-error-not-a-warning`](fronts-lint-turns-a-long-line-into-an-error-not-a-warning.md),
 whose "prettier does not rewrap prose" is true of **comments** only.
+
+This entry's trigger named "an `EmptyState` body" until 2026-10-10, when T-017
+added five of them past `printWidth` 100 and the lint stayed green: a `title` or
+`body` is a string in a JSX *attribute*, which prettier cannot break at all, and
+it is a different shape from the text children this entry is about. That half is
+now
+[`an-emptystate-body-is-an-attribute-string-prettier-leaves-alone`](an-emptystate-body-is-an-attribute-string-prettier-leaves-alone.md);
+nothing else here changed, and the `status` stays as it was —
+[`correcting-an-index-entry-is-two-edits`](correcting-an-index-entry-is-two-edits.md).
 
 ## Symptom
 
