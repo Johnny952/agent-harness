@@ -184,8 +184,8 @@ login.
   (`docs/decisions.md` ADR 32). Nothing answers on 8790 now and
   `docker compose build board` has no service to build, so this check cannot be
   re-run and is not meant to be. The block is left as written below because it
-  is what the passing row attests to. V0.6c, V0.6d and V0.6e are the checks that
-  cover those screens from here on.
+  is what the passing row attests to. V0.6c, V0.6d, V0.6e and V0.6f are the
+  checks that cover those screens from here on.
 - A new id rather than a re-use of `V0.6`: that id belongs to the events
   dashboard's auth on 8788, which T-010 deleted, so the
   `2026-09-16 | V0.6 | PASS` row in the results log is that superseded check
@@ -414,22 +414,43 @@ login.
   1. With the filter box empty, note how many rows each screen shows.
   2. Type a string nothing can match — `obserability` is the card's own example
      — into each screen's filter box.
-  3. On `/tail` only, put the filter box back to empty and set the `source`
-     picker to a value no buffered event carries, if one is offered.
-  4. Clear each filter box again.
+  3. On `/tail` only, put the filter box back to empty and set the `source` and
+     `type` pickers to a **pair** that no single buffered event carries — a
+     `source` taken from one row together with a `type` only other rows carry.
+     It has to be a pair: `front/src/routes/tail.tsx` builds both option lists
+     out of the unfiltered buffer, so every value either picker offers matches
+     at least one buffered event on its own, and no single-picker setting can
+     ever reach this state. Read the `source` and `type` columns of the rows on
+     screen in step 1 to pick the pair. A buffer whose rows happen to cover
+     every source-type combination offers no such pair either; if that is what
+     is on screen, record step 3 as not applicable to this buffer rather than
+     failing it, and say which sources and types were offered.
+  4. Clear each filter box again, and put `/tail`'s `source` and `type` pickers
+     back to `all` — step 3 left one of them off `all`, and the boxes alone do
+     not restore that screen.
 - Pass:
   - Step 2 shows, on `/learnings` and `/debt`, an empty state whose title
     quotes the string just typed and whose body offers to clear the filter box
     and names how many rows that brings back. Neither screen says *no phase has
-    written a learning entry* or *the debt index is empty*, and **no sentence on
-    either screen mentions the harness, a phase or the api**.
+    written a learning entry* or *the debt index is empty*, and **neither
+    sentence of the empty state itself mentions the harness, a phase or the
+    api**. That clause is about the state's own title and body and must not be
+    read as being about the whole screen: step 2 needs a collection with rows in
+    it, and with rows served `/learnings`' `PageHeader` subtitle always names a
+    phase — *in the order a phase sees them* — and its over-cap `Banner` names
+    the dispatcher. Both are correct and neither fails this check;
+    `docs/ui.md` *Absent, empty and broken are three different things* binds the
+    No-match state's two sentences, not every sentence around them.
   - Step 2 on `/tail` shows *No event matches these filters*, naming the payload
     filter and the two pickers, over a region that is not blank — the silent
     empty region is what this check exists to catch, and it is what shipped
     before T-017.
-  - Step 3 reaches the same state through a picker rather than the box, which is
-    the case the wording has to cover without quoting a query.
-  - Step 4 restores every row counted in step 1 on all three screens.
+  - Step 3 reaches the same state through the two pickers rather than the box,
+    which is the case the wording has to cover without quoting a query — or is
+    recorded as not applicable on a buffer that offers no non-covering pair,
+    which is a fact about the rows and not about the console.
+  - Step 4 restores every row counted in step 1 on all three screens, pickers
+    included.
   - `/sessions` is **not** part of this check and its one conflated sentence is
     expected: it is fixture-backed, so the state is unreachable there (ADR 43).
   - A collection that is genuinely empty is V0.6d step 2 and V0.6e step 4's
