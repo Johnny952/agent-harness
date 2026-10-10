@@ -3454,3 +3454,69 @@ once something serves the paced value, which is filed as this task's debt and
 belongs to whichever task next touches that route. `dispatcher/operator.py`'s
 `status` listing is inside this task and does print both, so the one surface an
 operator reads without a browser is not wrong in the meantime.
+
+## ADR 49 — the last `/usage` probe is persisted in the account's state file and served on its row
+
+**Status:** accepted (T-020-D1, server half, 2026-10-10). **Narrows ADR 18 and
+does not supersede it**: ADR 18's rule that a probe number is not served until
+something persists it with its time stands, and this entry is the something.
+What it narrows is the consequence ADR 18 drew from the rule, that the probe's
+numbers stay unserved. ADR 20's columns and ADR 48's ceilings are unchanged;
+this entry serves what ADR 48 computes and did not keep.
+
+**Context.** Since ADR 48 the primary's week parks on a ceiling that is a
+property of one probe — paced against the reset that probe read, recomputed
+every time — and nothing kept it. `/api/accounts` could serve `reserve_pct`,
+which is the session's ceiling and the week's fallback, and nothing else, so the
+console's pool screen labels the primary's week with a number that no longer
+governs it (`docs/debt/T-020-D1.md`). ADR 18's `usage_pct` gap is the same
+missing record seen from the gauge: `state_machine` persisted a probe's
+outcome — a state, a `rate_limited_at` — and never the probe.
+
+**Decision.** `dispatcher/dispatcher.py:_quota_decision` writes the probe it has
+just decided on, through `state_machine.record_probe`, as `last_probe` in that
+account's state file. It is the one place a probe meets a ceiling and both
+`check_quota_ok` and `_recheck_cooling_accounts` call it (ADR 48), so the gate
+and the recheck both record and neither can forget to.
+
+- **Where: the state file, because the api already reads it.** The read api
+  reads configuration and the dispatcher's own state files and nothing else, so
+  a probe there is served by a reader that exists; any other store is a new
+  thing for the api to open, for the deployment to mount, and for an
+  unreadable-file rule to be written for. The file is per account, which is
+  what a probe is about, and its writer is atomic already. `set_state` rebuilds
+  the document, so it carries `last_probe` by hand as it carries
+  `rate_limited_at`; `record_rate_limit` and `clear_rate_limit` rewrite the
+  document they read and keep it without a change.
+- **What: one record, the latest, not a series.** `probed_at` (epoch seconds,
+  the unit `rate_limited_at` is stored in, taken from the same `_utc_now` the
+  ceiling was computed against), `session_pct` and `week_pct`, the raw
+  `session_reset` and `week_reset` clauses, `exceeds`, `session_ceiling_pct`,
+  and `week_ceiling`. For a paced primary `week_ceiling` is `paced: true` with
+  `quota.week_ceiling`'s `pct`, `days_left`, the parsed reset as ISO 8601 and
+  `fallback_reason` (null unless it fell back to `reserve_pct`). For a worker,
+  and for the primary with `pace_primary_week` off, it is `paced: false` with
+  the configured threshold as `pct` and the rest null. The raw clauses go in
+  beside the parse because a fallback is explained only by the text that would
+  not parse. A series belongs to `docs/plans/token-economy.md` **P5**'s
+  collector, and nothing here pre-empts it.
+- **Served: `last_probe` on every `/api/accounts` row.** Null when the account
+  was never probed. A record that is there and not one — not an object, or
+  missing a key — nulls itself only, with its own warning, after the state half
+  of the row has been read: the account's state is still true when its probe is
+  not. A file the state half cannot read nulls `last_probe` with the rest and
+  adds no second warning. `reserve_pct` and every other column stay as ADR 20
+  set them.
+- **A failed write never touches the decision.** `_record_probe` catches and
+  logs everything. The record is for the console and the decision keeps an
+  account off a wall; a write error must neither crash the gate nor reach
+  `_recheck_cooling_accounts`'s fail-open `except`, which would read it as a
+  failed probe and wave the account back to IDLE.
+
+**Consequences.** ADR 18's precondition for `usage_pct` is met: a percentage
+with a stamp is served, and a console can show it with its age. The pool
+screen relabel is the half of T-020-D1 this entry does not do — splitting the
+primary's row into the session's ceiling and the week's paced one, read from
+`last_probe` — and the debt stays open until it lands. A record is only as
+fresh as the last probe, and an IDLE account that nothing dispatches is not
+probed, so a consumer reads `probed_at` before it reads the numbers.

@@ -76,7 +76,7 @@ externally-managed.
 | `dispatcher/cli.py` | The verbs: `run-task`, `bootstrap-project`, `merge-task`, `cleanup-task`, `learnings`, `status`, `release-account`. |
 | `dispatcher/config.py` | `config.yaml` into dataclasses. `config.example.yaml` is the commented copy and the place a new key gets explained. |
 | `dispatcher/docker_exec.py` | Every command that leaves the dispatcher process. Builds the `claude` argv, wraps it in an in-container `timeout`, and owns the worktree checkouts each role gets. |
-| `dispatcher/state_machine.py` | One JSON file per account: `IDLE`/`BUSY`/`PRE_COOLDOWN`/`COOLING_DOWN`, plus `rate_limited_at`, the only record of a refusal the harness can observe. |
+| `dispatcher/state_machine.py` | One JSON file per account: `IDLE`/`BUSY`/`PRE_COOLDOWN`/`COOLING_DOWN`, plus `rate_limited_at`, the only record of a refusal the harness can observe, and `last_probe`, the last `/usage` probe and the ceilings it was held to (ADR 49). |
 | `dispatcher/quota.py` | The `/usage` probe, the threshold that parks an account before a phase spends into a wall, and the primary's weekly ceiling paced against the reset that probe reports (ADR 48). |
 | `dispatcher/operator.py` | What the two read-and-repair verbs do: `status` reports the pool without writing to it, and `release-account` is the only way back from an account left `BUSY` by a crashed dispatcher. |
 | `dispatcher/gates.py` | The four checks that run between implementador and revisor with no model in the loop. Only the test gate blocks, and only on a red `test:` entry; installs, linters and the rest ride along as notes. |

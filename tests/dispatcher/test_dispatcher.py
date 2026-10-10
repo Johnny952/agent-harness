@@ -29,6 +29,7 @@ from dispatcher.state_machine import (
     AccountState,
     get_busy_since,
     get_current_task,
+    get_last_probe,
     get_rate_limited_at,
     get_state,
     record_rate_limit,
@@ -5052,6 +5053,129 @@ def test_the_paced_primarys_session_still_answers_to_the_reserve(tmp_path, monke
 
     assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
     assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+
+
+# --- the last probe, persisted (ADR 49) -------------------------------------
+#
+# Same recorded probes and supplied clock as the ADR 48 block above, read back
+# out of the state file `_quota_decision` wrote them to.
+
+
+def test_the_gate_records_a_paced_primarys_probe_and_both_its_ceilings(
+    tmp_path, monkeypatch
+) -> None:
+    """Everything the park log says, kept: the probe's own numbers, the session's
+    reserve, and the week's paced ceiling with the reset and days-left it was
+    computed from. Recorded and then parked, so it also survived the park."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+    probe = get_last_probe(cfg.state_dir, "cuenta1")
+    assert probe == {
+        "probed_at": _PACE_NOW.timestamp(),
+        "session_pct": 10,
+        "week_pct": 40,
+        "session_reset": None,
+        "week_reset": _RESET_IN_5_DAYS,
+        "exceeds": True,
+        "session_ceiling_pct": 60,
+        "week_ceiling": {
+            "paced": True,
+            "pct": pytest.approx(19.1667, abs=1e-3),
+            "days_left": pytest.approx(5.0),
+            "reset": "2026-10-14T12:00:00+00:00",
+            "fallback_reason": None,
+        },
+    }
+    # Plain JSON all the way down: the api serves this record as it reads it.
+    assert json.loads(json.dumps(probe)) == probe
+
+
+def test_the_recheck_records_its_probe_too(tmp_path, monkeypatch) -> None:
+    """The release path writes the probe that released the account, so the row
+    never shows the numbers that parked it after they stopped being true."""
+    cfg = _make_pool_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.PRE_COOLDOWN)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_36_HOURS)
+
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == ["cuenta1"]
+
+    probe = get_last_probe(cfg.state_dir, "cuenta1")
+    assert probe["exceeds"] is False
+    assert probe["week_reset"] == _RESET_IN_36_HOURS
+    assert probe["week_ceiling"]["pct"] == pytest.approx(68.75)
+    assert probe["week_ceiling"]["days_left"] == pytest.approx(1.5)
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+
+
+def test_a_fallback_primarys_record_says_why_it_was_not_paced(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=70, reset_clause=None)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    week = get_last_probe(cfg.state_dir, "cuenta1")["week_ceiling"]
+    assert week == {
+        "paced": True,
+        "pct": 60.0,
+        "days_left": None,
+        "reset": None,
+        "fallback_reason": "the week line carried no reset clause",
+    }
+
+
+@pytest.mark.parametrize(
+    ("account", "overrides", "threshold"),
+    [("cuenta2", {}, 90), ("cuenta1", {"pace_primary_week": False}, 60)],
+    ids=["worker", "primary-with-pacing-off"],
+)
+def test_an_unpaced_record_carries_the_one_configured_threshold(
+    tmp_path, monkeypatch, account, overrides, threshold
+) -> None:
+    cfg = _make_pool_config(tmp_path, **overrides)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    assert dispatcher_mod.check_quota_ok(cfg, account) is True
+
+    probe = get_last_probe(cfg.state_dir, account)
+    assert (probe["week_pct"], probe["exceeds"], probe["session_ceiling_pct"]) == (
+        40, False, threshold,
+    )
+    assert probe["week_ceiling"] == {
+        "paced": False, "pct": threshold, "days_left": None, "reset": None,
+        "fallback_reason": None,
+    }
+
+
+def test_a_failed_record_changes_neither_the_gate_nor_the_recheck(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The record is for the console. A write that fails must not crash the
+    gate, and must not reach the recheck's fail-open `except` — which would read
+    it as a failed probe and wave a parked account straight back to IDLE."""
+    cfg = _make_pool_config(tmp_path)
+    _pace_probe(monkeypatch, session_pct=10, week_pct=40, reset_clause=_RESET_IN_5_DAYS)
+
+    def refuse(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(dispatcher_mod.state_machine, "record_probe", refuse)
+
+    with caplog.at_level("WARNING"):
+        assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+        assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+        assert dispatcher_mod._recheck_cooling_accounts(cfg) == []
+
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+    assert get_last_probe(cfg.state_dir, "cuenta1") is None
+    failures = [
+        r.getMessage() for r in caplog.records if "could not record the quota probe" in r.getMessage()
+    ]
+    assert len(failures) == 2
+    assert "No space left on device" in failures[0]
 
 
 def test_a_phase_with_a_live_heartbeat_is_left_alone_however_long_it_runs(tmp_path) -> None:

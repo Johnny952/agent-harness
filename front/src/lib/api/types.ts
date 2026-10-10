@@ -212,14 +212,44 @@ export interface TaskDetail extends Task {
 export type AccountState = "IDLE" | "BUSY" | "PRE_COOLDOWN" | "COOLING_DOWN";
 
 /**
- * The nine keys `/api/accounts` answers, under the console's own name for one of
+ * The ceiling one probe's week was held to, as the dispatcher's gate recorded it
+ * (ADR 49). `paced` is a primary under ADR 48's ramp; otherwise `pct` is the one
+ * configured threshold and the other three are `null`. A paced week that fell
+ * back to `reserve_pct` keeps `paced: true` and says why in `fallback_reason`.
+ */
+export interface ProbeWeekCeiling {
+  paced: boolean;
+  pct: number;
+  days_left: number | null;
+  /** ISO 8601, the reset the ceiling was paced against. */
+  reset: string | null;
+  fallback_reason: string | null;
+}
+
+/** The last `/usage` probe of one account and what it was held to (ADR 49). */
+export interface LastProbe {
+  /** Epoch seconds, the unit the api serves `rate_limited_at` in. */
+  probed_at: number;
+  session_pct: number;
+  week_pct: number;
+  /** The CLI's raw reset clauses, `null` where the line carried none. */
+  session_reset: string | null;
+  week_reset: string | null;
+  exceeds: boolean;
+  session_ceiling_pct: number;
+  week_ceiling: ProbeWeekCeiling;
+}
+
+/**
+ * The ten keys `/api/accounts` answers, under the console's own name for one of
  * them: the api serves `current_task` and `client.ts` maps it (ADR 17).
  *
- * `usage_pct` and `rank` are gone and `heartbeat` with them — nothing persists
- * usage, nothing ranks accounts, and an account's heartbeat is the heartbeat of
- * the task it is running, which is a join across two routes (ADR 17, ADR 18). The
- * three thresholds are per-row because the envelope has no slot beside `data` for
- * a pool-wide fact (ADR 20).
+ * `rank` is gone and `heartbeat` with it — nothing ranks accounts, and an
+ * account's heartbeat is the heartbeat of the task it is running, which is a join
+ * across two routes (ADR 17, ADR 18). `usage_pct` is not a field: the probe's
+ * percentages are served stamped, inside `last_probe` (ADR 49, narrowing ADR 18).
+ * The three thresholds are per-row because the envelope has no slot beside `data`
+ * for a pool-wide fact (ADR 20).
  */
 export interface Account {
   name: string;
@@ -232,6 +262,12 @@ export interface Account {
   state: AccountState | null;
   current_task_id: string | null;
   rate_limited_at: string | null;
+  /**
+   * `null` when the account was never probed or its record is unreadable (the
+   * latter with a warning). Always served, so not optional: the api answers the
+   * key on every row (ADR 49), and the fixtures carry it as the route does.
+   */
+  last_probe: LastProbe | null;
 }
 
 export interface HookEvent {

@@ -3,6 +3,7 @@ import type {
   ChatThread,
   DebtEntry,
   HookEvent,
+  LastProbe,
   LearningEntry,
   Phase,
   QueuedAction,
@@ -260,13 +261,80 @@ export function mockPhases(): Phase[] {
   ];
 }
 
+/** Epoch seconds, the unit `last_probe.probed_at` is served in (ADR 49). */
+const epoch = (secondsAgo: number) => Math.floor(now() / 1000) - secondsAgo;
+
+/**
+ * The three shapes a `last_probe` takes, as `dispatcher/dispatcher.py:
+ * _quota_decision` writes them (ADR 49), named so a test can hold one account
+ * to each without restating the record. Built per call, like every fixture
+ * here, so `probed_at` is anchored to the moment it is read.
+ *
+ * - `pacedPrimary` — ADR 48's ramp: `reserve_pct` on the session, and the week
+ *   held to the paced ceiling, 4.5 days before the reset it read. The `pct` is
+ *   `quota.week_ceiling`'s for that many days, margin taken.
+ * - `fallbackPrimary` — the same account on a probe whose week line carried a
+ *   reset clause that would not parse: still `paced: true`, the week back on
+ *   the reserve, and the reason the dispatcher logged.
+ * - `worker` — one configured threshold on both windows, `paced: false`, and
+ *   the three pacing fields `null`.
+ */
+export function mockProbes(): Record<"pacedPrimary" | "fallbackPrimary" | "worker", LastProbe> {
+  return {
+    pacedPrimary: {
+      probed_at: epoch(240),
+      session_pct: 22,
+      week_pct: 31,
+      session_reset: "4:59pm (UTC)",
+      week_reset: "Oct 15, 4:59pm (UTC)",
+      exceeds: false,
+      session_ceiling_pct: 60,
+      week_ceiling: {
+        paced: true,
+        pct: 40.416666666666664,
+        days_left: 4.5,
+        reset: "2026-10-15T16:59:00+00:00",
+        fallback_reason: null,
+      },
+    },
+    fallbackPrimary: {
+      probed_at: epoch(90),
+      session_pct: 22,
+      week_pct: 31,
+      session_reset: "4:59pm (UTC)",
+      week_reset: "Oct 15 at 5pm",
+      exceeds: false,
+      session_ceiling_pct: 60,
+      week_ceiling: {
+        paced: true,
+        pct: 60,
+        days_left: null,
+        reset: null,
+        fallback_reason: "the reset clause 'Oct 15 at 5pm' did not parse",
+      },
+    },
+    worker: {
+      probed_at: epoch(45),
+      session_pct: 47.5,
+      week_pct: 63,
+      session_reset: "2:10pm (UTC)",
+      week_reset: "Oct 13, 9am (UTC)",
+      exceeds: false,
+      session_ceiling_pct: 90,
+      week_ceiling: { paced: false, pct: 90, days_left: null, reset: null, fallback_reason: null },
+    },
+  };
+}
+
 export function mockAccounts(): Account[] {
-  // No `usage_pct`, no `rank` and no `heartbeat`: nothing persists usage, nothing
-  // ranks accounts, and an account's lock is the lock on the task it is running
-  // (ADR 17, ADR 18). The three thresholds repeat per row because the envelope has
-  // no slot beside `data` for a pool-wide fact (ADR 20), and they are the defaults
+  // No `usage_pct`, no `rank` and no `heartbeat`: nothing ranks accounts, an
+  // account's lock is the lock on the task it is running (ADR 17, ADR 18), and
+  // the probe's percentages arrive stamped inside `last_probe` (ADR 49). The
+  // three thresholds repeat per row because the envelope has no slot beside
+  // `data` for a pool-wide fact (ADR 20), and they are the defaults
   // `dispatcher/config.py` carries.
   const limits = { quota_threshold_pct: 90, reserve_pct: 60, quota_cooldown_seconds: 1800 };
+  const probes = mockProbes();
   return [
     {
       name: "cuenta1",
@@ -276,6 +344,7 @@ export function mockAccounts(): Account[] {
       state: "BUSY",
       current_task_id: "T-011",
       rate_limited_at: null,
+      last_probe: probes.worker,
     },
     {
       name: "cuenta2",
@@ -285,6 +354,9 @@ export function mockAccounts(): Account[] {
       state: "COOLING_DOWN",
       current_task_id: null,
       rate_limited_at: iso(620),
+      // Old on purpose: a refused account is not re-probed until its cooldown
+      // runs out, so its record ages past the console's stale mark.
+      last_probe: { ...probes.worker, probed_at: epoch(5400), session_pct: 88, week_pct: 71 },
     },
     {
       name: "cuenta3",
@@ -294,15 +366,20 @@ export function mockAccounts(): Account[] {
       state: "BUSY",
       current_task_id: "T-014",
       rate_limited_at: null,
+      last_probe: probes.worker,
     },
     {
       name: "cuenta4",
       container: "agent-cuenta4",
       is_primary: false,
       ...limits,
-      state: "BUSY",
-      current_task_id: "T-012",
+      // `null` is a served value here and not an omission: the api nulls what an
+      // unreadable state file says and keeps the row, with a warning — and nulls
+      // `last_probe` with it, since the record lives in that same file (ADR 49).
+      state: null,
+      current_task_id: null,
       rate_limited_at: null,
+      last_probe: null,
     },
     {
       name: "cuenta5",
@@ -312,17 +389,17 @@ export function mockAccounts(): Account[] {
       state: "PRE_COOLDOWN",
       current_task_id: "T-013",
       rate_limited_at: null,
+      last_probe: { ...probes.worker, session_pct: 93, exceeds: true },
     },
     {
       name: "cuenta6",
       container: "agent-cuenta6",
       is_primary: true,
       ...limits,
-      // `null` is a served value here and not an omission: the api nulls what an
-      // unreadable state file says and keeps the row, with a warning.
-      state: null,
+      state: "IDLE",
       current_task_id: null,
       rate_limited_at: null,
+      last_probe: probes.pacedPrimary,
     },
   ];
 }

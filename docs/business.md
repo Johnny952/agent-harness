@@ -43,8 +43,12 @@ cite the entry and move it up, or drop the row.
   on its five-hour session and `quota.week_ceiling`'s paced value on its week,
   with this one as that week's fallback whenever the reset will not parse; the
   paced value is computed per probe and served nowhere, which is why reading the
-  row as a pair is still the best a consumer can do. Added by T-011, which
-  served the three fields and had to state which one governs.
+  row as a pair is still the best a consumer can do. `docs/decisions.md` ADR 49
+  narrows that last clause: the paced value is now served, per probe, in the
+  row's `last_probe.week_ceiling`, so a consumer that has a probe reads the
+  week's ceiling from there and falls back to the pair only when `last_probe`
+  is null. Added by T-011, which served the three fields and had to state which
+  one governs.
 
 ## Unconfirmed — inferred from the code by T-009
 

@@ -60,14 +60,21 @@ def set_state(
     current_task_id: str | None = None,
 ) -> None:
     # The write replaces the whole document, so anything persisted next to the
-    # state has to be carried across by hand. `rate_limited_at` is the one such
-    # field, and it has to outlive every transition: an account is refused,
+    # state has to be carried across by hand. `rate_limited_at` is the first
+    # such field, and it has to outlive every transition: an account is refused,
     # parked and re-probed in three separate writes, and the refusal is only
     # worth anything if it is still there on the third.
     existing = _read_state(state_dir, account_name) or {}
     data = {"state": state.value, "current_task_id": current_task_id}
     if existing.get("rate_limited_at") is not None:
         data["rate_limited_at"] = existing["rate_limited_at"]
+    # `last_probe` is carried for the same reason and by the same rule: it is a
+    # fact about the account, not about the transition, and the gate writes it
+    # one line before the `set_state` that parks the account on it
+    # (`docs/decisions.md` ADR 49). Dropping it here would erase every probe
+    # that ever parked anything.
+    if existing.get("last_probe") is not None:
+        data["last_probe"] = existing["last_probe"]
     # `busy_since` is the opposite case: it belongs to this transition and not
     # to the account, so it is stamped on the way into BUSY and dropped on the
     # way out rather than carried. Nothing re-enters BUSY without a new phase
@@ -113,6 +120,52 @@ def clear_rate_limit(state_dir: str, account_name: str) -> None:
         return
     del data["rate_limited_at"]
     _write_state(state_dir, account_name, data)
+
+
+#: The keys every persisted probe carries. `get_last_probe` checks for them so a
+#: record some older or hand-edited file holds in another shape reads as
+#: unreadable rather than as a probe with holes in it.
+PROBE_KEYS = frozenset({
+    "probed_at", "session_pct", "week_pct", "session_reset", "week_reset",
+    "exceeds", "session_ceiling_pct", "week_ceiling",
+})
+
+
+def record_probe(state_dir: str, account_name: str, probe: dict) -> None:
+    """Keep the last `/usage` probe of this account and what it was held to.
+
+    One record, overwritten by every probe: this is the account's latest
+    measurement, not a series (`docs/decisions.md` ADR 49). It lives in the
+    state file because that is what `observability/api` already reads, and
+    every other writer here carries it across a rewrite — `set_state` by
+    hand, the rate-limit pair because they rewrite the document they read.
+    """
+    data = _read_state(state_dir, account_name) or {
+        "state": AccountState.IDLE.value, "current_task_id": None,
+    }
+    data["last_probe"] = probe
+    _write_state(state_dir, account_name, data)
+
+
+def get_last_probe(state_dir: str, account_name: str) -> dict | None:
+    """The last probe recorded for this account, or None if it was never probed.
+
+    Raises ValueError for a record that is there but is not one: a reader that
+    serves it (the api's account row) nulls the record and says why, rather
+    than serving a half of one as if it were the whole.
+    """
+    data = _read_state(state_dir, account_name)
+    if data is None:
+        return None
+    probe = data.get("last_probe")
+    if probe is None:
+        return None
+    if not isinstance(probe, dict):
+        raise ValueError(f"last_probe is a {type(probe).__name__}, not an object")
+    missing = sorted(PROBE_KEYS - probe.keys())
+    if missing:
+        raise ValueError(f"last_probe is missing {', '.join(missing)}")
+    return probe
 
 
 def get_busy_since(state_dir: str, account_name: str) -> float | None:
