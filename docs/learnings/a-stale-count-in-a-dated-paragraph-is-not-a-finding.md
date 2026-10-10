@@ -1,13 +1,16 @@
 # A stale number in a dated measurement paragraph is weaker grounds for a revision round than one in live prose
 
-**When it applies:** your change falsifies a number another doc states — a
-warning count, a timing, a tally, a file count — and you are deciding whether
-that doc is a blocking finding, a debt row, a one-clause amendment, or nothing
-at all.
+**When it applies:** your change falsifies something another doc states — a
+warning count, a timing, a tally, a file count, or (T-018) a mechanism a doc
+states in prose — and you are deciding whether that doc is a blocking finding,
+a debt row, a one-clause amendment, or nothing at all.
 
-**Status:** unconfirmed — one task. T-015 took `bun run lint` from ten warnings
+**Status:** confirmed — two tasks. T-015 took `bun run lint` from ten warnings
 to nine and found the old count in five places falling into four classes, each
-class wanting a different answer.
+class wanting a different answer. T-018 then retired a *mechanism* rather than a
+number, sorted its surfaces into the same four classes, and gave each class a
+different answer — including the awkward one, which took its single clause in
+`docs/implementations/T-017.md`.
 
 ## Symptom
 
@@ -47,6 +50,16 @@ what the sentence is *for*:
   as history, but the word *now* makes it a claim about today. Its load-bearing
   half — no task starts with a `lint` note — stays true, which is why T-015's
   revisor weighed it and did **not** raise it as a finding.
+
+The split is not only a judgement: `dispatcher/project_docs.py` names
+`PRESENT_DOCS` and `RECORD_DOCS` and derives `is_record` from them, and
+`RECORD_DOCS`'s comment is this project's own ruling in so many words — "leave
+the sentence alone and record the disagreement somewhere newer", with
+`PRESENT_DOCS` winning where the two overlap, which is why the learnings
+*index* is present while its entries are records. Read those two tuples before
+classifying a doc by instinct; T-018 left a prose statement of a mechanism it
+had just retired standing in `docs/implementations/T-016.md` on exactly that
+ruling.
 
 ## What to do
 

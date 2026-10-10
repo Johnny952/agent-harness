@@ -34,6 +34,7 @@ already a row here.
 | `T-017-D1` | No test pins which number each route hands its empty-state component: `served.length` and not `rows.length` in `front/src/routes/learnings.tsx` and `debt.tsx`, `events.length` and not `filtered.length` in `tail.tsx`. Every arm of `LearningsEmpty`, `DebtEmpty` and `TailNoMatch` is covered; the argument is the whole of what `T-016-D1` was, and swapping it reintroduces that defect with all 73 tests green | A task editing the empty-state call site in `front/src/routes/learnings.tsx`, `debt.tsx` or `tail.tsx`, or changing how either of the first two computes `served` or `rows` — `debt.tsx`'s `served` is one unmemoised `?? []` that reads like a duplicate of `rows`. Also any task that wants to assert anything about a `front/` screen as a screen rather than about one of its components. Not a task editing only the component bodies, which are covered | A route-render helper under `front/src/` — a memory-history router plus a per-test seeded `QueryClient` — and then one test per screen: a served collection of N, a query matching none of it, asserting the no-match title and the absence of the collection's. The helper is the expensive half and is worth having well beyond these three screens, so write it against one screen first and decide there whether the seam is a seeded `QueryClient` or an intercepted `fetch`. Detail: [T-017-D1](T-017-D1.md) | none |
 | `T-017-D2` | `TailNoMatch` in `front/src/routes/tail.tsx` has no singular arm, so one buffered event with every filter excluding it reads *to see the 1 events this tail has buffered again*. `LearningsEmpty` and `DebtEmpty` both carry the singular and `-debt.test.tsx` pins it; the tail's arm is the one of the three that does not | A task editing `TailNoMatch`'s body in `front/src/routes/tail.tsx`, or copying the tail's form as the multi-filter precedent for a new no-match state — `docs/ui.md` *Absent, empty and broken are three different things* points a screen with more than one filter at this shape. Not a task editing the two single-filter screens, which have the singular already | One ternary mirroring `LearningsEmpty`'s `served === 1 ? "the one entry" : …`, plus a case in `front/src/routes/-tail.test.tsx` on `-debt.test.tsx`'s *counts one served row in the singular* idiom. Two lines in two files that are already open in front of whoever takes it. Detail: [T-017-D2](T-017-D2.md) | none |
 | `T-017-D3` | `front/src/routes/tail.tsx`'s no-match arm unmounts the virtual scroller while `scrollTop` is `TailPage` state that outlives it, so filtering to nothing while **paused** and then clearing remounts the div at DOM `scrollTop` 0 with the old offset still in state: `start` points into the middle of the buffer and the rows render translated out of the viewport until the next scroll. The unpaused path is repaired by the existing effect on `[filtered.length, paused]` | A task changing `front/src/routes/tail.tsx`'s `scrollTop`/`viewportH` state, its `start`/`end` window arithmetic or that effect; also any screen given a virtual scroller behind a bare-state arm in the same ternary, where the surviving state is the trap rather than the tail. Not a task editing `TailNoMatch`'s copy, and not one adding a no-match arm to a screen whose rows are not virtualised | Reset the window when there is nothing to show — `setScrollTop(0)` in an effect on `filtered.length === 0` — or key the scroller on that condition so the state is rebuilt with it; the first is smaller, the second also covers state added later at the cost of discarding the position on every filter change. The window has to be observable to be pinned, which is `T-017-D1`'s helper, so this is cheapest taken alongside it. Detail: [T-017-D3](T-017-D3.md) | none |
+| `T-018-D1` | `docs/decisions.md` **ADR 24** parenthesises that `front/node_modules` "does not exist in this repository and installing it is not authorised", and this index's closing paragraph on `T-015-D1` says the same in other words ("no phase of this project can run `bun` and a worktree has no `node_modules`"). Both false since the agent image shipped `bun` 1.3.12 on 2026-10-08 (`docs/decisions.md` ADR 39): T-018's card granted `cd front && bun install --frozen-lockfile`, all four of its phases ran it, and reading `front/node_modules` is how ADR 45's whole *Context* was established. The install clause is what is false, not ADR 24's conclusion that no phase can regenerate `front/src/routeTree.gen.ts` — none of the four granted scripts runs the generator | Any task whose card grants a `front/` script and whose phase reads ADR 24, or that `T-015-D1` paragraph, as a reason not to run it — the phase then reasons a `front/` change through from in-file precedent instead of executing the suite its own card gave it. Sharpest for a task taking `T-015-D1`, whose *Fix* needs the lint's own nine file names while its row says no phase can get them. Not a task that never opens `front/` | One narrowing ADR in ADR 45's shape — `front/node_modules` is installable by any phase whose card grants it, `cd front && bun install --frozen-lockfile` is the form, and the lockfile plus `bun`'s install cache on the projects mount are what make it reproducible — with ADR 24 keeping its number and an unstruck heading, then the one clause in this index's `T-015-D1` paragraph below. Worth taking all four surfaces at once: those two plus the two T-018's revisor found and did not file, the `T-013-D1` row here that contradicts itself in the same cell and the paragraph immediately above `front/README.md` *Writing a test*. Detail: [T-018-D1](T-018-D1.md) | none |
 
 `card` is `none` on every row because no card exists to point at: the T-008 and
 T-009 task files carry no `kanban_issue_id` and neither auditor was handed card
@@ -117,7 +118,13 @@ for. Two things about that cycle are worth a line. Its own *Fix* cannot be
 verified by whoever takes it from inside a phase, because no phase of this
 project can run `bun` and a worktree has no `node_modules`
 (`/data/.hive/learnings/inbox/T-015-bun-is-refused-in-a-phase.md`) — the
-dispatcher's test gate is the only observer of the count this row quotes. And
+dispatcher's test gate is the only observer of the count this row quotes. That
+last sentence was true when written and is false now, which is the whole of
+`T-018-D1`: a phase whose card grants `cd front && bun install
+--frozen-lockfile` can run the lint itself and read the nine file names off it,
+as T-016 did on 2026-10-09 and all four phases of T-018 did again. It is left
+standing rather than rewritten because `T-018-D1` quotes it and the same claim
+sits in an append-only ADR, which is a narrowing that row asks for. And
 there is no `T-015-D2`, though T-015's revisor did raise a proposal of its own:
 that `docs/debt/T-013-D1.md` *How it was resolved* and that entry's row here
 still said `eslint .` **now** exits zero with ten warnings. The auditor ruled it
@@ -157,3 +164,18 @@ the first: both want a test that can observe something only a route render
 reaches, which is `T-017-D1`'s helper. The row above them is resolved by the
 same task, which is why four `T-017`-era rows sit together here — one closed and
 three opened in its place, two of them polish on a screen the card did not name.
+
+`T-018-D1` is `none` for the first reason above and nothing else, and it took
+the path this table is shaped for: declared `found` by the implementador in
+round 1, accepted by the revisor in round 1, and filed by the auditor with the
+id in a filing note. Two things about it are worth a line. It is the only row
+here that declares a sentence of *this file* false — the `T-015-D1` paragraph
+above — which is why that paragraph carries a clause pointing back at this row
+rather than being rewritten: the other half of the same claim is in an
+append-only ADR, and correcting one surface while the other stands is how the
+two came to disagree in the first place. And there is no `T-018-D2`, though
+T-018's revisor raised a second finding of its own, a third copy of the same
+stale fact in `front/README.md`'s paragraph above *Writing a test*. It is
+named inside this row's *Fix* instead of filed, on the T-015 precedent two
+paragraphs up: one stale fact in four places is one task's work, and a second
+row would have to be resolved by the same commit as the first.
