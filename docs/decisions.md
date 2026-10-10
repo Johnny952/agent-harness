@@ -3048,3 +3048,135 @@ transcriptions, which is the difference between this and fixing `learnings.tsx`
 alone. A screen that genuinely needs one state for both cases — a region where
 the collection and the filter cannot be told apart — changes the `docs/ui.md`
 entry and owes an ADR, because by then three shipped screens rely on it.
+
+## ADR 45 — a test sits beside its route as `-name.test.tsx`, and `routeFileIgnorePrefix` is why
+
+**Status:** accepted (T-018, 2026-10-10). **Narrows ADR 30 and does not
+supersede it**: ADR 30's decision stands, only its *Context* names the wrong
+knob, so that entry is left exactly as written and its heading is not struck
+through — `docs/learnings/a-stale-count-in-a-dated-paragraph-is-not-a-finding.md`
+*an ADR on `main` narrowed by a new entry*. It also reconciles ADR 30 with
+**ADR 44**'s third bullet, which decided the opposite shape without saying that
+it had.
+
+**Context.** Two entries in this file disagree about whether a test may live
+under `front/src/routes/`. ADR 30 says one cannot: the generator "scans every
+file under `src/routes/` and turns it into a route", and the knob that would
+excuse a `.test.tsx` — `routeFileIgnorePattern`, correctly described there as
+having no default — "is set in `vite.config.ts`", which `docs/charter.md` **C-9**
+keeps off-limits to a hand edit. ADR 44's third bullet has each route export the
+component holding its own branches, "tested with a plain `render` and no router
+or query client", and T-017 shipped three such tests *under* `src/routes/`:
+`-learnings.test.tsx`, `-debt.test.tsx` and `-tail.test.tsx`, beside the
+`-index.test.tsx` T-012 added in `bc93b1d`. Four files exist where ADR 30 says
+none can.
+
+The generator, read with `front/node_modules` filled in this worktree by
+`cd front && bun install --frozen-lockfile`:
+
+- `@tanstack/router-generator`'s `baseConfigSchema`, in
+  `dist/esm/config.js`, declares **`routeFileIgnorePrefix` with a zod
+  `.default("-")`** (line 23) and `routeFileIgnorePattern` as `.optional()` with
+  no default (line 24). Three copies are installed — 1.167.21 hoisted, 1.167.40
+  nested under `@tanstack/router-plugin` 1.168.42 and under
+  `@tanstack/start-plugin-core` — and all three agree, at the same two lines.
+- `getRouteNodes` in `dist/esm/filesystem/physical/getRouteNodes.js` filters the
+  `readdir` listing before anything parses a file: a dirent whose name
+  `startsWith(routeFileIgnorePrefix)` is dropped, directories included, and
+  `routeFileIgnorePattern` is consulted only in the branches where it is set.
+- Nothing in this repo sets either knob. `front/vite.config.ts` passes
+  `tanstackStart: { server: { entry: "server" } }` and nothing else, and a grep
+  for `routeFileIgnore` across `front/node_modules/@lovable.dev/` comes back
+  empty. The default is what the four files rely on, and C-9's off-limits file
+  is not in the way at all.
+- A file that *is* read as a route and exports no `Route` produces a **warning**
+  — *"This file will not be included in the route tree"*, with the `-` prefix as
+  its first suggestion — and the generator returns `null` for it: the
+  `no-route-export` branch of `dist/esm/generator.js`. It does not error.
+
+ADR 30 is accurate on one clause of three: `routeFileIgnorePattern` really has no
+default. It is wrong that the knob is set in `vite.config.ts` — nothing sets it —
+wrong that a file the generator cannot route is an error, and wrong in the
+conclusion both were there to support, that a test file beside a route cannot
+exist. It also named the one knob of the two that is not the one in use.
+
+So what this entry retires is ADR 30's **premise**: that reaching a one-screen
+renderer from a test costs either a `vite.config.ts` edit or a move. What stands
+is its **decision**, which was never about the generator — being unreachable from
+a test is a reason to promote a component, with the same standing as a second
+screen needing it. The rule survives; the condition it fires on goes from
+"always, under `src/routes/`" to almost never.
+
+**Decision.** *A renderer that belongs to one screen stays in its route module,
+exported, and is tested from `-<name>.test.tsx` beside it.
+`front/src/components/console/` keeps the reasons for a move that were never
+about testability, and gains none from this entry.*
+
+- **The default is the `-` prefix, and it needs no configuration.** A test for a
+  branch or a renderer inside a route goes in `-<route-file>.test.tsx` in the
+  same directory, exporting what it renders from the route module. This is ADR
+  44's third bullet, generalised from three screens to the rule.
+- **A second screen drawing it still moves it.** Unchanged — the standing rule
+  `front/README.md` states for that directory, and the reason ADR 30 added to
+  rather than replaced.
+- **A non-component export still moves.** `react-refresh/only-export-components`
+  reads a route module's `Route` as a component (a PascalCase `const` from a call
+  expression) and `front/eslint.config.js` configures the rule with
+  `allowConstantExport: true`, which excuses a constant and not a function. So a
+  helper, a formatter or a tone map exported beside `Route` for a test is a tenth
+  warning against the nine `docs/debt/T-015-D1.md` holds as the bar, and it moves
+  instead. `asPathLine` is exactly this shape and is why
+  `front/src/components/console/payload.tsx` is one of the nine. This bullet is
+  read off the rule's configuration and that warning's location; no phase of
+  T-018 added such an export to measure it.
+- **Untestability where it sits is no longer a reason on its own.** It survives
+  only where the route module cannot be imported into a test at all — a module in
+  its import graph that throws or needs a server at import. No route does today:
+  nothing under `src/routes/` reaches `front/src/lib/api/server-env.ts`, the one
+  module in this tree that throws at import, and
+  `front/src/lib/api/forward.test.ts` shows the cheaper answer (`vi.mock`) for
+  when something does. A phase that believes it has found this case names it in
+  the handoff rather than moving a file on a hunch.
+- **Nothing moves back.** `front/src/components/console/payload.tsx` and
+  `front/src/components/console/learnings.tsx` stay where ADR 30 put them: the
+  first is right under this entry's third bullet anyway, the second was promoted
+  under a trigger this entry retires, and moving a tested component to re-derive
+  the same tests is churn. ADR 30's own *Consequences* already warns that the
+  directory is not a reliable answer to "how many screens use this"; that stays
+  true, and each file's docblock says which reason put it there.
+
+**Consequences.** Five documentation surfaces repeat the retired mechanism and
+are corrected in this task, none of them by editing an ADR: `front/README.md`
+*Writing a test*, whose bullet is rewritten to name `routeFileIgnorePrefix`, its
+`-` default and this number rather than restating the reasoning; the docblocks of
+`payload.tsx` and `console/learnings.tsx`, which cite ADR 30 and the wrong knob;
+`front/src/routes/README.md`, whose *Routes* opening says every `.tsx` file in
+the directory defines a route, which the four test files falsify; and
+`docs/learnings/a-route-can-export-the-component-its-branch-lives-in.md`, whose
+*What to do* tells a reader to prefer it over `front/README.md` — true until this
+task and wrong after it — which is the file plus its row in
+`docs/learnings/README.md`
+(`docs/learnings/correcting-an-index-entry-is-two-edits.md`), with `status`
+unchanged. No source, test or configuration file changes: `front/vite.config.ts`
+is untouched, and adding `routeFileIgnorePattern` to it is both unnecessary and
+C-9's to forbid.
+
+A sixth edit is not one of the five. `docs/implementations/T-017.md`'s paragraph
+on the disagreement is a dated record of what that task found and chose to leave,
+and it stays as written; its closing sentence is a present-tense claim inside a
+record, so it takes one clause naming this task and this number and nothing else
+(`docs/learnings/a-stale-count-in-a-dated-paragraph-is-not-a-finding.md`). Two
+more pre-existing claims are **not** in scope and are not findings: ADR 30's own
+*Context*, which is append-only, and ADR 24's parenthetical that
+`front/node_modules` "does not exist in this repository and installing it is not
+authorised" — false of a phase whose task grants `bun install`, which is how this
+entry's *Context* was read, and a narrowing another task owes.
+
+What protects this entry from a dependency bump is the same thing that hid the
+error: `routeFileIgnorePrefix`'s default is load-bearing for four filenames and
+for `front/src/routeTree.gen.ts`, which no phase here can regenerate. A bump
+that changed the default would put four test files into the route tree and break
+the build, which is a failure a reader cannot miss — unlike a plausible sentence
+in a README, which sat there from T-013 to T-018. That is why the bullet points
+at this number instead of carrying the mechanism: the mechanism belongs to a
+version, and the decision does not.
