@@ -9,6 +9,7 @@ import dispatcher.cli as cli_mod
 import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import learnings
 from dispatcher.context_transfer import read_kanban_issue_id, set_description, set_resolved_debt
+from dispatcher.dispatcher import CycleOutcome, DispatchResult
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
 from dispatcher.vibe_kanban_client import LocalBoardClient, NullKanbanClient, VibeKanbanClient
 
@@ -53,12 +54,13 @@ def _write_config(tmp_path: Path, board: bool = False, local_board: bool = False
     return config_path
 
 
-def _capture_cycle(monkeypatch) -> dict:
+def _capture_cycle(monkeypatch, outcome: CycleOutcome | None = CycleOutcome.FINISHED) -> dict:
     captured: dict = {}
 
     def fake_run_task_cycle(cfg, task_id, slug, kanban, description=None):
         captured.update(task_id=task_id, slug=slug, description=description)
         captured["kanban"] = kanban
+        return outcome
 
     monkeypatch.setattr(cli_mod, "run_task_cycle", fake_run_task_cycle)
     return captured
@@ -668,7 +670,10 @@ def test_an_unusable_log_level_falls_back_instead_of_killing_the_run(
 # --- run-phase ---
 
 
-def _capture_single_phase(monkeypatch, result: object = object()) -> dict:
+_LANDED = DispatchResult(success=True, session_id="s1", result_text="done", account="cuenta1")
+
+
+def _capture_single_phase(monkeypatch, result: DispatchResult | None = _LANDED) -> dict:
     """Stand in for the one phase, and record what the parser decided."""
     captured: dict = {}
 
@@ -830,3 +835,61 @@ def test_cli_run_phase_exits_nonzero_when_the_phase_did_not_land(
 
     assert excinfo.value.code == 1
     assert "blocked" in capsys.readouterr().err
+
+
+def test_cli_run_task_exits_zero_when_the_cycle_finished(tmp_path: Path, monkeypatch) -> None:
+    """A finished cycle still exits 0: nothing that chains run-task on success
+    has to change."""
+    _capture_cycle(monkeypatch, outcome=CycleOutcome.FINISHED)
+
+    _run(monkeypatch, _write_config(tmp_path), "--description", "Add a /healthz endpoint.")
+
+
+def test_cli_run_task_exits_with_the_held_code_when_no_account_took_a_phase(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The case ADR 52 exists for: on 2026-10-09 two cycles stopped for lack of
+    an account and exited 0, which read as a pass to whatever ran them. Held
+    is its own code, not the 1 a blocked task gets, because the answer to it
+    is a wait and not a person."""
+    _capture_cycle(monkeypatch, outcome=CycleOutcome.HELD)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, _write_config(tmp_path), "--description", "Add a /healthz endpoint.")
+
+    assert excinfo.value.code == cli_mod.EXIT_HELD == 75
+    assert excinfo.value.code != cli_mod.EXIT_BLOCKED
+    assert "held" in capsys.readouterr().err
+
+
+def test_cli_run_task_exits_one_when_the_cycle_blocked(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Every other stop is the code the CLI's other refusals already use."""
+    _capture_cycle(monkeypatch, outcome=CycleOutcome.BLOCKED)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, _write_config(tmp_path), "--description", "Add a /healthz endpoint.")
+
+    assert excinfo.value.code == cli_mod.EXIT_BLOCKED == 1
+    assert "blocked" in capsys.readouterr().err
+
+
+def test_cli_run_phase_exits_with_the_held_code_when_no_account_took_it(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The same split for the repair path: a phase that never ran is held, not
+    failed, and the operator's shell loop can tell the two apart."""
+    _capture_single_phase(monkeypatch, result=DispatchResult(
+        success=False, session_id=None, result_text="no accounts available",
+        account="", no_account=True,
+    ))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, _described(tmp_path),
+            "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "revisor",
+        )
+
+    assert excinfo.value.code == cli_mod.EXIT_HELD
+    assert "held" in capsys.readouterr().err

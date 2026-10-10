@@ -1,8 +1,9 @@
 # Token economy — what one window buys, and sizing tasks to fit it
 
 **Status:** P8 is built — T-020, 2026-10-10, under `docs/decisions.md` ADR 48;
-the change is `docs/implementations/T-020.md`. P1–P7 are still proposals and
-none of them is approved. Measured 2026-10-09 by the operator, out of
+the change is `docs/implementations/T-020.md`. P7 is built — T-023,
+2026-10-10, under ADR 52; the change is `docs/implementations/T-023.md`. P1–P6
+are still proposals and none of them is approved. Measured 2026-10-09 by the operator, out of
 cycle, on T-016's first round. It feeds the root README's *Prioritized* item 2
 (Token economy) and item 5 (Task profiles), and does not replace either.
 Evidence: `.data/verify/token-usage-T-016-2026-10-09.txt` (aggregates only).
@@ -158,6 +159,22 @@ is optional, and comes after P7.
 **P7 — A cycle that stops for lack of an account exits non-zero.** Today it
 exits `rc=0`. That happened twice on 2026-10-09, so a script or an operator
 reading only the exit code takes a held cycle for a finished one.
+
+**Built by T-023 (2026-10-10), as `docs/decisions.md` ADR 52.** A held cycle
+exits 75, sysexits.h's `EX_TEMPFAIL`, and a blocked one exits 1, the code every
+other refusal in the CLI already uses; a finished one still exits 0. Held gets
+its own code because the answer to it is a wait and not a person, and 2 was
+argparse's. `run_task_cycle` returns a `CycleOutcome` — `FINISHED`, `HELD` or
+`BLOCKED` — and `cli.py` maps it, so nothing raises from inside the cycle. The
+signal starts at the one return in `dispatch_phase` that every no-account path
+reaches (every account tried, cooling, or held back by `check_quota_ok`), as
+`DispatchResult.no_account`; `run_phase` copies it to `CycleContext.held` when
+a phase the task depends on stops on it. The optional map that finds no
+account is not a hold, since the task runs anyway. `run-phase` has the same
+split: `run_single_phase` hands back the unsuccessful result instead of None
+when it was held, and the CLI exits 75 on `no_account`. Blocked exiting 1 is a
+change of its own: rounds exhausted, a blocked arquitecto, a foreign lock or a
+diverged branch all exited 0 before.
 
 **P8 — Pace the primary's weekly spend against its reset.** Proposed by the
 operator on 2026-10-09, after cuenta1 was parked at 84% of its week with the

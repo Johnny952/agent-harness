@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import enum
 import logging
 import os
 import re
@@ -79,6 +80,27 @@ class DispatchResult:
     #: What the dispatcher checked itself about this phase's worktree. None
     #: for a phase that is not gated, or a gate run that did not finish.
     gates: gates.Report | None = None
+    #: True when the phase never ran because no account could take it — every
+    #: one tried, cooling or held back by its quota. Its own flag rather than
+    #: read off `account == ""`, which a failure from anywhere else can share,
+    #: because this is the one failure that is not the task's: it clears on
+    #: its own when an account resets, and the CLI exits with a different code
+    #: for it (ADR 52).
+    no_account: bool = False
+
+
+class CycleOutcome(enum.Enum):
+    """How a `run-task` cycle ended, which is what its exit code says.
+
+    Three and not two because "it did not finish" covers two things the
+    operator does opposite things about: a task that is blocked needs a
+    person, and a task that is held for lack of an account needs only a
+    wait. The CLI maps these to exit codes (ADR 52).
+    """
+
+    FINISHED = "finished"
+    HELD = "held"
+    BLOCKED = "blocked"
 
 
 class _HeartbeatLoop:
@@ -1197,7 +1219,10 @@ def dispatch_phase(
                 "task %s: no account is left for the %s phase; tried %s",
                 task_id, role, ", ".join(sorted(tried)) or "none",
             )
-            return DispatchResult(success=False, session_id=resume_session_id, result_text="no accounts available", account="")
+            return DispatchResult(
+                success=False, session_id=resume_session_id,
+                result_text="no accounts available", account="", no_account=True,
+            )
         tried.add(account)
 
         if not check_quota_ok(cfg, account):
@@ -1618,6 +1643,10 @@ class CycleContext:
     # Set when a phase bounced off another owner's lock: that run's worktrees
     # are in use, so close_cycle has to keep its hands off them.
     foreign_lock: bool = False
+    # Set when a phase the run depends on stopped because no account could
+    # take it: the card is blocked the same as any other stop, but the run is
+    # held, not failed, and says so in its exit code (ADR 52).
+    held: bool = False
 
 
 def open_cycle(
@@ -1764,6 +1793,7 @@ def run_phase(
                 result.result_text or "no diagnosis: the phase produced no output",
             )
             _update_task_status(ctx.kanban, ctx.issue_id, "blocked")
+            ctx.held = result.no_account
             return None
         # A phase the task does not depend on. It still hands off what it
         # managed — a partial map is worth having, and the next phase
@@ -1855,6 +1885,11 @@ def run_single_phase(
     are still readable in a later process. A task whose earlier phases ran
     before that existed has no such record; it closes the way this path always
     did, with nothing filed, and the log line says which of the two happened.
+
+    None means the phase did not land and the card is blocked. A phase that
+    never ran because no account could take it comes back instead as an
+    unsuccessful result with `no_account` set — the card is blocked the same
+    way, but the CLI exits on it with the held code, not the failed one.
     """
     ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
     if ctx is None:
@@ -1891,6 +1926,15 @@ def run_single_phase(
             note = "\n\n".join(part for part in (note, debt.filing_note(filed)) if part)
         result = run_phase(ctx, role, round_num=round_num, final=final, note=note)
         if result is None:
+            if ctx.held:
+                # Handed back rather than flattened to None, so the CLI can
+                # tell a phase that waits on an account from one that failed:
+                # `no_account` is the whole difference, and it exits on it.
+                # Never a success, so `completed` below stays False.
+                return DispatchResult(
+                    success=False, session_id=None,
+                    result_text="no accounts available", account="", no_account=True,
+                )
             return None
         if final:
             _update_task_status(kanban, ctx.issue_id, "done")
@@ -1930,10 +1974,21 @@ def run_task_cycle(
     slug: str,
     kanban: KanbanClient,
     description: str | None = None,
-) -> None:
+) -> CycleOutcome:
+    """Run a task from the arquitecto to the auditor, and say how it ended.
+
+    HELD when a phase the task depends on stopped because no account could
+    take it, BLOCKED for every other stop, FINISHED when the auditor closed
+    it — merged or not, since a refused merge is reported by `merge-task` and
+    leaves the task done.
+    """
     ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
     if ctx is None:
-        return
+        return CycleOutcome.BLOCKED
+    # Every stop after a phase that returned None reads this: the phase knows
+    # whether it was held, and the cycle only has to pass that on.
+    def stopped() -> CycleOutcome:
+        return CycleOutcome.HELD if ctx.held else CycleOutcome.BLOCKED
     # Set once the auditor has filed what this task learned.
     completed = False
 
@@ -1951,7 +2006,7 @@ def run_task_cycle(
                     task_id, update.detail,
                 )
                 _update_task_status(kanban, ctx.issue_id, "blocked")
-                return
+                return CycleOutcome.BLOCKED
             # Said out loud either way: a task that started from a stale base is
             # the thing this exists to prevent, and a run that could not reach
             # the remote has to be readable as such afterwards.
@@ -1970,11 +2025,11 @@ def run_task_cycle(
                 max_turns=cfg.mapping_max_turns,
             )
             if ctx.foreign_lock:
-                return
+                return CycleOutcome.BLOCKED
 
         arquitecto = run_phase(ctx, "arquitecto")
         if arquitecto is None:
-            return
+            return stopped()
         if handoff.blocked(arquitecto.handoff):
             # The one phase whose block costs less than the work it stops. The
             # arquitecto reads the plan, the charter and the indexes before
@@ -1988,7 +2043,7 @@ def run_task_cycle(
                 task_id, "; ".join(missing) or "no reason given",
             )
             _update_task_status(kanban, ctx.issue_id, "blocked")
-            return
+            return CycleOutcome.BLOCKED
 
         approved = False
         # Counted separately from `round_num`: `max_revision_rounds: 0` makes
@@ -2000,7 +2055,7 @@ def run_task_cycle(
             rounds_run = round_num
             implemented = run_phase(ctx, "implementador", round_num=round_num)
             if implemented is None:
-                return
+                return stopped()
             if implemented.gates is not None and implemented.gates.blocking:
                 # The gates already asked for this in-session and checked the
                 # answer. Paying a revisor to read a branch whose tests fail
@@ -2013,7 +2068,7 @@ def run_task_cycle(
                 continue
             revisor_result = run_phase(ctx, "revisor", round_num=round_num)
             if revisor_result is None:
-                return
+                return stopped()
             disguised = debt.blocking(revisor_result.handoff)
             if disguised:
                 # A block wearing a debt costume. Another round cannot supply
@@ -2042,15 +2097,15 @@ def run_task_cycle(
         if not approved:
             # Said out loud because otherwise nothing says it: the board move
             # below is a no-op when the task has no kanban issue, the task
-            # file's `status:` is only written by a handoff, and the run exits
-            # 0 either way — so a task that used up every round looked exactly
-            # like one that was never dispatched.
+            # file's `status:` is only written by a handoff, and before ADR 52
+            # the run exited 0 either way — so a task that used up every round
+            # looked exactly like one that was never dispatched.
             logger.warning(
                 "task %s: blocked after %d of %d revision round(s) without an approval",
                 task_id, rounds_run, cfg.max_revision_rounds,
             )
             _update_task_status(kanban, ctx.issue_id, "blocked")
-            return
+            return CycleOutcome.BLOCKED
 
         # Stamped before the phase that files them, so the auditor's prompt
         # can name the entries it owns and a later run can tell an entry that
@@ -2068,7 +2123,7 @@ def run_task_cycle(
         cfg, kanban, task_id, slug, implemented.handoff, revisor_result.handoff
     )
         if run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed)) is None:
-            return
+            return stopped()
         completed = True
 
         _update_task_status(kanban, ctx.issue_id, "done")
@@ -2081,5 +2136,6 @@ def run_task_cycle(
             # Same "only now": the entry is marked resolved on the branch that
             # just landed, so the card it mirrors has stopped being work.
             close_resolved_debt(cfg, kanban, task_id, slug)
+        return CycleOutcome.FINISHED
     finally:
         close_cycle(ctx, completed=completed)

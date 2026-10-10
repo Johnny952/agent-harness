@@ -1708,6 +1708,8 @@ def test_a_refused_phase_writes_the_refusal_down_and_the_recheck_honours_it(tmp_
 
     assert result.success is False
     assert result.result_text == "no accounts available"
+    # The one failure that is not the task's, flagged as such (ADR 52).
+    assert result.no_account is True
     assert get_state(cfg.state_dir, "cuenta1") == AccountState.COOLING_DOWN
     assert get_rate_limited_at(cfg.state_dir, "cuenta1") is not None
     # One probe: the gate before the phase. The recheck never ran a second,
@@ -5462,3 +5464,107 @@ def test_update_project_branch_does_nothing_without_a_container(tmp_path, monkey
     monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", never)
 
     assert dispatcher_mod.update_project_branch(cfg, "myproj") is None
+
+
+def _no_account_for(*roles: str):
+    """Every phase works and the revisor approves, except that `roles` find
+    no account free: the return dispatch_phase gives when the pool is empty."""
+    def fake(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        if role in roles:
+            return dispatcher_mod.DispatchResult(
+                success=False, session_id=None, result_text="no accounts available",
+                account="", no_account=True,
+            )
+        return _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt)
+    return fake
+
+
+def test_run_task_cycle_says_it_finished_when_the_auditor_closed_it(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "implementador", "revisor", "auditor"])
+def test_run_task_cycle_is_held_when_no_account_takes_a_phase(tmp_path, monkeypatch, role) -> None:
+    """Whichever phase it is: the card is blocked as for any stop, but the run
+    is held, which is what lets the CLI exit with a code a wait answers."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for(role))
+
+    kanban = _FakeKanban()
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.HELD
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "done") not in kanban.statuses
+
+
+def test_run_task_cycle_is_blocked_not_held_when_a_phase_fails_on_its_own(tmp_path, monkeypatch) -> None:
+    """A phase that ran and failed is the task's problem, not the pool's."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        lambda *a, **kw: dispatcher_mod.DispatchResult(
+            success=False, session_id=None, result_text="claude timed out after 1800s", account="cuenta1",
+        ),
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+
+
+def test_run_task_cycle_is_blocked_when_the_rounds_run_out(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+
+
+def test_run_task_cycle_is_blocked_when_there_is_no_description(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban())
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+
+
+def test_run_task_cycle_is_not_held_by_an_optional_map_that_found_no_account(tmp_path, monkeypatch) -> None:
+    """The mapper is not a phase the task depends on: the task runs anyway, so
+    the pool being empty for it says nothing about how the run ended."""
+    cfg = _make_config(tmp_path, mapping_enabled=True)
+    _fake_index(monkeypatch, exists=False)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for(project_docs.MAPPER_ROLE))
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+
+
+def test_run_single_phase_hands_back_a_held_result_when_no_account_took_it(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """Not None, which is a phase that failed: the CLI exits differently on the
+    two, and `no_account` is how it tells them apart."""
+    cfg = _make_config(tmp_path)
+    seen = _spy_learnings(monkeypatch)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for("auditor"))
+
+    kanban = _FakeKanban()
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+    )
+
+    assert result is not None
+    assert result.success is False and result.no_account is True
+    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert (_ISSUE_ID, "done") not in kanban.statuses
+    # Not completed: the entries --final carried go back, as for any stop.
+    assert seen["orphaned"] == ["task-1"]
