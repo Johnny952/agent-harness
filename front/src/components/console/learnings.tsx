@@ -2,10 +2,10 @@
  * The two cells of a learning row whose whole content is a served judgement.
  *
  * Here and not in `routes/learnings.tsx`, the one screen that draws them, for
- * ADR 30's reason: a test cannot reach a component under `src/routes/`, because
- * the TanStack route generator scans every file there and tries to make a route
- * out of it, and `routeFileIgnorePattern` lives in the Lovable-generated
- * `vite.config.ts` that `docs/charter.md` C-9 keeps off-limits to a hand edit.
+ * ADR 30's reason — a test could not reach a component under `src/routes/`.
+ * That reason was wrong: `routeFileIgnorePrefix` defaults to `-`, so a test may
+ * sit beside its route. `docs/decisions.md` ADR 45 narrows ADR 30 and its last
+ * bullet is why these two do not move back.
  *
  * Both of them render `/api/learnings` fields verbatim and derive nothing:
  * `stale` and `in_phase_table` are the api's judgements against the config it

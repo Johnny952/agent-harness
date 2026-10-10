@@ -185,13 +185,15 @@ phase, the lint rides along as a note.
 Tests live beside what they test, as `*.test.tsx`, and two things about this
 tree constrain where that can be:
 
-- **Not under `src/routes/`.** `@tanstack/router-plugin` turns every file it
-  finds there into a route and errors on one it cannot; the knob that would
-  excuse a test file, `routeFileIgnorePattern`, has no default and is set in
-  the Lovable-generated `vite.config.ts`, which C-9 keeps off-limits. A
-  renderer worth a test moves to `src/components/console/` instead —
-  `docs/decisions.md` ADR 30, and `src/components/console/payload.tsx` is the
-  first one that did.
+- **Under `src/routes/`, prefix the filename with `-`.** The route generator
+  reads every other file in that directory as a route, and the knob that
+  excuses one is `routeFileIgnorePrefix`, which **defaults to `-`** and is set
+  nowhere in this repo — so `-index.test.tsx`, `-learnings.test.tsx`,
+  `-debt.test.tsx` and `-tail.test.tsx` sit beside the routes they test and
+  cost nothing in `routeTree.gen.ts`. Export the renderer from its route
+  module and render it plainly. For when a component moves to
+  `src/components/console/` instead, and what `vite.config.ts` has to do with
+  it (nothing): `docs/decisions.md` **ADR 45**, which narrows **ADR 30**.
 - **Import `describe`/`it`/`expect`/`afterEach` from `"vitest"`, and call
   `afterEach(cleanup)` yourself.** [`vitest.config.ts`](vitest.config.ts) sets
   `globals: false`, and `@testing-library/react` registers its own cleanup only
