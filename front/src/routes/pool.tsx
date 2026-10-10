@@ -14,7 +14,7 @@ import {
   WarningBanner,
 } from "@/components/console/primitives";
 import { accountsQuery, tasksQuery } from "@/lib/api/queries";
-import type { Account, AccountState, Task } from "@/lib/api/types";
+import type { Account, AccountState, LastProbe, Task } from "@/lib/api/types";
 import { agoSeconds, formatAge } from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
@@ -126,11 +126,10 @@ function PoolPage() {
                 <li key={a.name} className="flex items-center gap-2 text-[11px]">
                   <Mono className="w-5 text-muted-foreground">{i + 1}</Mono>
                   <Mono>{a.name}</Mono>
-                  {a.is_primary && (
-                    <span className="label-xs text-warning">
-                      primary · reserve {a.reserve_pct}%
-                    </span>
-                  )}
+                  {/* The tag only: the primary answers to two ceilings since ADR 48,
+                      and one number here would have to pick a window to lie about.
+                      Both are on its card, read from its last probe. */}
+                  {a.is_primary && <span className="label-xs text-warning">primary</span>}
                   <span className="ml-auto text-[10px] text-muted-foreground">
                     {a.state ?? <Absent label="state unreadable" />}
                   </span>
@@ -144,7 +143,143 @@ function PoolPage() {
   );
 }
 
-function AccountCard({
+/**
+ * How old a probe may be before its card says so, in seconds.
+ *
+ * `docs/ui.md` *Staleness is served, never computed* is about the lock, whose
+ * expiry the api judges against its own config and answers as `lock_expired`.
+ * A probe has no such judgement to serve: nothing in the harness expires one, and
+ * ADR 49 leaves it to the consumer — "a consumer reads `probed_at` before it reads
+ * the numbers" — because an account nothing dispatches is never re-probed and its
+ * record simply ages. So the mark is the console's, and it marks rather than
+ * hides: the numbers stay, beside their age.
+ *
+ * Thirty minutes is a reading, not a measurement. A parked account is re-probed
+ * every 60s and a busy one was probed when its phase was dispatched, so a record
+ * older than half an hour belongs to an account that is idle or refused, and a
+ * five-hour session can have moved by more than any margin the ceilings keep.
+ */
+export const PROBE_STALE_S = 30 * 60;
+
+/** A percentage to one decimal, without a trailing `.0` on a whole number. */
+function pct(n: number): string {
+  return `${Math.round(n * 10) / 10}%`;
+}
+
+/**
+ * The windows this probe found at or over their ceilings, by the dispatcher's own
+ * comparison — `>=`, in `dispatcher/dispatcher.py:_quota_decision` — read off the
+ * served record rather than re-decided: both sides of each test are on it.
+ */
+function overWindows(probe: LastProbe): string[] {
+  const over: string[] = [];
+  if (probe.session_pct >= probe.session_ceiling_pct) {
+    over.push(`the session's ${pct(probe.session_pct)} over its ${pct(probe.session_ceiling_pct)}`);
+  }
+  if (probe.week_pct >= probe.week_ceiling.pct) {
+    over.push(`the week's ${pct(probe.week_pct)} over its ${pct(probe.week_ceiling.pct)}`);
+  }
+  return over;
+}
+
+/**
+ * The last probe, each window against the ceiling it was held to, age first.
+ *
+ * Since ADR 48 the primary's two windows answer to two different numbers —
+ * `reserve_pct` on the session, a paced ceiling on the week — so they are two
+ * rows, never one ceiling. Both come from the record the gate wrote (ADR 49) and
+ * not from configuration: the paced value is a property of that one probe and the
+ * reset it read, and `reserve_pct` beside `is_primary` cannot say which applied.
+ * A worker renders through the same rows, its one threshold on both.
+ */
+function ProbeReadout({ probe, now }: { probe: LastProbe; now: number }) {
+  const age = Math.max(0, Math.round(now / 1000 - probe.probed_at));
+  const stale = age > PROBE_STALE_S;
+  const week = probe.week_ceiling;
+  const probedAt = new Date(probe.probed_at * 1000).toISOString();
+  return (
+    <>
+      <div className="mt-3 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>last probe</span>
+        <Mono className={cn(stale && "text-warning")}>
+          <span title={`Probed at ${probedAt}`}>
+            {stale ? `stale · ${formatAge(age)} ago` : `${formatAge(age)} ago`}
+          </span>
+        </Mono>
+      </div>
+      {stale && (
+        <p className="mt-1 text-[10px] italic text-warning/80">
+          Older than {PROBE_STALE_S / 60} minutes: an account nothing dispatches is not re-probed,
+          so the numbers below may have moved.
+        </p>
+      )}
+      <div className="mt-1 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>session</span>
+        <Mono className={cn(probe.session_pct >= probe.session_ceiling_pct && "text-warning")}>
+          {pct(probe.session_pct)} of {pct(probe.session_ceiling_pct)}
+        </Mono>
+      </div>
+      <div className="mt-1 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>week</span>
+        <Mono className={cn(probe.week_pct >= week.pct && "text-warning")}>
+          {pct(probe.week_pct)} of {pct(week.pct)}
+        </Mono>
+      </div>
+      {/* A paced week that fell back keeps `paced: true` (ADR 49), so the reason is
+          the test, not the flag: with one, the ceiling above is the reserve, and the
+          reset clause that would not parse is the whole explanation. */}
+      {week.fallback_reason !== null ? (
+        <p
+          className="mt-1 text-[10px] italic text-muted-foreground/80"
+          title={`week line's reset clause: ${probe.week_reset ?? "none"}`}
+        >
+          The week fell back to the reserve, because {week.fallback_reason}.
+        </p>
+      ) : week.paced && week.days_left !== null ? (
+        <p
+          className="mt-1 text-right text-[10px] text-muted-foreground/80"
+          title={week.reset ? `paced against the reset at ${week.reset}` : undefined}
+        >
+          paced week · {week.days_left.toFixed(1)} days to the reset
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * No record to read: the account was never probed, or its state file would not
+ * parse (ADR 49). What is left is configuration, and it is worded as that — the
+ * ceilings this account is configured with, not what it is held to. For the
+ * primary that is one number for the session only: its week's ceiling is set
+ * per probe (ADR 48), and `reserve_pct` is what it falls back to, not what it is.
+ */
+function ConfiguredCeilings({ account }: { account: Account }) {
+  return (
+    <>
+      <div className="mt-3 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>last probe</span>
+        <Absent label="none recorded" />
+      </div>
+      <div className="mt-1 flex items-baseline justify-between text-[10px] text-muted-foreground">
+        <span>configured</span>
+        <Mono>
+          {account.is_primary
+            ? `session ${account.reserve_pct}% reserve`
+            : `${account.quota_threshold_pct}% threshold, both windows`}
+        </Mono>
+      </div>
+      {account.is_primary && (
+        <p className="mt-1 text-[10px] italic text-muted-foreground/80">
+          The week&apos;s ceiling is set at each probe, paced to its reset, and falls back to the
+          reserve only when the reset will not parse.
+        </p>
+      )}
+    </>
+  );
+}
+
+export function AccountCard({
   account,
   lockedTask,
   lockJoinBroken,
@@ -159,11 +294,15 @@ function AccountCard({
   const cooldownLeft =
     refusedAge === null ? null : Math.max(0, account.quota_cooldown_seconds - refusedAge);
   const refused = cooldownLeft !== null && cooldownLeft > 0;
-  // `PRE_COOLDOWN` is the harness's own word for parked over the local threshold:
-  // `dispatcher/dispatcher.py` sets it when a `/usage` probe crosses
-  // `_threshold_for`. The console reads the state rather than re-deriving it from
-  // a usage number it is not served — ADR 18.
+  // `PRE_COOLDOWN` is the harness's own word for parked over the account's own
+  // ceiling: `dispatcher/dispatcher.py:_quota_decision` decides it, against
+  // `reserve_pct` on the primary's session and a paced ceiling on its week since
+  // ADR 48, so neither `_threshold_for` nor any one configured number is the
+  // ceiling the primary parked on. The console reads the state rather than
+  // re-deciding it; `last_probe` (ADR 49) is only what it can say about why.
   const parked = account.state === "PRE_COOLDOWN";
+  const probe = account.last_probe;
+  const over = probe ? overWindows(probe) : [];
 
   const stateTone: Record<AccountState, string> = {
     IDLE: "text-muted-foreground border-border-strong",
@@ -201,32 +340,23 @@ function AccountCard({
       </div>
       <Mono className="text-[10px] text-muted-foreground">{account.container}</Mono>
 
-      {/* The gauge is gone with its number, and is not repaired with a fixture.
-          Nothing persists `usage_pct`: the harness learns an account's usage from a
-          `/usage` probe at dispatch time and `state_machine` keeps the outcome — a
-          state, a current task, a stamp — never the measurement. ADR 18 calls this
-          a deliberate visible regression, because that gauge was reading a mock and
-          the same gauge reading nothing is the same picture with none of the
-          meaning. The thresholds below are this account's own, served per row
-          (ADR 20), and they are what the number would have been read against. */}
-      <div className="mt-3 flex items-baseline justify-between text-[10px] text-muted-foreground">
-        <span>usage</span>
-        <Absent label="not recorded — nothing persists the probe" />
-      </div>
-      <div className="mt-1 flex items-baseline justify-between text-[10px] text-muted-foreground">
-        <span>its ceiling</span>
-        <Mono>
-          {account.is_primary
-            ? `${account.reserve_pct}% reserve`
-            : `${account.quota_threshold_pct}% threshold`}
-        </Mono>
-      </div>
+      {/* The numbers are the last probe's and not a live gauge: the harness learns
+          an account's usage at dispatch time, and ADR 49 keeps that one probe, with
+          its time, in the account's state file. ADR 18 held the gauge back until a
+          number had a stamp to be read with; it has one now, so the age is drawn
+          first and the numbers under it. */}
+      {probe ? <ProbeReadout probe={probe} now={now} /> : <ConfiguredCeilings account={account} />}
 
       {parked && (
         <p className="mt-2 rounded-sm border border-warning/50 bg-warning/10 px-2 py-1 text-[11px] text-warning">
-          Parked over the local{" "}
-          {account.is_primary ? account.reserve_pct : account.quota_threshold_pct}% threshold. This
-          self-heals — a re-probe runs every 60s, no action needed.
+          {over.length > 0
+            ? `Parked: ${over.join(" and ")}.`
+            : probe
+              ? "Parked over its own ceiling; the last probe above was under both."
+              : account.is_primary
+                ? `Parked over its session's ${account.reserve_pct}% reserve or its week's paced ceiling — no probe recorded to say which.`
+                : `Parked over the local ${account.quota_threshold_pct}% threshold.`}{" "}
+          This self-heals — a re-probe runs every 60s, no action needed.
         </p>
       )}
       {refused && (

@@ -264,9 +264,10 @@ export interface Account {
   rate_limited_at: string | null;
   /**
    * `null` when the account was never probed or its record is unreadable (the
-   * latter with a warning). Optional only because the mock fixtures predate it.
+   * latter with a warning). Always served, so not optional: the api answers the
+   * key on every row (ADR 49), and the fixtures carry it as the route does.
    */
-  last_probe?: LastProbe | null;
+  last_probe: LastProbe | null;
 }
 
 export interface HookEvent {
