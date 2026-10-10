@@ -15,7 +15,7 @@ import {
 } from "@/components/console/primitives";
 import { accountsQuery, tasksQuery } from "@/lib/api/queries";
 import type { Account, AccountState, LastProbe, Task } from "@/lib/api/types";
-import { agoSeconds, formatAge } from "@/lib/format";
+import { agoEpochSeconds, formatAge } from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 
@@ -152,7 +152,9 @@ function PoolPage() {
  * ADR 49 leaves it to the consumer — "a consumer reads `probed_at` before it reads
  * the numbers" — because an account nothing dispatches is never re-probed and its
  * record simply ages. So the mark is the console's, and it marks rather than
- * hides: the numbers stay, beside their age.
+ * hides: the numbers stay, beside their age. That entry says so in a paragraph of
+ * its own, which names this constant, and `docs/decisions.md` ADR 51 records why
+ * the rule does not reach it (T-021).
  *
  * Thirty minutes is a reading, not a measurement. A parked account is re-probed
  * every 60s and a busy one was probed when its phase was dispatched, so a record
@@ -193,8 +195,8 @@ function overWindows(probe: LastProbe): string[] {
  * A worker renders through the same rows, its one threshold on both.
  */
 function ProbeReadout({ probe, now }: { probe: LastProbe; now: number }) {
-  const age = Math.max(0, Math.round(now / 1000 - probe.probed_at));
-  const stale = age > PROBE_STALE_S;
+  const age = agoEpochSeconds(probe.probed_at, now);
+  const stale = age !== null && age > PROBE_STALE_S;
   const week = probe.week_ceiling;
   const probedAt = new Date(probe.probed_at * 1000).toISOString();
   return (
@@ -290,7 +292,7 @@ export function AccountCard({
   lockJoinBroken: boolean;
   now: number;
 }) {
-  const refusedAge = agoSeconds(account.rate_limited_at, now);
+  const refusedAge = agoEpochSeconds(account.rate_limited_at, now);
   const cooldownLeft =
     refusedAge === null ? null : Math.max(0, account.quota_cooldown_seconds - refusedAge);
   const refused = cooldownLeft !== null && cooldownLeft > 0;

@@ -228,7 +228,7 @@ export interface ProbeWeekCeiling {
 
 /** The last `/usage` probe of one account and what it was held to (ADR 49). */
 export interface LastProbe {
-  /** Epoch seconds, the unit the api serves `rate_limited_at` in. */
+  /** Epoch seconds, the unit the api serves `rate_limited_at` in. Read through `agoEpochSeconds`. */
   probed_at: number;
   session_pct: number;
   week_pct: number;
@@ -261,7 +261,15 @@ export interface Account {
   /** `null` when the state file would not parse; the row stays, with a warning. */
   state: AccountState | null;
   current_task_id: string | null;
-  rate_limited_at: string | null;
+  /**
+   * When the provider last refused this account, in epoch seconds, as
+   * `dispatcher/state_machine.py:record_rate_limit` stores it from `time.time()`
+   * and the api serves it unchanged; `null` when it never was, or when the state
+   * file would not parse. A number and not a `Date` string, so its age is
+   * `agoEpochSeconds`'s and never `agoSeconds`'s, which would read it as
+   * milliseconds (T-021).
+   */
+  rate_limited_at: number | null;
   /**
    * `null` when the account was never probed or its record is unreadable (the
    * latter with a warning). Always served, so not optional: the api answers the
