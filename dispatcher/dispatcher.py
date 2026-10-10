@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import logging
 import os
 import re
@@ -274,25 +275,107 @@ def pick_idle_account(
         return None
     logger.warning(
         "no worker account can come back on its own, so the %s phase falls back to the primary "
-        "account %s, held to its %d%% reserve rather than the %d%% worker threshold",
+        "account %s, held to its %d%% session reserve rather than the %d%% worker threshold, "
+        "and on its week to %s",
         role or "requested", primary, cfg.reserve_pct, cfg.quota_threshold_pct,
+        # Named, not computed: this function holds no probe, and the paced
+        # ceiling is only knowable from one (ADR 48).
+        "a ceiling paced against the reset /usage reports" if cfg.pace_primary_week
+        else "the same reserve",
     )
     return primary
 
 
 def _threshold_for(cfg: Config, account: str) -> int:
-    """The quota ceiling this account is held to.
+    """The configured quota ceiling this account is held to.
 
     The primary's is stricter than a worker's, and every reader of it has to
     agree. The gate that parks an account above the line and the recheck that
     un-parks it below one are the same decision seen twice, so a recheck on the
     worker threshold would wave the primary straight back to IDLE the moment
     the gate parked it on the reserve, and the two would loop.
+
+    Since `docs/decisions.md` ADR 48 neither of them reads this function
+    directly: both go through `_quota_decision`, which is the only place in the
+    module where a probe is compared with a ceiling, and that is what keeps
+    them agreeing now that one of the ceilings moves. For the primary this
+    number is its *session* ceiling and its week's fallback; its week's own
+    ceiling is `quota.week_ceiling`'s and is not configured.
     """
     for acc in cfg.accounts:
         if acc.name == account:
             return cfg.reserve_pct if acc.is_primary else cfg.quota_threshold_pct
     return cfg.quota_threshold_pct
+
+
+def _is_primary(cfg: Config, account: str) -> bool:
+    """Whether this is the account `primary_account` names.
+
+    By the pool's own mark, never by name: the primary is configuration
+    (`docs/charter.md` C-3), so an account the pool cannot identify is not it.
+    """
+    return any(acc.name == account and acc.is_primary for acc in cfg.accounts)
+
+
+def _utc_now() -> dt.datetime:
+    """The clock the paced weekly ceiling is measured from.
+
+    A function rather than an inline `datetime.now` so a test can replace it:
+    the ceiling moves with the calendar, and no test may depend on the day it
+    runs on.
+    """
+    return dt.datetime.now(dt.timezone.utc)
+
+
+@dataclasses.dataclass(frozen=True)
+class _QuotaDecision:
+    """One probe measured against whatever ceilings govern its account."""
+
+    exceeds: bool
+    #: What the park log says the numbers were measured against, already
+    #: carrying the ceiling, the days left and the reset when the week is paced.
+    limit_phrase: str
+
+
+def _quota_decision(
+    cfg: Config, account: str, usage: quota.UsageInfo, now: dt.datetime | None = None,
+) -> _QuotaDecision:
+    """The only place in this module a probe is compared with a ceiling.
+
+    `check_quota_ok` and `_recheck_cooling_accounts` both come through here, so
+    the gate and the recheck cannot drift apart — see `_threshold_for`. A
+    worker, and the primary with `pace_primary_week` off, get the one
+    configured number on both windows. A paced primary keeps `reserve_pct` on
+    its session and answers to `quota.week_ceiling` on its week (ADR 48).
+    """
+    threshold = _threshold_for(cfg, account)
+    if not cfg.pace_primary_week or not _is_primary(cfg, account):
+        return _QuotaDecision(
+            exceeds=quota.exceeds_threshold(usage, threshold),
+            limit_phrase=f"the {threshold}% threshold",
+        )
+    ceiling = quota.week_ceiling(usage.week_reset, now or _utc_now(), cfg.reserve_pct)
+    exceeds = usage.session_pct >= threshold or usage.week_pct >= ceiling.pct
+    if ceiling.fallback_reason is not None:
+        # Logged here rather than at the two call sites, so the gate and the
+        # recheck both report it and neither has to repeat the sentence.
+        logger.warning(
+            "the primary account %s cannot be paced on this probe, so its week falls back to "
+            "the %d%% reserve: %s",
+            account, threshold, ceiling.fallback_reason,
+        )
+        return _QuotaDecision(
+            exceeds=exceeds,
+            limit_phrase=f"the {threshold}% reserve on both windows, because {ceiling.fallback_reason}",
+        )
+    return _QuotaDecision(
+        exceeds=exceeds,
+        limit_phrase=(
+            f"the {threshold}% session reserve or the {ceiling.pct:.1f}% weekly ceiling "
+            f"({ceiling.days_left:.1f} days to the "
+            f"{ceiling.reset.strftime('%Y-%m-%d %H:%M %Z')} reset it read)"
+        ),
+    )
 
 
 def check_quota_ok(cfg: Config, account: str) -> bool:
@@ -332,12 +415,12 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             "waving it through unverified", account, exc,
         )
         return True
-    threshold = _threshold_for(cfg, account)
-    if quota.exceeds_threshold(usage, threshold):
+    decision = _quota_decision(cfg, account, usage)
+    if decision.exceeds:
         logger.warning(
-            "account %s is at %d%% of its session and %d%% of its week, over the %d%% threshold; "
+            "account %s is at %d%% of its session and %d%% of its week, over %s; "
             "parking it PRE_COOLDOWN and looking for another",
-            account, usage.session_pct, usage.week_pct, threshold,
+            account, usage.session_pct, usage.week_pct, decision.limit_phrase,
         )
         state_machine.set_state(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
         return False
@@ -345,13 +428,19 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
 
 
 def _recheck_cooling_accounts(cfg: Config) -> list[str]:
-    # Free-text /usage reset timestamps (session_reset/week_reset) aren't
-    # reliably parseable to an exact wake time (design spec sec. 4a caveat),
-    # so recovery is re-check-on-dispatch rather than a scheduled expiry:
-    # every account parked in PRE_COOLDOWN/COOLING_DOWN gets a fresh /usage
-    # probe whenever no account is IDLE, and flips back to IDLE the moment
-    # it clears the threshold. Without this, an account that ever crosses the
-    # threshold stays dead for the life of the process.
+    # No wake is ever booked off a /usage reset: recovery is
+    # re-check-on-dispatch rather than a scheduled expiry, so every account
+    # parked in PRE_COOLDOWN/COOLING_DOWN gets a fresh /usage probe whenever no
+    # account is IDLE, and flips back to IDLE the moment it clears the ceiling
+    # it answers to. Without this, an account that ever crosses that line stays
+    # dead for the life of the process.
+    #
+    # The session's reset clause is still read by nothing — free text, no year,
+    # and not worth an exact wake time (design spec sec. 4a caveat). The week's
+    # is read on every probe since docs/decisions.md ADR 48, and that is the
+    # second reason this loop is the right shape: a primary parked by the paced
+    # weekly ceiling is released by the ceiling rising on one of these probes,
+    # with no new scheduler.
     #
     # The exception is an account the service itself refused: that probe is
     # blind to a refusal, so a recorded one holds the account until the
@@ -400,7 +489,7 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
                 state_machine.record_rate_limit(cfg.state_dir, acc.name)
                 continue
             usage = quota.parse_usage_output(result.result_text)
-            exceeds = quota.exceeds_threshold(usage, _threshold_for(cfg, acc.name))
+            exceeds = _quota_decision(cfg, acc.name, usage).exceeds
         except Exception as exc:
             logger.warning("quota recheck failed for account %s: %s", acc.name, exc)
             exceeds = False

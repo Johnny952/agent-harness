@@ -30,12 +30,25 @@ primary_account: cuenta1
 quota_threshold_pct: 90
 
 # The line below which the primary accepts fallback work at all, and the
-# ceiling it is parked on in place of quota_threshold_pct. Above it the pool
-# reports itself dry rather than spending the operator's own console to the
-# wall. An explicit value above quota_threshold_pct is a config error, not a
-# clamp. Optional; defaults to 60, or to quota_threshold_pct when that is
-# stricter.
+# ceiling its five-hour session is parked on in place of quota_threshold_pct.
+# Above it the pool reports itself dry rather than spending the operator's own
+# console to the wall. Its week answers to the paced ceiling below instead,
+# and falls back to this number when no reset can be read. An explicit value
+# above quota_threshold_pct is a config error, not a clamp. Optional; defaults
+# to 60, or to quota_threshold_pct when that is stricter.
 reserve_pct: 60
+
+# Pace the primary's weekly spend against its own reset instead of holding the
+# week to the flat reserve_pct. With d days from the probe to the reset that
+# `/usage` reported, the week may be spent to 10% while d is over 6, rising
+# linearly to 95% over the following days, and 95% through the last one — less
+# 5 points held back for the phase that runs after the probe. The reset is
+# reread at every probe and never configured, because a week starts at a
+# moment set by the account's own history. `false` restores the older
+# behaviour exactly: reserve_pct on both of the primary's windows. The ramp's
+# own numbers are constants in dispatcher/quota.py, not keys. Optional;
+# defaults to true.
+pace_primary_week: true
 
 # The phases the primary will take as fallback. A revisor or an auditor reads
 # a diff and writes a verdict; an implementador writes code across up to

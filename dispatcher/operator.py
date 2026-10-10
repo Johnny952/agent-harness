@@ -53,10 +53,11 @@ class AccountReport:
     usage: quota.UsageInfo | None = None
     probe_error: str | None = None
     probe_refused: bool = False
-    #: The account `primary_account` names, held to `reserve_pct` instead of
-    #: `quota_threshold_pct` and tried last. Reported because the listing
-    #: otherwise shows one account measured against a different number than
-    #: the rest with nothing to say why.
+    #: The account `primary_account` names: held to `reserve_pct` on its
+    #: session, to the weekly ceiling paced against its own reset on its week
+    #: (`docs/decisions.md` ADR 48), and tried last. Reported because the
+    #: listing otherwise shows one account measured against different numbers
+    #: than the rest with nothing to say why.
     is_primary: bool = False
 
 
@@ -325,13 +326,39 @@ def _duration(seconds: float) -> str:
     return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
-def format_status(cfg: Config, accounts: list[AccountReport], tasks: list[TaskReport]) -> str:
+def _quota_limits(cfg: Config, acc: AccountReport, now: dt.datetime) -> str:
+    """What this account's probed numbers are measured against, as one phrase.
+
+    A worker, and a primary with the pacing switched off, answer to one
+    configured number on both windows and read as they always did. A paced
+    primary answers to two, so it says which is which.
+    """
+    threshold = _threshold_for(cfg, acc.name)
+    if not acc.is_primary or not cfg.pace_primary_week:
+        return f"threshold {threshold}%"
+    ceiling = quota.week_ceiling(acc.usage.week_reset, now, cfg.reserve_pct)
+    if ceiling.fallback_reason is not None:
+        return f"session {threshold}%, week {threshold}% — no reset read"
+    return f"session {threshold}%, week ceiling {ceiling.pct:.1f}%"
+
+
+def format_status(
+    cfg: Config,
+    accounts: list[AccountReport],
+    tasks: list[TaskReport],
+    now: dt.datetime | None = None,
+) -> str:
     """The whole pool as one screen, because that is the question being asked.
 
     No table helper and no column maths beyond a pad: this is read by a human
     at a terminal that may be narrow, and a wrapped table is worse than a
     ragged one.
+
+    `now` is the moment a paced weekly ceiling is measured from, taken once per
+    listing so two rows cannot disagree, and a parameter only so that a test
+    does not depend on the day it runs on.
     """
+    paced_at = now or dt.datetime.now(dt.timezone.utc)
     out = [f"accounts ({cfg.state_dir})"]
     width = max((len(a.name) for a in accounts), default=0)
     for acc in accounts:
@@ -348,10 +375,16 @@ def format_status(cfg: Config, accounts: list[AccountReport], tasks: list[TaskRe
             notes.append("probe REFUSED by the service")
         elif acc.usage is not None:
             # The primary answers to its reserve, so printing the worker
-            # threshold next to it would misreport when it is about to park.
+            # threshold next to it would misreport when it is about to park —
+            # and since ADR 48 its two windows answer to two different numbers,
+            # so one of those would misreport too. The paced row therefore
+            # names both, read from this account's own probe by the same pure
+            # function the gate uses. `status` writes nothing and logs nothing,
+            # so it calls quota.week_ceiling rather than the dispatcher's
+            # _quota_decision.
             notes.append(
                 f"session {acc.usage.session_pct}% · week {acc.usage.week_pct}% "
-                f"(threshold {_threshold_for(cfg, acc.name)}%)"
+                f"({_quota_limits(cfg, acc, paced_at)})"
             )
         elif acc.probe_error is not None:
             notes.append(f"probe failed: {acc.probe_error}")

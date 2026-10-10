@@ -39,7 +39,11 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   special case at all: it is the ordering running off its end. What keeps
   that from eating the console is three limits rather than an exclusion.
   `reserve_pct` (60) is the primary's own ceiling, stricter than the workers'
-  `quota_threshold_pct` (90) and a config error if it is ever set looser.
+  `quota_threshold_pct` (90) and a config error if it is ever set looser; it
+  holds the primary's five-hour session, while its week is paced against the
+  reset `/usage` reports — 10% of the week just after a reset rising to 95% in
+  its last day, `pace_primary_week: false` to go back to the flat reserve
+  (`docs/decisions.md` ADR 48).
   `fallback_roles` (`revisor` and `auditor` by default) is the list of phases
   it will take at all: a revisor or an auditor reads a diff and writes a
   verdict, bounded and cheap, while an implementador writes code across up to
@@ -674,9 +678,11 @@ python -m dispatcher.cli --config config.yaml release-account --name cuenta2
 ```
 
 `status` reads and prints: every account with its state, the task it is on,
-the ceiling it answers to — `reserve_pct` for the one marked `primary`,
-`quota_threshold_pct` for the rest, so the two numbers are read off the pool
-rather than off the config — how much of `quota_cooldown_seconds` a recorded
+the ceiling it answers to — `quota_threshold_pct` for a worker, and for the one
+marked `primary` both of its own: `reserve_pct` on the session and the paced
+weekly ceiling read from its last probe's reset, so the numbers are read off
+the pool and that probe rather than off the config — how much of
+`quota_cooldown_seconds` a recorded
 refusal has left to run, and every task card that is in progress or owned,
 with the age of its heartbeat and whether that is still a live lock against
 `heartbeat_ttl_seconds`. It writes nothing — deliberately, because the gate's
@@ -1640,11 +1646,13 @@ either.
      retries — and for the cool-down, which would then wait out the real
      reset instead of `quota_cooldown_seconds`' fixed guess. `exec_claude` would then read the final `result` message
      from the stream instead of a single JSON object.
-   - *Pace the primary's weekly spend.* Next after T-017: a weekly ceiling
-     for the primary that rises from 10% after its reset to 95% a day
-     before the next one, read from `/usage`'s own reset clause on every
-     probe instead of a fixed `reserve_pct`. The plan is
-     `docs/plans/token-economy.md` P8.
+   - *Pace the primary's weekly spend.* **Built by T-020** (`pace_primary_week`,
+     on by default): a weekly ceiling for the primary that rises from 10%
+     after its reset to 95% a day before the next one, read from `/usage`'s
+     own reset clause on every probe instead of a fixed `reserve_pct`, which
+     now holds its session and is the week's fallback. The decision is
+     `docs/decisions.md` ADR 48, the plan `docs/plans/token-economy.md` P8,
+     and the change `docs/implementations/T-020.md`.
    - *Trim the fixed startup context.* Every phase pays its startup
      context (system prompt, tool and MCP schemas, `CLAUDE.md`, skill
      listings) and rereads it on every turn. Ship only the plugins and MCP

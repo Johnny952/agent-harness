@@ -216,6 +216,22 @@ def test_load_config_reads_the_gate_keys(tmp_path: Path) -> None:
     assert cfg.gates_test_timeout_seconds == 120
 
 
+def test_load_config_paces_the_primary_week_by_default(tmp_path: Path) -> None:
+    """ADR 48 is on for a config that says nothing about it: the fixed weekly
+    reserve is the behaviour an operator has to ask for now, not the default."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    assert load_config(str(config_path)).pace_primary_week is True
+
+
+def test_load_config_reads_the_pacing_switch_off(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\npace_primary_week: false\n")
+
+    assert load_config(str(config_path)).pace_primary_week is False
+
+
 @pytest.mark.parametrize("bad_value", ["0", "-5", "15m", "true"])
 def test_load_config_rejects_an_invalid_test_timeout(tmp_path: Path, bad_value: str) -> None:
     """The timeout is what keeps a hung suite from holding the task's lock for
