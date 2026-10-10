@@ -3552,3 +3552,38 @@ one. The phases' `Bash(bun run lint*)` permission in `config.yaml` is
 unchanged. A phase that runs the lint itself before handing off now runs a
 check that can block its round.
 
+
+---
+
+## ADR 51 — a probe's staleness is the console's mark; `docs/ui.md`'s served-staleness rule covers the lock
+
+**Status:** accepted (T-021, 2026-10-10). **Narrows ADR 18 for the probe and
+does not supersede it**: a lock's staleness is still served as `lock_expired`
+and no screen compares a heartbeat against a number of its own.
+
+**Context.** The pool card marks a `last_probe` stale when it is older than
+`PROBE_STALE_S`, thirty minutes, a constant in `front/src/routes/pool.tsx`.
+`docs/ui.md` *Staleness is served, never computed* reads, on its face, as
+forbidding that. ADR 18 deleted `HEARTBEAT_STALE_S` under it, because the api
+already applied `heartbeat_ttl_seconds` and a console constant would drift
+from the config the dispatcher acts on. Two outcomes were open: serve a
+`probe_stale` judgement from the api, or rule that the entry does not reach
+the probe.
+
+**Decision.** The entry does not reach the probe, and `docs/ui.md` says so in
+a paragraph of its own. A probe's age is not a lock. Nothing in the harness
+expires a probe or acts on its age, so there is no server window and no
+config key for the console's number to disagree with, which was the whole of
+ADR 18's harm. ADR 49 hands the reading to the consumer in its own words: a
+consumer reads `probed_at` before it reads the numbers. The mark only marks:
+the numbers stay, beside their age. Serving `probe_stale` was not taken. It
+would invent a server window that only the console reads, and it would need a
+change under `observability/` for a judgement nothing on the server makes.
+
+**Consequences.** `PROBE_STALE_S` stays where it is, and its comment and the
+`docs/ui.md` paragraph cite this entry. If the dispatcher ever gives a probe an
+expiry of its own (re-probing an idle account on a timer, for one), the
+judgement moves to the api with it, the console reads the served field, and
+the constant and this exception go. The probe's age is now read through
+`front/src/lib/format.ts:agoEpochSeconds`, the same helper T-021 introduced
+for `rate_limited_at`.

@@ -311,9 +311,25 @@ served judgement: `in_phase_table`, against the `phase_table_cap` on the row,
 and no screen re-ranks the rows to work it out
 (`docs/decisions.md` ADR 41 and ADR 42).
 
-**Set by:** T-012; the learnings tree's two served judgements by T-016. Source
+A probe's age is the one mark a screen sets itself, and the rule above does not
+reach it. The pool card marks a `last_probe` stale past `PROBE_STALE_S`, thirty
+minutes, in `front/src/routes/pool.tsx`. The rule exists because the api already
+holds an expiry window for a lock, and a console with its own number would
+disagree with the dispatcher the day someone changed the config. A probe has no
+such window. Nothing in the harness expires a probe, nothing acts on its age,
+and no config key the console could drift from says how old is too old.
+`docs/decisions.md` ADR 49 leaves the reading to the consumer: an account
+nothing dispatches is not re-probed, so "a consumer reads `probed_at` before it
+reads the numbers". The mark therefore marks and never hides: the numbers stay,
+beside their age. If the dispatcher ever gives a probe an expiry of its own, the
+judgement moves to the api with it and this paragraph goes
+(`docs/decisions.md` ADR 51).
+
+**Set by:** T-012; the learnings tree's two served judgements by T-016; the
+probe's age by T-021. Source
 of truth: `front/src/components/console/primitives.tsx` (`HeartbeatDot`),
-`front/src/lib/format.ts`, `front/src/routes/learnings.tsx`.
+`front/src/lib/format.ts`, `front/src/routes/learnings.tsx`,
+`front/src/routes/pool.tsx` (`PROBE_STALE_S`).
 
 ### A region with no route says which route, and when
 

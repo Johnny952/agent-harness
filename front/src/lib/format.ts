@@ -18,6 +18,26 @@ export function agoSeconds(iso: string | null, now: number = Date.now()): number
   return Math.max(0, Math.round((now - then) / 1000));
 }
 
+/**
+ * `agoSeconds` for a stamp served as epoch seconds rather than as ISO 8601.
+ *
+ * Two fields arrive in that unit, because the dispatcher writes both from
+ * `time.time()` and the api serves its state files unchanged: `rate_limited_at`
+ * (`dispatcher/state_machine.py:record_rate_limit`) and `last_probe.probed_at`
+ * (ADR 49). Handed to `agoSeconds` instead, a number goes to `new Date(...)`,
+ * which reads it as milliseconds and lands in January 1970 — the ages come out
+ * decades long and nothing complains (T-021). A value that is not a finite
+ * number answers `null`, for `agoSeconds`'s reason: the api does not check the
+ * type of what a hand-edited state file holds.
+ */
+export function agoEpochSeconds(
+  epochSeconds: number | null,
+  now: number = Date.now(),
+): number | null {
+  if (typeof epochSeconds !== "number" || !Number.isFinite(epochSeconds)) return null;
+  return Math.max(0, Math.round(now / 1000 - epochSeconds));
+}
+
 export function formatAge(seconds: number | null): string {
   if (seconds === null) return "—";
   if (seconds < 60) return `${seconds}s`;

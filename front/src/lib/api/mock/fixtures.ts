@@ -153,7 +153,10 @@ export function mockTasks(): Task[] {
     {
       task_id: "T-012",
       status: "in_progress",
-      owner: "cuenta4",
+      // cuenta6, whose state file reads as BUSY on this task. It was cuenta4,
+      // whose state is unreadable: a live lock held by an account the api cannot
+      // say is running anything was a pairing nothing meant (T-021).
+      owner: "cuenta6",
       heartbeat: iso(17),
       depends_on: [],
       description: "Pool priority: workers before primary",
@@ -261,7 +264,10 @@ export function mockPhases(): Phase[] {
   ];
 }
 
-/** Epoch seconds, the unit `last_probe.probed_at` is served in (ADR 49). */
+/**
+ * Epoch seconds, the unit `last_probe.probed_at` (ADR 49) and `rate_limited_at`
+ * are both served in: the dispatcher writes each from `time.time()`.
+ */
 const epoch = (secondsAgo: number) => Math.floor(now() / 1000) - secondsAgo;
 
 /**
@@ -353,7 +359,10 @@ export function mockAccounts(): Account[] {
       ...limits,
       state: "COOLING_DOWN",
       current_task_id: null,
-      rate_limited_at: iso(620),
+      // Epoch seconds, as the api serves it. This was an ISO string once, which
+      // the api never sends, and it hid the console reading the real number as
+      // milliseconds (T-021).
+      rate_limited_at: epoch(620),
       // Old on purpose: a refused account is not re-probed until its cooldown
       // runs out, so its record ages past the console's stale mark.
       last_probe: { ...probes.worker, probed_at: epoch(5400), session_pct: 88, week_pct: 71 },
@@ -396,8 +405,8 @@ export function mockAccounts(): Account[] {
       container: "agent-cuenta6",
       is_primary: true,
       ...limits,
-      state: "IDLE",
-      current_task_id: null,
+      state: "BUSY",
+      current_task_id: "T-012",
       rate_limited_at: null,
       last_probe: probes.pacedPrimary,
     },

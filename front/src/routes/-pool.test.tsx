@@ -127,3 +127,33 @@ describe("no probe recorded", () => {
     expect(text).toContain("no probe recorded to say which");
   });
 });
+
+describe("a refused account", () => {
+  // The api serves `rate_limited_at` as `dispatcher/state_machine.py:
+  // record_rate_limit` stores it: epoch seconds, from `time.time()`. Handed to
+  // `new Date(...)` it is read as milliseconds, lands in January 1970, and the
+  // cooldown reads as long over — so the card never said a cooling account was
+  // refused (T-021). `now` is fixed so the time left is exact.
+  const now = 1_760_123_456_700;
+
+  function refusedText(secondsAgo: number): string {
+    const a = account(false, null, {
+      state: "COOLING_DOWN",
+      rate_limited_at: now / 1000 - secondsAgo,
+    });
+    const { container } = render(
+      <AccountCard account={a} lockedTask={null} lockJoinBroken={false} now={now} />,
+    );
+    return (container.textContent ?? "").replace(/\s+/g, " ");
+  }
+
+  it("reads an epoch-seconds stamp inside its cooldown as refused, with the time left", () => {
+    expect(refusedText(620)).toContain(
+      "Refused by the provider. Back in 19m 40s (1800s cooldown).",
+    );
+  });
+
+  it("is not refused once its cooldown has run out", () => {
+    expect(refusedText(1900)).not.toContain("Refused by the provider");
+  });
+});
