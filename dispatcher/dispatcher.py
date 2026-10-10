@@ -350,15 +350,33 @@ def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _Quota
     against the moment it was taken, and `_utc_now` is the one seam a test
     replaces, so a second injection point here would only be a way for the two
     readers to be handed different days.
+
+    It is also the one place that records the probe, for the same reason: both
+    readers pass through here, so neither can forget to (ADR 49). The record is
+    written after the decision is made and cannot change it.
     """
     threshold = _threshold_for(cfg, account)
+    now = _utc_now()
     if not cfg.pace_primary_week or not _is_primary(cfg, account):
-        return _QuotaDecision(
+        decision = _QuotaDecision(
             exceeds=quota.exceeds_threshold(usage, threshold),
             limit_phrase=f"the {threshold}% threshold",
         )
-    ceiling = quota.week_ceiling(usage.week_reset, _utc_now(), cfg.reserve_pct)
+        week = {
+            "paced": False, "pct": threshold, "days_left": None, "reset": None,
+            "fallback_reason": None,
+        }
+        _record_probe(cfg, account, _probe_record(usage, now, decision, threshold, week))
+        return decision
+    ceiling = quota.week_ceiling(usage.week_reset, now, cfg.reserve_pct)
     exceeds = usage.session_pct >= threshold or usage.week_pct >= ceiling.pct
+    week = {
+        "paced": True,
+        "pct": ceiling.pct,
+        "days_left": ceiling.days_left,
+        "reset": ceiling.reset.isoformat() if ceiling.reset is not None else None,
+        "fallback_reason": ceiling.fallback_reason,
+    }
     if ceiling.fallback_reason is not None:
         # Logged here rather than at the two call sites, so the gate and the
         # recheck both report it and neither has to repeat the sentence.
@@ -367,18 +385,67 @@ def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _Quota
             "the %d%% reserve: %s",
             account, threshold, ceiling.fallback_reason,
         )
-        return _QuotaDecision(
+        decision = _QuotaDecision(
             exceeds=exceeds,
             limit_phrase=f"the {threshold}% reserve on both windows, because {ceiling.fallback_reason}",
         )
-    return _QuotaDecision(
-        exceeds=exceeds,
-        limit_phrase=(
-            f"the {threshold}% session reserve or the {ceiling.pct:.1f}% weekly ceiling "
-            f"({ceiling.days_left:.1f} days to the "
-            f"{ceiling.reset.strftime('%Y-%m-%d %H:%M %Z')} reset it read)"
-        ),
-    )
+    else:
+        decision = _QuotaDecision(
+            exceeds=exceeds,
+            limit_phrase=(
+                f"the {threshold}% session reserve or the {ceiling.pct:.1f}% weekly ceiling "
+                f"({ceiling.days_left:.1f} days to the "
+                f"{ceiling.reset.strftime('%Y-%m-%d %H:%M %Z')} reset it read)"
+            ),
+        )
+    _record_probe(cfg, account, _probe_record(usage, now, decision, threshold, week))
+    return decision
+
+
+def _probe_record(
+    usage: quota.UsageInfo,
+    now: dt.datetime,
+    decision: _QuotaDecision,
+    session_ceiling_pct: int,
+    week_ceiling: dict,
+) -> dict:
+    """One probe as `state_machine.record_probe` keeps it and `/api/accounts`
+    serves it (ADR 49).
+
+    `probed_at` is epoch seconds, the unit `rate_limited_at` is already stored
+    and served in, so the two stamps on one row compare without a parse. It is
+    the moment the ceiling was computed from, not a second clock read, so a
+    days-left on the record is exactly `reset - probed_at`. The reset clauses
+    go in raw beside the parsed reset: a fallback is explained by the text that
+    would not parse, and only the raw clause carries it.
+    """
+    return {
+        "probed_at": now.timestamp(),
+        "session_pct": usage.session_pct,
+        "week_pct": usage.week_pct,
+        "session_reset": usage.session_reset,
+        "week_reset": usage.week_reset,
+        "exceeds": decision.exceeds,
+        "session_ceiling_pct": session_ceiling_pct,
+        "week_ceiling": week_ceiling,
+    }
+
+
+def _record_probe(cfg: Config, account: str, record: dict) -> None:
+    """Persist the probe, and never let doing so touch the decision it records.
+
+    The record is for the console; the decision is what keeps an account off a
+    wall. A full disk or a state file some other writer mangled must not turn
+    into a crash of the gate, nor — through `_recheck_cooling_accounts`'s own
+    fail-open `except` — into an account waved back to IDLE on a write error.
+    So everything is caught here and logged, and the caller carries on.
+    """
+    try:
+        state_machine.record_probe(cfg.state_dir, account, record)
+    except Exception as exc:
+        logger.warning(
+            "could not record the quota probe for account %s: %s; the decision stands", account, exc,
+        )
 
 
 def check_quota_ok(cfg: Config, account: str) -> bool:

@@ -308,7 +308,24 @@ def create_app(
                 # array parses, and `get_state`'s `data["state"]` and
                 # `get_current_task`'s `data.get(...)` then fail on its shape.
                 warnings.append(f"{path}: unreadable account state: {exc}")
-                row.update(state=None, current_task=None, rate_limited_at=None)
+                row.update(
+                    state=None, current_task=None, rate_limited_at=None, last_probe=None,
+                )
+            else:
+                # The last `/usage` probe and the ceilings it was held to, as
+                # the dispatcher's gate recorded them — ADR 49, narrowing ADR
+                # 18's "probe numbers stay unserved". Its own `try`, after the
+                # state half, so a record in the wrong shape nulls only itself:
+                # the account's state is still true when its probe is not. A
+                # file the first `try` could not read never gets here, so one
+                # corrupt file is one warning and not two.
+                try:
+                    row["last_probe"] = state_machine.get_last_probe(
+                        cfg.state_dir, account.name
+                    )
+                except (OSError, TypeError, AttributeError, ValueError, KeyError) as exc:
+                    warnings.append(f"{path}: unreadable last probe: {exc}")
+                    row["last_probe"] = None
             data.append(row)
         return _envelope(data, warnings)
 

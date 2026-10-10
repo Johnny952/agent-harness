@@ -897,6 +897,7 @@ def test_accounts_reports_the_pool_from_the_state_directory(tmp_path: Path) -> N
             "state": "BUSY",
             "current_task": "T-1",
             "rate_limited_at": None,
+            "last_probe": None,
             "is_primary": False,
             "quota_threshold_pct": 90,
             "reserve_pct": 60,
@@ -908,6 +909,7 @@ def test_accounts_reports_the_pool_from_the_state_directory(tmp_path: Path) -> N
             "state": "IDLE",
             "current_task": None,
             "rate_limited_at": 1700000000.0,
+            "last_probe": None,
             "is_primary": False,
             "quota_threshold_pct": 90,
             "reserve_pct": 60,
@@ -1015,6 +1017,88 @@ def test_an_unreadable_state_file_keeps_the_config_half_of_the_row(tmp_path: Pat
     assert account["state"] is None
     assert account["is_primary"] is True
     assert account["quota_threshold_pct"] == 95
+
+
+#: One probe as `dispatcher.dispatcher._probe_record` writes it for a paced
+#: primary: the shape `/api/accounts` serves as `last_probe` (ADR 49).
+_PACED_PROBE = {
+    "probed_at": 1791547200.0,
+    "session_pct": 12,
+    "week_pct": 30,
+    "session_reset": "4:59pm (UTC)",
+    "week_reset": "Oct 14, 12:00pm (UTC)",
+    "exceeds": True,
+    "session_ceiling_pct": 60,
+    "week_ceiling": {
+        "paced": True,
+        "pct": 19.166666666666668,
+        "days_left": 5.0,
+        "reset": "2026-10-14T12:00:00+00:00",
+        "fallback_reason": None,
+    },
+}
+
+
+def test_a_recorded_probe_is_served_on_its_row(tmp_path: Path) -> None:
+    """ADR 49: the record the gate wrote is the record the row serves, whole.
+
+    Written through `state_machine.record_probe` and then parked through
+    `set_state`, the order the gate does it in, so the row also pins that the
+    transition did not drop it.
+    """
+    harness = _harness(tmp_path, accounts=("cuenta1", "cuenta2"), primary_account="cuenta1")
+    state_machine.record_probe(harness.state_dir, "cuenta1", _PACED_PROBE)
+    state_machine.set_state(harness.state_dir, "cuenta1", AccountState.PRE_COOLDOWN)
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    assert body["warnings"] == []
+    assert body["data"][0]["last_probe"] == _PACED_PROBE
+    assert body["data"][0]["state"] == "PRE_COOLDOWN"
+    # `reserve_pct` stays on the row beside it, unchanged (ADR 20).
+    assert body["data"][0]["reserve_pct"] == 60
+
+
+def test_an_account_never_probed_serves_a_null_probe(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, accounts=("cuenta1", "cuenta2"))
+    state_machine.set_state(harness.state_dir, "cuenta1", AccountState.BUSY, "T-1")
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    assert body["warnings"] == []
+    # One with a state file and no probe in it, one with no state file at all.
+    assert [row["last_probe"] for row in body["data"]] == [None, None]
+
+
+def test_an_unreadable_probe_nulls_only_itself_with_a_warning(tmp_path: Path) -> None:
+    """A record in the wrong shape is not served as half a probe, and does not
+    cost the row its state: the state half was read and is still true."""
+    harness = _harness(tmp_path, accounts=("cuenta1", "cuenta2"))
+    state_machine.set_state(harness.state_dir, "cuenta1", AccountState.BUSY, "T-1")
+    path = Path(harness.state_dir) / "cuenta1.json"
+    data = json.loads(path.read_text())
+    data["last_probe"] = {"session_pct": 12}
+    path.write_text(json.dumps(data))
+    state_machine.record_probe(harness.state_dir, "cuenta2", _PACED_PROBE)
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    [warning] = body["warnings"]
+    assert str(path) in warning
+    assert "unreadable last probe" in warning
+    first, second = body["data"]
+    assert (first["state"], first["current_task"], first["last_probe"]) == ("BUSY", "T-1", None)
+    assert second["last_probe"] == _PACED_PROBE
+
+
+def test_an_unreadable_state_file_nulls_the_probe_with_one_warning(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    (Path(harness.state_dir) / "cuenta1.json").write_text("{truncated")
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    assert len(body["warnings"]) == 1
+    assert body["data"][0]["last_probe"] is None
 
 
 # --- events ---------------------------------------------------------------

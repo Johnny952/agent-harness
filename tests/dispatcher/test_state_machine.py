@@ -1,5 +1,8 @@
+import json
 import time
 from pathlib import Path
+
+import pytest
 
 from dispatcher.config import AccountConfig
 from dispatcher.state_machine import (
@@ -7,9 +10,11 @@ from dispatcher.state_machine import (
     clear_rate_limit,
     get_busy_since,
     get_current_task,
+    get_last_probe,
     get_rate_limited_at,
     get_state,
     list_idle_accounts,
+    record_probe,
     record_rate_limit,
     set_state,
 )
@@ -154,3 +159,93 @@ def test_re_entering_busy_restamps_the_clock(tmp_path: Path) -> None:
 
 def test_no_busy_since_for_an_account_with_no_state_file(tmp_path: Path) -> None:
     assert get_busy_since(str(tmp_path), "cuenta1") is None
+
+
+# --- last_probe (docs/decisions.md ADR 49) ---------------------------------
+
+_PROBE = {
+    "probed_at": 1791547200.0,
+    "session_pct": 12,
+    "week_pct": 30,
+    "session_reset": "4:59pm (UTC)",
+    "week_reset": None,
+    "exceeds": False,
+    "session_ceiling_pct": 90,
+    "week_ceiling": {
+        "paced": False, "pct": 90, "days_left": None, "reset": None, "fallback_reason": None,
+    },
+}
+
+
+def test_no_probe_is_recorded_for_an_account_that_was_never_probed(tmp_path: Path) -> None:
+    assert get_last_probe(str(tmp_path), "cuenta1") is None
+    set_state(str(tmp_path), "cuenta1", AccountState.IDLE)
+    assert get_last_probe(str(tmp_path), "cuenta1") is None
+
+
+def test_a_probe_round_trips_through_the_state_file(tmp_path: Path) -> None:
+    # The gate can probe an account before anything wrote its state file.
+    record_probe(str(tmp_path), "cuenta1", _PROBE)
+
+    assert get_last_probe(str(tmp_path), "cuenta1") == _PROBE
+    assert get_state(str(tmp_path), "cuenta1") == AccountState.IDLE
+
+
+def test_a_later_probe_replaces_the_earlier_one(tmp_path: Path) -> None:
+    record_probe(str(tmp_path), "cuenta1", _PROBE)
+    later = {**_PROBE, "probed_at": 1791550800.0, "week_pct": 31}
+
+    record_probe(str(tmp_path), "cuenta1", later)
+
+    assert get_last_probe(str(tmp_path), "cuenta1") == later
+
+
+def test_recording_a_probe_leaves_the_state_and_the_refusal_alone(tmp_path: Path) -> None:
+    record_rate_limit(str(tmp_path), "cuenta1", at=1000.0)
+    set_state(str(tmp_path), "cuenta1", AccountState.BUSY, current_task_id="task-1")
+
+    record_probe(str(tmp_path), "cuenta1", _PROBE)
+
+    assert get_state(str(tmp_path), "cuenta1") == AccountState.BUSY
+    assert get_current_task(str(tmp_path), "cuenta1") == "task-1"
+    assert get_rate_limited_at(str(tmp_path), "cuenta1") == 1000.0
+
+
+def test_a_recorded_probe_survives_every_later_state_change(tmp_path: Path) -> None:
+    # The gate records the probe and then parks the account with `set_state`,
+    # which rewrites the whole document: without the carry the probe that
+    # parked the account would be gone the moment it did.
+    record_probe(str(tmp_path), "cuenta1", _PROBE)
+    set_state(str(tmp_path), "cuenta1", AccountState.PRE_COOLDOWN)
+    set_state(str(tmp_path), "cuenta1", AccountState.COOLING_DOWN)
+    set_state(str(tmp_path), "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    set_state(str(tmp_path), "cuenta1", AccountState.IDLE)
+
+    assert get_last_probe(str(tmp_path), "cuenta1") == _PROBE
+
+
+def test_a_recorded_probe_survives_the_rate_limit_writers(tmp_path: Path) -> None:
+    record_probe(str(tmp_path), "cuenta1", _PROBE)
+
+    record_rate_limit(str(tmp_path), "cuenta1", at=1000.0)
+    assert get_last_probe(str(tmp_path), "cuenta1") == _PROBE
+
+    clear_rate_limit(str(tmp_path), "cuenta1")
+    assert get_last_probe(str(tmp_path), "cuenta1") == _PROBE
+    assert get_rate_limited_at(str(tmp_path), "cuenta1") is None
+
+
+@pytest.mark.parametrize(
+    "record",
+    [["not", "an", "object"], {"session_pct": 12}],
+    ids=["not-an-object", "missing-keys"],
+)
+def test_a_record_in_the_wrong_shape_reads_as_unreadable(tmp_path: Path, record) -> None:
+    set_state(str(tmp_path), "cuenta1", AccountState.IDLE)
+    path = tmp_path / "cuenta1.json"
+    data = json.loads(path.read_text())
+    data["last_probe"] = record
+    path.write_text(json.dumps(data))
+
+    with pytest.raises(ValueError, match="last_probe"):
+        get_last_probe(str(tmp_path), "cuenta1")
