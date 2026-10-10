@@ -1640,6 +1640,11 @@ either.
      retries — and for the cool-down, which would then wait out the real
      reset instead of `quota_cooldown_seconds`' fixed guess. `exec_claude` would then read the final `result` message
      from the stream instead of a single JSON object.
+   - *Pace the primary's weekly spend.* Next after T-017: a weekly ceiling
+     for the primary that rises from 10% after its reset to 95% a day
+     before the next one, read from `/usage`'s own reset clause on every
+     probe instead of a fixed `reserve_pct`. The plan is
+     `docs/plans/token-economy.md` P8.
    - *Trim the fixed startup context.* Every phase pays its startup
      context (system prompt, tool and MCP schemas, `CLAUDE.md`, skill
      listings) and rereads it on every turn. Ship only the plugins and MCP

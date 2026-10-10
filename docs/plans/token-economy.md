@@ -156,3 +156,53 @@ is optional, and comes after P7.
 **P7 — A cycle that stops for lack of an account exits non-zero.** Today it
 exits `rc=0`. That happened twice on 2026-10-09, so a script or an operator
 reading only the exit code takes a held cycle for a finished one.
+
+**P8 — Pace the primary's weekly spend against its reset.** Proposed by the
+operator on 2026-10-09, after cuenta1 was parked at 84% of its week with the
+week resetting the next day. This is the next harness change after T-017
+closes, before P1–P7.
+
+- **The problem.** The primary is held to a fixed `reserve_pct` (60), and
+  `quota.exceeds_threshold` applies it to the session and the week alike. So
+  the reserve is too loose at the start of a week, when the harness could
+  spend the operator's 60% on day one, and too strict at the end, when about
+  40% of the week is lost at the reset unspent.
+- **The rule.** The primary's weekly ceiling rises linearly over its week:
+  10% just after the reset, 95% from one day before the next one. With *d*
+  days left, the ceiling is 10% + 85% × (6 − *d*) / 6 for 1 < *d* ≤ 6, and 95%
+  once *d* ≤ 1. Days left 6, 5, 4, 3 and 2 give 10, 24, 38, 53 and 67%, just
+  over one day left gives about 81%, and the last day 95%. Spend not used on one day carries to the next, because the
+  ceiling is compared with the cumulative `week_pct`. The 5% kept at the end
+  is for the operator. The five-hour window keeps its own threshold, so the
+  week and the session are checked separately.
+- **When it is computed.** At every probe, not once a day, so the ceiling
+  never jumps at midnight. `_recheck_cooling_accounts` already probes every
+  parked account while none is IDLE, so a primary parked by the ceiling is
+  released by the ceiling rising, with no new scheduler.
+- **Where the reset comes from.** `/usage` prints it on the week line, for
+  example `Current week (all models): 86% used · resets Oct 10, 4:59pm (UTC)`
+  (cuenta1, probed 2026-10-09 21:38 UTC). `UsageInfo.week_reset` already
+  captures that clause and nothing reads it. The reset is not a fixed
+  weekday per account. A week starts at a moment set by the account's own
+  history, so the probe must reread it every time, never take it from
+  config. One observation, on cuenta2: its week rolled between 13:08 and
+  17:37 UTC on 2026-10-09, with no API call in between, and its next reset
+  reads `Oct 16, 1:59pm (UTC)`. That fits a fixed seven-day cadence from the
+  previous reset rather than a week anchored to the first message after it.
+  It is one sample, so it is unverified; the rule does not depend on which
+  of the two is true, as long as it reads the reset rather than predicting
+  it.
+- **Failure mode.** The clause is free text with no year. Parse
+  `%b %d, %I:%M%p` and `%b %d, %I%p` with the zone in parentheses, and take
+  the year that puts the reset within the next seven days. If parsing fails,
+  or the reset is missing (the CLI omits it from a 0% line), fall back to
+  today's fixed `reserve_pct` and log it. The probe runs only between phases, so a phase may overshoot
+  the ceiling by its own cost, so dispatch stops about 5 points short until
+  P5 gives a measured phase cost.
+- **Scope.** The primary only. A worker account exists to be spent, and
+  pacing it moves work in time without adding any. A config switch could
+  enable it per account later.
+- **Needs** an ADR (it replaces ADR-level reserve semantics), a change to
+  `config.py`, `quota.py` and the parking in `dispatcher.py`, and tests on
+  the reset parser with the recorded `/usage` texts. One surface, per P4.
+
