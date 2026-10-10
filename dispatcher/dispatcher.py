@@ -495,6 +495,25 @@ _REMOTE_IS_NOT_YOURS = (
 )
 
 
+# Why a role is told this up front rather than left to the learnings table: T-017,
+# T-018 and T-019 each lost turns to the same refusal, in a different shape every
+# time — a trailing `; echo "EXIT=$?"`, an expansion, two `cd`s, a `cd` before
+# `git` — and a table of traps reaches the phase only once it has already walked
+# into one. The CLI's permission check reads a Bash call as a chain and refuses it
+# whole when any link is not granted on its own, so the rule is the shape and not
+# the command. `.hive/learnings/harness/T-019-a-trailing-echo-exit-refuses-the-whole-call.md`
+# is the evidence and names the siblings it retired. Short on purpose: every phase
+# pays for it.
+_ONE_OPERATION_PER_CALL = (
+    "One standing rule about Bash. Run one operation per call: no `;`, `&&`, `||` or pipe "
+    "to chain a status echo, and no `$?`, `$(...)`, `${...}` or loops — a call shaped like "
+    "that is refused whole, even when every piece is allowed. Read the exit status from the "
+    "command's own output instead. The one exception is the `cd <dir> && <granted command>` "
+    "form your task card writes, used exactly as written. To read a file outside your "
+    "worktree, use the Read tool with its absolute path rather than `cd`."
+)
+
+
 def _role_prompt(
     role: str,
     task_id: str,
@@ -534,6 +553,9 @@ def _role_prompt(
     # before anything has been cut from it, which is the moment a pull looks
     # most reasonable.
     prompt += f"\n\n{_REMOTE_IS_NOT_YOURS}"
+    # Every role, the mapper included: it has the same shell and the same
+    # permission check, and its whole job is reading files across the tree.
+    prompt += f"\n\n{_ONE_OPERATION_PER_CALL}"
     # What this role owes the project's own docs. Here rather than in a
     # vendored skill because a skill is method and travels between projects,
     # while this is about the docs of the project in front of it.
