@@ -11,8 +11,9 @@
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
-import { TailNoMatch } from "./tail";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { Route, TailNoMatch } from "./tail";
+import { renderRoute } from "@/test/render-route";
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
 // never runs, and every render would stack in one document.
@@ -33,5 +34,39 @@ describe("a tail whose filters matched nothing", () => {
     const { container } = render(<TailNoMatch buffered={312} />);
     expect(container.textContent).not.toContain("No events yet");
     expect(container.textContent).not.toContain("holds no events");
+  });
+
+  it("counts one buffered event in the singular", () => {
+    const { container } = render(<TailNoMatch buffered={1} />);
+    expect(container.textContent).toContain("the one event this tail has buffered");
+    expect(container.textContent).not.toContain("1 events");
+  });
+});
+
+// The tests above hand `TailNoMatch` its count; this one lets the screen pass it.
+// This screen reads `client.ts` from a `useEffect` rather than through
+// `useQuery`, which is why `renderRoute` stubs `fetch` and not the query cache.
+// `docs/debt/T-017-D1.md`.
+describe("the Live tail with a payload filter that matches none of its events", () => {
+  it("says no event matches, and counts what was buffered", async () => {
+    const event = (id: number) => ({
+      id,
+      source_app: "dispatcher",
+      event_type: "phase_start",
+      payload: { task: `T-00${id}` },
+      created_at: "2026-10-10T12:00:00Z",
+    });
+    await renderRoute(Route, "/tail", {
+      "/api/events": { data: [event(3), event(2), event(1)] },
+    });
+    await screen.findByText('{"task":"T-002"}');
+
+    fireEvent.change(screen.getByPlaceholderText(/^Filter payload/), {
+      target: { value: "zzz" },
+    });
+
+    expect(await screen.findByText("No event matches these filters")).toBeTruthy();
+    expect(document.body.textContent).toContain("the 3 events this tail has buffered");
+    expect(document.body.textContent).not.toContain("No events yet");
   });
 });
