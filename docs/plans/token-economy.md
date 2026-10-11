@@ -9,8 +9,9 @@ added the same evening by the operator, out of cycle, under ADR 54 (dated
 built — T-020, 2026-10-10, under `docs/decisions.md` ADR 48; the change is
 `docs/implementations/T-020.md`. P7 is built — T-023, 2026-10-10, under ADR 52;
 the change is `docs/implementations/T-023.md`. P1–P3 are built — T-022,
-2026-10-10; the change is `docs/implementations/T-022.md`. P4 and P6 are still
-proposals and neither of them is approved. Measured 2026-10-09 by the operator,
+2026-10-10; the change is `docs/implementations/T-022.md`. P4 was approved by the
+user on 2026-10-11, with `docs/plans/task-split.md` as its design, and is not
+built; P6 is still a proposal and not approved. Measured 2026-10-09 by the operator,
 out of cycle, on T-016's first round. It feeds the root README's *Prioritized*
 item 2 (Token economy) and item 5 (Task profiles), and does not replace either.
 Evidence: `.data/verify/token-usage-T-016-2026-10-09.txt` (aggregates only).
@@ -83,7 +84,7 @@ context that was already at its maximum.
 
 ## Proposals
 
-Ordered by cost to build. None is approved. P1–P3 are prompt text, P4 is a
+Ordered by cost to build; the status line above says which are built or approved. P1–P3 are prompt text, P4 is a
 process change, and P5–P7 are code.
 
 **P1 — Batch independent tool calls.** Add one line to every role's prompt

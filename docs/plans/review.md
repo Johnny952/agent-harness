@@ -1,9 +1,11 @@
 # Review — a person approves a task's diff in the console before it merges
 
-**Status:** a stub. It records a goal the user set on 2026-10-10 and what the
-code and the other plans already say about it, so the decisions it needs are
-asked in one place. Nothing here is designed in detail, built or approved, and
-part of it waits on a charter ruling only the user can make.
+**Status:** design, approved in outline by the user on 2026-10-11, not built.
+It began as a stub on 2026-10-10 recording a goal the user set; the user
+answered its open questions on 2026-10-11, and those answers are under
+*Decisions*. It is built after `docs/plans/board-service.md`, on the same
+service and the same comments file. The charter ruling it needs was given by
+the user the same day and is `docs/charter.md` C-12 (*Decisions*, 1).
 
 ## The goal
 
@@ -17,6 +19,10 @@ becomes a person's decision, taken over a diff, in the console.
 
 ## What exists today
 
+- **Every task already works on its own branch.** The writing roles share one
+  worktree on `agent/task/<task_id>` (`docker_exec.task_branch`); the
+  reviewing roles get a detached checkout of its tip. Parallel tasks never
+  share a tree.
 - **The cycle ends at `done`, unmerged, by default.** `merge_on_done` is off
   (`dispatcher/config.py`), so a task that passes the revisor and the auditor
   is `done` with its work on its task branch. The merge is a later
@@ -28,71 +34,137 @@ becomes a person's decision, taken over a diff, in the console.
   data. It splits a raw unified diff in the browser and has no line comments.
   It is a Lovable draft, not a spec.
 - **The api writes nothing.** Every route in `observability/api/app.py` is a
-  `GET` and every mount is `:ro`. `docs/plans/front.md` *Tier 3 — the write
-  surface* says every write needs a different service, a queue and a worker,
-  never a docker socket in a web process (`docs/plans/board.md`, *Actions go
-  through a queue, not a socket*).
-- **The ruling is already on the books as open.** `front.md` lists "Approving
-  from the console, against C-1 and C-4" as a charter question for the tier-3
-  opening task: C-1 makes the operator's conversation the one place a human
-  drives from, and C-4 says nothing spends quota without a human authorizing
-  the run. A reject that sends the task back to the implementador spends
-  quota, so it is a C-4 authorization given from a page.
+  `GET` and every mount is `:ro`. Writes go through the board service of
+  `docs/plans/board-service.md`, never the api.
 - **The epic design depends on it.** `docs/plans/task-split.md` makes a
   sub-task wait until its dependencies are *merged*, not `done`, because under
   this plan approving is the merge.
 
-## The flow this plan proposes, in outline
+## Decisions
+
+### 1. A verdict in the console authorizes what it starts
+
+The user ruled on 2026-10-11 that a verdict given in the console counts as a
+person authorizing the run it starts. That settles the C-1 and C-4 question
+`docs/plans/front.md` and `board-service.md` left open:
+
+- *approve* spends no quota, and starts the merge and the push;
+- *request changes* spends quota, because it starts a phase, and the verdict
+  is that phase's authorization;
+- *comment* starts nothing.
+
+It is recorded as `docs/charter.md` C-12, written by the main thread at the
+user's word on 2026-10-11. C-12 also covers C-5: the push on *approve* is the
+person's, run by the dispatcher's side, and no role pushes.
+
+### 2. Our own screen, built on a diff library
+
+The review is the harness's own: a screen in the console, its comments in the
+hive, no GitHub pull request. It fits the user's other decisions (a board of
+our own, comments in files, the internal network) and works for a project
+with no GitHub remote.
+
+To keep the code small, the screen uses a React diff component instead of
+drawing hunks by hand, and the api sends the raw unified diff for it to
+parse. Candidates, to be checked for upkeep and React 19 support when the
+screen is built (installing one is its own ask):
+
+- `@git-diff-view/react` — split and unified views, syntax highlighting, and
+  widgets under a line for comments, close to GitHub's review;
+- `react-diff-view` — with `gitdiff-parser`; hunks, widgets for comments,
+  tokenization.
+
+This also answers `front.md`'s "who parses the diff": the library, in the
+browser. The api only runs `git diff` and returns its text.
+
+### 3. Comments live in `comments.jsonl`, and are kept for good
+
+A review comment is a line in the task's `comments.jsonl`
+(`board-service.md` section 2), with `{file, line, commit}` added. A comment
+whose commit is no longer the branch's tip is shown as *outdated* beside its
+file, as GitHub does, rather than moved. Comments are never deleted or
+summarised; a merged task keeps them as the record of its review.
+
+### 4. A task is a branch, and the review is its pull request
+
+The user asked whether, with many agents, the flow should be a branch and a
+pull request. It is, in all but the host:
+
+- each task's work is on `agent/task/<task_id>`, cut from the base when the
+  cycle opens;
+- the review is that branch against its merge base, at a named commit;
+- *approve* merges the branch into the base (`merge_task_branch`) and pushes
+  the base to its upstream, then writes the `merged` block
+  (`task-split.md`), which releases the task's dependents and may close its
+  epic;
+- a sub-task whose dependency has merged is cut from the base that now holds
+  it, so siblings never build on unapproved work.
+
+The base is the branch the project's checkout is on, as `merge-task` uses
+today. If the merge conflicts, or the push is refused, nothing is pushed: the
+task goes to *Blocked* with a comment saying why, and the person decides
+whether to send it back with *request changes*.
+
+The push needs a git credential, which neither the api nor the board service
+may hold. The worker that runs the merge, on the dispatcher's side, holds it;
+where it lives is an ADR written when step 4 below is built.
+
+### 5. *Request changes* goes back to the arquitecto
+
+A person's comments are a new requirement, so they get a plan before code:
+
+1. The verdict reopens the task's cycle at the arquitecto, with the comments
+   handed to it alongside the task's *Goal* and *Done when*.
+2. The arquitecto writes a formal plan for the changes. If the changes span
+   more than one surface it may split, under `task-split.md`'s limits.
+3. The implementador, the revisor and the auditor run again on the same
+   branch, and the task returns to *Awaiting review* with a new commit.
+
+No new CLI verb: it is the same cycle, entered with comments. *Reject* in the
+user's list is read as request changes; dropping a task for good is a
+separate, rarer action (the branch abandoned, the task to `dropped`).
+
+## The flow
 
 1. **A state between `done` and merged: awaiting review.** The cycle ends
-   there instead of at `done` when review is on. The card moves to the
-   board's review column. (`docs/plans/board-service.md` section 4 names it
-   *Awaiting review*, and section 8 turns `/approvals` into this screen.)
-2. **The api serves the diff, read-only.** A route like
-   `GET /api/tasks/<id>/diff` returns the task branch against its merge base,
-   parsed per file on the server (the "who parses the diff" question in
-   `front.md`), together with the commit it was taken at.
-3. **The console shows it like a pull request.** Files, hunks, the handoffs'
-   summary next to it (what the implementador changed, what the revisor and
-   the auditor said), and comments anchored to a file, a line and that commit.
-4. **Three verdicts, written through the write service, never the api:**
-   - *approve* — merge the task branch (`merge_task_branch`), push, and record
-     the merge on the task (`task-split.md`'s `merged` block), which also
-     releases its dependents and may close its epic;
-   - *request changes* — the comments go back to the implementador as a new
-     revision round, with the same account pick and quota rules as any phase;
-   - *comment* — the comments are stored and nothing runs.
-   *Reject* in the user's list is read here as request changes; dropping a task
-   for good is a separate, rarer action (abandon the branch, card to blocked).
+   there instead of at `done` when review is on, and the task shows in the
+   board's *Awaiting review* column (`board-service.md` section 4).
+2. **The api serves the diff, read-only.** `GET /api/tasks/<id>/diff` returns
+   the raw unified diff of the task branch against its merge base, and the
+   commit it was taken at.
+3. **The console shows it like a pull request.** `/approvals` becomes this
+   screen (`board-service.md` section 8): files and hunks through the diff
+   library, the handoffs' summary beside them (what the implementador
+   changed, what the revisor and the auditor said), and comments anchored to
+   a file, a line and that commit.
+4. **The three verdicts are written through the board service**, never the
+   api, and act as *Decisions* 4 and 5 say.
+
+## How it would be built
+
+After `board-service.md`'s steps, each a single surface:
+
+1. The *awaiting review* state, replacing `merge_on_done`.
+2. The diff route in the api.
+3. The *comment* verdict and line comments in `comments.jsonl`.
+4. The *approve* verdict: merge, push and the `merged` block, with the
+   credential's ADR.
+5. The *request changes* verdict: the cycle reopened at the arquitecto.
+6. The screen, with the diff library. A front task, behind its own ask for a
+   build and for the package.
+
+Steps 4 and 5 start runs from the console under C-12.
 
 ## Open questions
 
-- **The charter ruling (C-1, C-4).** Whether a verdict given in the console
-  counts as the human authorizing that run. `docs/charter.md` is the user's to
-  edit; this plan does not draft the ruling for it.
-- **Our own screen, or real GitHub pull requests.** "Like a GitHub PR, or the
-  same thing" leaves room for the dispatcher to open a real PR (`gh pr create`)
-  and the console to show it, or for the review to be the harness's own. A
-  real PR gets diff, comments and approval for free and moves the push before
-  the review; our own keeps everything in the hive and works offline and for
-  projects with no GitHub remote. This is the first decision, because it
-  decides most of the others.
-- **Where comments live.** A section in the task file's body, a
-  `<task_id>/review.json` beside the saved handoffs, or the write service's
-  own table; and how a line comment survives a new round that moves the line.
-- **Where the write service lives, and its credential.** The tier-3 opening
-  task's ADR. Pushing needs a credential the api must never hold.
-- **Which revision loop a "request changes" reuses.** The cycle's own loop
-  between implementador and revisor, re-entered with the person's comments, or
-  a new `dispatch revise --task-id` verb; and whether the revisor and auditor
-  run again after it.
-- **Where the merge goes and when it pushes.** Into the branch the checkout is
-  on, as `merge-task` does, and pushed to its upstream; what happens when the
-  push is refused or the merge conflicts.
+- **Which diff library.** Chosen when step 6 is built, from the two
+  candidates above.
+- **Does a request for changes re-run every role?** *Decisions* 5 re-runs all
+  four. A one-line wording fix might skip the arquitecto; whether the person
+  may choose that on the verdict is left to step 5.
 
 ## What it is not
 
 Not a replacement for the revisor and the auditor: the person reviews after
-they pass, not instead. Not built before the ruling and the GitHub-or-ours
-decision. Not part of P4: the epic design only needs the `merged` fact, which
-`merge-task` can write today.
+they pass, not instead. Not part of P4: the epic design only needs the
+`merged` fact, which `merge-task` can write today.

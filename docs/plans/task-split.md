@@ -1,10 +1,11 @@
 # Task split — epics, and the arquitecto's backstop for a task that spans surfaces
 
-**Status:** design only. Nothing here is built, and nothing here is approved:
-it settles the decisions `docs/plans/token-economy.md` P4 leaves "for an ADR",
-so that once P4 is approved the work can be dispatched in one-surface tasks.
-No ADR is appended to `docs/decisions.md` until the user approves; the text
-ready to append is under *Proposed ADR*. Written 2026-10-10 by the operator's
+**Status:** design, approved by the user on 2026-10-11 together with
+`docs/plans/token-economy.md` P4, not built. It settles the decisions P4
+leaves "for an ADR", so the work can be dispatched in one-surface tasks. The
+ADR lands in `docs/decisions.md` with the task that builds it; the text is
+under *Proposed ADR*, to be brought in line with `board-service.md` first
+(below). Written 2026-10-10 by the operator's
 session, out of cycle, from the code at `c7a643e`, and revised the same day
 with the user's answers to its first open questions: a split parent is an
 **epic** its sub-tasks are tagged with, a dependency counts once it is
@@ -455,13 +456,17 @@ The console's view of an epic — tasks grouped under their epic, its progress
 — is a screen, so a fifth task in `front/`, after 2 makes the api serve the
 fields. It is not needed for the dispatcher side to work.
 
+## Answered
+
+- **Should the console get its own epic view?** Yes: `board-service.md`
+  section 8 adds an epic screen, and section 4 shows epics as swimlanes on
+  the board. It is built in that plan's step 8.
+
 ## Open questions
 
-- **Should the console get its own epic view?** Until it does, the parent
-  reads *In Progress* with an `[epic]` title. `docs/plans/board-service.md`
-  step 7 proposes one.
 - **The surface unit for harness work.** *What counts as one surface*
-  proposes one module's contract; P4's approval confirms it or replaces it.
+  proposes one module's contract. P4 was approved with it on 2026-10-11, so it
+  stands until a build shows a unit that does not fit.
 - **Does the operator's own task-writing need a check too?** The split is a
   backstop for a task the operator sized wrong. Nothing here measures that
   after the fact against `git diff --stat`, which P4 also proposes; that is
@@ -469,8 +474,11 @@ fields. It is not needed for the dispatcher side to work.
 
 ## Proposed ADR
 
-To append to `docs/decisions.md` with the next number when the user approves
-P4 and this design. Not appended now.
+To append to `docs/decisions.md` with the next number by the task that builds
+this design; P4 and this design were approved on 2026-10-11. Before it is
+appended, its references to cards and to an `[epic]` card title are replaced
+by the board of `board-service.md`, which drops the cards (that plan's
+step 2).
 
 ```markdown
 ## ADR <next> — Epics: the arquitecto may split a task, and a dependency waits for its merge

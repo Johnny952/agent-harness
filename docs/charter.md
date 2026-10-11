@@ -293,3 +293,34 @@ command moves to the index's `test:` list, which is where a blocking check
 already lives. A rule a phase cannot satisfy without silencing it (an
 `eslint-disable` with no reason, a rule turned off in the config) is not a
 fix: say so in the phase's `risks`, as with any charter entry.
+
+---
+
+### C-12 — A person's verdict in the console authorizes the run it starts
+
+**Ruled:** 2026-10-11, in conversation with the main thread, answering the
+question [`docs/plans/front.md`](plans/front.md),
+[`docs/plans/board-service.md`](plans/board-service.md) and
+[`docs/plans/review.md`](plans/review.md) left open against C-1, C-4 and C-5.
+**Trigger:** you are building a console action that starts a phase, merges or
+pushes, or you are deciding whether one needs a separate authorization.
+
+A verdict a person gives on a task in the console — *approve*, *request
+changes* or *comment*, as `review.md` defines them — is that person
+authorizing what the verdict starts. It is a C-4 authorization, given from a
+page instead of the conversation:
+
+- *request changes* spends quota: it reopens the task's cycle at the
+  arquitecto, with the same account pick and quota rules as any phase;
+- *approve* spends none: it merges the task branch and pushes the base. It is
+  the human's merge call and push call of C-5, taken together over the diff;
+- *comment* starts nothing.
+
+What does not change: C-1 still makes the conversation the one place a model
+is talked to, and the console a place a person decides, not a session. C-4
+still holds for everything else — nothing in the console starts a run without
+a person's verdict on that task, and accepting a backlog item onto the board
+is not a verdict and starts nothing. C-5 still holds for every role: no phase
+pushes. The push on *approve* is run by the dispatcher's side on the person's
+verdict, never by a role, the api or the board service, and the credential it
+needs stays there.

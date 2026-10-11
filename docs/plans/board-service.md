@@ -1,6 +1,6 @@
 # Board service — the harness's own board, kept by agents over MCP
 
-**Status:** design only, not approved. It records an idea the user raised on
+**Status:** design, approved by the user on 2026-10-11, not built. It records an idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
 and tasks and writes their descriptions and steps, through a service that
 owns the board and that agents reach over MCP. The aim is a tidier board.
@@ -22,6 +22,15 @@ And three more after reviewing the console's screens:
 - **The auditor sets a debt entry's impact** (2026-10-11). It adds one column
   to the debt index, whose columns are a contract (`COLUMNS` in
   `dispatcher/debt.py`; its `card` column becomes the backlog item's id).
+
+And three on 2026-10-11, when the plan was approved:
+
+- **Existing task files are migrated by `dispatch migrate`**, a one-off the
+  operator runs, not on read (step 1).
+- **Comments are kept for good.** A merged task's `comments.jsonl` is never
+  deleted or summarised; it is the record of its discussion and its review.
+- **A verdict in the console authorizes the run it starts**, the C-1 and C-4
+  ruling, now `docs/charter.md` C-12.
 
 Written by the operator's session, out of cycle, from the code at `a838508`.
 
@@ -293,6 +302,34 @@ This is the main use:
 C-1 (one conversation drives) and C-4 (a person authorizes each run) stay as
 they are. Writing tidy task files moves from the person to the agent.
 
+### When planning happens
+
+The user asked where planning and splitting fall in this flow. Three levels,
+each at the moment it is cheapest:
+
+1. **In the conversation, before the backlog: the what.** The person and the
+   operator's session settle what the feature is and when it is done. The
+   session proposes it with *Goal* and *Done when*, and no implementation
+   plan. Nothing here spends a phase.
+2. **In the cycle, after accepting: the how.** When an accepted task is
+   dispatched, the arquitecto runs first, as it does today. If the task is
+   one surface, it writes the plan and the cycle goes on to the
+   implementador. If it spans two to four, it splits it under
+   `task-split.md`: the task becomes an epic, the cycle stops before the
+   implementador, and the sub-tasks land on the board as `pending`. Each
+   sub-task's own arquitecto plans it when it is dispatched. A split is
+   already accepted (section 4), so it needs no second trip through the
+   backlog.
+3. **For a feature too big for one split: a plan document first.** Past four
+   surfaces, or with design decisions the person must take, the planning is
+   done in the conversation as a plan in `docs/plans/`, as this document
+   was, and the session proposes its build steps as an epic with its tasks
+   already cut.
+
+So the backlog holds what to do, and the arquitecto decides how, only for work
+the person has accepted: planning never spends quota on an item that may
+still be deferred or dropped.
+
 ### 8. The console's screens
 
 Checked against `front/src/routes` on 2026-10-10. The console's *real* screens
@@ -325,8 +362,10 @@ Each step is a single surface, built in this order:
 1. **The task module and the file split.**
    - Build `dispatcher/tasks.py`, and move the description into
      `.hive/board/<task_id>/description.md`.
-   - On read, a task file that still has a description in its body is
-     migrated.
+   - `dispatch migrate` moves the description out of every task file that
+     still has one in its body, once, when the operator runs it; reads never
+     rewrite a file. The module refuses a task file not yet migrated, naming
+     the command.
    - The prompt changes to *Goal* and *Done when* plus the path to the
      description.
    - The dispatcher's own writes move onto the module.
@@ -340,7 +379,8 @@ Each step is a single surface, built in this order:
      `board_get`.
    - The operator's session is configured to use it.
    - An ADR for where the write side lives: the decision `front.md` leaves to
-     the tier-3 opening task.
+     the tier-3 opening task. The git credential `review.md`'s *approve*
+     needs for the push stays out of the service, on the dispatcher's side.
 5. **The backlog and the write tools.**
    - The backlog statuses, `priority`, `source`, and `open_cycle` refusing
      anything but `pending`.
@@ -366,13 +406,7 @@ and the same comments file.
 
 ## Open questions
 
-- **Approving from the console, against C-1 and C-4.** This is the charter
-  question `front.md` and `review.md` already name. Steps 5 and 8 add console
-  writes that spend no quota (propose, edit, comment, accept), and those do
-  not need the ruling. The verdicts in `review.md` do.
-- **Migrating existing task files.** Moving the description out on read
-  (step 1) means a task file changes the first time it is read after the
-  upgrade. The alternative is a one-off `dispatch migrate` that the operator
-  runs.
-- **Retiring comments.** `comments.jsonl` only grows. Should a merged task's
-  comments be kept for good, or summarised into the task's handoff log?
+The three questions this section held were answered by the user on
+2026-10-11 (the status block at the top): the C-1 and C-4 ruling, migrating
+by `dispatch migrate`, and keeping comments for good. None is open; new ones
+are added here as the build raises them.
