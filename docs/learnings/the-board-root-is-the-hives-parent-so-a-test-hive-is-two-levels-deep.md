@@ -25,6 +25,11 @@ hive, and its `local_board` option puts the local kanban board at
 do not collide, because the local board client lists only `.json` files and
 descriptions sit in per-task subdirectories. The suite is green with both.
 
+Since T-028 that second tenant is gone: the local board and the fixture's
+`local_board` option were removed (`docs/decisions.md` ADR 59), so nothing but
+descriptions lands in `tmp_path / "board"` and the no-collision claim, never
+checked, no longer needs to be. The `test_cli.py` advice below is moot.
+
 ## What to do
 
 Use the two-level layout in a new fixture. In `test_cli.py`, do not assert on

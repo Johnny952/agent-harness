@@ -4,8 +4,14 @@
 `dispatcher/vibe_kanban_client.py`, adding a third implementation of the seam,
 or changing `KanbanIssue`.
 
-**Status:** confirmed — T-008 added the second implementation and the parity
-tests decided the shape.
+**Status:** retired 2026-10-11 by T-028. The seam is gone: the client module,
+its three clients, `KanbanIssue`, the factory in the CLI and the parity tests
+were all deleted (`docs/decisions.md` ADR 59, which supersedes ADR 1 to ADR 4).
+Nothing below describes the tree any more. The file stays because
+`a-surface-assertion-names-its-reference.md` and
+`correcting-an-index-entry-is-two-edits.md` cite it. It was confirmed until
+then: T-008 added the second implementation and the parity tests decided the
+shape.
 
 ## What the tests pin
 

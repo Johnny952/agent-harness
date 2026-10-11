@@ -1,8 +1,9 @@
 # Debt
 
 Work a task decided not to do, declared by the implementador, ruled on by the
-revisor, filed here by the auditor. This index is the source of truth; a board
-card, where there is one, mirrors a row and never replaces it.
+revisor, filed here by the auditor. This index is the source of truth and
+nothing mirrors a row anywhere else: the board seam that once opened a card
+per entry was removed by T-028 (`docs/decisions.md` ADR 59).
 
 Read the whole table and open only the entries whose **where** matches the task
 in front of you: the trigger is a condition to check against your own work, not
@@ -15,7 +16,7 @@ already a row here.
 
 | id | what | where | fix | card |
 |---|---|---|---|---|
-| `T-008-D1` | **Resolved 2026-09-28.** No lock around `LocalBoardClient.set_status`'s read-modify-write, and no racing-writers test | Phase 4's action queue, or two `dispatch` processes over one `local_board.dir` expecting both status moves to stick | Taken by the narrow branch, not the architectural one: `_card_lock` holds an `flock` per card around the read, the merge and the write, and `tests/dispatcher/test_vibe_kanban_client.py` proves a second writer blocks and then reads the first's new status. `flock` and not the `O_EXCL` declared, because an `O_EXCL` lock outlives the process that took it and would wedge a card after the crash `run-phase` exists to repair. The Phase 1 API as sole writer stays the end state. Detail: [T-008-D1](T-008-D1.md) | none |
+| `T-008-D1` | **Resolved 2026-09-28.** No lock around `LocalBoardClient.set_status`'s read-modify-write, and no racing-writers test | Phase 4's action queue, or two `dispatch` processes over one `local_board.dir` expecting both status moves to stick | Taken by the narrow branch, not the architectural one: `_card_lock` holds an `flock` per card around the read, the merge and the write, and the client's own test file, `test_vibe_kanban_client.py`, proved a second writer blocks and then reads the first's new status (client and test file both deleted by T-028 with the whole seam, `docs/decisions.md` ADR 59, so this row describes code that no longer exists). `flock` and not the `O_EXCL` declared, because an `O_EXCL` lock outlives the process that took it and would wedge a card after the crash `run-phase` exists to repair. The Phase 1 API as sole writer stays the end state. Detail: [T-008-D1](T-008-D1.md) | none |
 | `T-008-D2` | **Resolved 2026-09-26 by T-009.** A card that will not parse is skipped with a warning; nothing quarantines it or tells a caller the board is short | Phase 1's read API, or reconciling a task file's `kanban_issue_id` against a board that no longer lists it | Taken by the second branch of the fix, not the first: `LocalBoardClient.unreadable()` reports the card files `list_issues` skipped and `observability/api/app.py:_read_cards` names each one in `warnings`. No quarantine. Detail: [T-008-D2](T-008-D2.md) | none |
 | `T-008-D3` | **Resolved 2026-09-26.** `docs/plans/board.md`'s Status paragraph denied Phase 0 existed — first by calling it queued, then by calling its last round uncommitted | Reading that plan's Status paragraph to decide whether Phase 0 exists — first task allowed to edit the plan owns it | Rewritten out of cycle rather than by Phase 1: the paragraph now states that Phase 0 is built and merged and cites the two debts left open. Detail: [T-008-D3](T-008-D3.md) | none |
 | `T-009-D2` | **Resolved 2026-09-28.** Nothing caps `/api/events?limit=`, or the length of `warnings`; the range check added in round 3 rejects only an integer SQLite cannot bind | A caller or Phase 3's tail sending a large-but-bindable `limit` at a long-lived events database, or a `local_board.dir` holding many documents that will not parse | Both halves, with the number decided without waiting for Phase 3: `MAX_EVENT_LIMIT = 1000` clamps `limit` and names the clamp in `warnings`, `MAX_WARNINGS = 100` caps the list in `_envelope` with its last slot tallying the rest. A clamp and not a rejection, sitting after the round-3 range check so an unbindable integer stays a 400. 1000 is five times the board's `EVENTS_LIMIT`, not a tail window: Phase 3's tail is `since`-bounded. `docs/decisions.md` ADR 11. Detail: [T-009-D2](T-009-D2.md) | none |
@@ -42,13 +43,20 @@ already a row here.
 | `T-024-D3` | `GET /api/tasks/<task_id>/usage` (**ADR 54**) has no screen: nothing in `front/` requests it, the console has no view of what a phase cost, and no card says which page would show it or which of a group's keys it would print. Found by the operator while resolving `T-024-D1`, whose *Fix* asked for the route and the screen together; the route was built out of cycle and kept away from `front/` | A task asked to show a phase's or a task's cost in the console, or to put the usage route on a screen; also one building the task detail around `/api/tasks/<task_id>`, the screen this route was shaped beside. Not a task on the Tokens screen or `docs/plans/front.md`'s Tokens task — those are provider logins (`docs/learnings/the-tokens-screen-is-logins-not-spend.md`) — and not one that only needs the numbers, which the route already serves | A card in `docs/plans/front.md` naming the screen — most likely a section of the task detail — and what it prints from a group: `role`, `round`, `account`, `call_kinds` and `phase_call`'s measured fields, with the per-call lines behind a disclosure. No sum across `calls` until [`T-024-D2`](T-024-D2.md) is answered and a new ADR adds the total as a key; until then a per-attempt figure is `phase_call`'s, labelled as the first call and not the attempt. Detail: [T-024-D3](T-024-D3.md) | none |
 | `T-026-D1` | **Resolved 2026-10-11 by T-027.** The unmigrated-hive refusal is enforced by calling `tasks.unmigrated_ids` at each entry point rather than inside the task-file writer. `context_transfer` no longer carries the `description` key and every one of its writers is read, mutate, `write_task_file`, so a write to a task file that still has the key deletes the description silently; `open_cycle` and `_require_migrated` (on `run-task`, `run-phase`, `release-account`) are what stop it | A future verb or library caller reaches a `context_transfer` writer (`acquire_lock`, `refresh_heartbeat`, `handoff`, `set_kanban_issue_id`, `set_resolved_debt`, `release_stale_lock`) without going through `open_cycle`, `run-task`, `run-phase` or `release-account`. Not `merge-task`, `cleanup-task`, `status` or the api, which write no task file | `docs/plans/board-service.md` *How it would be built* step 1, "The dispatcher's own writes move onto the module": make the module's writer refuse an unmigrated file, then drop the four enumerated checks. Taken by the first half and not the second: the six writers moved to `dispatcher/tasks.py` and its `_write_task_file` refuses a file with the key (`UnmigratedTaskError`), with a test that no other module under `dispatcher/` calls `write_task_file`; the four checks stay, because they are the whole-hive rule of `docs/business.md` *Task descriptions* and not the guard against the delete any more. Detail: [T-026-D1](T-026-D1.md) | none |
 | `T-026-D2` | **Resolved 2026-10-11 by T-027.** `dispatch migrate` does not check that no cycle is in flight: `tasks.migrate` reads and rewrites each task file with no lock and without looking at its `status` or heartbeat | An operator runs `dispatch migrate` while a dispatcher holds a live lock on a task: the heartbeat thread's read-then-write can race migrate's rewrite of the same task file. Not a second `migrate` run, which changes nothing | Have `migrate` refuse a task file whose lock is live (`is_lock_expired` false) and report it under `refused`, or take the per-task lock once the second half of `docs/plans/board-service.md` step 1 adds it; one test in `tests/dispatcher/test_tasks.py`. Taken by the first branch: `tasks.migrate` takes the heartbeat TTL and reports a task whose lock is live under `refused`; live means `in_progress`, a heartbeat present and not expired. The per-task lock still comes with the service (step 4). Detail: [T-026-D2](T-026-D2.md) | none |
+| `T-028-D1` | `front/` still declares what the api stopped serving: `KanbanIssue` and `Task`'s `card` and `kanban_issue_id` in `front/src/lib/api/types.ts`, the fixture values under `front/src/lib/api/mock/`, and a comment in `front/src/routes/debt.tsx` calling the debt index's `card` cell a card on the Kanban board | A task editing `Task` in `front/src/lib/api/types.ts` or the task fixtures, rendering a task's card, or changing what the debt index's `card` column holds. Not a task on a screen that reads neither field, which is every screen today | One `front/` task removes the type, the two fields, the fixture values and the two comments (`docs/decisions.md` ADR 59 *Consequences*). Detail: [T-028-D1](T-028-D1.md) | none |
+| `T-028-D2` | The root `README.md` still describes the optional board in the present tense — both config blocks, `--kanban-issue-id`, the `vibe-kanban` compose service, debt cards — and `pyproject.toml` and `docker/agent/Dockerfile` still install `mcp`, which only the deleted client imported; the Dockerfile's comment names that module | An operator following `README.md` to configure a board, who now gets a startup error naming ADR 59; or a task editing the agent image's pip list or `pyproject.toml`'s dependencies | One docs task rewrites the README's board passages against ADR 59 and drops `mcp` from both files with the comment; the image half needs a build no phase can run. Detail: [T-028-D2](T-028-D2.md) | none |
+| `T-028-D3` | Nothing writes `blocked` to a task file: a cycle that stops blocked leaves a log line and an exit code. Found, not introduced — the deleted `_update_task_status` only ever moved a card | A task reading a task file's `status` to tell a blocked task from a pending or `in_progress` one, such as the console's Blocked column, or a test looking for `blocked` in a task file. Not a task reading `CycleOutcome` or the exit code | `docs/plans/board-service.md` sections 4 and 6 decide it: the dispatcher writes `blocked` to the frontmatter. Detail: [T-028-D3](T-028-D3.md) | none |
 
-`card` is `none` on every row because no card exists to point at: the T-008 and
-T-009 task files carry no `kanban_issue_id` and neither auditor was handed card
-ids, which is what a run with no board configured looks like — the gap Phase 0
-exists to close. A later task filing debt on a harness with `local_board` or
-`vibe_kanban` set is handed the card's id with the entry's id and puts it here,
-in backticks, verbatim.
+`card` is `none` on every row because no card exists to point at. That was
+first an accident of configuration — this harness never had a board set, so
+no auditor from T-008 on was handed a card id — and since T-028 it is the
+rule: the board seam is removed and nothing opens a card
+(`docs/decisions.md` ADR 59). The column stays, unchanged, because
+`dispatcher/debt.py`'s `COLUMNS` and the api's debt route read it; write
+`none` in it, as the filing note says. Step 5 of
+`docs/plans/board-service.md` *How it would be built* is what next puts a
+value there, a backlog item's id. "The first reason above" in the paragraphs
+below means this one: no card exists.
 
 The two `T-010` rows are `none` for a second reason as well, worth naming
 because it is not the same gap. That cycle was recovered one phase at a time
@@ -248,3 +256,15 @@ fix horizon, the second half of step 1 of `docs/plans/board-service.md`, and
 both were resolved by T-027, which built it. There is no `T-026-D3`: the revisor raised
 no proposal of its own, and its round 1 findings were doc edits the
 implementador made in round 2.
+
+The three `T-028` rows are `none` for the first reason above, now as the rule
+and not the accident, and took the path this table is shaped for: declared by
+the arquitecto and again by the implementador in rounds 1 and 2, accepted by
+the revisor in both, and filed by the auditor with the ids in a filing note.
+`T-028-D1` and `T-028-D2` are `introduced`: they are the surfaces of the
+removed seam that the card kept out of scope. `T-028-D3` is `found`, and it is
+the gap the removal uncovered rather than made — the card was the only place a
+blocked run was ever recorded. The same audit corrected three older rows'
+prose instead of filing anything: `T-008-D1` here and in its file, and
+`T-008-D3`'s file, each cited the deleted client module by path. There is no
+`T-028-D4`: the revisor raised no proposal of its own.

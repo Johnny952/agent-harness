@@ -162,6 +162,22 @@ cite the entry and move it up, or drop the row.
   operator should be able to see another project's unreviewed entries on this
   screen, which today they cannot, by the same filter.
 
+## Unconfirmed — inferred from the code by T-028
+
+- **A task that stopped blocked is not marked blocked anywhere a reader of
+  the hive can see: its task file says `pending` or `in_progress`, as if it
+  were waiting or running.** A task file's `status` is written by
+  `dispatcher/tasks.py`'s `acquire_lock` (`in_progress`) and `handoff`
+  (`done` for the final phase, `pending` otherwise), and no code writes or
+  reads `blocked`; the cycle reports it as `CycleOutcome.BLOCKED`, a log line
+  and an exit code. Until T-028 a board card carried that status, on a
+  harness that had a board (`docs/decisions.md` ADR 59 removed the seam).
+  `docs/plans/board-service.md` sections 4 and 6 plan the write, so the
+  intent is on paper, but nothing rules on today's behaviour: a human should
+  say whether a blocked task reading as `pending` — and so as something a
+  later run may pick up again — is acceptable until that step is built.
+  Filed as [`docs/debt/T-028-D3`](debt/T-028-D3.md).
+
 ## Unconfirmed — inferred from the code by T-024
 
 - **A phase has a record only if it finished, with one exception: the optional
