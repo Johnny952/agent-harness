@@ -118,22 +118,27 @@ export function initialTokens(): ContainerToken[] {
   }));
 }
 
+// The Claude IDs are the ones config.yaml passes as `--model`
+// (docs/plans/models-5-5.md, Decisions 5). The non-Claude entries stay only
+// while docs/plans/omniroute.md is undecided.
 export const MODEL_OPTIONS: ModelOption[] = [
-  { id: "claude-opus-4", label: "Claude Opus 4", context_k: 200 },
-  { id: "claude-sonnet-4.5", label: "Claude Sonnet 4.5", context_k: 200 },
-  { id: "claude-haiku-4.5", label: "Claude Haiku 4.5", context_k: 200 },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5", context_k: 200 },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", context_k: 200 },
+  { id: "claude-haiku-5-5", label: "Claude Haiku 5.5", context_k: 200 },
   { id: "gpt-5", label: "GPT-5", context_k: 400 },
   { id: "gpt-5-mini", label: "GPT-5 mini", context_k: 400 },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", context_k: 1000 },
 ];
 
 export function initialRoleModels(): RoleModelConfig[] {
+  // As config.yaml runs them: the cartografo on `mapping_model`, every other
+  // role on `default_model`.
   const m: Record<Role, string> = {
-    cartografo: "claude-haiku-4.5",
-    arquitecto: "claude-opus-4",
-    implementador: "claude-sonnet-4.5",
-    revisor: "claude-opus-4",
-    auditor: "gpt-5-mini",
+    cartografo: "claude-sonnet-5-5",
+    arquitecto: "claude-opus-5-5",
+    implementador: "claude-opus-5-5",
+    revisor: "claude-opus-5-5",
+    auditor: "claude-opus-5-5",
   };
   return (Object.keys(m) as Role[]).map((role) => ({
     role,
