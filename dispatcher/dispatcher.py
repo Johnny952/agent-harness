@@ -470,6 +470,120 @@ def _record_probe(cfg: Config, account: str, record: dict) -> None:
         )
 
 
+def _number_or_none(value: object) -> int | float | None:
+    """A measured number, or nothing — never a coercion and never a default.
+
+    `bool` is excluded explicitly because it is an `int` in Python, and a
+    `num_turns` that came back `true` is a format drift rather than one turn.
+    Anything else the CLI prints where a number belongs — a string, a list,
+    `null` — is a key that no longer means what this harness thinks it means,
+    and the honest record of that is `null` (`docs/decisions.md` ADR 53).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _usage_record(
+    task_id: str,
+    role: str,
+    round_num: int | None,
+    account: str,
+    call: str,
+    result: docker_exec.ClaudeResult,
+    now: dt.datetime,
+) -> dict:
+    """One `claude` call as the task's usage log keeps it (ADR 53).
+
+    Seventeen keys in two halves. The first nine are the dispatcher's own and
+    it always knows them; the rest keep the CLI's own spelling, so there is no
+    translation table to maintain and a key the CLI renames shows up as a
+    column that went all-null rather than as a number quietly meaning
+    something else.
+
+    Pure, and `now` is a parameter rather than a second clock read: the module
+    has one seam (`_utc_now`) and the caller reads it, which is the shape
+    `_probe_record` already has. The stamp is ISO-8601 UTC like
+    `save_handoff`'s `saved_at`, not `_probe_record`'s epoch seconds — this
+    record sits beside that envelope, and nothing compares it with
+    `rate_limited_at` (ADR 49).
+
+    `measured` is false exactly when `raw` is empty, which is every way
+    `exec_claude` can fail to parse a result object; then every measured field
+    is `null`. That is a different fact from a call that cost nothing, and the
+    distinction is the whole point: nothing here is summed, scaled, defaulted
+    to zero or carried over from another call.
+    """
+    raw = result.raw
+    usage = raw.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    is_error = raw.get("is_error")
+    return {
+        "task_id": task_id,
+        "role": role,
+        "round": round_num,
+        "account": account,
+        "call": call,
+        "session_id": result.session_id if isinstance(result.session_id, str) else None,
+        "recorded_at": now.isoformat(),
+        "measured": bool(raw),
+        # Names only, never values: the first real run says on its own which
+        # keys the CLI printed, without the live probe this task was refused.
+        "raw_keys": sorted(raw),
+        "is_error": is_error if isinstance(is_error, bool) else None,
+        "num_turns": _number_or_none(raw.get("num_turns")),
+        "duration_ms": _number_or_none(raw.get("duration_ms")),
+        "total_cost_usd": _number_or_none(raw.get("total_cost_usd")),
+        "input_tokens": _number_or_none(usage.get("input_tokens")),
+        "output_tokens": _number_or_none(usage.get("output_tokens")),
+        "cache_read_input_tokens": _number_or_none(usage.get("cache_read_input_tokens")),
+        "cache_creation_input_tokens": _number_or_none(usage.get("cache_creation_input_tokens")),
+    }
+
+
+@dataclasses.dataclass(frozen=True)
+class _UsageRecorder:
+    """The five things a usage line needs that are fixed for one attempt.
+
+    Built once the account is picked and handed to the retry helpers, so each
+    call site records its own result as the call that produced it without
+    taking five more parameters to do it. Frozen because an attempt's account
+    and round do not change under it — a failover builds a new one.
+    """
+
+    cfg: Config
+    task_id: str
+    role: str
+    round_num: int | None
+    account: str
+
+    def record(self, call: str, result: docker_exec.ClaudeResult) -> None:
+        """Write the line, and never let doing so touch the phase.
+
+        `_record_probe`'s contract, for `_record_probe`'s reason: this is
+        bookkeeping on a path that may already be failing, and a full disk must
+        not be what fails a phase or changes a decision. The warning names the
+        task, the role and the call, because a missing line is otherwise
+        indistinguishable from a call that was never made.
+        """
+        try:
+            context_transfer.append_usage(
+                self.cfg.hive_tasks_dir,
+                self.task_id,
+                _usage_record(
+                    self.task_id, self.role, self.round_num, self.account, call,
+                    result, _utc_now(),
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "task %s: could not record what the %s phase's %s call cost: %s; "
+                "the phase carries on",
+                self.task_id, self.role, call, exc,
+            )
+
+
 def check_quota_ok(cfg: Config, account: str) -> bool:
     container = container_for(cfg, account)
     # The /usage probe parses free-text CLI output (design spec sec. 4a
@@ -924,6 +1038,7 @@ def _shrink_over_budget(
     result: docker_exec.ClaudeResult,
     model: str | None,
     effort: str | None,
+    recorder: _UsageRecorder,
 ) -> docker_exec.ClaudeResult:
     """One `--resume` asking for a shorter handoff, when one blew its budget.
 
@@ -986,6 +1101,9 @@ def _shrink_over_budget(
         # permissions have to be restated here too.
         **_phase_permission_flags(cfg),
     )
+    # Before the branch below, not after: a retry this discards as a *result*
+    # still cost the account a turn, and the log is about what was spent.
+    recorder.record("shrink-retry", retry)
     if not _exec_succeeded(retry) or is_rate_limit_error(retry):
         # The first return is over budget but complete; a failed or
         # rate-limited retry is nothing. Keep the first, and let the phase
@@ -1058,6 +1176,7 @@ def _run_gates(
     model: str | None,
     effort: str | None,
     round_num: int | None,
+    recorder: _UsageRecorder,
 ) -> tuple[docker_exec.ClaudeResult, gates.Report | None]:
     """The deterministic checks, and the one `--resume` they are worth.
 
@@ -1101,6 +1220,8 @@ def _run_gates(
         # no inherited flags.
         **_phase_permission_flags(cfg),
     )
+    # Recorded whether or not it is kept, for the shrink retry's reason.
+    recorder.record("gate-retry", retry)
     if not _exec_succeeded(retry) or is_rate_limit_error(retry):
         # The first return stands: a phase that finished with findings against
         # it is worse than one that answered them and better than nothing, and
@@ -1118,6 +1239,7 @@ def _refuse_review_writes(
     result: docker_exec.ClaudeResult,
     model: str | None,
     effort: str | None,
+    recorder: _UsageRecorder,
 ) -> docker_exec.ClaudeResult:
     """One `--resume` telling a reviewing phase the edits it made are gone.
 
@@ -1176,6 +1298,8 @@ def _refuse_review_writes(
         json_schema=handoff.schema_for(role),
         **_phase_permission_flags(cfg),
     )
+    # Recorded whether or not it is kept, for the shrink retry's reason.
+    recorder.record("review-retry", retry)
     if not _exec_succeeded(retry) or is_rate_limit_error(retry):
         # The first return stands. It overstates what the phase did, but it
         # holds the review itself, and the WARNING is in the log either way.
@@ -1229,6 +1353,9 @@ def dispatch_phase(
             continue
 
         container = container_for(cfg, account)
+        # One per attempt, built once the account is known: a failover is a
+        # different account paying for a different call, and gets its own.
+        recorder = _UsageRecorder(cfg, task_id, role, round_num, account)
         logger.info(
             "task %s: %s%s goes to account %s, %s",
             task_id, role, f" round {round_num}" if round_num is not None else "", account,
@@ -1270,20 +1397,27 @@ def dispatch_phase(
                     json_schema=handoff.schema_for(role),
                     **_phase_permission_flags(cfg),
                 )
+                # Here, before the retries: each of them *replaces* `result`,
+                # so a record taken afterwards would describe the last retry
+                # and not the phase. Written before the gates, too, so that a
+                # crash in one cannot cost the phase's own numbers.
+                recorder.record("phase", result)
                 # Before the shrink, not after: the gate retry writes a new
                 # handoff, and the byte budget has to be enforced on the return
                 # that actually lands in the task file.
                 result, gate_report = _run_gates(
                     cfg, container, workdir, project_dir, task_id, role,
-                    result, model, effort, round_num,
+                    result, model, effort, round_num, recorder,
                 )
                 # Between the two for the same reason: it can rewrite the
                 # handoff as well, and the gates only ever run for the
                 # implementador, which this never fires for.
                 result = _refuse_review_writes(
-                    cfg, container, workdir, task_id, role, result, model, effort,
+                    cfg, container, workdir, task_id, role, result, model, effort, recorder,
                 )
-                result = _shrink_over_budget(cfg, container, workdir, role, result, model, effort)
+                result = _shrink_over_budget(
+                    cfg, container, workdir, role, result, model, effort, recorder,
+                )
             if _should_commit(role, result):
                 docker_exec.commit_worktree(
                     container, workdir,

@@ -9,6 +9,7 @@ import pytest
 
 from dispatcher.context_transfer import (
     acquire_lock,
+    append_usage,
     handoff,
     handoff_path,
     has_phase_section,
@@ -29,6 +30,7 @@ from dispatcher.context_transfer import (
     set_kanban_issue_id,
     task_file_path,
     TaskFile,
+    usage_log_path,
     write_task_file,
 )
 
@@ -750,6 +752,44 @@ def test_read_handoff_still_answers_none_for_everything_the_envelope_raises_on(
     assert read_handoff(hive_dir, "task-1", "revisor") is None
     assert read_handoff(hive_dir, "task-2", "auditor") is None
     assert read_handoff(hive_dir, "task-1", "auditor") == {"status": "complete"}
+
+
+def test_append_usage_writes_one_parseable_line_under_the_task(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+
+    path = append_usage(hive_dir, "task-1", {"call": "phase", "input_tokens": 12})
+
+    assert path == usage_log_path(hive_dir, "task-1")
+    # Under the task's own scratch dir, namespaced away from the roles' notes
+    # for the same reason `handoffs/` is.
+    assert path.startswith(scratch_dir(hive_dir, "task-1") + os.sep)
+    lines = Path(path).read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"call": "phase", "input_tokens": 12}
+
+
+def test_append_usage_appends_rather_than_replacing(tmp_path: Path) -> None:
+    # A phase is up to four `claude` calls on possibly two accounts, and the
+    # series over rounds is what P5 is for — so nothing here may overwrite.
+    hive_dir = str(tmp_path)
+
+    append_usage(hive_dir, "task-1", {"call": "phase", "account": "cuenta1"})
+    path = append_usage(hive_dir, "task-1", {"call": "shrink-retry", "account": "cuenta1"})
+
+    records = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    assert [r["call"] for r in records] == ["phase", "shrink-retry"]
+    assert records[0] == {"call": "phase", "account": "cuenta1"}
+
+
+def test_append_usage_does_not_show_up_as_a_handoff_or_a_task(tmp_path: Path) -> None:
+    # The guard that this file cannot reach `/api/phases` as a row: that route
+    # lists `handoffs/`, and the usage log is a sibling directory.
+    hive_dir = str(tmp_path)
+
+    append_usage(hive_dir, "task-1", {"call": "phase"})
+
+    assert list_handoff_roles(hive_dir, "task-1") == []
+    assert list_task_ids(hive_dir) == []
 
 
 def _card_with_body(tmp_path: Path, body: str) -> str:
