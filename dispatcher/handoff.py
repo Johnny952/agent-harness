@@ -366,6 +366,30 @@ def worth_shrinking(role: str, overage: int) -> bool:
     return overage >= max(_SHRINK_MARGIN_FLOOR, int(budget_for(role) * _SHRINK_MARGIN))
 
 
+#: Appended to every phase's system prompt that has a handoff schema. Under
+#: `-p` a turn that ends on a progress report ends the phase, which Anthropic's
+#: guide to Opus 5.5 warns it may do when run unattended
+#: (`docs/plans/models-5-5.md`, *Decisions*, 3). Never sent to the main thread,
+#: where a person answers and a turn is meant to end.
+UNATTENDED_PHASE = (
+    "This phase runs unattended: nobody reads your turns while it runs and "
+    "nobody can answer a question. It ends only when you send the structured "
+    "handoff your schema describes, and a turn that ends any other way ends the "
+    "phase with nothing handed on. So do not stop to report progress, to list "
+    "what is left, to ask whether to go on, or to wait for a confirmation that "
+    "will not come. If you cannot go on, say why in the handoff and send it."
+)
+
+
+def continue_prompt() -> str:
+    """The `--resume` a phase gets when it ended without its handoff."""
+    return (
+        "The phase is not over: it ends only when you send the structured handoff. "
+        "Carry on from where you stopped, and send it when the work is done or "
+        "when you cannot go further."
+    )
+
+
 def shrink_prompt(role: str, size: int, budget: int) -> str:
     """The one `--resume` a phase gets when its handoff blew the budget."""
     return (

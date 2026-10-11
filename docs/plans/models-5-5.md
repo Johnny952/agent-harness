@@ -1,7 +1,7 @@
 # Models 5.5 — pinned model IDs, explicit effort, and prompts fit for unattended phases
 
 **Status:** proposed by the main thread on 2026-10-11 at the user's ask.
-Steps 1 and 2 built the same day (ADR 57); steps 3 to 6 not built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
+Steps 1 to 3 built the same day (ADRs 57 and 58); steps 4 to 6 not built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
 order across the plans*): it touches only the config, the role prompts and
 the console's model list, and it changes the cost of every phase after it.
 It follows Anthropic's guide to prompting Opus 5.5, read that day.
@@ -27,6 +27,10 @@ role prompts follow what the guide says about unattended runs.
   Since step 2 (2026-10-11), every phase carries `--effort`:
   `default_effort` (`medium`), or the role's level in `role_effort`, until
   the escalation takes over.
+- **A phase must hand off.** Since step 3 (2026-10-11), every role with a
+  handoff schema is told the phase runs unattended
+  (`handoff.UNATTENDED_PHASE`), and a phase that ends without a readable
+  handoff is resumed up to `max_handoff_resumes` (2) times, then failed.
 - **The console's model list is a mock.** `front/src/lib/api/mock/ops-fixtures.ts`
   lists `claude-opus-4`, `claude-sonnet-4.5`, `claude-haiku-4.5` and three
   non-Claude models, and its role map uses them. `/models` reads it through
@@ -109,7 +113,10 @@ Each step is a single surface:
 2. The per-role `effort` key and its `--effort` flag, with tests. No quota.
    Built 2026-10-11: `default_effort` and `role_effort` (ADR 57).
 3. The premature-stop paragraph and the bounded resume on a missing handoff,
-   with its `max_handoff_resumes` config key, with tests.
+   with its `max_handoff_resumes` config key, with tests. Built 2026-10-11
+   (ADR 58). The paragraph is appended in the dispatcher
+   (`_phase_system_prompt`), not in `role_skills.system_prompt`, so the
+   cartografo, which has no skills, gets it too.
 4. The phrase check over `skills/`.
 5. The mock's model list and role map. A front task, behind its own ask for
    a build.

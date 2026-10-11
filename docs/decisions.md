@@ -4092,3 +4092,39 @@ config that names none of the keys runs every phase at `medium`, which is
 Opus 5.5's own default, so the cost of a round below the escalation should not
 move; step 6's measurement is what decides any other level. The CLI has no
 `max_tokens` flag, so that open question closes with nothing to set.
+
+## ADR 58 — a phase that ends without its handoff is resumed a bounded number of times, then failed
+
+**Status:** accepted (user, 2026-10-11, out of cycle; `docs/plans/models-5-5.md`
+step 3). Spends within the run already authorized (C-4, *Amended* 2026-10-11).
+
+**Context.** Anthropic's guide to Opus 5.5 warns that in an unattended run the
+model may end a turn with a progress report, a list of what is left, or a
+question, instead of carrying on. Under `claude -p` that turn ends the phase.
+Until now such a phase counted as succeeded when the CLI reported no error,
+and the missing handoff surfaced only later, as a role with nothing to read.
+
+**Decision.**
+
+- **The paragraph.** Every phase whose role has a handoff schema
+  (`handoff.schema_for`) gets `handoff.UNATTENDED_PHASE` appended to its
+  system prompt, after the role's skills (`_phase_system_prompt`). It says the
+  phase is unattended, ends only with the structured handoff, and names the
+  ways a turn ends too early. The main thread never gets it: a person answers
+  there.
+- **The resume.** A phase that succeeded but whose result `handoff.parse`
+  cannot read is resumed with `--resume <session>`, the same model, effort and
+  schema, and one short line (`handoff.continue_prompt`), up to
+  `max_handoff_resumes` times (config, 2 by default; 0 turns it off). Each
+  resume is recorded as `handoff-resume`, so it counts in the run's spending.
+- **Then failed.** When the resumes run out, or there is no session to
+  resume, the phase's result is marked `is_error` and takes the existing
+  failure path. A resume that fails, or hits a rate limit, is returned as it
+  is, so the rate-limit failover carries the session on as it does for a phase.
+- **Where.** In `dispatch_phase`, right after the phase is recorded and
+  before the gates, so a gate never runs on a phase that handed nothing on.
+
+**Consequences.** A stop that is only a pause costs one short resume instead of
+a failed round. A phase that cannot produce its handoff now fails at once
+rather than one role later. The worst case is `max_handoff_resumes` extra
+calls per phase, each bounded by `phase_timeout_seconds`.

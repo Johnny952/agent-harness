@@ -39,6 +39,18 @@ from dispatcher.state_machine import (
 from dispatcher.vibe_kanban_client import NullKanbanClient
 
 
+@pytest.fixture(autouse=True)
+def _phases_may_end_in_prose(monkeypatch):
+    """Most fakes here answer "phase done" with no structured return, which a
+    real phase now gets resumed for and then failed on. That rule has its own
+    tests in test_handoff_resume.py; the tests here are about everything else,
+    so the check passes their results through as they are."""
+    monkeypatch.setattr(
+        dispatcher_mod, "_resume_missing_handoff",
+        lambda cfg, container, workdir, role, result, *args: result,
+    )
+
+
 # run_task_cycle refuses to dispatch a task with no description (it would
 # spend four phases of quota on roles told nothing but an id), so every
 # cycle test has to supply one.
@@ -264,7 +276,8 @@ def test_dispatch_phase_delivers_the_role_skills_to_the_phase_call(tmp_path, mon
     dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
 
     assert captured["phase"]["plugin_dirs"] == role_skills.plugin_dirs("revisor")
-    assert captured["phase"]["append_system_prompt"] == role_skills.system_prompt("revisor")
+    assert captured["phase"]["append_system_prompt"].startswith(role_skills.system_prompt("revisor"))
+    assert captured["phase"]["append_system_prompt"].endswith(handoff.UNATTENDED_PHASE)
     assert "blocking-review" in captured["phase"]["append_system_prompt"]
     assert not captured["probe"].get("plugin_dirs")
     assert not captured["probe"].get("append_system_prompt")

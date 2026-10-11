@@ -93,6 +93,24 @@ def test_load_config_refuses_a_bad_effort(tmp_path: Path, extra: str) -> None:
         load_config(str(config_path))
 
 
+def test_a_phase_is_resumed_twice_for_its_handoff_by_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+    assert load_config(str(config_path)).max_handoff_resumes == 2
+
+    config_path.write_text(CONFIG_YAML + "\nmax_handoff_resumes: 0\n")
+    assert load_config(str(config_path)).max_handoff_resumes == 0
+
+
+@pytest.mark.parametrize("value", ["-1", "true", '"2"', "1.5"])
+def test_load_config_refuses_a_bad_max_handoff_resumes(tmp_path: Path, value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nmax_handoff_resumes: {value}\n")
+
+    with pytest.raises(ValueError, match="max_handoff_resumes"):
+        load_config(str(config_path))
+
+
 def test_the_permission_mode_defaults_to_the_one_this_harness_can_use(tmp_path: Path) -> None:
     """Not left to the CLI's own default, which is the measured failure: with
     no mode a phase's every prompting tool call is denied, its own worktree

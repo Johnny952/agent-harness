@@ -173,6 +173,11 @@ class Config:
     #: A level per role over `default_effort`, such as `{"revisor": "high"}`.
     #: The escalation after `escalate_effort_after_round` still wins over both.
     role_effort: dict[str, str] = dataclasses.field(default_factory=dict)
+    #: How many times a phase that ended without its handoff is resumed with
+    #: one "continue" line before it counts as failed. Unattended, a model can
+    #: end a turn on a progress report, and under `-p` that ends the phase
+    #: (`docs/plans/models-5-5.md`, *Decisions*, 3). 0 fails it at once.
+    max_handoff_resumes: int = 2
 
     def effort_for(self, role: str, round_num: int | None = None) -> str:
         """The `--effort` a phase of `role` runs at, in `round_num` if any."""
@@ -297,6 +302,13 @@ def _check_effort(key: str, level: object) -> str:
     if not isinstance(level, str) or level not in EFFORT_LEVELS:
         raise ValueError(f"{key} must be one of: {', '.join(EFFORT_LEVELS)}")
     return level
+
+
+def _load_max_handoff_resumes(raw: dict) -> int:
+    value = raw.get("max_handoff_resumes", 2)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("max_handoff_resumes must be a non-negative integer")
+    return value
 
 
 def _load_role_effort(raw: dict) -> dict[str, str]:
@@ -501,6 +513,7 @@ def load_config(path: str) -> Config:
         escalated_effort=_check_effort("escalated_effort", raw.get("escalated_effort", "high")),
         default_effort=_check_effort("default_effort", raw.get("default_effort", "medium")),
         role_effort=_load_role_effort(raw),
+        max_handoff_resumes=_load_max_handoff_resumes(raw),
         phase_timeout_seconds=phase_timeout_seconds,
         # Off by default: merging is the one thing a run does to the branch the
         # human works from, so it waits to be asked for. `dispatch merge-task`

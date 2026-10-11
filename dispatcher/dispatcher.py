@@ -1030,6 +1030,76 @@ def _phase_handoff(container: str, result: docker_exec.ClaudeResult) -> dict | N
     return subagents.backfill(handoff.parse(result), subagents.of_session(container, result.session_id))
 
 
+def _phase_system_prompt(role: str) -> str | None:
+    """The role's skills line, and the unattended paragraph for any role that
+    hands off: both are charged on every call, so neither is sent where it has
+    nothing to say."""
+    parts = [role_skills.system_prompt(role)]
+    if handoff.schema_for(role) is not None:
+        parts.append(handoff.UNATTENDED_PHASE)
+    return "\n\n".join(p for p in parts if p) or None
+
+
+def _resume_missing_handoff(
+    cfg: Config,
+    container: str,
+    workdir: str,
+    role: str,
+    result: docker_exec.ClaudeResult,
+    model: str | None,
+    effort: str | None,
+    recorder: _UsageRecorder,
+) -> docker_exec.ClaudeResult:
+    """Up to `max_handoff_resumes` `--resume`s for a phase that stopped short.
+
+    A phase that ended without its structured return ended on a report, not a
+    completion (`docs/plans/models-5-5.md`, *Decisions*, 3). Each resume is one
+    "continue" line into the same session, on the run already authorized, and
+    recorded against it like any retry. When they run out, or there is no
+    session to resume, the result is turned into a failure: the next phase
+    would otherwise start from a handoff that was never written.
+
+    A failed or rate-limited resume is returned as it is, so the caller's own
+    paths handle it: a rate limit fails over with the session, which the next
+    account resumes. Runs inside the heartbeat loop, as the other retries do.
+    """
+    if not _exec_succeeded(result) or is_rate_limit_error(result):
+        return result
+    if handoff.schema_for(role) is None or handoff.parse(result) is not None:
+        return result
+    for attempt in range(1, cfg.max_handoff_resumes + 1):
+        if not result.session_id:
+            break
+        logger.warning(
+            "%s phase ended without its handoff; resuming it to finish (%d of %d)",
+            role, attempt, cfg.max_handoff_resumes,
+        )
+        retry = docker_exec.exec_claude(
+            container, workdir, handoff.continue_prompt(),
+            resume_session_id=result.session_id, model=model, effort=effort,
+            timeout_seconds=cfg.phase_timeout_seconds,
+            # The session already read its skills; the schema has to travel,
+            # or the return it is being asked for comes back as prose.
+            json_schema=handoff.schema_for(role),
+            **_phase_permission_flags(cfg),
+        )
+        recorder.record("handoff-resume", retry)
+        if not _exec_succeeded(retry) or is_rate_limit_error(retry):
+            return retry
+        if handoff.parse(retry) is not None:
+            logger.info("%s handoff arrived after %d resume(s)", role, attempt)
+            return retry
+        result = retry
+    logger.error(
+        "%s phase ended without its handoff after %d resume(s)%s; it counts as failed",
+        role, cfg.max_handoff_resumes, "" if result.session_id else " (no session to resume)",
+    )
+    return docker_exec.ClaudeResult(
+        session_id=result.session_id, result_text=result.result_text,
+        raw={**result.raw, "is_error": True},
+    )
+
+
 def _shrink_over_budget(
     cfg: Config,
     container: str,
@@ -1393,7 +1463,7 @@ def dispatch_phase(
                     # caller: the role is what decides the set, and a phase
                     # dispatched by any other path should get the same one.
                     plugin_dirs=role_skills.plugin_dirs(role),
-                    append_system_prompt=role_skills.system_prompt(role),
+                    append_system_prompt=_phase_system_prompt(role),
                     json_schema=handoff.schema_for(role),
                     **_phase_permission_flags(cfg),
                 )
@@ -1402,6 +1472,11 @@ def dispatch_phase(
                 # and not the phase. Written before the gates, too, so that a
                 # crash in one cannot cost the phase's own numbers.
                 recorder.record("phase", result)
+                # First of the retries: the gates, the review check and the
+                # shrink all work on a handoff, and this is what makes one.
+                result = _resume_missing_handoff(
+                    cfg, container, workdir, role, result, model, effort, recorder,
+                )
                 # Before the shrink, not after: the gate retry writes a new
                 # handoff, and the byte budget has to be enforced on the return
                 # that actually lands in the task file.

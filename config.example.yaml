@@ -231,6 +231,13 @@ escalate_effort_after_round: 2
 # invocation. Optional; defaults to high.
 escalated_effort: high
 
+# A phase that ends without its structured handoff (a turn closed on a
+# progress report, say) is resumed with one short "continue" line, up to this
+# many times, before it counts as a failed phase. Each resume is a model call
+# on the run already authorized. 0 fails such a phase at once. Optional;
+# defaults to 2.
+max_handoff_resumes: 2
+
 # Wall-clock timeout for a single phase's `claude` invocation, in seconds.
 # Bounds a hung run inside the agent container (it's killed there); once
 # killed, the phase counts as failed rather than hanging the dispatcher
