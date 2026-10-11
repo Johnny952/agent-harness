@@ -18,11 +18,11 @@ cite the entry and move it up, or drop the row.
 
 ## Reading the harness's state
 
-- **A task's `card` is the board document its `kanban_issue_id` points at, or
-  `null`; a harness with no board configured is not an error.** Confirmed:
-  `docs/plans/board.md`, "Phase 1 — a read API in Python", and
-  `docs/decisions.md` ADR 3, which narrows it further — only a `local_board`
-  harness gets cards, and a `vibe_kanban` one gets `null` plus one warning.
+- **A task row has no `card` and no `kanban_issue_id`: the task file is the
+  board's data and nothing mirrors it.** Confirmed: `docs/decisions.md` ADR 59,
+  which removed the board seam and supersedes ADR 3. A task file that still
+  carries a `kanban_issue_id` key is served without it and without a warning,
+  and a config that still names a board stops the api at startup.
 - **Events are tailed by id and never by time: `since` filters `id > since`.**
   Confirmed: the same spec section. uuid4 task ids admit no other stable order,
   so there is deliberately no time-based filter beside it.

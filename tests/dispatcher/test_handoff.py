@@ -59,6 +59,21 @@ def test_every_role_carries_the_fields_the_next_phase_reads() -> None:
             assert field in properties, f"{role} is missing {field}"
 
 
+@pytest.mark.parametrize("role", ROLES)
+def test_no_schema_description_puts_debt_on_a_board(role) -> None:
+    """The schema is prompt text every phase reads. The board seam is gone
+    (`docs/decisions.md` ADR 59): accepted debt is filed in the index and
+    nowhere else."""
+    text = json.dumps(handoff.schema_for(role))
+    assert "on the board" not in text
+    assert "its card" not in text
+
+
+def test_an_accepted_ruling_says_where_the_debt_is_filed() -> None:
+    ruling = handoff.schema_for("revisor")["properties"]["debt_rulings"]["items"]["properties"]["ruling"]
+    assert "accepted: it gets filed in the debt index." in ruling["description"]
+
+
 def test_unknown_role_gets_no_schema() -> None:
     """No schema means no `--json-schema` flag and the prose path, the same
     way an unknown role gets no skills — not a crashed dispatch."""
