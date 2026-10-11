@@ -3940,3 +3940,80 @@ D2 stays open and is now the only thing between this route and a per-attempt
 total. `raw_keys` travels in every served line, so the first real dispatched
 phase's log answers which keys the CLI printed without another probe. P4 is
 still not unblocked: a route over one task's lines is not a median either.
+
+## ADR 55 — a directory the dispatcher creates under the hive tasks dir is 0755, whatever the umask
+
+**Status:** accepted (operator, 2026-10-10, out of cycle). **Narrows ADR 54's
+*Consequences*** — the paragraph recording that `append_usage` makes the usage
+directory at the dispatcher's umask, and that `handoffs/` and the scratch
+directory share the risk — and supersedes nothing: ADR 54's route, row shape
+and warnings stand, and ADR 27's and ADR 53's files keep their paths and their
+0644.
+
+**Context.** `dispatcher/context_transfer.py` set every **file's** mode on
+purpose and every **directory's** by accident. `_write_atomic` chmods its temp
+file 0644 before the `os.replace`, so the handoff envelope ADR 27 serves is
+0644 under any umask, and `append_usage` creates `calls.jsonl` `O_EXCL` and
+`fchmod`s the descriptor (ADR 53). But three directory creations took the
+process umask: `ensure_scratch_dir`'s `os.makedirs` (the scratch dir, and the
+hive tasks dir if missing), `append_usage`'s `os.makedirs` (`usage/`, and the
+scratch dir if missing), and `_write_atomic`'s `Path.mkdir(parents=True)`,
+which for `save_handoff` makes `handoffs/` and possibly the scratch dir. Under
+umask 077 all of them are 0700, and `observability/api/` — over a `:ro` mount,
+possibly as another uid — cannot traverse to the 0644 file inside
+(`docs/learnings/a-0644-file-under-hive-still-sits-in-a-umask-directory.md`).
+ADR 54 recorded this and put the fix on the writer, for all three directories
+at once.
+
+**Decision.** One helper, `_makedirs_readable(hive_dir, path)`, makes every
+directory below the hive tasks dir for these paths, and every directory it
+**creates** ends up 0755:
+
+- **Only below `hive_dir`.** The hive tasks dir and its parents are still made,
+  if missing, by `os.makedirs` at the umask, as before, and are never chmodded:
+  they belong to whoever set `.hive/` up. A `path` outside the hive raises
+  `ValueError`.
+- **Only what this call created.** Each component is `os.mkdir`ed alone; a
+  `FileExistsError` skips it without touching its mode. That is also the
+  `exist_ok` race's answer — two processes making the same directory, the
+  loser's `mkdir` fails and the winner's chmod stands — and it means a
+  directory an older dispatcher, a phase or the operator made keeps its mode.
+- **On a descriptor opened `O_NOFOLLOW | O_DIRECTORY`**, after the `mkdir`,
+  because the scratch dir is writable by the phases and a name swapped for a
+  symlink between the two calls must not redirect the chmod. The `mkdir`'s
+  own mode is masked by the umask, so the `fchmod` is what sets it.
+
+`ensure_scratch_dir`, `append_usage` and `save_handoff` call it for the scratch
+dir, `usage/` and `handoffs/`. `save_handoff` makes its parent before
+`_write_atomic`, whose own mkdir then finds it there and stays at the umask on
+purpose: for a task file its parent is the hive tasks dir itself.
+
+A chmod that fails raises `OSError` to the caller like every other failure in
+the helper, which is `append_usage`'s rule: the module raises and the call site
+decides. So a failed chmod costs exactly what a failed `mkdir` there already
+cost — `_UsageRecorder.record` logs it and the phase carries on, the gate's
+`ensure_scratch_dir` is inside `_run_gates`' swallow, and the cycle's
+`ensure_scratch_dir` and `save_handoff` let it propagate. Swallowing it in the
+helper instead would leave a 0700 directory, which is exactly the silent
+failure ADR 54's warning exists to name, and an `fchmod` by the uid that just
+made the directory has no ordinary way to fail.
+
+**Why 0755 and not 0750 or a group.** The reader is "another uid", not a known
+group: the api's container user is not pinned against the dispatcher's, and
+`_write_atomic` already chose world-readable 0644 for the files inside, so
+anything tighter on the directory would only re-close what the file mode
+opened. Nothing in these directories is secret beyond what their 0644 files
+already show.
+
+**Why not `os.umask`.** Process-wide, and the heartbeat thread writes
+concurrently — `_write_atomic`'s own comment rejects it for that reason.
+
+**Consequences.** Directories that exist on a host from before this change
+keep their mode: the helper never chmods what it did not create, so a scratch
+dir or `usage/` made 0700 earlier stays 0700 until the operator widens it by
+hand (`chmod 755` on that task's scratch dir and its `handoffs/` and `usage/`).
+`/api/tasks/<task_id>/usage`'s `PermissionError` warning stays, reworded to
+name that cause rather than today's dispatcher. Other writers under the scratch
+dir — the gates' test log, whatever a phase writes there — are not this
+entry's; neither are `learnings.ensure_dirs`' directories, which sit beside the
+hive tasks dir, not under it.

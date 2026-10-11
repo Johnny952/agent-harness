@@ -1861,6 +1861,9 @@ def test_usage_the_api_may_not_read_is_null_and_a_warning_saying_permission(
     assert "permission denied" in warning
     assert context_transfer.usage_log_path(harness.tasks_dir, "T-1") in warning
     assert "ADR 54" in warning
+    # ADR 55 fixed the writer, so the warning must say the cause is a
+    # directory from before it, not today's dispatcher.
+    assert "before docs/decisions.md ADR 55" in warning
 
 
 def test_usage_that_fails_to_read_another_way_is_null_and_a_different_warning(
