@@ -6,7 +6,8 @@ from outside the container holding it: `dispatcher/context_transfer.py` turns a
 task file into a `TaskFile`, `dispatcher/state_machine.py` answers what an
 account is doing, `observability/collector/db.py` lists events,
 `dispatcher/debt.py` parses the debt index, and `dispatcher/learnings.py` parses
-the hive's trap entries. This is an HTTP surface over those, and nothing more:
+the hive's trap entries; `context_transfer.read_usage` reads a task's per-call
+usage log (ADR 54). This is an HTTP surface over those, and nothing more:
 every route is a `GET`, every mount is `:ro`, and there is no second copy of any
 file format here — a parser this service needs and does not have is one to make
 reachable in `dispatcher/`, not one to rewrite.
@@ -129,6 +130,17 @@ MAX_PHASES = 100
 #: enough while `rule` and `when` are one line each — a row that ever carries
 #: the entry body is a different bound. `docs/decisions.md` ADR 41.
 MAX_LEARNINGS = 500
+
+#: The most usage lines one `/api/tasks/<task_id>/usage` answer carries. A
+#: thousand because a phase writes one line per `claude` call — one, plus a
+#: retry per gate or review failure and a shrink retry per oversized handoff —
+#: so a task that reaches this has been re-dispatched hundreds of times and the
+#: clamp is the news. The newest lines are the ones kept, because the attempt a
+#: reader came for is the last one; the first group served may then lack its
+#: `phase` line, and the warning says so. It bounds a count and not bytes, on
+#: `MAX_PHASES`' model, which is enough while a line is sixteen scalars plus
+#: `raw_keys`. `docs/decisions.md` ADR 54.
+MAX_USAGE_CALLS = 1000
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
@@ -466,6 +478,81 @@ def create_app(
             rows = rows[:MAX_PHASES]
         return _envelope([row for _, row in rows], warnings)
 
+    @app.get("/api/tasks/<task_id>/usage")
+    @requires_auth
+    def task_usage(task_id: str):
+        # A path segment and not `/api/usage?task_id=`: the id is required and
+        # names one task, which is what `/api/tasks/<task_id>` already spells
+        # as a segment, while a query parameter on this api is a filter on a
+        # list — and there is no unfiltered form of this read to bound.
+        # `docs/decisions.md` ADR 54.
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        # A 404 for the same two cases and in the same words as the detail
+        # route, and not ADR 27's 200: this read belongs to the screen that
+        # opens `/api/tasks/<task_id>` first, which already answers 404 for an
+        # id with no task file, so a 200 here would contradict its own parent.
+        if not _is_bare_task_id(task_id):
+            return _error(f"no task {task_id!r}", 404)
+        if not os.path.exists(context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)):
+            return _error(f"no task {task_id!r} in {cfg.hive_tasks_dir}", 404)
+        path = context_transfer.usage_log_path(cfg.hive_tasks_dir, task_id)
+        try:
+            log = context_transfer.read_usage(cfg.hive_tasks_dir, task_id)
+        except ValueError:
+            # `.` and `..` pass `_is_bare_task_id` — `..md` is a bare filename —
+            # and `read_usage` refuses them because as a *directory* name they
+            # leave the hive. Neither can have a task file, so the check above
+            # answers first today; this keeps the refusal a 404 if it ever does
+            # not.
+            return _error(f"no task {task_id!r}", 404)
+        except PermissionError as exc:
+            # `data: null` and not `[]`: an empty list says the task made no
+            # call, which is a different claim from "the api may not look".
+            # Named apart from the other `OSError`s because it has one known
+            # cause here: `append_usage` makes the directory at the
+            # dispatcher's umask, and a 0700 one is closed to this service's
+            # uid. ADR 54 records it.
+            return _envelope(
+                None,
+                [
+                    f"{path}: permission denied reading the usage log: {exc} "
+                    "(the usage directory may be 0700 under the dispatcher's umask; "
+                    "docs/decisions.md ADR 54)"
+                ],
+            )
+        except OSError as exc:
+            return _envelope(None, [f"{path}: unreadable usage log: {exc}"])
+        warnings: list[str] = []
+        if log.skipped:
+            # The lines the reader could not parse, counted and named: ADR 5's
+            # "nothing is dropped silently" for a log whose damage is per line,
+            # so the reader's count is the warning and no `unreadable()`
+            # sibling re-reads the file.
+            warnings.append(
+                f"{path}: {log.skipped} unreadable usage line(s) skipped; they are in no group"
+            )
+        lines = log.lines
+        if len(lines) > MAX_USAGE_CALLS:
+            warnings.append(
+                f"{len(lines)} usage lines and this service answers at most "
+                f"{MAX_USAGE_CALLS}: the newest {MAX_USAGE_CALLS} are served, and "
+                "the first group may be missing its phase line"
+            )
+            lines = lines[-MAX_USAGE_CALLS:]
+        try:
+            # The guard wraps the use of the parsed values, as on `/api/phases`:
+            # grouping compares fields a hand-edited line may hold as anything
+            # JSON can, and the serialisation round is what `_envelope` does
+            # anyway, run here so it costs a warning and not a 500.
+            groups = _usage_groups(task_id, lines)
+            app.json.dumps(groups)
+        except _UNREADABLE as exc:
+            warnings.append(f"{path}: unreadable usage log: {exc}")
+            return _envelope(None, warnings)
+        return _envelope(groups, warnings)
+
     @app.get("/api/learnings")
     @requires_auth
     def learnings_index():
@@ -757,6 +844,65 @@ def _phase(task_id: str, role: str, envelope: dict) -> dict:
         "saved_at": envelope.get("saved_at"),
         "handoff": envelope.get("handoff"),
     }
+
+
+def _usage_groups(task_id: str, lines: list[dict]) -> list[dict]:
+    """The usage log's lines, grouped into the attempts that wrote them.
+
+    One group per attempt at a phase, in file order — which is the order the
+    calls were made, since the log is append-only. A line opens a new group
+    when it is a `phase` call, the one every attempt writes first, or when its
+    `(role, round, account)` differs from the open group's, which is what a
+    failover to the next account or a re-dispatch looks like when a `phase`
+    line is missing. Values are compared with `==` and never hashed, because a
+    hand-edited line may hold a list where a string belongs.
+
+    Lines travel verbatim in `calls`: nothing is projected and no subkey is
+    assumed, since `raw_keys` exists because the CLI's own set is not pinned.
+    The group adds only what holds whatever `docs/debt/T-024-D2.md` answers —
+    how many calls, which kinds, how many were measured — and the `phase` line
+    itself under `phase_call`, the one per-attempt figure that is right under
+    either answer. Nothing is summed: a resumed call's usage may be cumulative,
+    and a total across `calls` would then count the phase twice. ADR 54 is the
+    argument and says what changes once D2 is answered.
+    """
+    groups: list[dict] = []
+    for line in lines:
+        key = (line.get("role"), line.get("round"), line.get("account"))
+        current = groups[-1] if groups else None
+        if (
+            current is None
+            or line.get("call") == "phase"
+            or (current["role"], current["round"], current["account"]) != key
+        ):
+            current = {
+                "task_id": task_id,
+                "role": key[0],
+                "round": key[1],
+                "account": key[2],
+                "calls": [],
+                "call_count": 0,
+                "call_kinds": [],
+                "measured_calls": 0,
+                "unmeasured_calls": 0,
+                "phase_call": None,
+            }
+            groups.append(current)
+        current["calls"].append(line)
+        current["call_count"] += 1
+        kind = line.get("call")
+        if isinstance(kind, str) and kind not in current["call_kinds"]:
+            current["call_kinds"].append(kind)
+        # `is True` / `is False` and not truthiness: a line whose `measured` is
+        # neither is in neither count, so the two falling short of
+        # `call_count` is the visible sign that the format drifted.
+        if line.get("measured") is True:
+            current["measured_calls"] += 1
+        elif line.get("measured") is False:
+            current["unmeasured_calls"] += 1
+        if kind == "phase" and current["phase_call"] is None:
+            current["phase_call"] = line
+    return groups
 
 
 def _bounded_body(path: str, body: str) -> tuple[str, list[str]]:

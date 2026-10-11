@@ -282,6 +282,98 @@ def append_usage(hive_dir: str, task_id: str, record: dict) -> str:
     return path
 
 
+@dataclasses.dataclass(frozen=True)
+class UsageLog:
+    """What `read_usage` found: the lines that parsed, and how many did not.
+
+    `skipped` is there so a reader that must not drop anything silently — the
+    api's envelope is one — can say that it did, without this module deciding
+    how that is worded. Blank lines are not counted: they are not records.
+    """
+
+    lines: list[dict]
+    skipped: int
+
+
+def _reject_non_finite(constant: str) -> float:
+    """`json.loads`' hook for `NaN` and `Infinity`, which it accepts by default.
+
+    Neither is JSON, and a line carrying one would parse here and then be served
+    by a JSON encoder that writes it back out as a bare `NaN` no client can read.
+    `append_usage` cannot write one — `_number_or_none` keeps what the CLI
+    printed, and the CLI prints JSON — so a line holding one was written by
+    something else and is skipped like any other that is not a record.
+    """
+    raise ValueError(f"{constant} is not a JSON number")
+
+
+def read_usage(hive_dir: str, task_id: str) -> UsageLog:
+    """Every line of this task's usage log that is a record, in the order written.
+
+    The reader's half of the contract `append_usage` states, and the guarantee
+    rather than the writer count: the scratch dir is writable from the agent
+    containers, so a line may be anything. Each line is decoded and parsed on
+    its own: a blank line is skipped, and one that is not UTF-8, one that will
+    not parse, and one that parses into something other than an object are
+    skipped and counted rather than raised on. So is a last line with no
+    newline after it:
+    `append_usage` writes each record and its newline in one call, so a line
+    without one is a write still in progress or one that was cut off, and in
+    neither case the record its writer meant. A line is never repaired, merged
+    with the next one or defaulted — what comes back is what was written.
+
+    A task with no log — never dispatched, dispatched before ADR 53, or no
+    scratch dir at all — is an empty log, not an error. `PermissionError` and
+    every other `OSError` are raised: a log this process may not read is a
+    different fact from a log that is not there, and the caller is the one who
+    knows how to say so.
+
+    `task_id` must be one path component, and `ValueError` is raised otherwise,
+    before anything is opened. `observability/api/app.py:_is_bare_task_id` is a
+    check on the *file* name `<task_id>.md`, and it admits `.` and `..` — whose
+    scratch dirs are the hive dir itself and its parent. This is the check on
+    the *directory* name, made here so no caller can reach outside the hive dir
+    through this function whatever it checked first.
+    """
+    if not _is_single_path_component(task_id):
+        raise ValueError(f"task id {task_id!r} is not a single path component")
+    path = usage_log_path(hive_dir, task_id)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except (FileNotFoundError, NotADirectoryError):
+        return UsageLog(lines=[], skipped=0)
+    chunks = data.split(b"\n")
+    # The element after the last newline: empty when the file ends in one, and
+    # otherwise the incomplete line the docstring describes.
+    tail = chunks.pop()
+    skipped = 1 if tail.strip() else 0
+    lines: list[dict] = []
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        try:
+            value = json.loads(chunk.decode("utf-8"), parse_constant=_reject_non_finite)
+        except (ValueError, RecursionError):
+            # `UnicodeDecodeError` and `JSONDecodeError` are both `ValueError`s;
+            # `RecursionError` is what a line of ten thousand `[` costs `json`.
+            skipped += 1
+            continue
+        if not isinstance(value, dict):
+            skipped += 1
+            continue
+        lines.append(value)
+    return UsageLog(lines=lines, skipped=skipped)
+
+
+def _is_single_path_component(name: str) -> bool:
+    """Is this a name that can only ever be one entry inside a directory?"""
+    if not name or name in (".", "..") or "\0" in name:
+        return False
+    separators = {os.sep, "/"} | ({os.altsep} if os.altsep else set())
+    return not any(sep in name for sep in separators)
+
+
 def list_task_ids(hive_dir: str) -> list[str]:
     if not os.path.isdir(hive_dir):
         return []

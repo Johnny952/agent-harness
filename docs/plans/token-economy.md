@@ -1,8 +1,12 @@
 # Token economy — what one window buys, and sizing tasks to fit it
 
 **Status:** P5 is built — T-024, 2026-10-11, under `docs/decisions.md` ADR 53;
-the change is `docs/implementations/T-024.md`. P8 is built — T-020, 2026-10-10,
-under `docs/decisions.md` ADR 48; the change is
+the change is `docs/implementations/T-024.md`. Its reader and route —
+`GET /api/tasks/<task_id>/usage`, one group per attempt, nothing summed — were
+added the same evening by the operator, out of cycle, under ADR 54 (dated
+2026-10-10 in local time, where T-024's dates are UTC); the change is
+`docs/implementations/T-024-D1.md`, and no screen consumes it yet. P8 is
+built — T-020, 2026-10-10, under `docs/decisions.md` ADR 48; the change is
 `docs/implementations/T-020.md`. P7 is built — T-023, 2026-10-10, under ADR 52;
 the change is `docs/implementations/T-023.md`. P1–P3 are built — T-022,
 2026-10-10; the change is `docs/implementations/T-022.md`. P4 and P6 are still
