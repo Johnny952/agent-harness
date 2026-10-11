@@ -251,9 +251,10 @@ which then runs all four phases. So the loop as built joins a task in flight,
 which is what it was designed for: it is the repair path, and both tasks that
 have driven it, T-008 and T-010, were started by a full cycle and resumed by
 hand. Driving a task phase by phase from its first role needs a verb that
-writes the card and stops. `set_description` already exists in
-`context_transfer` with no CLI in front of it, so what is missing is an
-argument parser and a decision about what the verb is called, not a mechanism.
+writes the card and stops. `write_description` already exists in
+`dispatcher/tasks.py` with no such verb in front of it, so what is missing is
+an argument parser and a decision about what the verb is called, not a
+mechanism.
 Left unbuilt rather than smuggled into a docs phase.
 
 ## Phases

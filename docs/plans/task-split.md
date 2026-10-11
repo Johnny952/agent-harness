@@ -58,9 +58,11 @@ cost avoided.
 - **Task files.** `context_transfer.task_file_path(hive_dir, task_id)` is
   `<hive_tasks_dir>/<task_id>.md`: YAML frontmatter (`task_id`, `status`,
   `owner`, `depends_on`, `heartbeat`, then optional `kanban_issue_id`,
-  `resolved_debt`, `description`) and a markdown body every handoff appends
-  to. `TaskFile`, `read_task_file`, `write_task_file` and `_read_or_new` are
-  the whole format. `depends_on` is read, written and served by the api
+  `resolved_debt`) and a markdown body every handoff appends to. `TaskFile`,
+  `read_task_file`, `write_task_file` and `_read_or_new` are the whole
+  format of that file; since T-026 the description is not in it but in
+  `board/<task_id>/description.md` beside the tasks dir, read and written
+  by `dispatcher/tasks.py`. `depends_on` is read, written and served by the api
   (`observability/api/app.py`), but **nothing in `dispatcher/` enforces it**.
 - **Nothing records a merge on the task.** A branch lands either in-cycle,
   through `dispatcher._merge_task_branch` when `merge_on_done` is on (off by

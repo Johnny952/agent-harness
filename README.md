@@ -132,9 +132,10 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   names a directory and the dispatcher keeps one JSON card per issue in it.
   One block or the other, never both.
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
-  (`status`, `owner`, `depends_on`, `heartbeat`, the operator's
-  `description`, and `kanban_issue_id` when there's a board) plus a body
-  that accumulates each phase's handoff. A phase returns that handoff as a
+  (`status`, `owner`, `depends_on`, `heartbeat`, and `kanban_issue_id`
+  when there's a board) plus a body that accumulates each phase's handoff;
+  the operator's description lives in `board/<task-id>/description.md`
+  beside the hive tasks dir. A phase returns that handoff as a
   schema (`--json-schema`, per role: what changed, what was verified, what's
   pending, risks, the subagents it started, proposed learnings and debt, and
   paths to the detail — plus the revisor's `verdict`), within a per-role byte
