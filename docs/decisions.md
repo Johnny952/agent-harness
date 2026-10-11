@@ -3629,3 +3629,140 @@ at the end of a finished cycle still exits 0: the task is done, and `merge-task`
 is the verb whose exit code reports a merge. The card is blocked on a hold as
 before, so the board does not tell held from blocked; the exit code and the log
 line do.
+
+## ADR 53 — a phase's cost is one line per `claude` call in the task's own usage log, not a key on the handoff envelope
+
+**Status:** accepted (T-024, 2026-10-11). Builds
+`docs/plans/token-economy.md` P5. Narrows ADR 27's *Context* — the clause
+saying the harness records almost nothing *about* a run — and reverses none of
+its decisions: the handoff envelope keeps its four keys and `/api/phases` keeps
+its six.
+
+**Context.** `dispatcher/docker_exec.py:exec_claude` parses the
+`--output-format json` object the CLI prints into `ClaudeResult.raw`, and
+leaves `raw` as `{}` whenever nothing parsed — a crash, a stdout that is not
+JSON, a JSON list, the host-backstop timeout. Three readers touch it, each
+asking one question: `is_rate_limit_error` (`is_error`, `api_error_status`),
+`_exec_succeeded` (`is_error`, and emptiness) and `handoff.parse`
+(`structured_output`). Nothing reads `usage`, `num_turns`, `duration_ms` or
+`total_cost_usd`, and the phase ends with all four in a local that goes out of
+scope.
+
+**Which keys a real `raw` holds could not be verified from this tree.** Nothing
+persists one. `<hive_tasks_dir>/<task_id>/handoffs/<role>.json` is ADR 27's
+four-key envelope and carries no CLI object; ADR 49's probe record carries
+parsed percentages; `.data/verify/` is outside the directories a phase may
+read. The names used below are taken from `docs/ROADMAP.md` V1.1's *Record*
+step, from its 2026-09-24 V5.1 Results row (CLI 2.1.273: `num_turns`,
+`total_cost_usd`, `api_error_status`, `stop_reason`) and from the root
+`README.md` item 2 (`usage` with input, cache creation, cache read and
+output) — and T-024 was forbidden a live probe. So nothing here may depend on
+a key existing.
+
+**A phase is not one `claude` call.** `dispatch_phase` loops over accounts when
+one answers 429, and each attempt is a call the service served and the account
+paid for. Inside one attempt `_run_gates`, `_refuse_review_writes` and
+`_shrink_over_budget` may each spend one `--resume`, and each **replaces**
+`result` with the retry's — whose `usage` is that one turn, not the phase's.
+`save_handoff` writes one file per role, overwritten each round, and
+`run_phase` returns before reaching it whenever a phase did not finish.
+
+**Decision.** (b), its own file: `<hive_tasks_dir>/<task_id>/usage/calls.jsonl`,
+append-only, **one JSON object per line per `claude` call the dispatcher made
+for a phase** — the attempt itself and each of the three retries, on every
+account tried.
+
+```
+{"task_id": str, "role": str, "round": int | null, "account": str,
+ "call": "phase" | "gate-retry" | "review-retry" | "shrink-retry",
+ "session_id": str | null, "recorded_at": ISO-8601 UTC, "measured": bool,
+ "raw_keys": [str], "is_error": bool | null, "num_turns": int | null,
+ "duration_ms": int | null, "total_cost_usd": float | null,
+ "input_tokens": int | null, "output_tokens": int | null,
+ "cache_read_input_tokens": int | null,
+ "cache_creation_input_tokens": int | null}
+```
+
+The names split in two halves, which is the rule rather than a coincidence.
+The first nine are the dispatcher's own and it always knows them. The rest keep
+the CLI's **own** spelling, so there is no translation table to maintain and a
+key the CLI renames shows up as a column that went all-null rather than as a
+number quietly meaning something else.
+
+Never a guessed number. Every measured field is `null` when the CLI did not
+give it, and nothing here is summed, scaled, defaulted to zero or carried over
+from another call. `measured` is `false` exactly when `raw` is empty — the
+call produced no result object at all — and then every measured field is
+`null`: a phase that crashed or timed out records that it has no usage, which
+is a different fact from a phase that cost nothing. `raw_keys` is the sorted
+top-level key names of the object, values excluded, so the first real run says
+on its own whether `usage` and `total_cost_usd` were ever there, without
+another probe. `is_error` is kept because a 429 attempt and a clean phase are
+the same shape otherwise, and both appear in this log.
+
+Where it is written: `dispatch_phase` builds one recorder per attempt, once the
+account is picked, and hands it to the three retry helpers; each call site
+records its own result as the call that produced it. Writing it can never
+cost the phase — the write is caught and logged on `_record_probe`'s model,
+because this is bookkeeping on a path that may already be failing.
+
+What is **not** in this log: the `/usage` probes of `check_quota_ok`,
+`_recheck_cooling_accounts` and `operator.format_status`. `/usage` is a local
+command (V1.3, V5.1: `num_turns` 0, `total_cost_usd` 0), ADR 49 already
+persists what a probe found, and a probe is not a phase. There is no config
+key either: the record costs no quota and no model call, and a switch for it
+would only ever be a way to lose the series.
+
+**Why not (a), a `usage` key on the handoff envelope.** Four reasons, and the
+first alone decides it. One file per role, overwritten each round, keeps the
+approved round and destroys the earlier ones — and a series of rounds is
+exactly what P5 is for, since a task's cost is its rounds. A phase that failed
+or timed out writes no envelope at all, so (a) would have to move
+`save_handoff` onto the failure path, changing what ADR 26, ADR 27 and ADR 28
+rest on: that every row of `/api/phases` is a phase that finished. One record
+per role and round cannot hold the four calls an attempt can make, and keyed
+off the final `result` it would report a shrink retry's two turns as the
+phase's whole cost — measured, mislabelled, and worse than absent. And the
+envelope is a role's return; what a call cost is the dispatcher's own
+observation, which is the same separation `handoffs/` was namespaced for.
+
+**Why not the collector**, which is P5's own wording ("sending them to the
+collector"). `dispatcher/` has no HTTP client and no `requests` import; the
+collector is reached only by `hooks/emit_event.py`, from inside an agent
+container. A POST would add a network failure mode to a cycle that has none,
+its `events` table is hook-fed and keyed on session and source app, and
+`observability/api/` cannot even open that database over its `:ro` mount
+without the care `docs/learnings/a-read-only-sqlite-open-still-writes.md`
+describes. A file under `.hive/` is on the filesystem the dispatcher already
+owns and the api already reads.
+
+**Consequences.** `/api/phases` is unchanged and serves nothing new: the route
+lists `handoffs/`, the log is a sibling directory, and no console screen reads
+it — the tokens screen is fixture-backed and its own card, which `front/`'s
+plan puts outside this task. A later task that serves this is choosing a row
+shape for a series, which is that screen's decision and not a reader this task
+should guess at.
+
+ADR 27's three *present nowhere* rows move only half a step. `account` and a
+phase's real elapsed time are now recorded, per call, in this log; `model` is
+still nowhere, because what the dispatcher passes as `--model` is the
+configured model and not the one that answered. The phase row keeps its six
+keys until a task decides what a row over several calls means.
+
+The write discipline is not `_write_atomic`'s, and the difference is
+deliberate: this is a log, not a document, so a line is appended with `O_APPEND`
+under the task lock that already makes the dispatcher its only writer, rather
+than the whole file being re-serialised per phase. A reader therefore skips a
+line it cannot parse instead of calling the file damaged, and must not assume
+the last line is complete.
+
+Citing the file in a doc needs the placeholder spelling used throughout this
+entry. Spelled bare, it has a slash and an extension, so
+`dispatcher/gates.py:pointer_token` reads it as a path, and it is a path no
+worktree will ever hold — `.hive/` is gitignored and lives outside the repo.
+
+P4 is not unblocked by this. It asks for a measured budget — "the median
+ia-harness implementador costs X% of a window" — and one task's records are not
+a median, nor is a token count a window percentage, whose weighting is still
+unpublished. P4's surface proxy and P8's 5-point margin stand as written until
+enough of these files exist to replace them.
