@@ -61,6 +61,27 @@ cite the entry and move it up, or drop the row.
   by T-024, which wrote the log and deliberately no reader of it
   ([`docs/debt/T-024-D1`](debt/T-024-D1.md)).
 
+## Task descriptions
+
+- **One task file that still carries its description in the frontmatter stops
+  every task in the hive, not only its own.** Confirmed by the user on
+  2026-10-11, ruling on what T-026 inferred: `dispatcher/dispatcher.py`'s
+  `open_cycle` and `dispatcher/cli.py`'s `_require_migrated` (on `run-task`,
+  `run-phase` and `release-account`) refuse while `tasks.unmigrated_ids`
+  returns anything, because `reap_expired_locks` rewrites other tasks' files
+  and would delete the key (`docs/implementations/T-026.md` *Decisions* item
+  4). The api does the narrower thing: it drops that one task's row with a
+  warning. `dispatch migrate` is the way out.
+- **A task description is valid only under `dispatcher/tasks.py`'s
+  `parse_description` grammar, which is stricter than "has `## Goal` and
+  `## Done when`".** Confirmed by the user on 2026-10-11, ruling on what T-026
+  inferred: text before the first section, a second section of the same name
+  and a required section with only whitespace under it are errors, and a
+  column-zero `## Steps` inside a code fence starts a section. `dispatch
+  migrate` follows the same grammar: a legacy description that already holds
+  one of the five headings at column zero is refused for hand migration
+  rather than moved.
+
 ## Unconfirmed — inferred from the code by T-009
 
 - **Every non-dotted subdirectory of `projects_root` is a project the harness
@@ -156,29 +177,3 @@ cite the entry and move it up, or drop the row.
   failed optional phase *ought* to be a row a console shows beside the phases
   that finished — and if so, whether the row needs a field saying which it is,
   since nothing on the envelope distinguishes them today.
-
-## Unconfirmed — inferred from the code by T-026
-
-- **One task file that still carries its description in the frontmatter stops
-  every task in the hive, not only its own.** `dispatcher/dispatcher.py`'s
-  `open_cycle` and `dispatcher/cli.py`'s `_require_migrated` (on `run-task`,
-  `run-phase` and `release-account`) refuse while `tasks.unmigrated_ids`
-  returns anything, because `reap_expired_locks` rewrites other tasks' files
-  and would delete the key. The card asked only that the module refuse *a*
-  task file that has the key; the hive-wide form is the arquitecto's decision,
-  recorded in `docs/implementations/T-026.md` *Decisions* item 4. The api does
-  the narrower thing: it drops that one task's row with a warning. A human
-  should say whether a single legacy file dropped into a migrated hive ought
-  to halt dispatching for every task, or only for its own.
-- **What counts as a valid task description is stricter than "has `## Goal`
-  and `## Done when`".** `dispatcher/tasks.py`'s `parse_description` also
-  rejects any text before the first section, a second section of the same
-  name, and a required section with only whitespace under it; and it does not
-  treat a fenced code block specially, so a column-zero `## Steps` inside a
-  fence starts a section. `docs/plans/board-service.md` section 2 names the
-  sections and which are required and settles none of these four. `dispatch
-  migrate` follows from the same grammar: a legacy description that already
-  holds one of the five headings at column zero is refused for hand migration
-  rather than moved. A human should say whether a preamble line above
-  `## Goal` and a heading inside a fence are errors an operator is meant to
-  hit.
