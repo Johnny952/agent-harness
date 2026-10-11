@@ -122,12 +122,12 @@ def _at_latest(text: str) -> str:
 
 def _arg_default_latest(text: str) -> str:
     return text.replace(
-        "ARG CLAUDE_CODE_VERSION=2.1.273", "ARG CLAUDE_CODE_VERSION=latest", 1
+        "ARG CLAUDE_CODE_VERSION=2.1.296", "ARG CLAUDE_CODE_VERSION=latest", 1
     )
 
 
 def _dollar_var_with_no_arg_declared(text: str) -> str:
-    without_arg = text.replace("ARG CLAUDE_CODE_VERSION=2.1.273\n", "", 1)
+    without_arg = text.replace("ARG CLAUDE_CODE_VERSION=2.1.296\n", "", 1)
     return without_arg.replace(
         "@${CLAUDE_CODE_VERSION}", "@$CLAUDE_CODE_VERSION", 1
     )
@@ -136,11 +136,11 @@ def _dollar_var_with_no_arg_declared(text: str) -> str:
 def _arg_above_first_from(text: str) -> str:
     # Valid Dockerfile syntax (a global ARG before the first FROM), but not
     # visible in the final stage unless re-declared there.
-    without_arg = text.replace("ARG CLAUDE_CODE_VERSION=2.1.273\n", "", 1)
+    without_arg = text.replace("ARG CLAUDE_CODE_VERSION=2.1.296\n", "", 1)
     first_from = without_arg.index("FROM ")
     return (
         without_arg[:first_from]
-        + "ARG CLAUDE_CODE_VERSION=2.1.273\n"
+        + "ARG CLAUDE_CODE_VERSION=2.1.296\n"
         + without_arg[first_from:]
     )
 

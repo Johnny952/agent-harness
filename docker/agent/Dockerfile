@@ -91,7 +91,7 @@ RUN git config --system safe.directory '*' \
 
 # The dispatcher parses this CLI's --output-format json shape, /usage text,
 # and rate-limit messages, so bump this version deliberately and re-verify.
-ARG CLAUDE_CODE_VERSION=2.1.273
+ARG CLAUDE_CODE_VERSION=2.1.296
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Without this the CLI's background auto-updater runs `npm install -g` inside

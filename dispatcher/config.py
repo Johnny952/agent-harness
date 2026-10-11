@@ -445,7 +445,7 @@ def load_config(path: str) -> Config:
         vibe_kanban=vibe_kanban,
         local_board=local_board,
         collector_url=raw["collector_url"],
-        default_model=raw.get("default_model", "opus"),
+        default_model=raw.get("default_model", "claude-opus-5-5"),
         permission_mode=_load_permission_mode(raw),
         allowed_tools=_load_allowed_tools(raw),
         max_revision_rounds=raw.get("max_revision_rounds", 3),
@@ -464,7 +464,7 @@ def load_config(path: str) -> Config:
         mapping_enabled=bool(raw.get("mapping_enabled", False)),
         # Cheaper than the roles that decide things: reading a tree and
         # writing down what is there does not need the expensive model.
-        mapping_model=raw.get("mapping_model", "sonnet"),
+        mapping_model=raw.get("mapping_model", "claude-sonnet-5-5"),
         mapping_max_turns=mapping_max_turns,
         # On by default, unlike the two above: the gates run through
         # `docker exec` with no model in the loop, so they spend no quota, and

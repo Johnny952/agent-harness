@@ -32,7 +32,7 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.heartbeat_ttl_seconds == 120
     assert cfg.projects_root == "/data/projects"
     assert cfg.vibe_kanban is None
-    assert cfg.default_model == "opus"
+    assert cfg.default_model == "claude-opus-5-5"
     assert cfg.permission_mode == "acceptEdits"
     assert cfg.max_revision_rounds == 3
     assert cfg.escalate_effort_after_round == 2
@@ -161,7 +161,7 @@ def test_mapping_is_off_until_it_is_asked_for(tmp_path: Path) -> None:
     cfg = load_config(str(config_path))
 
     assert cfg.mapping_enabled is False
-    assert cfg.mapping_model == "sonnet"
+    assert cfg.mapping_model == "claude-sonnet-5-5"
     assert cfg.mapping_max_turns == 40
 
 

@@ -134,8 +134,10 @@ state_dir: /state
 collector_url: http://collector:8787
 
 # Model passed as `claude --model <default_model>` for every role
-# (arquitecto/implementador/revisor/auditor). Optional; defaults to opus.
-default_model: opus
+# (arquitecto/implementador/revisor/auditor). Optional; defaults to
+# claude-opus-5-5. A full ID rather than an alias, so the model a run used is
+# the one written here; it needs an agent image whose CLI knows it (2.1.296+).
+default_model: claude-opus-5-5
 
 # Permission mode passed as `claude --permission-mode <mode>` on every call
 # that runs a role's own work. Without it the CLI runs `-p` with nobody able
@@ -280,8 +282,8 @@ mapping_enabled: false
 
 # Model for that phase, separate from default_model: the mapper reads and
 # summarises rather than designs, so it is the one phase worth running cheap.
-# Optional; defaults to sonnet.
-mapping_model: sonnet
+# Optional; defaults to claude-sonnet-5-5.
+mapping_model: claude-sonnet-5-5
 
 # Hard turn budget for that phase, passed as `claude --max-turns`. The run is
 # cut off there, and whatever the mapper wrote up to that point is committed —
