@@ -61,6 +61,15 @@ What follows: the main thread is not a worker, and a worker is not a place to
 ask a question. A phase that needs a decision the task never gave it ends
 blocked and says so; it does not invent the decision, and it does not wait.
 
+**Amended:** 2026-10-11, in conversation with the main thread, at the user's
+word: the conversation moves to the console. Once the console holds a thread
+(`docs/plans/main-thread.md`), that thread is the one interactive session this
+entry speaks of. The host session on the operator's machine is the operator's
+tool for developing the harness and drives nothing once the harness is
+deployed. There is still one conversation; what moved is where it is held.
+This also answers the question C-8 left open: the chat dock is that
+conversation, not a second one.
+
 ---
 
 ### C-2 — The primary account is in the worker pool
@@ -95,6 +104,15 @@ default belongs in config (`primary_account:`), so that a harness with
 different accounts, or a human who moves the conversation, changes one line
 rather than the code.
 
+**Amended:** 2026-10-11, in conversation with the main thread, at the user's
+word: the primary is a setting a person changes, not only a line of config. A
+harness starts with no accounts, and accounts are added from the console, so
+until a person picks another, the primary is **the first account added**. A
+person may later change it from the console. `primary_account:` stays as the
+way a harness configured by hand names it, as this host's names `cuenta1`
+today. Whichever way it is chosen, C-2 does not change: the primary is last in
+the pool and keeps its reserve.
+
 ---
 
 ### C-4 — Nothing spends an account's quota without a human authorizing that run
@@ -112,6 +130,16 @@ and to report that one is ready; it is not allowed to start one.
 This is why `dispatch run-task` is a command a human types, and why Phase 4 of
 [`docs/plans/board.md`](plans/board.md) puts actions behind a queue a human
 releases rather than behind a button that runs them.
+
+**Amended:** 2026-10-11, in conversation with the main thread, at the user's
+word: resuming a phase that ended without a valid handoff is part of the run
+already authorized, not a new one. The dispatcher may resume such a phase with
+`--resume` and a short "continue" line, up to a cap set in the config
+(`max_handoff_resumes`, 2 by default), and the resumes count against the same
+spending limit as the phase. Past the cap the phase has failed, and starting
+it again is a new run that needs a person. This does not cover a phase that
+ended blocked, failed a gate or ran out of quota, nor the main thread, where a
+person answers (`docs/plans/models-5-5.md`, *Decisions*, 3).
 
 ---
 
@@ -234,6 +262,9 @@ the front's chat dock becomes a second interactive session — C-1 says the
 conversation is the only one, and reconciling them is a later ruling, not an
 implementation detail — and whether `front/` keeps its Lovable round-trip.
 
+The first was ruled on 2026-10-11: the chat dock is the conversation of C-1,
+moved to the console, not a second session (C-1, *Amended*).
+
 ---
 
 ### C-9 — `front/` lives in this repo, and the Lovable round-trip stays live
@@ -347,3 +378,33 @@ is not a verdict and starts nothing. C-5 still holds for every role: no phase
 pushes. The push on *approve* is run by the dispatcher's side on the person's
 verdict, never by a role, the api or the board service, and the credential it
 needs stays there.
+
+**Amended:** 2026-10-11, in conversation with the main thread, at the user's
+word, on three points:
+
+- *The conversation is in the console.* The sentence above that makes the
+  console "a place a person decides, not a session" no longer holds: the
+  console also holds the conversation of C-1 (C-1, *Amended*). What still
+  holds is that a model is talked to in one conversation only, and that a
+  verdict, not a message in that conversation, is what authorizes a task's run
+  from the board.
+- *Only the owner's verdict authorizes.* Where this entry says "a person", it
+  means the harness's owner (`docs/plans/server-deployment.md`, *Decisions*,
+  2). A reviewer's *approve* or *request changes* is a recommendation: it
+  moves the task to wait for the owner and starts nothing. A reviewer's
+  *comment* is a comment.
+- *More verdicts.* These are verdicts in the sense of this entry too:
+  - *Start development* on a task in *Ready* spends quota: it starts that
+    task's cycle under the spending limit shown before it is confirmed
+    (`docs/plans/board-service.md`).
+  - *Start epic* spends quota: it authorizes, in one verdict, every task of
+    the epic listed on the screen when it is confirmed, under the epic's
+    spending limit. That limit is the ceiling of the authorization: reaching
+    it stops the epic and waits for a person. A task added to the epic after
+    the verdict is not covered by it.
+  - On a command request (`docs/plans/command-requests.md`): *Run once*
+    spends quota, since it resumes the phase that asked. *Allow for this role
+    in this project* spends quota the same way and also grants a standing
+    permission, for that role in that project only, never global and never
+    over the denylist. *Deny* hands the refusal back to the phase and
+    authorizes only the resume that carries it.

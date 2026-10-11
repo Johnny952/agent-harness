@@ -163,7 +163,7 @@ are the same task files, told apart by `status`:
     session accepts on the person's explicit word in the conversation, the
     same way it dispatches (decided by the user on 2026-10-10).
   - Accepting spends no quota. Dispatching an accepted task stays a separate
-    act (C-4).
+    act (C-4), the *Start development* button below.
 - **Debt enters as backlog.** The flow up to the index does not change: the
   implementador declares, the revisor rules, the auditor files the entry in
   `docs/debt/`. The dispatcher then mirrors each filed entry as a backlog item
@@ -220,6 +220,69 @@ are the same task files, told apart by `status`:
   accepted task enter the board as `pending`. Their parent was accepted, and
   the split is that same work cut up. The cap on splits in `task-split.md`
   keeps this from growing the work without limit.
+
+### Starting development: a button on the board
+
+Added on 2026-10-11, on the user's word, after the plan was approved. It
+answers the open question in `main-thread.md` of who starts the next task
+when the person does not name it in the conversation. It needs a charter
+ruling before it is built (*Open questions*).
+
+- **The button.** Each card in *Ready* has *Start development*. A card in
+  *Waiting* shows it disabled, naming the dependency not merged yet. A task
+  already queued or running shows no button, so a double click starts
+  nothing twice.
+- **What it does.** The board service writes an action
+  `{kind: "start", task, by, at}` to the queue, and the worker opens the
+  task's cycle when an account is free, under `balancer.md`'s pick and quota
+  rules. Until then the card shows *Queued, waiting for an account*, with
+  *Cancel*. Once a phase has started, cancelling is the dispatcher's own
+  stop, not this button.
+- **What it authorizes.** The task's cycle, from the arquitecto to *Awaiting
+  review*, including the dispatcher's own retries, and nothing after it:
+  *request changes* and *resolve conflict* stay their own verdicts. Before it
+  queues anything, the button says so, with the roles the cycle runs, the
+  state of the pool, and the cost of past cycles when there is one to show.
+  It never shows a guessed estimate.
+- **Per epic.** The epic's view has *Start epic*. It queues the epic's
+  *Ready* tasks, and each later task as its dependencies merge, in the
+  board's order. As many run at once as there are free accounts. It covers
+  the tasks in `split_into` when the button is pressed, and the sub-tasks the
+  arquitecto splits them into; a task added to the epic later is not
+  covered, because the person has not seen it. *Stop epic* drops what is
+  queued and leaves running phases alone. The epic still moves only as fast
+  as the person approves, since a dependency counts once it is merged.
+- **Accepting is still not starting.** Accepting moves an item onto the
+  board and spends nothing; starting is the separate act that spends quota.
+  They stay two clicks, because a person may accept now and start later.
+
+#### A spending limit on what a start authorizes
+
+Added the same day. The pool already stops an account at its threshold and
+keeps the primary's reserve (`balancer.md`). What it does not stop is one
+start spending more than the person meant: *Start epic* can run until every
+worker account is parked, and a task whose gate keeps failing goes through
+every retry the dispatcher allows. So each start carries a limit, and
+reaching it pauses the work rather than failing it.
+
+- **The measure is one already written.** The usage log records each
+  phase's tokens and the `result`'s cost. The limit counts those. It never
+  counts an estimate, the same rule as the button's preview.
+- **Per task.** A cycle that has spent more than its limit, or retried more
+  than a set number of times, ends *Blocked* with the reason
+  `budget_reached`, showing what it spent. Continuing is a new *Start*.
+- **Per epic.** *Start epic* asks for the epic's limit, prefilled from the
+  past cycles of the epic's own tasks, or from the project's median once
+  `token-economy.md` P4 has one. When the epic reaches it, nothing new is
+  queued, running phases finish, and the epic shows *Paused: limit
+  reached* with *Resume*, which asks for a new limit.
+- **A floor on the pool.** Either start may also say "stop queuing when the
+  pool's free share drops under N%", read from `/usage` as the picker reads
+  it. That keeps quota for the conversation and the reviews.
+- **Reaching a limit is a notification** of kind *Blocked*
+  (`notifications.md`), because it waits on the person.
+
+The default numbers are set when this is built, from real cycles.
 
 ### 5. The service
 
@@ -339,14 +402,14 @@ read the api; the others are Lovable drafts over mock data.
 
 | Screen | Today | What this plan needs |
 |---|---|---|
-| Board (`/`) | real: four status columns, no role lanes (ADR 26, ADR 28) | board items only; the live columns of section 4; epic swimlanes |
+| Board (`/`) | real: four status columns, no role lanes (ADR 26, ADR 28) | board items only; the live columns of section 4; epic swimlanes; *Start development* on *Ready* cards |
 | Backlog (`/backlog`) | mock: a list with a *completed* toggle | redefined: proposed, deferred and dropped items in priority order, with accept, defer, drop and reorder; no completion, since completed work is on the board |
 | Debt (`/debt`) | real, read-only from `docs/debt/` | stays the index's view; each open entry links to its backlog item and shows whether it was accepted |
 | Task (`/tasks/$taskId`) | real: status, owner, dependencies, running record, declared debt | adds the description's sections, the comment thread with a form, the epic it belongs to, and its `phase` |
 | Epic | missing | new: the epic's tasks with their states, its `split_into` and `depends_on` as a graph or ordered list, and progress to merged |
 | Approvals (`/approvals`) | mock: approve or reject pushes, merges, permissions and budgets | becomes `review.md`'s screen: a task's diff with line comments and the verdicts; it lists the *Awaiting review* and *Conflict* columns, with *resolve conflict* on the latter |
 | Roadmap | missing | new, in `docs/plans/roadmap-view.md`: plans, epics and tasks in three bands (future, now, past), derived from the files; read-only, after this plan |
-| Queue (`/queue`) | mock | out of scope here; dispatching from the console waits for the C-4 ruling |
+| Queue (`/queue`) | mock | the queued starts, in the order the worker will take them, each with *Cancel*; built with *Starting development*, after its ruling |
 
 Two rules keep the screens apart:
 
@@ -405,6 +468,10 @@ Each step is a single surface, built in this order:
    description and comments. It is a front task, behind its own ask for a
    build.
 
+9. **Starting development.** The `start` action and its cancel in the
+   worker, the button on the board and the epic, the spending limit, and the
+   queue screen. It needs the queue and worker, and the charter ruling below.
+
 `review.md`'s diff screen and verdicts come after this, on the same service
 and the same comments file.
 
@@ -412,5 +479,14 @@ and the same comments file.
 
 The three questions this section held were answered by the user on
 2026-10-11 (the status block at the top): the C-1 and C-4 ruling, migrating
-by `dispatch migrate`, and keeping comments for good. None is open; new ones
-are added here as the build raises them.
+by `dispatch migrate`, and keeping comments for good. New ones are added here
+as the build raises them.
+
+- **The ruling for *Start development*.** C-12 lists the console verdicts
+  that authorize a run, and C-4 holds for everything else: "nothing in the
+  console starts a run without a person's verdict on that task". *Start* is
+  a verdict on a task, but it is not in C-12's list, and *Start epic* is a
+  verdict on tasks the person has not each looked at. **Ruled 2026-10-11:**
+  both are C-12 verdicts. *Start epic* covers the tasks listed when it is
+  confirmed, and its spending limit is the ceiling of the authorization
+  (C-12, *Amended*).

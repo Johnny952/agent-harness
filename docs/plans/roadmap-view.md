@@ -73,22 +73,65 @@ No role is given the roadmap as context. It would ride in every phase that had
 it (`docs/plans/token-economy.md`) for little benefit, since a phase already
 gets its plan and its task.
 
+### 5. A change is a new entry, never an edit
+
+When the project changes course, both decisions stay on the roadmap: the new
+one is added and the old one is not moved or removed, as `docs/decisions.md`
+is append-only. A derived view could not rewrite the past anyway; the past is
+git and the ADRs.
+
+The repo already tells three kinds of change apart, and the view shows each its
+own way:
+
+| Relation | Example | How it shows |
+|---|---|---|
+| **Supersedes** | C-11 superseded C-10; an ADR with its heading struck through | The old entry keeps its date, dimmed, marked "superseded by X"; the new one says "supersedes Y"; each links the other |
+| **Narrows** | "Narrows ADR 53 and does not supersede it" | The old entry stays current; the new one hangs from it as an event |
+| **Amends** | C-5, amended 2026-10-11 for the task-branch push | One entry, with the amendment's date as one more milestone |
+
+By when the change comes:
+
+1. **A plan changes before it is built.** It is in the future band and shows
+   its current state. Expanded, it lists its revisions, read from the plan
+   file's `git log` (date and commit subject). Nothing extra is written.
+2. **Built work is replaced by new work.** The old task stays in the past
+   band, in its month; the new one is in the future or now band with
+   "supersedes T-0xx". The past gains a link forward and nothing else.
+3. **A decision changes with no new code** (a superseding ADR, a charter
+   amendment). It is an event in the past band, at its date, under its plan.
+4. **A plan is dropped.** Its status becomes `superseded` or `dropped`; it
+   stays in the past with its reason, linked to what replaced it, if anything.
+
+Every link carries the why: the ADR or ruling that justified the change. Today
+that answer takes reading `docs/decisions.md` whole.
+
+The screen has a filter: *full history*, the default, with superseded entries
+dimmed, and *current only*, which hides them and shows the project as it
+stands.
+
 ## What it needs underneath
 
 1. **A small frontmatter on each plan.** It replaces the prose *Status* line:
    `status` (idea, design, approved, building, built, superseded), and the
-   dates it was approved and built. It is the one new thing written, once per
-   plan, and kept by whoever changes the plan's status.
+   dates it was approved and built, and `supersedes`, the plans it replaces,
+   when any. It is the one new thing written, once per plan, and kept by
+   whoever changes the plan's status.
 2. **An optional `plan` field on tasks and epics.** It is written only when
-   set, like `epic`, and the arquitecto fills it when it proposes.
+   set, like `epic`, and the arquitecto fills it when it proposes. So is
+   `supersedes`, the task or epic the new work replaces.
 3. **A one-time backfill of the past.** A script reads the merge commits from
    git and the `docs/implementations/T-*.md` notes, and writes `plan` (and
    `merged`, where the task file lacks it) onto the old tasks. A task it
    cannot place stays under "no plan", which is honest.
 4. **`GET /api/roadmap`.** It builds the tree from the plans' frontmatter, the
-   task files and the ADR index. It is read-only, like every api route.
+   task files and the ADR index. It is read-only, like every api route. The
+   relations between ADRs and charter entries are read from the conventions
+   they already follow: a struck-through heading, "supersedes", "narrows",
+   and the charter's **Amended:** block. No historical record is edited for
+   the view (*Decisions*, 5).
 5. **The screen.** A vertical list in the three bands, each plan expanding to
-   its epics and each epic to its tasks.
+   its epics and each epic to its tasks, with the *full history* and *current
+   only* filter.
 
 ## How it would be built
 
@@ -113,6 +156,10 @@ route, the front screen (behind its own ask for a build).
 - **Which plans count.** `board.md` and `front.md` are older and broader than
   one initiative. Whether they are rows, or split into the phases they
   describe, is decided when the frontmatter is written.
+- **A structured relation line on new ADRs.** Reading the prose conventions
+  breaks the day one is written differently. New ADRs could carry a line such
+  as `**Relation:** supersedes 30`, with old ones left as they are and still
+  read from their prose. Decided when the route is built.
 - **Debt.** Whether accepted debt items show in the future band, or only on
   the board and the debt screen.
 
