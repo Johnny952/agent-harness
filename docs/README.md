@@ -115,6 +115,7 @@ externally-managed.
 | `docs/debt/README.md` | Before you start: work earlier tasks deliberately left undone, one row each with the condition that says whether it bites your task. Also where your own accepted debt is filed. |
 | `docs/business.md` | Before changing what the harness *decides* — which accounts are eligible, what counts as a project, what a reader is allowed to treat as absent. Partial by construction: it holds the rules a task inferred from the code and marked unconfirmed, waiting on a human, alongside the confirmed ones it cites. |
 | `docs/plans/token-economy.md` | Before changing how a role spends its turns, or when sizing a task: what one Opus window bought on T-016, where the avoidable tokens went, and the proposals that follow — including sizing a task so its whole cycle fits one window. |
+| `docs/plans/task-split.md` | Before building P4's split backstop: the arquitecto's `split` handoff field, how the dispatcher files `<task>-S<n>` sub-tasks and stops before the implementador, the `depends_on` gate, the limits, and a proposed ADR. Design only, not approved. |
 
 `docs/superpowers/` is vendored upstream material, not this project's
 documentation. Do not treat it as a contract and do not edit it; the pointer
