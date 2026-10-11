@@ -49,6 +49,17 @@ cite the entry and move it up, or drop the row.
   week's ceiling from there and falls back to the pair only when `last_probe`
   is null. Added by T-011, which served the three fields and had to state which
   one governs.
+- **A usage line that says `measured: false` is an absence of evidence and
+  never a cost of zero, so no reader may sum it, average it or default it to
+  0.** Confirmed: `docs/decisions.md` ADR 53, which makes `measured` false
+  exactly when `ClaudeResult.raw` is empty — every way
+  `dispatcher/docker_exec.py:exec_claude` can fail to produce a result object,
+  from a host-backstop timeout to stdout that is not JSON — and sets every
+  measured field to `null` in that case, each of them read with `.get` and
+  never coerced. The same entry makes a renamed CLI key indistinguishable from
+  an absent one by design, with `raw_keys` on the line as the way to tell. Added
+  by T-024, which wrote the log and deliberately no reader of it
+  ([`docs/debt/T-024-D1`](debt/T-024-D1.md)).
 
 ## Unconfirmed — inferred from the code by T-009
 
@@ -125,3 +136,23 @@ cite the entry and move it up, or drop the row.
   is listed here rather than as a defect; what no doc settles is whether an
   operator should be able to see another project's unreviewed entries on this
   screen, which today they cannot, by the same filter.
+
+## Unconfirmed — inferred from the code by T-024
+
+- **A phase has a record only if it finished, with one exception: the optional
+  mapper records a run that failed. So "a row in `/api/phases`" means "a phase
+  that finished, or the one phase whose failure the cycle tolerates" — never
+  "a phase that succeeded".** `dispatcher/dispatcher.py:run_phase` returns
+  before both `context_transfer.handoff` and `context_transfer.save_handoff`
+  when a phase did not succeed *and* `fatal` is true, so a crashed or timed-out
+  phase leaves its diagnosis in the log and nothing under `handoffs/`.
+  `fatal=False` is passed at exactly one call site — the optional mapper
+  (`project_docs.MAPPER_ROLE`), run when `_needs_mapping` is true — which only
+  warns and then falls through to both writes, leaving an envelope whose
+  `handoff` payload may be `null`. Read off `run_phase` and that one call site;
+  no doc states the exception, and `docs/decisions.md` **ADR 53** states the
+  general rule in the broader form ("a phase that failed or timed out writes no
+  envelope at all") that the mapper does not obey. A human should say whether a
+  failed optional phase *ought* to be a row a console shows beside the phases
+  that finished — and if so, whether the row needs a field saying which it is,
+  since nothing on the envelope distinguishes them today.

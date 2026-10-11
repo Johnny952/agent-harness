@@ -3707,7 +3707,10 @@ cost the phase — the write is caught and logged on `_record_probe`'s model,
 because this is bookkeeping on a path that may already be failing.
 
 What is **not** in this log: the `/usage` probes of `check_quota_ok`,
-`_recheck_cooling_accounts` and `operator.format_status`. `/usage` is a local
+`_recheck_cooling_accounts` and `operator._probe_into`, the last reached from
+`operator.account_reports(cfg, probe=True)` and so only from `cli.py`'s
+`status --probe` — `operator.format_status` is handed the reports and makes no
+`claude` call of its own. `/usage` is a local
 command (V1.3, V5.1: `num_turns` 0, `total_cost_usd` 0), ADR 49 already
 persists what a probe found, and a probe is not a phase. There is no config
 key either: the record costs no quota and no model call, and a switch for it

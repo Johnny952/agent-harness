@@ -82,7 +82,7 @@ externally-managed.
 | `dispatcher/quota.py` | The `/usage` probe, the threshold that parks an account before a phase spends into a wall, and the primary's weekly ceiling paced against the reset that probe reports (ADR 48). |
 | `dispatcher/operator.py` | What the two read-and-repair verbs do: `status` reports the pool without writing to it, and `release-account` is the only way back from an account left `BUSY` by a crashed dispatcher. |
 | `dispatcher/gates.py` | The four checks that run between implementador and revisor with no model in the loop. Only the test gate blocks, and only on a red `test:` entry; installs, `lint:` entries and the rest ride along as notes. |
-| `dispatcher/context_transfer.py` | `TaskFile`: the `.hive/tasks/<id>.md` card, its frontmatter, and the status block a resumed phase reads. |
+| `dispatcher/context_transfer.py` | `TaskFile`: the `.hive/tasks/<id>.md` card, its frontmatter, and the status block a resumed phase reads. Also the two records the dispatcher keeps beside a task rather than in it: the per-role handoff envelope `/api/phases` serves (ADR 27), and the append-only log of what every `claude` call cost (`append_usage`, ADR 53). |
 | `dispatcher/handoff.py` | What one role leaves the next, as pointers rather than prose, and the budgets that hold it to a size. |
 | `dispatcher/project_docs.py` | This contract. Where a project's docs live, what each role owes them, and the frontmatter above. |
 | `dispatcher/learnings.py` | The inbox of things a run discovered, and the retirement of ones a later run disproved. |
