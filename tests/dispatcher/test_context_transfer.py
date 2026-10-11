@@ -781,6 +781,24 @@ def test_append_usage_appends_rather_than_replacing(tmp_path: Path) -> None:
     assert records[0] == {"call": "phase", "account": "cuenta1"}
 
 
+def test_append_usage_leaves_the_log_readable_whatever_the_umask(tmp_path: Path) -> None:
+    # `_write_atomic`'s own 0644 is this module's rule for a `.hive/` file, and
+    # its comment is the reason: agent containers and the host operator both
+    # read what the dispatcher writes there. The eventual reader of this log is
+    # `observability/api/` over a `:ro` mount as a different uid, so a
+    # dispatcher started under a tight umask must not create a log that reader
+    # cannot open.
+    hive_dir = str(tmp_path)
+    previous = os.umask(0o077)
+    try:
+        path = append_usage(hive_dir, "task-1", {"call": "phase"})
+        append_usage(hive_dir, "task-1", {"call": "gate-retry"})
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+
+
 def test_append_usage_does_not_show_up_as_a_handoff_or_a_task(tmp_path: Path) -> None:
     # The guard that this file cannot reach `/api/phases` as a row: that route
     # lists `handoffs/`, and the usage log is a sibling directory.

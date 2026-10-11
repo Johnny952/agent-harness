@@ -176,8 +176,10 @@ own spelling, taken from `docs/ROADMAP.md` V1.1's *Record* step and its V5.1
 row because no stored `raw` exists on this harness to read them off and T-024
 was refused a live probe — so each line also carries `raw_keys`, and the first
 real run says on its own which keys were there. `/api/phases` serves nothing
-new: the log is a sibling of `handoffs/`, and the screen that would read it is
-`docs/plans/front.md`'s own card.
+new: the log is a sibling of `handoffs/`, and nothing reads it yet — no console
+screen and no card owns a view of what a phase cost, the Tokens screen and
+`docs/plans/front.md`'s Tokens task being a container's provider login rather
+than its spend.
 
 **This does not give P4 its budget.** One task's records are not a median, and
 nothing here converts a token count into the window percentage `/usage`

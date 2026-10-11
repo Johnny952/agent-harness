@@ -3737,24 +3737,53 @@ describes. A file under `.hive/` is on the filesystem the dispatcher already
 owns and the api already reads.
 
 **Consequences.** `/api/phases` is unchanged and serves nothing new: the route
-lists `handoffs/`, the log is a sibling directory, and no console screen reads
-it — the tokens screen is fixture-backed and its own card, which `front/`'s
-plan puts outside this task. A later task that serves this is choosing a row
-shape for a series, which is that screen's decision and not a reader this task
-should guess at.
+lists `handoffs/`, the log is a sibling directory, and nothing reads it at all.
+No console screen and no card anywhere in `docs/` owns a view of what a phase
+cost — `front/`'s Tokens screen and `docs/plans/front.md`'s Tokens task are a
+container's *provider login*, the same word for a different object, gated on a
+privileged read and a charter ruling that have nothing to do with this log. A
+later task that serves this is choosing a row shape for a series, and is
+inventing the screen as well as the route, which is why this entry guesses at
+neither.
 
-ADR 27's three *present nowhere* rows move only half a step. `account` and a
-phase's real elapsed time are now recorded, per call, in this log; `model` is
-still nowhere, because what the dispatcher passes as `--model` is the
-configured model and not the one that answered. The phase row keeps its six
-keys until a task decides what a row over several calls means.
+Root `README.md` item 2, *Record usage per phase*, is both the request this
+entry answers and the prescription it declines. Its keys are the ones recorded
+here, which is why it is cited for their spelling; but it asks for them to go
+to the collector — argued against above — "tagged with role, model, effort,
+round, and a fingerprint of the agent config (CLI version, skills, MCP
+servers, compaction window)", so that rates can be compared *across config
+versions*. A line carries role, round, account and call, and nothing about the
+configuration the call ran under: no fingerprint, because nothing in this
+harness records the CLI version, the skill set or the compaction window a phase
+ran with, and one assembled from `config.yaml` at read time would describe the
+configuration *now* rather than the one that ran — ADR 27's `model` row below
+is the same trap. Model and effort are omitted for that reason and not for want
+of a value: both are flags this dispatcher sets, so a later task may add them
+as what was *requested*, which is a weaker fact than the rest of the line and
+has to be labelled as one. Item 2 stays as written, outside this task's files,
+and the cross-config comparison it wants waits on a record of the config that
+is not this one.
+
+ADR 27's *present nowhere* rows move only half a step. `account` and a phase's
+real elapsed time are now recorded, per call, in this log, and so is
+`shrink_retry`, which that table has as "Logged by `_shrink_over_budget`,
+persisted nowhere": a `call: "shrink-retry"` line is exactly that record, per
+call rather than per phase. `model` is still nowhere, because what the
+dispatcher passes as `--model` is the configured model and not the one that
+answered. The phase row keeps its six keys until a task decides what a row over
+several calls means.
 
 The write discipline is not `_write_atomic`'s, and the difference is
 deliberate: this is a log, not a document, so a line is appended with `O_APPEND`
-under the task lock that already makes the dispatcher its only writer, rather
-than the whole file being re-serialised per phase. A reader therefore skips a
-line it cannot parse instead of calling the file damaged, and must not assume
-the last line is complete.
+rather than the whole file being re-serialised per phase. By convention the
+dispatcher holding the task lock is its only writer, and convention is all that
+is: the scratch dir is mounted into the agent containers at the same path, so an
+aggregator must take its integrity from the reader's half of the contract and
+not from a writer count. That half: skip a line that will not parse instead of
+calling the file damaged, and do not assume the last line is complete. The
+file's mode is `_write_atomic`'s 0644, set on the descriptor at creation, for
+that helper's own reason — a reader in another container is a reader with
+another uid.
 
 Citing the file in a doc needs the placeholder spelling used throughout this
 entry. Spelled bare, it has a slash and an extension, so

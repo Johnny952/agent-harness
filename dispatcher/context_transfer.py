@@ -244,16 +244,23 @@ def append_usage(hive_dir: str, task_id: str, record: dict) -> str:
     Appended with `O_APPEND` rather than through `_write_atomic`, which is the
     one place in this module that difference is deliberate. That helper exists
     for a JSON *document* another process may read while it is being replaced;
-    this is a log, every line of it is final once written, and the task lock
-    already makes the dispatcher its only writer — so re-serialising the whole
-    file per `claude` call would buy nothing and lose the series as it grows.
-    The reader's half of that contract: skip a line that will not parse, and
-    do not assume the last line is complete, rather than calling the file
-    damaged (`docs/learnings/atomic-writes-copy-state-machine.md` is about the
-    document case and does not fire here).
+    this is a log, every line of it is final once written, and by convention
+    the dispatcher holding the task lock is the only thing that writes it — so
+    re-serialising the whole file per `claude` call would buy nothing and lose
+    the series as it grows. Convention is all it is: the scratch dir is mounted
+    into the agent containers at the same path, so an aggregator must read the
+    reader's half of the contract as the guarantee and not the writer count —
+    skip a line that will not parse, and do not assume the last line is
+    complete, rather than calling the file damaged
+    (`docs/learnings/atomic-writes-copy-state-machine.md` is about the document
+    case and does not fire here).
 
-    No `chmod` either: `open(..., "a")` creates at the process umask, where
-    `_write_atomic` has to undo `NamedTemporaryFile`'s 0600.
+    The mode is `_write_atomic`'s 0644 and for its reason — agent containers
+    and the host operator both read what this module writes under `.hive/`,
+    and the reader ADR 53 names is `observability/api/` over a `:ro` mount as
+    another uid. `open(..., "a")` would create at the process umask, so the
+    file is created `O_EXCL` and `fchmod`ed instead: only at creation, on the
+    descriptor, so this never changes the mode of a file another uid owns.
 
     Raises `OSError` to its caller. Swallowing belongs at the call site, where
     the dispatcher knows this is bookkeeping on a path that may already be
@@ -261,6 +268,15 @@ def append_usage(hive_dir: str, task_id: str, record: dict) -> str:
     """
     path = usage_log_path(hive_dir, task_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        pass  # Already there, and whoever created it owns its mode.
+    else:
+        try:
+            os.fchmod(fd, 0o644)  # The umask masked the mode above.
+        finally:
+            os.close(fd)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
     return path
