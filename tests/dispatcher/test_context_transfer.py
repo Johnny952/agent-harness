@@ -19,7 +19,6 @@ from dispatcher.context_transfer import (
     list_handoff_roles,
     list_task_ids,
     LockHeldError,
-    read_description,
     read_handoff,
     read_handoff_envelope,
     read_kanban_issue_id,
@@ -29,7 +28,6 @@ from dispatcher.context_transfer import (
     release_stale_lock,
     save_handoff,
     scratch_dir,
-    set_description,
     set_kanban_issue_id,
     task_file_path,
     TaskFile,
@@ -348,84 +346,22 @@ def test_acquire_lock_after_handoff_by_different_owner_succeeds(tmp_path: Path) 
     assert task.owner == "cuenta2"
 
 
-_MULTILINE_DESCRIPTION = """Add a /healthz endpoint.
-
-It must return 200 with {"status": "ok"} and skip auth.
-"""
-
-
-def test_description_roundtrips_and_is_written_as_a_block_scalar(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-
-    set_description(hive_dir, "task-1", _MULTILINE_DESCRIPTION)
-
-    assert read_description(hive_dir, "task-1") == _MULTILINE_DESCRIPTION
-    # Not just readable by us: a description is written by a human and read by
-    # one while debugging a run, so it has to survive as the lines they typed
-    # instead of safe_dump's default single-quoted scalar with folded newlines.
-    raw = Path(task_file_path(hive_dir, "task-1")).read_text()
-    assert "description: |" in raw
-    assert "  It must return 200" in raw
-
-
-def test_description_with_trailing_whitespace_still_roundtrips(tmp_path: Path) -> None:
-    """A block scalar can't represent a line with trailing spaces; the emitter
-    falls back to a quoted style on its own, so fidelity doesn't depend on the
-    value being block-friendly."""
-    hive_dir = str(tmp_path)
-    description = "first line   \nsecond line"
-
-    set_description(hive_dir, "task-1", description)
-
-    assert read_description(hive_dir, "task-1") == description
-
-
-def test_set_description_keeps_the_phase_history_already_in_the_body(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-    acquire_lock(hive_dir, "task-1", owner="cuenta1")
-    handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready", depends_on=["task-0"])
-
-    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
-
-    task = read_task_file(task_file_path(hive_dir, "task-1"))
-    assert task.description == "Add a /healthz endpoint."
-    # Re-seeding a task mid-cycle replaces the ask and nothing else.
-    assert task.body.strip() == "arquitecto: plan ready"
-    assert task.status == "review"
-    assert task.depends_on == ["task-0"]
-
-
-def test_handoff_keeps_the_description_out_of_the_body(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-    set_description(hive_dir, "task-1", _MULTILINE_DESCRIPTION)
-
-    handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready")
-    handoff(hive_dir, "task-1", new_status="review", body="implementador: done")
-
-    task = read_task_file(task_file_path(hive_dir, "task-1"))
-    # The body accumulates phase summaries, which is exactly why the ask lives
-    # in the frontmatter: here it would have been appended twice.
-    assert task.description == _MULTILINE_DESCRIPTION
-    assert "healthz" not in task.body
-
-
-def test_task_file_written_before_descriptions_existed_is_still_readable(tmp_path: Path) -> None:
+def test_the_task_file_no_longer_carries_the_description(tmp_path: Path) -> None:
+    """The description lives in `dispatcher/tasks.py`'s file now: a task file
+    from before that still reads, with no such field, and is written back
+    without the key."""
     path = str(tmp_path / "task-1.md")
     Path(path).write_text(
         "---\ntask_id: task-1\nstatus: pending\nowner: null\ndepends_on: []\n"
-        "heartbeat: null\n---\n\nold body\n"
+        "heartbeat: null\ndescription: Add a /healthz endpoint.\n---\n\nold body\n"
     )
 
     task = read_task_file(path)
+    write_task_file(path, task)
 
-    assert task.description is None
+    assert not hasattr(task, "description")
     assert task.body.strip() == "old body"
-
-
-def test_read_description_of_an_unseeded_task_is_none(tmp_path: Path) -> None:
-    assert read_description(str(tmp_path), "task-1") is None
-    # Reading must not create the file: list_task_ids feeds the dispatcher.
-    assert list_task_ids(str(tmp_path)) == []
+    assert "description" not in Path(path).read_text()
 
 
 _ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
@@ -439,21 +375,8 @@ def test_kanban_issue_id_roundtrips(tmp_path: Path) -> None:
     assert read_kanban_issue_id(hive_dir, "task-1") == _ISSUE_ID
 
 
-def test_kanban_issue_id_is_written_above_the_description(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-    set_description(hive_dir, "task-1", _MULTILINE_DESCRIPTION)
-
-    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
-
-    raw = Path(task_file_path(hive_dir, "task-1")).read_text()
-    # The description is a block scalar running to the end of the frontmatter;
-    # a short bookkeeping key after it would read as part of the prose.
-    assert raw.index("kanban_issue_id:") < raw.index("description:")
-
-
 def test_set_kanban_issue_id_keeps_everything_else(tmp_path: Path) -> None:
     hive_dir = str(tmp_path)
-    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
     acquire_lock(hive_dir, "task-1", owner="cuenta1")
     handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready")
 
@@ -462,7 +385,6 @@ def test_set_kanban_issue_id_keeps_everything_else(tmp_path: Path) -> None:
 
     task = read_task_file(task_file_path(hive_dir, "task-1"))
     assert task.kanban_issue_id == _ISSUE_ID
-    assert task.description == "Add a /healthz endpoint."
     assert task.body.strip() == "arquitecto: plan ready"
     assert task.status == "review"
 
@@ -481,19 +403,18 @@ def test_task_file_written_before_the_board_existed_is_still_readable(tmp_path: 
     path = str(tmp_path / "task-1.md")
     Path(path).write_text(
         "---\ntask_id: task-1\nstatus: pending\nowner: null\ndepends_on: []\n"
-        "heartbeat: null\ndescription: Add a /healthz endpoint.\n---\n\nold body\n"
+        "heartbeat: null\n---\n\nold body\n"
     )
 
     task = read_task_file(path)
 
     assert task.kanban_issue_id is None
-    assert task.description == "Add a /healthz endpoint."
 
 
 def test_a_task_with_no_board_writes_no_kanban_key(tmp_path: Path) -> None:
     hive_dir = str(tmp_path)
 
-    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
+    acquire_lock(hive_dir, "task-1", owner="cuenta1")
 
     assert read_kanban_issue_id(hive_dir, "task-1") is None
     # Absent, not null: a harness without a board leaves no trace of one.
@@ -536,7 +457,7 @@ def test_save_handoff_lives_under_the_task_scratch_dir_not_beside_the_task_file(
     tmp_path: Path,
 ) -> None:
     hive_dir = str(tmp_path)
-    set_description(hive_dir, "task-1", "Add a /healthz endpoint.")
+    acquire_lock(hive_dir, "task-1", owner="cuenta1")
 
     path = save_handoff(hive_dir, "task-1", "auditor", {"summary": "ok"})
 
@@ -1081,20 +1002,14 @@ def test_has_phase_section_is_false_for_every_card_it_cannot_read(tmp_path: Path
 def test_has_phase_section_matches_against_the_body_and_not_the_frontmatter(
     tmp_path: Path,
 ) -> None:
-    # A card's description can quote the heading it is asking about — T-014's own
-    # does — so the match runs over the parsed body, never the file's text.
+    # A frontmatter value can quote the heading being asked about — T-014's
+    # description did, while it lived there — so the match runs over the parsed
+    # body, never the file's text.
     path = str(tmp_path / "task-1.md")
-    write_task_file(
-        path,
-        TaskFile(
-            task_id="task-1",
-            status="done",
-            owner=None,
-            depends_on=[],
-            heartbeat=None,
-            body="## implementador\n\nDone.\n",
-            description="no `## auditor` section, no drop:\n## auditor\n",
-        ),
+    Path(path).write_text(
+        "---\ntask_id: task-1\nstatus: done\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\ndescription: |\n  no `## auditor` section, no drop:\n"
+        "  ## auditor\n---\n\n## implementador\n\nDone.\n"
     )
 
     assert "## auditor" in Path(path).read_text()

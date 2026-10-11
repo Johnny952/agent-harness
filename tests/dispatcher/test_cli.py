@@ -7,8 +7,8 @@ import pytest
 
 import dispatcher.cli as cli_mod
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import learnings
-from dispatcher.context_transfer import read_kanban_issue_id, set_description, set_resolved_debt
+from dispatcher import learnings, tasks
+from dispatcher.context_transfer import read_kanban_issue_id, set_resolved_debt
 from dispatcher.dispatcher import CycleOutcome, DispatchResult
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
 from dispatcher.vibe_kanban_client import LocalBoardClient, NullKanbanClient, VibeKanbanClient
@@ -37,6 +37,23 @@ local_board:
 """
 
 ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
+
+#: A description the CLI accepts: the two required sections.
+_DESCRIPTION = "## Goal\n\nAdd a /healthz endpoint.\n\n## Done when\n\nGET /healthz answers 200.\n"
+
+#: A task file from before T-026, with its description still in the frontmatter.
+_LEGACY_TASK_FILE = (
+    "---\ntask_id: {task_id}\nstatus: pending\nowner: null\ndepends_on: []\n"
+    "heartbeat: null\ndescription: Add a /healthz endpoint.\n---\n\n"
+)
+
+
+def _legacy(tmp_path: Path, task_id: str = "task-9") -> Path:
+    hive = tmp_path / "hive"
+    hive.mkdir(parents=True, exist_ok=True)
+    path = hive / f"{task_id}.md"
+    path.write_text(_LEGACY_TASK_FILE.format(task_id=task_id))
+    return path
 
 
 def _write_config(tmp_path: Path, board: bool = False, local_board: bool = False) -> Path:
@@ -78,22 +95,149 @@ def test_cli_run_task_invokes_run_task_cycle(tmp_path: Path, monkeypatch) -> Non
     config_path = _write_config(tmp_path)
     captured = _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz endpoint.")
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
 
     assert captured["task_id"] == "task-1"
     assert captured["slug"] == "myproj"
-    assert captured["description"] == "Add a /healthz endpoint."
+    assert captured["description"] == _DESCRIPTION
 
 
 def test_cli_run_task_reads_description_from_a_file(tmp_path: Path, monkeypatch) -> None:
     config_path = _write_config(tmp_path)
     spec = tmp_path / "spec.md"
-    spec.write_text("# Goal\n\nAdd a /healthz endpoint.\n")
+    spec.write_text(_DESCRIPTION)
     captured = _capture_cycle(monkeypatch)
 
     _run(monkeypatch, config_path, "--description-file", str(spec))
 
-    assert captured["description"] == "# Goal\n\nAdd a /healthz endpoint.\n"
+    assert captured["description"] == _DESCRIPTION
+
+
+def test_cli_run_task_rejects_a_description_missing_a_required_section(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    captured = _capture_cycle(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, config_path, "--description", "## Goal\n\nAdd a /healthz endpoint.\n")
+
+    assert excinfo.value.code == 2
+    assert captured == {}
+    assert "`## Done when`" in capsys.readouterr().err
+
+
+def test_cli_run_task_rejects_a_description_file_missing_a_required_section(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    spec = tmp_path / "spec.md"
+    spec.write_text("## Done when\n\nGET /healthz answers 200.\n")
+    captured = _capture_cycle(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, config_path, "--description-file", str(spec))
+
+    assert excinfo.value.code == 2
+    assert captured == {}
+    assert "`## Goal`" in capsys.readouterr().err
+
+
+def test_cli_run_task_refuses_a_hive_that_was_not_migrated(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """Another task's legacy file is enough: the cycle's first write is
+    `reap_expired_locks`, over every task file."""
+    config_path = _write_config(tmp_path)
+    legacy = _legacy(tmp_path)
+    before = legacy.read_bytes()
+    captured = _capture_cycle(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, config_path, "--description", _DESCRIPTION)
+
+    assert excinfo.value.code == 2
+    assert captured == {}
+    err = capsys.readouterr().err
+    assert "dispatch migrate" in err and "task-9" in err
+    assert legacy.read_bytes() == before
+
+
+def test_cli_run_phase_refuses_a_hive_that_was_not_migrated(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _legacy(tmp_path)
+    captured = _capture_single_phase(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, config_path,
+            "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "revisor",
+        )
+
+    assert excinfo.value.code == 2
+    assert captured == {}
+    assert "dispatch migrate" in capsys.readouterr().err
+
+
+def test_cli_release_account_refuses_a_hive_that_was_not_migrated(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    legacy = _legacy(tmp_path)
+    before = legacy.read_bytes()
+    monkeypatch.setattr(
+        cli_mod.operator, "release_account",
+        lambda *a, **k: pytest.fail("released over an unmigrated hive"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "release-account", "--name", "cuenta1")
+
+    assert excinfo.value.code == 2
+    assert "dispatch migrate" in capsys.readouterr().err
+    assert legacy.read_bytes() == before
+
+
+def test_cli_migrate_prints_what_it_moved_and_then_nothing(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _legacy(tmp_path)
+    hive = str(tmp_path / "hive")
+
+    _run_command(monkeypatch, config_path, "migrate")
+
+    out = capsys.readouterr().out
+    assert f"task-9: description moved to {tasks.description_path(hive, 'task-9')}" in out
+    assert "moved 1 description(s); 0 already migrated" in out
+    assert tasks.unmigrated_ids(hive) == []
+    assert tasks.parse_description(tasks.read_description(hive, "task-9")).goal == (
+        "Add a /healthz endpoint."
+    )
+
+    _run_command(monkeypatch, config_path, "migrate")
+
+    assert capsys.readouterr().out == "nothing to migrate\n"
+
+
+def test_cli_migrate_exits_one_when_it_refused_a_file(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    legacy = _legacy(tmp_path)
+    legacy.write_text(legacy.read_text().replace(
+        "description: Add a /healthz endpoint.", "description: [not, text]"
+    ))
+    before = legacy.read_bytes()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "migrate")
+
+    assert excinfo.value.code == 1
+    assert "task-9: not migrated" in capsys.readouterr().err
+    assert legacy.read_bytes() == before
 
 
 def test_cli_run_task_reads_description_from_stdin(tmp_path: Path, monkeypatch) -> None:
@@ -102,11 +246,11 @@ def test_cli_run_task_reads_description_from_stdin(tmp_path: Path, monkeypatch) 
     with no need to bind-mount the spec."""
     config_path = _write_config(tmp_path)
     captured = _capture_cycle(monkeypatch)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("piped in from a heredoc"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_DESCRIPTION))
 
     _run(monkeypatch, config_path, "--description-file", "-")
 
-    assert captured["description"] == "piped in from a heredoc"
+    assert captured["description"] == _DESCRIPTION
 
 
 def test_cli_run_task_without_any_description_exits_without_dispatching(
@@ -145,7 +289,7 @@ def test_cli_run_task_resumes_on_the_stored_description(tmp_path: Path, monkeypa
     second run of the same id) needs no --description: the ask is in the
     task file. None is passed so the stored text isn't rewritten."""
     config_path = _write_config(tmp_path)
-    set_description(str(tmp_path / "hive"), "task-1", "Add a /healthz endpoint.")
+    tasks.write_description(str(tmp_path / "hive"), "task-1", _DESCRIPTION)
     captured = _capture_cycle(monkeypatch)
 
     _run(monkeypatch, config_path)
@@ -192,7 +336,7 @@ def test_cli_run_task_without_a_board_uses_the_null_client(tmp_path: Path, monke
     config_path = _write_config(tmp_path)
     captured = _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz endpoint.")
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
 
     # No vibe_kanban block: the cycle gets a board that answers every call and
     # reaches nothing, rather than a client pointed at a server that isn't there.
@@ -203,7 +347,7 @@ def test_cli_run_task_with_a_board_uses_the_real_client(tmp_path: Path, monkeypa
     config_path = _write_config(tmp_path, board=True)
     captured = _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz endpoint.")
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
 
     assert isinstance(captured["kanban"], VibeKanbanClient)
     assert captured["kanban"].config.command == ["vibe-kanban", "mcp"]
@@ -215,7 +359,7 @@ def test_cli_run_task_with_a_local_board_uses_the_local_client(
     config_path = _write_config(tmp_path, local_board=True)
     captured = _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz endpoint.")
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
 
     assert isinstance(captured["kanban"], LocalBoardClient)
     assert captured["kanban"].config.dir == str(tmp_path / "board")
@@ -225,7 +369,7 @@ def test_cli_run_task_stores_an_issue_id_for_a_local_board(tmp_path: Path, monke
     config_path = _write_config(tmp_path, local_board=True)
     _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz.", "--kanban-issue-id", ISSUE_ID)
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", ISSUE_ID)
 
     # A local board reads the id the same way the remote one does, so the flag
     # has to be accepted for it too — the check is "no board", not "no MCP".
@@ -236,7 +380,7 @@ def test_cli_run_task_stores_the_kanban_issue_id(tmp_path: Path, monkeypatch) ->
     config_path = _write_config(tmp_path, board=True)
     _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz.", "--kanban-issue-id", ISSUE_ID)
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", ISSUE_ID)
 
     # In the task file, so a re-run of the same task needs the flag only once.
     assert read_kanban_issue_id(str(tmp_path / "hive"), "task-1") == ISSUE_ID
@@ -246,7 +390,7 @@ def test_cli_run_task_leaves_an_unnamed_issue_unset(tmp_path: Path, monkeypatch)
     config_path = _write_config(tmp_path, board=True)
     _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, config_path, "--description", "Add a /healthz endpoint.")
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
 
     assert read_kanban_issue_id(str(tmp_path / "hive"), "task-1") is None
 
@@ -261,7 +405,7 @@ def test_cli_run_task_rejects_the_short_id_shown_on_the_card(
     captured = _capture_cycle(monkeypatch)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, config_path, "--description", "Add a /healthz.", "--kanban-issue-id", "VK-7")
+        _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", "VK-7")
 
     assert excinfo.value.code == 2
     assert captured == {}
@@ -275,7 +419,7 @@ def test_cli_run_task_rejects_an_issue_id_with_no_board_configured(
     captured = _capture_cycle(monkeypatch)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, config_path, "--description", "Add a /healthz.", "--kanban-issue-id", ISSUE_ID)
+        _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", ISSUE_ID)
 
     assert excinfo.value.code == 2
     assert captured == {}
@@ -611,7 +755,7 @@ def test_the_cli_gives_the_dispatcher_log_somewhere_to_go(tmp_path: Path, monkey
     captured = _basic_config_recorder(monkeypatch)
     _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, _write_config(tmp_path), "--description", "do the thing")
+    _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
 
     assert captured["level"] == logging.INFO
     assert captured["stream"] is sys.stderr
@@ -643,7 +787,7 @@ def test_the_environment_can_make_a_run_louder_or_quieter(
     captured = _basic_config_recorder(monkeypatch)
     _capture_cycle(monkeypatch)
 
-    _run(monkeypatch, _write_config(tmp_path), "--description", "do the thing")
+    _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
 
     assert captured["level"] == expected
 
@@ -660,7 +804,7 @@ def test_an_unusable_log_level_falls_back_instead_of_killing_the_run(
     cycle = _capture_cycle(monkeypatch)
 
     with caplog.at_level("WARNING"):
-        _run(monkeypatch, _write_config(tmp_path), "--description", "do the thing")
+        _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
 
     assert captured["level"] == logging.INFO
     assert cycle["task_id"] == "task-1"
@@ -693,7 +837,7 @@ def _described(tmp_path: Path, board: bool = False) -> Path:
     """A config whose task-1 is already under way, which is the only kind of
     task this verb runs on."""
     config_path = _write_config(tmp_path, board=board)
-    set_description(tmp_path / "hive", "task-1", "Add a /healthz endpoint that returns 200.")
+    tasks.write_description(str(tmp_path / "hive"), "task-1", _DESCRIPTION)
     return config_path
 
 
@@ -842,7 +986,7 @@ def test_cli_run_task_exits_zero_when_the_cycle_finished(tmp_path: Path, monkeyp
     has to change."""
     _capture_cycle(monkeypatch, outcome=CycleOutcome.FINISHED)
 
-    _run(monkeypatch, _write_config(tmp_path), "--description", "Add a /healthz endpoint.")
+    _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
 
 
 def test_cli_run_task_exits_with_the_held_code_when_no_account_took_a_phase(
@@ -855,7 +999,7 @@ def test_cli_run_task_exits_with_the_held_code_when_no_account_took_a_phase(
     _capture_cycle(monkeypatch, outcome=CycleOutcome.HELD)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, _write_config(tmp_path), "--description", "Add a /healthz endpoint.")
+        _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
 
     assert excinfo.value.code == cli_mod.EXIT_HELD == 75
     assert excinfo.value.code != cli_mod.EXIT_BLOCKED
@@ -869,7 +1013,7 @@ def test_cli_run_task_exits_one_when_the_cycle_blocked(
     _capture_cycle(monkeypatch, outcome=CycleOutcome.BLOCKED)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, _write_config(tmp_path), "--description", "Add a /healthz endpoint.")
+        _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
 
     assert excinfo.value.code == cli_mod.EXIT_BLOCKED == 1
     assert "blocked" in capsys.readouterr().err

@@ -1,6 +1,12 @@
 # Board service — the harness's own board, kept by agents over MCP
 
-**Status:** design, approved by the user on 2026-10-11, not built. It records an idea the user raised on
+**Status:** design, approved by the user on 2026-10-11. The first half of
+step 1 of *How it would be built* is built by T-026
+(`docs/implementations/T-026.md`): the task module `dispatcher/tasks.py`,
+the description in its own `description.md`, and `dispatch migrate`. The
+rest of step 1 (the prompt change to *Goal* and *Done when*, and the
+dispatcher's other writes moving onto the module) and every later step are
+not built. It records an idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
 and tasks and writes their descriptions and steps, through a service that
 owns the board and that agents reach over MCP. The aim is a tidier board.
@@ -442,7 +448,8 @@ Each step is a single surface, built in this order:
    - Build `dispatcher/tasks.py`, and move the description into
      `.hive/board/<task_id>/description.md`.
    - `dispatch migrate` moves the description out of every task file that
-     still has one in its body, once, when the operator runs it; reads never
+     still has one as the frontmatter key `description`, once, when the
+     operator runs it; reads never
      rewrite a file. The module refuses a task file not yet migrated, naming
      the command.
    - The prompt changes to *Goal* and *Done when* plus the path to the

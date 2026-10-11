@@ -50,6 +50,8 @@ from dispatcher import (
     project_docs,
     state_machine,
 )
+# Aliased: `create_app` names its `/api/tasks` view `tasks`.
+from dispatcher import tasks as task_store
 from dispatcher.config import Config, load_config
 from dispatcher.vibe_kanban_client import LocalBoardClient
 from observability import auth
@@ -226,7 +228,12 @@ def create_app(
                 # `except` in the module. It is the provider `jsonify` uses,
                 # not `json.dumps`, so a YAML date still serialises. Narrowing
                 # this `try` back to the parse reopens both.
-                row = _task(task, cards, cfg.heartbeat_ttl_seconds)
+                # The description is read inside the guard too: a task file
+                # `dispatch migrate` has not moved yet raises here, a
+                # `ValueError` whose text names the command, and costs this
+                # task its row rather than serving it with no ask.
+                description = task_store.read_description(cfg.hive_tasks_dir, task_id)
+                row = _task(task, description, cards, cfg.heartbeat_ttl_seconds)
                 app.json.dumps(row)
             except _UNREADABLE as exc:
                 warnings.append(f"{path}: unreadable task file: {exc}")
@@ -250,7 +257,8 @@ def create_app(
             found = context_transfer.read_task_file(path)
             # Shaping and serialisation inside the guard, as on `/api/tasks`
             # and for the same reason; the comment there says why.
-            row = _task(found, cards, cfg.heartbeat_ttl_seconds)
+            description = task_store.read_description(cfg.hive_tasks_dir, task_id)
+            row = _task(found, description, cards, cfg.heartbeat_ttl_seconds)
             # The running record, on this route and not on the list: `handoff()`
             # appends every phase's summary to `body`, so it only grows for the
             # life of a task id, and `/api/tasks` is the list a screen polls.
@@ -781,10 +789,18 @@ def _lock_expired(task: context_transfer.TaskFile, ttl_seconds: int) -> bool | N
         return None
 
 
-def _task(task: context_transfer.TaskFile, cards: dict[str, dict], ttl_seconds: int) -> dict:
-    """One task as `TaskFile` has it, plus the card it points at.
+def _task(
+    task: context_transfer.TaskFile,
+    description: str | None,
+    cards: dict[str, dict],
+    ttl_seconds: int,
+) -> dict:
+    """One task as `TaskFile` has it, plus its description and the card it points at.
 
-    The fields are `TaskFile`'s and this invents none but `lock_expired`, which
+    The fields are `TaskFile`'s, but for `description` — the text of the task's
+    `description.md` as `dispatcher/tasks.py:read_description` returned it,
+    served verbatim and `null` when there is none — and this invents none but
+    `lock_expired`, which
     is argued at `_lock_expired`. `card` is `null` for a task with no
     `kanban_issue_id`, for a harness with no board, and for an id the board does
     not hold — none of the three is an error.
@@ -805,7 +821,7 @@ def _task(task: context_transfer.TaskFile, cards: dict[str, dict], ttl_seconds: 
         "owner": task.owner,
         "depends_on": task.depends_on,
         "heartbeat": task.heartbeat,
-        "description": task.description,
+        "description": description,
         "kanban_issue_id": task.kanban_issue_id,
         "resolved_debt": task.resolved_debt,
         "card": cards.get(task.kanban_issue_id) if task.kanban_issue_id else None,

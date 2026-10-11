@@ -16,10 +16,12 @@ _FRONTMATTER_DELIM = "---"
 class _TaskDumper(yaml.SafeDumper):
     """SafeDumper that emits multi-line strings as block scalars.
 
-    A task description is usually several lines; safe_dump's default for
-    those is a single-quoted scalar with the newlines folded, which makes
-    the task file unreadable for the human who wrote the description and
-    for anyone debugging a run. Subclassed rather than registered on
+    safe_dump's default for a multi-line value is a single-quoted scalar
+    with the newlines folded, which makes the task file unreadable for
+    anyone debugging a run. The frontmatter no longer carries the task
+    description (`dispatcher/tasks.py` keeps it in its own file); block
+    style is kept for any multi-line value, and `tasks.migrate`'s rewrite
+    of a task file rests on it. Subclassed rather than registered on
     yaml.SafeDumper so the other safe_dump callers in this repo keep the
     stock behaviour. Fidelity is unaffected either way: the emitter falls
     back to a quoted style on its own whenever a block scalar can't
@@ -52,13 +54,6 @@ class TaskFile:
     depends_on: list[str]
     heartbeat: str | None
     body: str
-    # The task as the operator stated it, kept in the frontmatter rather
-    # than in `body`: handoff() appends each phase summary to `body`, so a
-    # description written there would be duplicated on every re-run of the
-    # same task id, and the roles could no longer tell the original ask
-    # apart from what previous roles said about it. Last field (and last in
-    # the frontmatter) so existing TaskFile(...) constructions still work.
-    description: str | None = None
     # The uuid of the Vibe Kanban issue this task shows up as, when there is
     # a board at all. It lives here rather than in a dispatcher-side map
     # because the task file is what survives a restart, and because the id is
@@ -474,9 +469,6 @@ def read_task_file(path: str) -> TaskFile:
         depends_on=fm.get("depends_on", []),
         heartbeat=_as_heartbeat_str(fm.get("heartbeat")),
         body=body.lstrip("\n"),
-        # .get, not [...]: task files written before descriptions existed
-        # have no such key and must stay readable.
-        description=fm.get("description"),
         kanban_issue_id=fm.get("kanban_issue_id"),
         resolved_debt=fm.get("resolved_debt") or [],
     )
@@ -586,35 +578,15 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["kanban_issue_id"] = task.kanban_issue_id
     if task.resolved_debt:
         fm["resolved_debt"] = task.resolved_debt
-    if task.description is not None:
-        # Last key so the (multi-line) description sits next to the body,
-        # with the short bookkeeping fields readable above it.
-        fm["description"] = task.description
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
-
-
-def set_description(hive_dir: str, task_id: str, description: str) -> None:
-    """Store the operator's task description, creating the task file if needed.
-
-    Everything else on an existing file is preserved: re-seeding a task
-    that already has phase history in its body only replaces the ask.
-    """
-    path, task = _read_or_new(hive_dir, task_id)
-    task.description = description
-    write_task_file(path, task)
-
-
-def read_description(hive_dir: str, task_id: str) -> str | None:
-    """The stored description, or None when the task file doesn't exist yet."""
-    return _read_or_new(hive_dir, task_id)[1].description
 
 
 def set_kanban_issue_id(hive_dir: str, task_id: str, issue_id: str) -> None:
     """Point this task at a Vibe Kanban issue, creating the task file if needed.
 
-    Like set_description, everything else on an existing file is preserved:
-    attaching a board to a task that already ran only adds the id.
+    Everything else on an existing file is preserved: attaching a board to
+    a task that already ran only adds the id.
     """
     path, task = _read_or_new(hive_dir, task_id)
     task.kanban_issue_id = issue_id
