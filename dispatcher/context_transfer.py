@@ -225,6 +225,63 @@ def read_handoff(hive_dir: str, task_id: str, role: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+#: Where the dispatcher keeps what each `claude` call it made for this task
+#: cost (`docs/decisions.md` ADR 53). Namespaced into its own subdirectory for
+#: the reason `_HANDOFF_SUBDIR` gives, and a sibling of it rather than a file
+#: inside it: `list_handoff_roles` reads every `.json` in that directory as a
+#: role, and this log is the dispatcher's own observation, not a role's return.
+_USAGE_SUBDIR = "usage"
+_USAGE_FILE = "calls.jsonl"
+
+
+def usage_log_path(hive_dir: str, task_id: str) -> str:
+    return os.path.join(scratch_dir(hive_dir, task_id), _USAGE_SUBDIR, _USAGE_FILE)
+
+
+def append_usage(hive_dir: str, task_id: str, record: dict) -> str:
+    """Add one line to this task's usage log, and return the file it went in.
+
+    Appended with `O_APPEND` rather than through `_write_atomic`, which is the
+    one place in this module that difference is deliberate. That helper exists
+    for a JSON *document* another process may read while it is being replaced;
+    this is a log, every line of it is final once written, and by convention
+    the dispatcher holding the task lock is the only thing that writes it — so
+    re-serialising the whole file per `claude` call would buy nothing and lose
+    the series as it grows. Convention is all it is: the scratch dir is mounted
+    into the agent containers at the same path, so an aggregator must read the
+    reader's half of the contract as the guarantee and not the writer count —
+    skip a line that will not parse, and do not assume the last line is
+    complete, rather than calling the file damaged
+    (`docs/learnings/atomic-writes-copy-state-machine.md` is about the document
+    case and does not fire here).
+
+    The mode is `_write_atomic`'s 0644 and for its reason — agent containers
+    and the host operator both read what this module writes under `.hive/`,
+    and the reader ADR 53 names is `observability/api/` over a `:ro` mount as
+    another uid. `open(..., "a")` would create at the process umask, so the
+    file is created `O_EXCL` and `fchmod`ed instead: only at creation, on the
+    descriptor, so this never changes the mode of a file another uid owns.
+
+    Raises `OSError` to its caller. Swallowing belongs at the call site, where
+    the dispatcher knows this is bookkeeping on a path that may already be
+    failing and must never be what fails a phase.
+    """
+    path = usage_log_path(hive_dir, task_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        pass  # Already there, and whoever created it owns its mode.
+    else:
+        try:
+            os.fchmod(fd, 0o644)  # The umask masked the mode above.
+        finally:
+            os.close(fd)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    return path
+
+
 def list_task_ids(hive_dir: str) -> list[str]:
     if not os.path.isdir(hive_dir):
         return []

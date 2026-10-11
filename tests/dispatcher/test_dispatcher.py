@@ -22,6 +22,7 @@ from dispatcher.context_transfer import (
     set_kanban_issue_id,
     set_resolved_debt,
     task_file_path,
+    usage_log_path,
     write_task_file,
 )
 from dispatcher.docker_exec import ClaudeResult
@@ -5568,3 +5569,337 @@ def test_run_single_phase_hands_back_a_held_result_when_no_account_took_it(
     assert (_ISSUE_ID, "done") not in kanban.statuses
     # Not completed: the entries --final carried go back, as for any stop.
     assert seen["orphaned"] == ["task-1"]
+
+
+# --- what every `claude` call cost, recorded (ADR 53) ------------------------
+#
+# One line per call in the task's own usage log: the attempt itself and each of
+# the three retries, on every account tried. Nothing here is ever a guessed
+# number — a field the CLI did not give is `null`, never 0.
+
+
+_USAGE_NOW = dt.datetime(2026, 10, 11, 9, 30, tzinfo=dt.timezone.utc)
+
+#: A `--output-format json` object with everything on it the CLI is known to
+#: print. The names are the CLI's own (`docs/ROADMAP.md` V1.1 *Record*, its
+#: 2026-09-24 V5.1 row, root `README.md` item 2), because no stored `raw`
+#: exists anywhere on this harness to read them off.
+_FULL_RAW = {
+    "is_error": False,
+    "num_turns": 37,
+    "duration_ms": 412_000,
+    "total_cost_usd": 1.84,
+    "session_id": "sess-1",
+    "usage": {
+        "input_tokens": 1_200,
+        "output_tokens": 9_500,
+        "cache_read_input_tokens": 480_000,
+        "cache_creation_input_tokens": 31_000,
+    },
+}
+
+
+def _usage_lines(cfg, task_id="task-1"):
+    """The log as a reader gets it: a line skipped if it will not parse."""
+    path = Path(usage_log_path(cfg.hive_tasks_dir, task_id))
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text().splitlines():
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def test_usage_record_keeps_every_number_a_full_result_carried(tmp_path) -> None:
+    record = dispatcher_mod._usage_record(
+        "T-024", "implementador", 2, "cuenta1", "phase",
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+        _USAGE_NOW,
+    )
+
+    assert record == {
+        "task_id": "T-024",
+        "role": "implementador",
+        "round": 2,
+        "account": "cuenta1",
+        "call": "phase",
+        "session_id": "sess-1",
+        "recorded_at": "2026-10-11T09:30:00+00:00",
+        "measured": True,
+        # Names only, never values: the first real run says on its own which
+        # keys the CLI actually printed, without another probe.
+        "raw_keys": [
+            "duration_ms", "is_error", "num_turns", "session_id",
+            "total_cost_usd", "usage",
+        ],
+        "is_error": False,
+        "num_turns": 37,
+        "duration_ms": 412_000,
+        "total_cost_usd": 1.84,
+        "input_tokens": 1_200,
+        "output_tokens": 9_500,
+        "cache_read_input_tokens": 480_000,
+        "cache_creation_input_tokens": 31_000,
+    }
+    # Plain JSON all the way down: `append_usage` serialises this as it is.
+    assert json.loads(json.dumps(record)) == record
+
+
+def test_usage_record_of_a_result_with_no_usage_block_is_null_and_not_zero(tmp_path) -> None:
+    """The difference P4 would rest on: a call whose token counts were never
+    reported is unknown, and reading it as nothing spent would understate
+    every median built on this log."""
+    raw = {"is_error": False, "num_turns": 4, "duration_ms": 9_100}
+    record = dispatcher_mod._usage_record(
+        "T-024", "revisor", 1, "cuenta2", "phase",
+        ClaudeResult(session_id="sess-2", result_text="ok", raw=raw),
+        _USAGE_NOW,
+    )
+
+    assert record["measured"] is True, "the CLI did answer; one of its keys is missing"
+    assert record["raw_keys"] == ["duration_ms", "is_error", "num_turns"]
+    assert record["num_turns"] == 4 and record["duration_ms"] == 9_100
+    for key in (
+        "input_tokens", "output_tokens",
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+        "total_cost_usd",
+    ):
+        assert record[key] is None, key
+        assert record[key] != 0
+
+
+def test_usage_record_of_an_empty_result_says_it_has_no_usage(tmp_path) -> None:
+    """`raw` is `{}` for a host-backstop timeout, a crash, a stdout that is not
+    JSON and a JSON list. None of those cost nothing — they cost whatever ran
+    before they broke, and the honest record of that is `measured: false`."""
+    record = dispatcher_mod._usage_record(
+        "T-024", "auditor", None, "cuenta1", "phase",
+        ClaudeResult(session_id=None, result_text="claude timed out after 7200s", raw={}),
+        _USAGE_NOW,
+    )
+
+    assert record["measured"] is False
+    assert record["raw_keys"] == []
+    assert record["session_id"] is None
+    # The dispatcher's own nine are still right: this line is what says a
+    # phase ran at all.
+    assert record["task_id"] == "T-024"
+    assert record["role"] == "auditor"
+    assert record["round"] is None
+    assert record["account"] == "cuenta1"
+    assert record["call"] == "phase"
+    assert record["recorded_at"] == "2026-10-11T09:30:00+00:00"
+    for key in (
+        "is_error", "num_turns", "duration_ms", "total_cost_usd",
+        "input_tokens", "output_tokens",
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+    ):
+        assert record[key] is None, key
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A count the CLI printed as a string, which is what a format drift
+        # looks like from here.
+        {"num_turns": "37", "usage": {"input_tokens": "1200"}},
+        # `usage` as something other than an object.
+        {"usage": ["input_tokens"]},
+        {"usage": None},
+        # `True` is an `int` in Python and is not a token count.
+        {"num_turns": True, "duration_ms": True},
+    ],
+)
+def test_usage_record_refuses_a_value_that_is_not_a_number(raw) -> None:
+    """Keeping the CLI's own spelling means a renamed or re-typed key shows up
+    as a column that went all-null, never as a number that quietly means
+    something else."""
+    record = dispatcher_mod._usage_record(
+        "T-024", "implementador", 1, "cuenta1", "phase",
+        ClaudeResult(session_id="sess-1", result_text="", raw=raw),
+        _USAGE_NOW,
+    )
+
+    assert record["measured"] is True
+    for key in (
+        "num_turns", "duration_ms", "total_cost_usd",
+        "input_tokens", "output_tokens",
+        "cache_read_input_tokens", "cache_creation_input_tokens",
+    ):
+        assert record[key] is None, key
+
+
+def test_a_dispatched_phase_leaves_one_line_naming_its_account_and_round(
+    tmp_path, monkeypatch,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+    ])
+
+    dispatcher_mod.dispatch_phase(
+        cfg, "task-1", "myproj", "implementador", "build the thing", round_num=2,
+    )
+
+    lines = _usage_lines(cfg)
+    assert len(lines) == 1
+    assert lines[0]["call"] == "phase"
+    assert lines[0]["account"] == "cuenta1"
+    assert lines[0]["role"] == "implementador"
+    assert lines[0]["round"] == 2
+    assert lines[0]["num_turns"] == 37
+    assert lines[0]["input_tokens"] == 1_200
+
+
+def test_a_phase_that_did_not_finish_is_still_recorded(tmp_path, monkeypatch) -> None:
+    """The case the record exists for as much as the clean one: a phase that
+    crashed or timed out returns before `save_handoff`, so the envelope cannot
+    carry it, and the account paid for it either way."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id=None, result_text="claude timed out after 7200s", raw={}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review it")
+
+    assert result.success is False
+    lines = _usage_lines(cfg)
+    assert len(lines) == 1
+    assert lines[0]["call"] == "phase"
+    assert lines[0]["measured"] is False
+    assert lines[0]["num_turns"] is None
+
+
+def test_a_failover_records_a_line_per_account_in_order(tmp_path, monkeypatch) -> None:
+    """A refused attempt is a call the service served and the account paid for,
+    so the log holds both halves of the handover rather than only the account
+    the phase finished on."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+    )
+    _fake_subagents(monkeypatch, agents=())
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        if container == "agent-cuenta1":
+            return ClaudeResult(
+                session_id=_SESSION_UUID, result_text="usage limit reached",
+                raw={"is_error": True, "num_turns": 1},
+            )
+        return ClaudeResult(session_id=_SESSION_UUID, result_text="carried on", raw=_FULL_RAW)
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.account == "cuenta2"
+    lines = _usage_lines(cfg)
+    assert [(line["account"], line["call"]) for line in lines] == [
+        ("cuenta1", "phase"), ("cuenta2", "phase"),
+    ]
+    assert lines[0]["is_error"] is True, "a 429 attempt and a clean phase are otherwise one shape"
+    assert lines[1]["total_cost_usd"] == 1.84
+
+
+def test_a_shrink_retry_is_recorded_as_its_own_call(tmp_path, monkeypatch) -> None:
+    """Each retry replaces `result`, so anything derived from the phase's final
+    return describes the last retry and not the phase. One line per call is
+    what keeps the two apart."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF, "num_turns": 30}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF, "num_turns": 2}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    lines = _usage_lines(cfg)
+    assert [line["call"] for line in lines] == ["phase", "shrink-retry"]
+    assert [line["num_turns"] for line in lines] == [30, 2]
+
+
+def test_a_gate_retry_is_recorded_as_its_own_call(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF, "num_turns": 30}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF, "num_turns": 5}),
+    ])
+    _gate_recorder(monkeypatch, [_one_finding(gates.ASK), gates.Report()])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    lines = _usage_lines(cfg)
+    assert [line["call"] for line in lines] == ["phase", "gate-retry"]
+    assert [line["num_turns"] for line in lines] == [30, 5]
+
+
+def test_a_review_write_retry_is_recorded_as_its_own_call(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(_FakeGit, "dirty", ("docs/implementations/task-1.md",))
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF, "num_turns": 20}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF, "num_turns": 3}),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    lines = _usage_lines(cfg)
+    assert [line["call"] for line in lines] == ["phase", "review-retry"]
+    assert [line["num_turns"] for line in lines] == [20, 3]
+
+
+def test_a_retry_that_was_discarded_is_still_recorded(tmp_path, monkeypatch) -> None:
+    """It was thrown away as a *result* and the account still paid for it.
+    Recorded before the branch that decides whether to keep it, for exactly
+    that reason."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="boom", raw={}),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.handoff == _FAT_HANDOFF, "the discarded retry is not the phase's answer"
+    lines = _usage_lines(cfg)
+    assert [line["call"] for line in lines] == ["phase", "shrink-retry"]
+    assert lines[1]["measured"] is False
+
+
+def test_a_usage_log_that_cannot_be_written_does_not_cost_the_phase(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """Bookkeeping on a path that may already be failing: a full disk must not
+    be what fails a phase or changes a decision (`_record_probe`'s contract)."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+    ])
+
+    def boom(hive_dir, task_id, record):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(dispatcher_mod.context_transfer, "append_usage", boom)
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(
+            cfg, "task-1", "myproj", "implementador", "build the thing",
+        )
+
+    assert result.success is True
+    assert any(
+        "implementador" in r.getMessage() and "No space left on device" in r.getMessage()
+        for r in caplog.records
+    )

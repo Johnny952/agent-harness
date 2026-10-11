@@ -1,12 +1,14 @@
 # Token economy — what one window buys, and sizing tasks to fit it
 
-**Status:** P8 is built — T-020, 2026-10-10, under `docs/decisions.md` ADR 48;
-the change is `docs/implementations/T-020.md`. P7 is built — T-023,
-2026-10-10, under ADR 52; the change is `docs/implementations/T-023.md`. P1–P3
-are built — T-022, 2026-10-10; the change is `docs/implementations/T-022.md`.
-P4–P6 are still proposals and none of them is approved. Measured 2026-10-09 by the operator, out of
-cycle, on T-016's first round. It feeds the root README's *Prioritized* item 2
-(Token economy) and item 5 (Task profiles), and does not replace either.
+**Status:** P5 is built — T-024, 2026-10-11, under `docs/decisions.md` ADR 53;
+the change is `docs/implementations/T-024.md`. P8 is built — T-020, 2026-10-10,
+under `docs/decisions.md` ADR 48; the change is
+`docs/implementations/T-020.md`. P7 is built — T-023, 2026-10-10, under ADR 52;
+the change is `docs/implementations/T-023.md`. P1–P3 are built — T-022,
+2026-10-10; the change is `docs/implementations/T-022.md`. P4 and P6 are still
+proposals and neither of them is approved. Measured 2026-10-09 by the operator,
+out of cycle, on T-016's first round. It feeds the root README's *Prioritized*
+item 2 (Token economy) and item 5 (Task profiles), and does not replace either.
 Evidence: `.data/verify/token-usage-T-016-2026-10-09.txt` (aggregates only).
 
 ## Why this was measured
@@ -156,6 +158,34 @@ some of that back: the 21k fixed context and a few orienting reads per task.
 Sending them to the collector would replace this page's one-off transcript
 analysis with a series. It would also give P4 a measured budget instead of a
 surface count: "the median ia-harness implementador costs X% of a window".
+
+**Built by T-024 (2026-10-11), as `docs/decisions.md` ADR 53.** Not to the
+collector and not on the handoff envelope: one JSON object per line per
+`claude` call the dispatcher made, appended to the task's own usage log at
+`<hive_tasks_dir>/<task_id>/usage/calls.jsonl`. A phase is up to four calls —
+the attempt and the gate, review-write and shrink retries, each of which
+*replaces* the result — on as many accounts as a failover tries, and the
+envelope keeps one file per role, overwritten per round, which is the series
+P5 is for. A line holds the role, round, account and which of the four calls it
+was, plus `num_turns`, `duration_ms`, `total_cost_usd` and the four token
+counts from `usage`, and `measured: false` when the CLI printed nothing that
+parsed. Every field the CLI did not give is `null`, never 0, and nothing is
+summed or scaled: a call that crashed records that it has no usage, which is
+not the same fact as a call that cost nothing. The measured keys keep the CLI's
+own spelling, taken from `docs/ROADMAP.md` V1.1's *Record* step and its V5.1
+row because no stored `raw` exists on this harness to read them off and T-024
+was refused a live probe — so each line also carries `raw_keys`, and the first
+real run says on its own which keys were there. `/api/phases` serves nothing
+new: the log is a sibling of `handoffs/`, and nothing reads it yet — no console
+screen and no card owns a view of what a phase cost, the Tokens screen and
+`docs/plans/front.md`'s Tokens task being a container's provider login rather
+than its spend.
+
+**This does not give P4 its budget.** One task's records are not a median, and
+nothing here converts a token count into the window percentage `/usage`
+reports, whose weighting is unpublished. P4's surface proxy above and P8's
+5-point margin below stand as written until enough of these logs exist to
+replace them.
 
 **P6 — Don't trust a `/usage` snapshot past its own reset.** `/usage` is
 local: it reads the counters the CLI stored at the account's last API call.
