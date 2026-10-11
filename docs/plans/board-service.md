@@ -8,7 +8,12 @@ T-027 (`docs/implementations/T-027.md`): the task module
 file's path, and the dispatcher's task-file writes on the module, whose
 writer refuses an unmigrated file. Step 2 is built by T-028
 (`docs/implementations/T-028.md`, `docs/decisions.md` ADR 59): the board
-seam is removed. The per-task lock of section 5 comes
+seam is removed. The first half of step 3 is built by T-029
+(`docs/implementations/T-029.md`): task 2 of `docs/plans/task-split.md`
+section 8, the epic format, in `dispatcher/tasks.py` (`file_split`,
+`mark_merged`, `unmet_dependencies`), and `mark_blocked`, the writer for a
+task that stopped blocked. Nothing calls them yet; task 3 of that section is
+next. The per-task lock of section 5 comes
 with the service (step 4). Every later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics

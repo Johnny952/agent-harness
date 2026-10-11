@@ -12,10 +12,23 @@ from dispatcher.context_transfer import (
     task_file_path,
     write_task_file,
 )
+from dispatcher.handoff import SubTask
 
 _GOAL = "Add a /healthz endpoint."
 _DONE = "GET /healthz answers 200."
 _DESCRIPTION = f"## Goal\n\n{_GOAL}\n\n## Done when\n\n{_DONE}\n"
+
+#: A two-entry split, the second waiting for the first and carrying a section
+#: of its own.
+_SPLIT = [
+    SubTask(title="The api", surface="observability/api/", description=_DESCRIPTION, after=()),
+    SubTask(
+        title="The screen",
+        surface="front/",
+        description="## Goal\n\nShow it.\n\n## Surface\n\nThe status page.\n\n## Done when\n\nIt shows.\n",
+        after=(1,),
+    ),
+]
 
 #: A task file from before the description moved, less the `description` key
 #: itself. `write_task_file` writes exactly this for a task with a lock.
@@ -225,6 +238,9 @@ _WRITERS = {
     "release_stale_lock": tasks.release_stale_lock,
     "handoff": lambda hive, tid: tasks.handoff(hive, tid, new_status="review", body="## revisor"),
     "set_resolved_debt": lambda hive, tid: tasks.set_resolved_debt(hive, tid, ["task-0-D1"]),
+    "mark_merged": lambda hive, tid: tasks.mark_merged(hive, tid, "main"),
+    "mark_blocked": tasks.mark_blocked,
+    "file_split": lambda hive, tid: tasks.file_split(hive, tid, _SPLIT),
 }
 
 
@@ -560,3 +576,323 @@ def test_migrate_finishes_a_run_that_died_between_its_two_writes(tmp_path: Path)
 
     assert report.moved == [("task-1", str(path))]
     assert legacy.read_text() == _HEAD + _BODY
+
+
+# -- file_split: the epic format (docs/plans/task-split.md section 2) -----------
+
+_S1_TEXT = (
+    f"## Goal\n\n{_GOAL}\n\nPart of epic task-1. Surface: observability/api/.\n\n"
+    f"## Done when\n\n{_DONE}\n"
+)
+_S2_TEXT = (
+    "## Goal\n\nShow it.\n\nPart of epic task-1. Surface: front/.\n\n"
+    "## Surface\n\nThe status page.\n\n## Done when\n\nIt shows.\n"
+)
+
+
+def _tree(hive: str) -> dict[str, bytes]:
+    """Every file under the hive root, tasks and board both, by relative path."""
+    root = Path(hive).parent
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _refused(hive: str, subtasks: list[SubTask], parent_id: str = "task-1") -> tasks.SplitError:
+    """File a split that must be refused, and check nothing was written."""
+    before = _tree(hive)
+    with pytest.raises(tasks.SplitError) as excinfo:
+        tasks.file_split(hive, parent_id, subtasks)
+    assert _tree(hive) == before
+    assert excinfo.value.task_id == parent_id
+    return excinfo.value
+
+
+def test_file_split_files_the_sub_tasks_and_makes_the_parent_an_epic(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    parent = _legacy(hive, "")
+
+    assert tasks.file_split(hive, "task-1", _SPLIT) == ["task-1-S1", "task-1-S2"]
+
+    first = read_task_file(task_file_path(hive, "task-1-S1"))
+    second = read_task_file(task_file_path(hive, "task-1-S2"))
+    for sub in (first, second):
+        assert (sub.status, sub.owner, sub.heartbeat, sub.body) == ("pending", None, None, "")
+        assert sub.epic == "task-1"
+        assert sub.split_into == [] and sub.merged is None
+    assert first.depends_on == []
+    assert second.depends_on == ["task-1-S1"]
+    # The ask is on the board, never in the frontmatter.
+    for task_id in ("task-1-S1", "task-1-S2"):
+        assert "description" not in Path(task_file_path(hive, task_id)).read_text()
+    assert tasks.read_description(hive, "task-1-S1") == _S1_TEXT
+    assert tasks.read_description(hive, "task-1-S2") == _S2_TEXT
+    parsed = tasks.parse_description(_S2_TEXT)
+    assert parsed.goal == "Show it.\n\nPart of epic task-1. Surface: front/."
+    assert (parsed.surface, parsed.done_when) == ("The status page.", "It shows.")
+
+    epic = read_task_file(str(parent))
+    assert epic.status == "epic"
+    assert epic.split_into == ["task-1-S1", "task-1-S2"]
+    assert (epic.owner, epic.depends_on, epic.epic) == ("cuenta1", ["task-0"], None)
+    assert epic.body == _BODY.split("---\n\n", 1)[1]
+
+
+def test_file_split_puts_the_epic_line_under_a_goal_that_comes_last(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    last = SubTask(
+        title="t", surface="docs/\n## Steps\nand  tests", after=(),
+        description="## Done when\n\nDone.\n\n## Goal\n\nDo it.\n\n\n",
+    )
+
+    tasks.file_split(hive, "task-1", [_SPLIT[0], last])
+
+    text = tasks.read_description(hive, "task-1-S2")
+    assert text == (
+        "## Done when\n\nDone.\n\n## Goal\n\nDo it.\n\n"
+        "Part of epic task-1. Surface: docs/ ## Steps and tests.\n\n\n"
+    )
+    # A newline in the surface opened no section.
+    assert tasks.parse_description(text).steps is None
+
+
+def test_file_split_refuses_a_description_that_is_not_in_sections(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    bad = SubTask(title="t", surface="front/", description="Just do it.", after=())
+
+    error = _refused(hive, [_SPLIT[0], bad])
+
+    assert error.problems == [
+        "sub-task 2: its description has text before its first section; start with `## Goal`"
+    ]
+    assert "task task-1: the split cannot be filed: sub-task 2" in str(error)
+
+
+def test_file_split_refuses_what_split_problems_refuses(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+
+    error = _refused(hive, _SPLIT[:1])
+
+    assert error.problems == ["a split has 2 to 4 sub-tasks, this one has 1"]
+
+
+def test_file_split_refuses_a_parent_that_is_inside_an_epic(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    tasks.file_split(hive, "task-1", _SPLIT)
+
+    error = _refused(hive, _SPLIT, parent_id="task-1-S1")
+
+    assert error.problems == [
+        "task task-1-S1 is part of epic task-1; a task inside an epic cannot become an epic"
+    ]
+
+
+def test_file_split_refuses_a_sub_task_that_exists_with_another_description(
+    tmp_path: Path,
+) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    tasks.write_description(hive, "task-1-S2", _DESCRIPTION)
+    tasks.acquire_lock(hive, "task-1-S1", owner="cuenta1")  # a task file, no description
+
+    error = _refused(hive, _SPLIT)
+
+    assert error.problems == [
+        "task-1-S1 already exists with no description",
+        "task-1-S2 already exists with a different description",
+    ]
+
+
+def test_file_split_refuses_a_parent_with_no_task_file(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+
+    error = _refused(hive, _SPLIT)
+
+    assert error.problems == ["task task-1 has no task file"]
+    assert not os.path.exists(tasks.board_root(hive))
+
+
+def test_file_split_refuses_a_parent_already_split_into_other_ids(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    third = SubTask(title="t", surface="docs/", description=_DESCRIPTION, after=(2,))
+    tasks.file_split(hive, "task-1", _SPLIT + [third])
+
+    error = _refused(hive, _SPLIT)
+
+    assert error.problems == ["task task-1 is already split into task-1-S1, task-1-S2, task-1-S3"]
+
+
+def test_file_split_names_every_problem_in_one_error(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    blank = SubTask(title="", surface="front/", description="## Goal\n\nOnly a goal.\n", after=(2,))
+
+    error = _refused(hive, [blank, _SPLIT[0]])
+
+    assert error.problems == [
+        "sub-task 1: title is blank",
+        "sub-task 1: after names 2, which is not an entry before it",
+        "task task-1 has no task file",
+        "sub-task 1: its description is missing its `## Done when` section",
+    ]
+    for problem in error.problems:
+        assert problem in str(error)
+
+
+def test_file_split_refuses_a_parent_id_that_is_not_one_path_component(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+
+    with pytest.raises(ValueError) as excinfo:
+        tasks.file_split(hive, "../task-1", _SPLIT)
+
+    assert not isinstance(excinfo.value, tasks.SplitError)
+    assert _tree(hive) == {}
+
+
+def test_filing_the_same_split_again_writes_nothing(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    tasks.file_split(hive, "task-1", _SPLIT)
+    # The first sub-task has run since: its file is not the one that was filed.
+    tasks.acquire_lock(hive, "task-1-S1", owner="cuenta1")
+    tasks.handoff(hive, "task-1-S1", new_status="done", body="## arquitecto\n\nDone.")
+    before = _tree(hive)
+    mtimes = {name: os.stat(Path(hive).parent / name).st_mtime_ns for name in before}
+
+    assert tasks.file_split(hive, "task-1", _SPLIT) == ["task-1-S1", "task-1-S2"]
+
+    assert _tree(hive) == before
+    assert {name: os.stat(Path(hive).parent / name).st_mtime_ns for name in before} == mtimes
+
+
+def test_file_split_finishes_a_run_that_died_after_its_first_write(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    tasks.write_description(hive, "task-1-S1", _S1_TEXT)
+
+    tasks.file_split(hive, "task-1", _SPLIT)
+
+    assert read_task_file(task_file_path(hive, "task-1-S1")).epic == "task-1"
+    assert read_task_file(task_file_path(hive, "task-1-S2")).depends_on == ["task-1-S1"]
+    assert tasks.read_description(hive, "task-1-S2") == _S2_TEXT
+    assert read_task_file(task_file_path(hive, "task-1")).status == "epic"
+
+
+def test_filing_again_does_not_reopen_an_epic_that_was_closed(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    parent = _legacy(hive, "")
+    tasks.file_split(hive, "task-1", _SPLIT)
+    closed = read_task_file(str(parent))
+    closed.status = "done"
+    write_task_file(str(parent), closed)
+    before = _tree(hive)
+
+    tasks.file_split(hive, "task-1", _SPLIT)
+
+    assert _tree(hive) == before
+    assert read_task_file(str(parent)).status == "done"
+
+
+# -- mark_merged, unmet_dependencies, mark_blocked ------------------------------
+
+
+def test_mark_merged_writes_the_block_and_leaves_the_rest(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    path = _legacy(hive, "")
+    before = read_task_file(str(path))
+
+    tasks.mark_merged(hive, "task-1", "main")
+
+    after = read_task_file(str(path))
+    assert after.merged["into"] == "main"
+    assert isinstance(after.merged["at"], str)
+    assert dt.datetime.fromisoformat(after.merged["at"]).utcoffset() == dt.timedelta(0)
+    assert sorted(after.merged) == ["at", "into"]
+    after.merged = None
+    assert after == before
+    # The rest of the file to the byte: the block is appended to the frontmatter.
+    head, block = path.read_text().split("merged:\n", 1)
+    assert head + block.split("---\n", 1)[1] == _HEAD + _BODY.removeprefix("---\n")
+
+
+def test_a_second_mark_merged_replaces_the_block(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+
+    tasks.mark_merged(hive, "task-1", "main")
+    tasks.mark_merged(hive, "task-1", "release")
+
+    assert read_task_file(task_file_path(hive, "task-1")).merged["into"] == "release"
+
+
+@pytest.mark.parametrize("writer", [lambda h: tasks.mark_merged(h, "task-1", "main"), lambda h: tasks.mark_blocked(h, "task-1")])
+def test_marking_a_task_with_no_file_raises_and_creates_nothing(tmp_path: Path, writer) -> None:
+    hive = _hive(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        writer(hive)
+
+    assert _tree(hive) == {}
+
+
+def test_unmet_dependencies_says_which_are_missing_and_which_are_not_merged(
+    tmp_path: Path,
+) -> None:
+    hive = _hive(tmp_path)
+    tasks.handoff(hive, "task-a", new_status="done", body="## auditor")  # done, not merged
+    tasks.handoff(hive, "task-b", new_status="done", body="## auditor")
+    tasks.mark_merged(hive, "task-b", "main")
+    Path(task_file_path(hive, "task-c")).write_text("TODO write this up\n")
+    task = _legacy(hive, "")
+    waiting = read_task_file(str(task))
+    waiting.depends_on = ["task-a", "task-404", "task-b", "task-c", "../x", 7]
+    before = _tree(hive)
+
+    assert tasks.unmet_dependencies(hive, waiting) == [
+        "task-a is not merged",
+        "task-404 has no task file",
+        "task-c: its task file cannot be read",
+        "'../x' is not a task id",
+        "7 is not a task id",
+    ]
+    assert _tree(hive) == before  # a reader
+
+    tasks.mark_merged(hive, "task-a", "main")
+    waiting.depends_on = ["task-a", "task-b"]
+    assert tasks.unmet_dependencies(hive, waiting) == []
+    waiting.depends_on = []
+    assert tasks.unmet_dependencies(hive, waiting) == []
+    waiting.depends_on = "task-a"
+    assert tasks.unmet_dependencies(hive, waiting) == ["depends_on is 'task-a', not a list"]
+
+
+def test_a_sub_task_waits_for_the_one_it_comes_after_until_that_is_merged(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    tasks.file_split(hive, "task-1", _SPLIT)
+    second = read_task_file(task_file_path(hive, "task-1-S2"))
+
+    assert tasks.unmet_dependencies(hive, second) == ["task-1-S1 is not merged"]
+    tasks.mark_merged(hive, "task-1-S1", "main")
+    assert tasks.unmet_dependencies(hive, second) == []
+
+
+def test_mark_blocked_sets_the_status_and_releases_the_lock_keeping_the_body(
+    tmp_path: Path,
+) -> None:
+    hive = _hive(tmp_path)
+    path = _legacy(hive, "")
+    before = read_task_file(str(path))
+    assert (before.status, before.owner) == ("in_progress", "cuenta1")
+
+    tasks.mark_blocked(hive, "task-1")
+
+    after = read_task_file(str(path))
+    assert (after.status, after.owner, after.heartbeat) == ("blocked", None, None)
+    assert (after.body, after.depends_on) == (before.body, before.depends_on)

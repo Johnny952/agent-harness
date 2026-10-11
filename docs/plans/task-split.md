@@ -4,7 +4,13 @@
 `docs/plans/token-economy.md` P4, built in part. Step 1 of *How the
 implementation is itself split* — the handoff shape, inert — is built by
 T-025 (`docs/implementations/T-025.md`): `_SPLIT_PROPERTY`, `SubTask`,
-`split_of`, `split_problems` and `render`'s `**Split**` section. Steps 2 to 4
+`split_of`, `split_problems` and `render`'s `**Split**` section. Step 2 — the
+epic format, inert — is built by T-029 (`docs/implementations/T-029.md`), in
+`dispatcher/tasks.py` and not `context_transfer`: `file_split`, `mark_merged`,
+`unmet_dependencies`, the `epic`, `split_into` and `merged` fields, and
+`mark_blocked`. Nothing calls them yet, and where that note differs from
+section 2's sketch (the description is a file, there is no card title), the
+note is what was built. Steps 3 and 4
 are not built, and no role's schema offers `split` until step 4. This design
 settles the decisions P4 leaves "for an ADR", so the work can be dispatched in
 one-surface tasks. The

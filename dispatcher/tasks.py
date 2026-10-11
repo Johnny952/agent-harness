@@ -4,8 +4,9 @@
 module that writes them. Two of them are written here: the description — the
 ask, in sections, at `<hive root>/board/<task_id>/description.md` — and the
 task file itself — status, lock, handoffs — whose writers (`acquire_lock`,
-`refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_resolved_debt`)
-all end in `_write_task_file`. `context_transfer` keeps
+`refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_resolved_debt`,
+`file_split`, `mark_merged`, `mark_blocked`) all end in `_write_task_file`.
+`context_transfer` keeps
 the `TaskFile` shape, its reader and the serializer `write_task_file`, which
 nothing under `dispatcher/` but this module calls.
 
@@ -16,6 +17,12 @@ therefore refuses such a file by name (`UnmigratedTaskError`), as the
 description's own reader and writer do; `migrate` is the one path that writes
 over one, having stored the description first. `unmigrated_ids` is what lets
 an entry point refuse the whole hive until `dispatch migrate` has been run.
+
+The epic format of `docs/plans/task-split.md` section 2 is written here too:
+`file_split` files a split's sub-tasks and turns their parent into an epic,
+`mark_merged` records a merge on the task and `unmet_dependencies` reads it.
+`mark_blocked` records a task that stopped blocked. Nothing calls those four
+yet.
 """
 from __future__ import annotations
 
@@ -28,6 +35,8 @@ from pathlib import Path
 import yaml
 
 from dispatcher import context_transfer
+# By name: this module's own `handoff` is a task-file writer.
+from dispatcher.handoff import SubTask, split_problems
 
 # `_makedirs_readable`, `_write_atomic`, `_is_single_path_component`,
 # `_read_or_new` and `_FRONTMATTER_DELIM` are private to `context_transfer` and used here on
@@ -63,6 +72,17 @@ class UnmigratedTaskError(ValueError):
         )
         self.task_id = task_id
         self.path = path
+
+
+class SplitError(ValueError):
+    """A split `file_split` will not file. One error, every problem."""
+
+    def __init__(self, parent_id: str, problems: list[str]) -> None:
+        super().__init__(
+            f"task {parent_id}: the split cannot be filed: " + "; ".join(problems)
+        )
+        self.task_id = parent_id
+        self.problems = list(problems)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -270,7 +290,10 @@ def acquire_lock(
             raise context_transfer.LockHeldError(task_id, task.owner)
     task.owner = owner
     task.heartbeat = dt.datetime.now(dt.timezone.utc).isoformat()
-    if task.status == "pending":
+    # Running a blocked task again is the operator's decision to retry (the
+    # user's ruling of 2026-10-11, `docs/debt/T-028-D3.md`). `epic` and `done`
+    # stay as they are.
+    if task.status in ("pending", "blocked"):
         task.status = "in_progress"
     _write_task_file(path, task)
     return task
@@ -308,6 +331,171 @@ def handoff(
     if depends_on is not None:
         task.depends_on = depends_on
     _write_task_file(path, task)
+
+
+def mark_blocked(hive_dir: str, task_id: str) -> None:
+    """Record that this task stopped blocked, and release its lock.
+
+    The body and every other field stay. A task with no file raises, as
+    `refresh_heartbeat` does: there is nothing to mark, and creating one here
+    would invent a task. `acquire_lock` takes a blocked task again.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.status = "blocked"
+    task.owner = None
+    task.heartbeat = None
+    _write_task_file(path, task)
+
+
+def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
+    """Record on the task that its branch was merged into `target`.
+
+    `docs/plans/task-split.md` section 3, "Merged is recorded on the task":
+    this block, not `status: done`, is what a dependency waits for. Status,
+    lock and body are left as they were; a second call replaces the block. A
+    task with no file raises rather than getting one.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.merged = {"into": target, "at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    _write_task_file(path, task)
+
+
+def unmet_dependencies(hive_dir: str, task: context_transfer.TaskFile) -> list[str]:
+    """Why this task cannot start yet, one line per dependency. Empty means it can.
+
+    A dependency is met once its task file carries a `merged` block; its
+    status does not matter, `done` is not merged. Never writes.
+    """
+    if not isinstance(task.depends_on, list):
+        return [f"depends_on is {task.depends_on!r}, not a list"]
+    unmet = []
+    for dep in task.depends_on:
+        if not isinstance(dep, str) or not context_transfer._is_single_path_component(dep):
+            unmet.append(f"{dep!r} is not a task id")
+            continue
+        try:
+            merged = context_transfer.read_task_file(
+                context_transfer.task_file_path(hive_dir, dep)
+            ).merged
+        except FileNotFoundError:
+            unmet.append(f"{dep} has no task file")
+        except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError):
+            unmet.append(f"{dep}: its task file cannot be read")
+        else:
+            if not merged:
+                unmet.append(f"{dep} is not merged")
+    return unmet
+
+
+def _with_epic_line(text: str, parent_id: str, surface: str) -> str:
+    """A sub-task's description with its epic and surface under `## Goal`.
+
+    The line goes after the section's last non-blank line and every other
+    line stays as stated. The surface's whitespace is collapsed so a newline
+    in it cannot open a section. `text` has already parsed, so it has a Goal.
+    """
+    lines = text.splitlines()
+    start = next(
+        i for i, line in enumerate(lines)
+        if (match := _SECTION_RE.match(line)) and match.group(1) == REQUIRED[0]
+    )
+    end = next(
+        (i for i in range(start + 1, len(lines)) if _SECTION_RE.match(lines[i])), len(lines)
+    )
+    while not lines[end - 1].strip():
+        end -= 1
+    lines[end:end] = ["", f"Part of epic {parent_id}. Surface: {' '.join(surface.split())}."]
+    return "\n".join(lines) + "\n"
+
+
+def file_split(hive_dir: str, parent_id: str, subtasks: list[SubTask]) -> list[str]:
+    """File a split: one `<parent>-S<n>` task per entry, and the parent an epic.
+
+    `docs/plans/task-split.md` section 2. Each sub-task is `pending`, tagged
+    with its `epic`, with `depends_on` from the entry's `after` and its ask in
+    its own `description.md`, never in the frontmatter. Returns the sub-task
+    ids in list order.
+
+    Everything is checked before anything is written, and every problem is
+    reported in one `SplitError`. Filing the same split again writes nothing:
+    a description is written only where none is stored, a sub-task file only
+    where there is none (its phases may have run), and the parent only while
+    its `split_into` is not this split's already — so a run that died part
+    way is finished by running it again, and an epic closed since stays
+    closed. The parent is never created here. An unmigrated file raises
+    `UnmigratedTaskError`, as from every other writer.
+    """
+    if not context_transfer._is_single_path_component(parent_id):
+        raise ValueError(f"task id {parent_id!r} is not a single path component")
+    ids = [f"{parent_id}-S{n}" for n in range(1, len(subtasks) + 1)]
+    for task_id in [parent_id] + ids:
+        _refuse_unmigrated(hive_dir, task_id)
+
+    problems = list(split_problems(subtasks))
+    parent_path = context_transfer.task_file_path(hive_dir, parent_id)
+    parent = None
+    if not os.path.exists(parent_path):
+        problems.append(f"task {parent_id} has no task file")
+    else:
+        parent = context_transfer.read_task_file(parent_path)
+        if parent.epic:
+            problems.append(
+                f"task {parent_id} is part of epic {parent.epic}; "
+                "a task inside an epic cannot become an epic"
+            )
+        if parent.split_into and parent.split_into != ids:
+            problems.append(
+                f"task {parent_id} is already split into "
+                + ", ".join(str(item) for item in parent.split_into)
+            )
+    texts: dict[str, str] = {}
+    stored: dict[str, str | None] = {}
+    for position, (task_id, subtask) in enumerate(zip(ids, subtasks), start=1):
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (subtask.description, subtask.surface)
+        ):
+            continue  # `split_problems` already said so.
+        try:
+            parse_description(subtask.description)
+        except DescriptionError as exc:
+            problems.append(f"sub-task {position}: its description {exc}")
+            continue
+        texts[task_id] = _with_epic_line(subtask.description, parent_id, subtask.surface)
+        stored[task_id] = read_description(hive_dir, task_id)
+        if stored[task_id] is None:
+            if os.path.exists(context_transfer.task_file_path(hive_dir, task_id)):
+                problems.append(f"{task_id} already exists with no description")
+        elif stored[task_id] != texts[task_id]:
+            problems.append(f"{task_id} already exists with a different description")
+    if problems:
+        raise SplitError(parent_id, problems)
+
+    for task_id, subtask in zip(ids, subtasks):
+        # The description first, as `migrate` does.
+        if stored[task_id] is None:
+            write_description(hive_dir, task_id, texts[task_id])
+        path = context_transfer.task_file_path(hive_dir, task_id)
+        if not os.path.exists(path):
+            _write_task_file(
+                path,
+                context_transfer.TaskFile(
+                    task_id=task_id,
+                    status="pending",
+                    owner=None,
+                    depends_on=[ids[i - 1] for i in subtask.after],
+                    heartbeat=None,
+                    body="",
+                    epic=parent_id,
+                ),
+            )
+    if parent.split_into != ids:
+        parent.status = "epic"
+        parent.split_into = ids
+        _write_task_file(parent_path, parent)
+    return ids
 
 
 def _legacy_text(old: str) -> str:

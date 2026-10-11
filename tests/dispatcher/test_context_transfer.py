@@ -49,6 +49,64 @@ def test_write_then_read_roundtrip(tmp_path: Path) -> None:
     assert result == task
 
 
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "task_id: task-1\nstatus: pending\nowner: null\ndepends_on:\n- task-0\nheartbeat: null\n",
+        "task_id: task-1\nstatus: done\nowner: null\ndepends_on: []\nheartbeat: null\n"
+        "resolved_debt:\n- T-026-D1\n",
+    ],
+)
+def test_a_task_file_without_the_epic_fields_round_trips_to_the_byte(
+    tmp_path: Path, frontmatter: str
+) -> None:
+    path = tmp_path / "task-1.md"
+    text = f"---\n{frontmatter}---\n\n## arquitecto\n\nDone.\n"
+    path.write_text(text)
+
+    task = read_task_file(str(path))
+    write_task_file(str(path), task)
+
+    assert (task.epic, task.split_into, task.merged) == (None, [], None)
+    assert path.read_text() == text
+
+
+def test_the_epic_fields_round_trip_and_come_after_resolved_debt(tmp_path: Path) -> None:
+    path = tmp_path / "task-1.md"
+    task = TaskFile(
+        task_id="task-1", status="epic", owner=None, depends_on=[], heartbeat=None, body="hello",
+        resolved_debt=["T-026-D1"], epic="task-0", split_into=["task-1-S1", "task-1-S2"],
+        merged={"into": "main", "at": "2026-10-11T16:00:36+00:00"},
+    )
+
+    write_task_file(str(path), task)
+
+    assert read_task_file(str(path)) == task
+    assert isinstance(read_task_file(str(path)).merged["at"], str)
+    frontmatter = path.read_text().split("---\n")[1]
+    keys = [line.split(":")[0] for line in frontmatter.splitlines() if line[:1].isalpha()]
+    assert keys[-4:] == ["resolved_debt", "epic", "split_into", "merged"]
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [("blocked", "in_progress"), ("epic", "epic"), ("done", "done")],
+)
+def test_acquire_lock_takes_a_blocked_task_and_leaves_an_epic_and_a_done_one(
+    tmp_path: Path, status: str, expected: str
+) -> None:
+    hive_dir = str(tmp_path)
+    write_task_file(
+        str(tmp_path / "task-1.md"),
+        TaskFile(task_id="task-1", status=status, owner=None, depends_on=[], heartbeat=None, body="b"),
+    )
+
+    task = acquire_lock(hive_dir, "task-1", owner="cuenta1")
+
+    assert (task.status, task.owner, task.body) == (expected, "cuenta1", "b")
+    assert read_task_file(str(tmp_path / "task-1.md")).status == expected
+
+
 def test_acquire_lock_sets_owner_and_moves_pending_to_in_progress(tmp_path: Path) -> None:
     hive_dir = str(tmp_path)
 

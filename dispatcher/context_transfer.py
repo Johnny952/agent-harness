@@ -59,6 +59,14 @@ class TaskFile:
     # in a later process — `merge-task` by hand, days after the cycle — and
     # by then the handoff that claimed them is only prose.
     resolved_debt: list[str] = dataclasses.field(default_factory=list)
+    # The epic format of `docs/plans/task-split.md` section 2, each written
+    # only when set. On a sub-task, the id of the task it was split from.
+    epic: str | None = None
+    # On the parent, the ids of its sub-tasks in the order the split gave them.
+    split_into: list[str] = dataclasses.field(default_factory=list)
+    # {"into": <branch>, "at": <ISO-8601 UTC>}: a dependency counts once this
+    # is there, not at `done`.
+    merged: dict | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -465,6 +473,9 @@ def read_task_file(path: str) -> TaskFile:
         heartbeat=_as_heartbeat_str(fm.get("heartbeat")),
         body=body.lstrip("\n"),
         resolved_debt=fm.get("resolved_debt") or [],
+        epic=fm.get("epic") or None,
+        split_into=fm.get("split_into") or [],
+        merged=fm.get("merged") or None,
     )
 
 
@@ -577,6 +588,13 @@ def write_task_file(path: str, task: TaskFile) -> None:
     }
     if task.resolved_debt:
         fm["resolved_debt"] = task.resolved_debt
+    # After `resolved_debt`, so a file that has it keeps its bytes.
+    if task.epic:
+        fm["epic"] = task.epic
+    if task.split_into:
+        fm["split_into"] = task.split_into
+    if task.merged:
+        fm["merged"] = task.merged
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

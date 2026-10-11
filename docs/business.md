@@ -86,6 +86,22 @@ cite the entry and move it up, or drop the row.
   one of the five headings at column zero is refused for hand migration
   rather than moved.
 
+## Task status
+
+- **A task that stopped blocked is marked `blocked` in its own task file, not
+  left `pending`, and running it again is the operator's decision to retry.**
+  Ruled by the user on 2026-10-11, on what T-028 inferred and filed as
+  [`docs/debt/T-028-D3`](debt/T-028-D3.md); the ruling reached this repo through T-029's card and
+  is cited in the comment on `acquire_lock`. The rule is half
+  built: `dispatcher/tasks.py` has `mark_blocked`, which sets the status and
+  releases the lock, and `acquire_lock` moves a `blocked` task to
+  `in_progress` as it moves a `pending` one. Nothing calls `mark_blocked`
+  yet, so until the dispatcher does a blocked cycle still leaves its task
+  file `pending` or `in_progress`, with `CycleOutcome.BLOCKED`, a log line
+  and an exit code as its only record. Until T-028 a board card carried that
+  status, on a harness that had a board (`docs/decisions.md` ADR 59 removed
+  the seam).
+
 ## Unconfirmed — inferred from the code by T-009
 
 - **Every non-dotted subdirectory of `projects_root` is a project the harness
@@ -162,21 +178,20 @@ cite the entry and move it up, or drop the row.
   operator should be able to see another project's unreviewed entries on this
   screen, which today they cannot, by the same filter.
 
-## Unconfirmed — inferred from the code by T-028
+## Unconfirmed — inferred from the code by T-029
 
-- **A task that stopped blocked is not marked blocked anywhere a reader of
-  the hive can see: its task file says `pending` or `in_progress`, as if it
-  were waiting or running.** A task file's `status` is written by
-  `dispatcher/tasks.py`'s `acquire_lock` (`in_progress`) and `handoff`
-  (`done` for the final phase, `pending` otherwise), and no code writes or
-  reads `blocked`; the cycle reports it as `CycleOutcome.BLOCKED`, a log line
-  and an exit code. Until T-028 a board card carried that status, on a
-  harness that had a board (`docs/decisions.md` ADR 59 removed the seam).
-  `docs/plans/board-service.md` sections 4 and 6 plan the write, so the
-  intent is on paper, but nothing rules on today's behaviour: a human should
-  say whether a blocked task reading as `pending` — and so as something a
-  later run may pick up again — is acceptable until that step is built.
-  Filed as [`docs/debt/T-028-D3`](debt/T-028-D3.md).
+- **A finished or blocked task can become an epic.** `dispatcher/tasks.py`'s
+  `file_split` does not look at the parent's status: it refuses a parent that
+  is inside an epic or already split into other ids, and any other parent
+  with a task file, `done` and `blocked` included, becomes `epic`. Nothing
+  calls `file_split` yet, so this has not happened on a run, and the planned
+  caller only reaches it mid-cycle. `docs/plans/task-split.md` section 2
+  also lets an operator write an epic by hand and does not say which states
+  a parent may be in. A human, or task 3 of that plan's section 8, should
+  say whether only a task in its cycle may be split. The neighbouring case
+  is decided and not yet built: `acquire_lock` still gives the lock on an
+  `epic`, and that plan's section 2 (*Running the parent again*) and
+  section 7 have `run_task_cycle` refuse one before dispatching anything.
 
 ## Unconfirmed — inferred from the code by T-024
 
