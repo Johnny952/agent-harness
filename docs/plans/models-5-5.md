@@ -1,7 +1,7 @@
 # Models 5.5 — pinned model IDs, explicit effort, and prompts fit for unattended phases
 
 **Status:** proposed by the main thread on 2026-10-11 at the user's ask.
-Steps 1 to 3 built the same day (ADRs 57 and 58); steps 4 to 6 not built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
+Steps 1 to 4 built the same day (ADRs 57 and 58); steps 5 and 6 not built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
 order across the plans*): it touches only the config, the role prompts and
 the console's model list, and it changes the cost of every phase after it.
 It follows Anthropic's guide to prompting Opus 5.5, read that day.
@@ -117,7 +117,13 @@ Each step is a single surface:
    (ADR 58). The paragraph is appended in the dispatcher
    (`_phase_system_prompt`), not in `role_skills.system_prompt`, so the
    cartografo, which has no skills, gets it too.
-4. The phrase check over `skills/`.
+4. The phrase check over `skills/`. Built 2026-10-11:
+   `tests/dispatcher/test_prompt_phrases.py` checks every file under
+   `skills/` and every text the dispatcher hands a phase (the role prompt,
+   the system prompt, the continue, shrink and discarded-writes prompts), for
+   each role. It fails on an ask for the reasoning itself, such as "think step
+   by step" or "explain your reasoning", and lets a mention through, such as
+   "push back with technical reasoning".
 5. The mock's model list and role map. A front task, behind its own ask for
    a build.
 6. One measured task run at `medium` against the last comparable run at the
