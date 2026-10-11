@@ -382,7 +382,8 @@ Each step is a single surface, built in this order:
    - The operator's session is configured to use it.
    - An ADR for where the write side lives: the decision `front.md` leaves to
      the tier-3 opening task. The git credential `review.md`'s *approve*
-     needs for the push stays out of the service, on the dispatcher's side.
+     needs for the push, and the task-branch push of C-5 as amended, stays
+     out of the service, on the dispatcher's side.
 5. **The backlog and the write tools.**
    - The backlog statuses, `priority`, `source`, and `open_cycle` refusing
      anything but `pending`.

@@ -126,6 +126,25 @@ Phases commit to their own branch and stop there. Merging is a human's call and
 pushing is a separate one. The dispatcher contains no `git push` today and that
 is not an omission to fix.
 
+**Amended:** 2026-10-11, in conversation with the main thread, at the user's
+word: the task branches go to GitHub as a record. Two pushes are now the
+dispatcher's, and still none is a role's:
+
+- *The task branch.* After each phase that commits, the dispatcher pushes
+  `agent/task/<task_id>` to the project's remote, so each role's commit is on
+  GitHub as it lands. It is on only for a project that turns it on, off by
+  default, and a project with no remote never pushes. A refused push does not
+  stop the cycle; it leaves a comment on the task. Never with force: the
+  branch only moves forward, because the base is merged into it, not rebased
+  under it (`docs/plans/review.md` *Decisions*, 6), and C-9's rule against
+  rewriting a pushed commit binds the dispatcher as it binds the operator.
+- *The base.* Pushed only on a person's *approve*, under C-12.
+
+What stays: no role runs `git push` or holds the credential, which stays on
+the dispatcher's side; the base is never pushed without a verdict; and no pull
+request is opened on GitHub, because the review is the console's. The pushed
+branch is a record, not a place to review.
+
 ---
 
 ### C-6 — A task is done when the docs say why, not when the code works

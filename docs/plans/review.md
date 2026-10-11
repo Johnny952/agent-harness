@@ -28,7 +28,8 @@ becomes a person's decision, taken over a diff, in the console.
   is `done` with its work on its task branch. The merge is a later
   `dispatch merge-task`, which calls `docker_exec.merge_task_branch` into
   whatever branch the project's checkout is on. Nothing in the dispatcher
-  pushes; the push is the operator's.
+  pushes yet; the push is the operator's. C-5 as amended on 2026-10-11 lets
+  the dispatcher push task branches, and C-12 the base on *approve*.
 - **A draft screen.** `front/src/routes/approvals.tsx` approves or rejects
   "pushes with diffs, merges, tool permissions and budget overrides" over mock
   data. It splits a raw unified diff in the browser and has no line comments.
@@ -109,12 +110,19 @@ own role (*Decisions*, 6). If the push is refused all the same, because the
 upstream moved, nothing is pushed: the task goes to *Blocked* with a comment
 saying why.
 
-Roles commit on the task branch and do not push it (C-5). The only push is
-the base's, on *approve*.
+Roles commit on the task branch and never push (C-5). The dispatcher pushes
+the task branch after each phase that commits, when the project turns that on,
+so GitHub keeps the record of each role's work; it is never a pull request
+there, and never forced (C-5 as amended on 2026-10-11). The base is pushed
+only on *approve*.
 
-The push needs a git credential, which neither the api nor the board service
-may hold. The worker that runs the merge, on the dispatcher's side, holds it;
-where it lives is an ADR written when step 4 below is built.
+Both pushes need a git credential, which neither the api nor the board service
+may hold. The dispatcher's side holds it; where it lives is an ADR written
+when step 4 below is built.
+
+How the dispatcher learns of a verdict the service wrote, by reading the hive
+as it reads tasks today or by a signal from the service, is decided when step
+4 is built.
 
 ### 5. *Request changes* goes back to the arquitecto
 
@@ -195,26 +203,29 @@ After `board-service.md`'s steps, each a single surface:
 2. The diff route in the api.
 3. The *comment* verdict and line comments in `comments.jsonl`.
 4. The *approve* verdict: merge, push and the `merged` block, with the
-   credential's ADR.
-5. The *request changes* verdict: the cycle reopened at the arquitecto.
-6. The screen, with the diff library. A front task, behind its own ask for a
+   credential's ADR, and the dispatcher picking up verdicts.
+5. The task-branch push after each phase, per project, off by default.
+   Independent of the console, so it may be built first; it needs the same
+   credential, and the ADR goes with whichever of 4 and 5 lands first.
+6. The *request changes* verdict: the cycle reopened at the arquitecto.
+7. The screen, with the diff library. A front task, behind its own ask for a
    build and for the package.
-7. The *Conflict* state: the base merged into each branch at review and after
+8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
-8. The integrador role: its prompt, handoff schema, profile and write limit,
+9. The integrador role: its prompt, handoff schema, profile and write limit,
    and the *resolve conflict* verdict. Under an ADR, since it adds a role.
 
-Steps 4, 5 and 8 start runs from the console under C-12.
+Steps 4, 6 and 9 start runs from the console under C-12.
 
 ## Open questions
 
-- **Which diff library.** Chosen when step 6 is built, from the two
+- **Which diff library.** Chosen when step 7 is built, from the two
   candidates above.
 - **Does a request for changes re-run every role?** *Decisions* 5 re-runs all
   four. A one-line wording fix might skip the arquitecto; whether the person
-  may choose that on the verdict is left to step 5.
+  may choose that on the verdict is left to step 6.
 - **The integrador's model.** A cheaper model for textual conflicts, or the
-  implementador's; set by its profile when step 8 is built, and measured
+  implementador's; set by its profile when step 9 is built, and measured
   against the first conflicts it resolves.
 
 ## What it is not
