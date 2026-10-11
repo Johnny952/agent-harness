@@ -345,6 +345,7 @@ read the api; the others are Lovable drafts over mock data.
 | Task (`/tasks/$taskId`) | real: status, owner, dependencies, running record, declared debt | adds the description's sections, the comment thread with a form, the epic it belongs to, and its `phase` |
 | Epic | missing | new: the epic's tasks with their states, its `split_into` and `depends_on` as a graph or ordered list, and progress to merged |
 | Approvals (`/approvals`) | mock: approve or reject pushes, merges, permissions and budgets | becomes `review.md`'s screen: a task's diff with line comments and the verdicts; it lists the *Awaiting review* and *Conflict* columns, with *resolve conflict* on the latter |
+| Roadmap | missing | new, in `docs/plans/roadmap-view.md`: plans, epics and tasks in three bands (future, now, past), derived from the files; read-only, after this plan |
 | Queue (`/queue`) | mock | out of scope here; dispatching from the console waits for the C-4 ruling |
 
 Two rules keep the screens apart:
