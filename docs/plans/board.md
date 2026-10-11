@@ -1,5 +1,10 @@
 # Plan: a board for this harness
 
+> **Superseded in part (proposed, 2026-10-10).** `docs/plans/board-service.md`
+> drops Vibe Kanban and the `KanbanClient` seam: the hive's task files are the
+> board and the console is its view. What follows stays as the record of
+> Phases 0 and 1; the phases after them are to be re-planned there.
+
 Status: Phase 0 is built and merged. It was specified below, dispatched as
 T-008 on 2026-09-25, and landed as `LocalBoardClient` in
 `dispatcher/vibe_kanban_client.py` behind a `local_board` block in

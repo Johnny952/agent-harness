@@ -46,7 +46,8 @@ becomes a person's decision, taken over a diff, in the console.
 
 1. **A state between `done` and merged: awaiting review.** The cycle ends
    there instead of at `done` when review is on. The card moves to the
-   board's review column.
+   board's review column. (`docs/plans/board-service.md` section 4 names it
+   *Awaiting review*, and section 8 turns `/approvals` into this screen.)
 2. **The api serves the diff, read-only.** A route like
    `GET /api/tasks/<id>/diff` returns the task branch against its merge base,
    parsed per file on the server (the "who parses the diff" question in

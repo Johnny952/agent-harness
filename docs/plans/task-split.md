@@ -212,8 +212,9 @@ frontmatter field `split_into: [T-025-S1, T-025-S2]`. `epic` is a new value
 of a free-string field, chosen over `blocked` because the two need opposite
 things: a blocked task needs a decision, an epic needs nothing but its
 children run. Its card's title gains the `[epic]` prefix and the card is sent
-`"in_progress"` — the epic has open work — rather than `"blocked"`, which on a
-`vibe_kanban` board maps to *In Review* and would say a person must act. The
+`"in_progress"` — the epic has open work — rather than `"blocked"`, which
+would say a person must act. (If `docs/plans/board-service.md` is approved the
+cards go, and the console shows an epic from its task file.) The
 parent's branch has only the arquitecto's commit, if any; it is never merged
 and is cleaned up like a blocked task's.
 
@@ -446,16 +447,19 @@ soon as it lands.
    three files, but they are one contract — the split outcome end to end —
    and none of them works without the others.
 
+If `docs/plans/board-service.md` is approved, tasks 2 and 3 write through its
+task module rather than straight into `context_transfer`; the design here does
+not change.
+
 The console's view of an epic — tasks grouped under their epic, its progress
 — is a screen, so a fifth task in `front/`, after 2 makes the api serve the
 fields. It is not needed for the dispatcher side to work.
 
 ## Open questions
 
-- **Should the board get its own `epic` column?** On a `vibe_kanban` board
-  that is a `status_map` entry in `config.yaml` and a column, which is the
-  operator's to add. Until then the parent reads *In Progress* with an
-  `[epic]` title.
+- **Should the console get its own epic view?** Until it does, the parent
+  reads *In Progress* with an `[epic]` title. `docs/plans/board-service.md`
+  step 7 proposes one.
 - **The surface unit for harness work.** *What counts as one surface*
   proposes one module's contract; P4's approval confirms it or replaces it.
 - **Does the operator's own task-writing need a check too?** The split is a
