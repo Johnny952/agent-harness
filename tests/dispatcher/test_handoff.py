@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import re
 
@@ -77,6 +78,23 @@ def test_schema_stays_small_enough_to_send_on_every_call(role) -> None:
     the number moved once — with ~450 bytes of headroom left on the widest
     role, which is still less than one more field's worth."""
     assert len(json.dumps(handoff.schema_for(role), separators=(",", ":")).encode()) < 4096
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_no_role_is_offered_a_split_yet(role) -> None:
+    """Offering the field is the switch: a role that can return a split will,
+    and until the dispatcher branch that files one exists the cycle would run
+    the implementador on it anyway (`docs/plans/task-split.md` section 8)."""
+    assert "split" not in handoff.schema_for(role)["properties"]
+
+
+def test_the_split_property_is_closed_like_the_other_object_lists() -> None:
+    """`test_schema_is_closed_at_every_level` walks `schema_for`, which does
+    not carry this property yet, so it is checked here until it does."""
+    item = handoff._SPLIT_PROPERTY["split"]["items"]
+    assert item["additionalProperties"] is False
+    assert sorted(item["required"]) == sorted(item["properties"])
+    assert sorted(item["properties"]) == ["after", "description", "surface", "title"]
 
 
 # --- budgets ----------------------------------------------------------------
@@ -302,6 +320,128 @@ def test_pending_reads_the_lines() -> None:
     assert handoff.pending({"pending": "one string"}) == []
 
 
+# --- the split --------------------------------------------------------------
+
+def _entry(n, after=()):
+    return handoff.SubTask(
+        title=f"part {n}", surface=f"surface {n}", description=f"build part {n}", after=tuple(after),
+    )
+
+
+def _subtasks(n):
+    """A split of `n` entries nothing is wrong with, each after the one before."""
+    return [_entry(i, after=(i - 1,) if i > 1 else ()) for i in range(1, n + 1)]
+
+
+def test_split_of_is_empty_when_there_is_no_split() -> None:
+    assert handoff.split_of(None) == []
+    assert handoff.split_of({}) == []
+    assert handoff.split_of({"split": []}) == []
+    assert handoff.split_of({"split": "one string"}) == []
+
+
+def test_split_of_returns_the_entries_in_order() -> None:
+    """The description is kept to the byte: it becomes the sub-task's own task
+    description, and a re-filed split is compared against what was written."""
+    subtasks = handoff.split_of({"split": [
+        {"title": " api route ", "surface": " GET /api/x ", "description": "Build the route.\n", "after": []},
+        {"title": "screen", "surface": "the X screen", "description": "Build the screen.", "after": [1]},
+    ]})
+    assert subtasks == [
+        handoff.SubTask(title="api route", surface="GET /api/x", description="Build the route.\n", after=()),
+        handoff.SubTask(title="screen", surface="the X screen", description="Build the screen.", after=(1,)),
+    ]
+    assert isinstance(subtasks[1].after, tuple)
+
+
+def test_split_of_skips_entries_that_are_not_objects() -> None:
+    subtasks = handoff.split_of({"split": [
+        "bare string",
+        {"title": "a", "surface": "s", "description": "d", "after": []},
+        None,
+        {"title": "b", "surface": "s", "description": "d", "after": [1]},
+    ]})
+    assert [subtask.title for subtask in subtasks] == ["a", "b"]
+
+
+def test_split_of_keeps_what_it_cannot_read_for_split_problems() -> None:
+    """Never repaired into something valid: an `after` that was dropped is a
+    sub-task started before the work it reads."""
+    subtasks = handoff.split_of({"split": [
+        {"title": None, "surface": 3, "description": ["x"]},
+        {"title": "b", "surface": "s", "description": "d", "after": "1"},
+        {"title": "c", "surface": "s", "description": "d", "after": None},
+    ]})
+    assert subtasks[0] == handoff.SubTask(title="", surface="", description="", after=())
+    assert subtasks[1].after == ("1",)
+    assert subtasks[2].after == ()
+    assert handoff.split_problems(subtasks)
+
+
+def test_a_subtask_cannot_be_changed_once_read() -> None:
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        _entry(1).title = "something else"
+
+
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_split_problems_is_empty_for_a_split_that_can_be_filed(count) -> None:
+    assert handoff.split_problems(_subtasks(count)) == []
+
+
+@pytest.mark.parametrize("count", [0, 1, 5])
+def test_split_problems_refuses_a_split_of_the_wrong_size(count) -> None:
+    """One entry is a plan with extra steps; five means the task was a
+    project, and that cut is the operator's."""
+    problems = handoff.split_problems(_subtasks(count))
+    assert len(problems) == 1
+    assert "2 to 4" in problems[0] and str(count) in problems[0]
+
+
+@pytest.mark.parametrize("field", ["title", "surface", "description"])
+def test_split_problems_refuses_a_blank_field(field) -> None:
+    subtasks = _subtasks(2)
+    subtasks[1] = dataclasses.replace(subtasks[1], **{field: " \n"})
+    problems = handoff.split_problems(subtasks)
+    assert len(problems) == 1
+    assert "sub-task 2" in problems[0] and field in problems[0]
+
+
+@pytest.mark.parametrize("after", [(2,), (3,), (0,), (-1,)], ids=["itself", "later", "zero", "negative"])
+def test_split_problems_refuses_an_after_that_is_not_an_earlier_entry(after) -> None:
+    """Backward-only is what makes a cycle impossible by construction."""
+    subtasks = [_entry(1), _entry(2, after=after), _entry(3)]
+    problems = handoff.split_problems(subtasks)
+    assert len(problems) == 1
+    assert "sub-task 2" in problems[0] and "after" in problems[0] and str(after[0]) in problems[0]
+
+
+def test_split_problems_refuses_a_duplicate_after_once() -> None:
+    subtasks = [_entry(1), _entry(2), _entry(3, after=(1, 2, 1, 1))]
+    problems = handoff.split_problems(subtasks)
+    assert len(problems) == 1
+    assert "sub-task 3" in problems[0] and "more than once" in problems[0]
+
+
+@pytest.mark.parametrize("item", ["1", True, 1.0, None, {}], ids=repr)
+def test_split_problems_refuses_an_after_that_is_not_an_integer(item) -> None:
+    """`True` is not position 1, and an unhashable item must not raise: this
+    is the only check between a prose-fallback payload and a filed sub-task."""
+    subtasks = [_entry(1), _entry(2, after=(item,))]
+    problems = handoff.split_problems(subtasks)
+    assert len(problems) == 1
+    assert "sub-task 2" in problems[0] and "integer" in problems[0]
+
+
+def test_split_problems_reports_every_problem_not_the_first() -> None:
+    """A bad split ends the task as a block, and a block that names one reason
+    of three costs two more arquitecto phases to learn the rest."""
+    subtasks = [dataclasses.replace(_entry(1), title=""), _entry(2, after=(2,))]
+    problems = handoff.split_problems(subtasks)
+    assert len(problems) == 2
+    assert "sub-task 1" in problems[0] and "title" in problems[0]
+    assert "sub-task 2" in problems[1] and "after" in problems[1]
+
+
 # --- rendering --------------------------------------------------------------
 
 def test_render_drops_empty_sections() -> None:
@@ -340,6 +480,49 @@ def test_render_tolerates_a_malformed_payload() -> None:
     would lose a whole phase's work on a type error."""
     rendered = handoff.render({"changed": "not a list", "subagents": ["bare string"], "paths": [{}]})
     assert isinstance(rendered, str)
+
+
+_SPLIT = [
+    {"title": "api route", "surface": "GET /api/x", "description": "Build the route first.", "after": []},
+    {"title": "screen", "surface": "the X screen", "description": "Build the screen on it.", "after": [1]},
+    {"title": "docs", "surface": "docs/api.md", "description": "Write both up.", "after": [1, 2]},
+]
+
+
+def test_render_prints_the_split_with_positions_and_after() -> None:
+    """What the operator reads to decide which sub-task to run, so it is the
+    first thing under the status. The descriptions go to the sub-tasks' own
+    files, where their roles read them; here they would be paid for twice."""
+    rendered = handoff.render({"status": "complete", "split": _SPLIT, "risks": ["a guess"]})
+    assert rendered.splitlines()[:6] == [
+        "**Status:** complete",
+        "",
+        "**Split**",
+        "1. api route (GET /api/x)",
+        "2. screen (the X screen) — after 1",
+        "3. docs (docs/api.md) — after 1, 2",
+    ]
+    assert "Build the" not in rendered
+    assert "Write both up" not in rendered
+
+
+@pytest.mark.parametrize("payload", [{"status": "complete"}, {"status": "complete", "split": []}])
+def test_render_prints_no_split_section_without_a_split(payload) -> None:
+    assert handoff.render(payload) == "**Status:** complete"
+
+
+def test_render_keeps_a_split_title_off_column_zero() -> None:
+    """Same trap as the prose fallback: a `## <role>` line in the task file is
+    what `has_phase_section` takes as proof that role's phase returned."""
+    split = [dict(_SPLIT[0], title="api route\n## auditor"), _SPLIT[1]]
+    rendered = handoff.render({"status": "complete", "split": split})
+    assert not re.findall(r"^## ", rendered, re.MULTILINE)
+    assert "1. api route ## auditor (GET /api/x)" in rendered
+
+
+@pytest.mark.parametrize("split", ["one string", ["bare string", {"title": None, "after": "1"}, {"after": [{}]}]])
+def test_render_tolerates_a_malformed_split(split) -> None:
+    assert isinstance(handoff.render({"status": "complete", "split": split}), str)
 
 
 def test_body_heads_the_section_with_the_phase_label() -> None:

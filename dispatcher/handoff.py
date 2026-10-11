@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 
 from dispatcher import debt, docker_exec
 
@@ -190,6 +191,39 @@ _RESOLVED_DEBT_PROPERTY = {
             "Ids of debt entries this task resolved, as the debt index writes them "
             "(T-001-D1). Empty when it resolved none."
         ),
+    },
+}
+
+#: The arquitecto's other way to end a task early: not "this cannot be done"
+#: but "this is more than one task". Defined here and in no role's extras yet,
+#: on purpose. Offering the field is the switch — a role that can return a
+#: split will — so it joins `_ROLE_EXTRAS` together with the dispatcher branch
+#: that files one (`docs/plans/task-split.md`, section 8, step 4).
+_SPLIT_PROPERTY = {
+    "split": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The sub-task in one line."},
+                "surface": {
+                    "type": "string",
+                    "description": "The one surface it changes: an api route, a screen, a region of a screen, or one module's contract.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "The sub-task as its own task description: what to build, what it reads from earlier sub-tasks, and when it is done.",
+                },
+                "after": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "1-based positions of earlier entries in this list that must be merged first. Empty for none.",
+                },
+            },
+            "required": ["title", "surface", "description", "after"],
+            "additionalProperties": False,
+        },
+        "description": "Empty unless the task spans more than one surface. Then: the sub-tasks in the order they run, and no plan.",
     },
 }
 
@@ -472,6 +506,104 @@ def pending(payload: dict | None) -> list[str]:
     return _lines(payload, "pending")
 
 
+@dataclass(frozen=True)
+class SubTask:
+    """One entry of a split, as the arquitecto stated it.
+
+    `after` holds 1-based positions in the list `split_of` returned. On a
+    payload the CLI validated those are integers; on one that came back
+    through the prose fallback they are whatever was there, kept so that
+    `split_problems` refuses them.
+    """
+
+    title: str
+    surface: str
+    description: str
+    after: tuple[int, ...]
+
+
+#: A one-entry split is a plan with extra steps; more than four means the task
+#: was a project, and cutting that is the operator's call, not a phase's.
+_SPLIT_MIN = 2
+_SPLIT_MAX = 4
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def split_of(payload: dict | None) -> list[SubTask]:
+    """The sub-tasks the phase split its task into, empty when it did not.
+
+    Reads, never repairs. An entry that is not an object is dropped, the way
+    `_lines` drops what it cannot print; anything else unreadable is kept
+    blank or as stated, so `split_problems` refuses the split rather than a
+    sub-task being filed without the `after` it was given.
+    """
+    if not payload:
+        return []
+    entries = payload.get("split")
+    if not isinstance(entries, list):
+        return []
+    subtasks = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        after = entry.get("after")
+        if after is None:
+            after = ()
+        elif not isinstance(after, list):
+            after = (after,)
+        subtasks.append(SubTask(
+            title=_text(entry.get("title")).strip(),
+            surface=_text(entry.get("surface")).strip(),
+            # Verbatim: it becomes the sub-task's own task description.
+            description=_text(entry.get("description")),
+            after=tuple(after),
+        ))
+    return subtasks
+
+
+def split_problems(subtasks: list[SubTask]) -> list[str]:
+    """What makes a split unusable, one line each. Empty means it can be filed.
+
+    Every problem is reported, not the first: a bad split ends the task as a
+    block, and the block's reasons are all the arquitecto's next run gets.
+    `after` may only name entries before its own, which is what makes a cycle
+    impossible without anyone walking the graph.
+    """
+    problems = []
+    if not _SPLIT_MIN <= len(subtasks) <= _SPLIT_MAX:
+        problems.append(
+            f"a split has {_SPLIT_MIN} to {_SPLIT_MAX} sub-tasks, this one has {len(subtasks)}"
+        )
+    for position, subtask in enumerate(subtasks, start=1):
+        for field in ("title", "surface", "description"):
+            value = getattr(subtask, field)
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"sub-task {position}: {field} is blank")
+        # `type() is int`, so True is not position 1. Kept in a list and not a
+        # set: nothing says a junk item is hashable.
+        seen: list[int] = []
+        repeated: list[int] = []
+        for item in subtask.after:
+            if type(item) is not int:
+                problems.append(
+                    f"sub-task {position}: after names {item!r}, which is not an integer"
+                )
+            elif item in seen:
+                if item not in repeated:
+                    repeated.append(item)
+                    problems.append(f"sub-task {position}: after names {item} more than once")
+            else:
+                seen.append(item)
+                if not 1 <= item < position:
+                    problems.append(
+                        f"sub-task {position}: after names {item}, which is not an entry before it"
+                    )
+    return problems
+
+
 def fallback_body(text: str, head: int = 500, tail: int = 1500) -> str:
     """Clamp a return that came back as prose instead of the schema.
 
@@ -561,6 +693,26 @@ def _rulings(payload: dict) -> list[str]:
     return rendered
 
 
+def _split(payload: dict) -> list[str]:
+    """Each sub-task on one numbered line, without its description.
+
+    The description goes to the sub-task's own file, where its roles read it;
+    here it would be paid for by every later reader of the parent. Whitespace
+    is collapsed because a title is the model's text: a newline in one would
+    put whatever follows it at column zero of the task file, where `## <role>`
+    is a phase heading (see `body`).
+    """
+    rendered = []
+    for position, subtask in enumerate(split_of(payload), start=1):
+        pieces = [f"{position}.", subtask.title]
+        if subtask.surface:
+            pieces.append(f"({subtask.surface})")
+        if subtask.after:
+            pieces.append("— after " + ", ".join(str(item) for item in subtask.after))
+        rendered.append(" ".join(" ".join(pieces).split()))
+    return rendered
+
+
 def render(payload: dict) -> str:
     """The structured return as the markdown a later role reads.
 
@@ -575,6 +727,12 @@ def render(payload: dict) -> str:
     if verdict:
         head.append(f"**Verdict:** {verdict}")
     parts = [" · ".join(head)] if head else []
+
+    # Right under the status, like the verdict: it is the phase's outcome, and
+    # the lines carry their own numbers instead of a `- `.
+    split = _split(payload)
+    if split:
+        parts.append("\n".join(["**Split**", *split]))
 
     for key, title in _SECTIONS:
         items = _lines(payload, key)
