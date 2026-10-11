@@ -115,7 +115,7 @@ class _HeartbeatLoop:
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
             try:
-                context_transfer.refresh_heartbeat(self._hive_dir, self._task_id)
+                tasks.refresh_heartbeat(self._hive_dir, self._task_id)
             except Exception:
                 # A single transient I/O hiccup must not permanently kill the
                 # loop — that would silently stop heartbeats for the rest of
@@ -809,6 +809,15 @@ _ONE_OPERATION_PER_CALL = (
     "worktree, use the Read tool with its absolute path rather than `cd`."
 )
 
+#: The roles pointed at `description.md` for the optional sections
+#: (`docs/plans/board-service.md` section 2, *What each phase is given*).
+_DESCRIPTION_READERS = frozenset({"arquitecto", "implementador"})
+
+
+def _ask(parsed: tasks.Description) -> str:
+    """The two sections every phase is given, under their own headings."""
+    return f"## Goal\n\n{parsed.goal}\n\n## Done when\n\n{parsed.done_when}"
+
 
 def _role_prompt(
     role: str,
@@ -823,24 +832,42 @@ def _role_prompt(
     max_turns: int | None = None,
     note: str = "",
 ) -> str:
+    # `DescriptionError` for a text missing a required section: `open_cycle`
+    # refuses that before any phase, and a caller that skipped it gets the
+    # exception, never a prompt with half an ask.
+    parsed = tasks.parse_description(description)
     if role == project_docs.MAPPER_ROLE:
         # The mapper runs before the first phase, so there is no handoff to
         # read and the task is context, not its job: it is told what is coming
         # so it maps the parts of the project that task will touch first.
         prompt = (
             f"Role: {role}. Task: {task_id}.\n\n"
-            f"The task about to run on this project is:\n{description}\n\n"
+            f"The task about to run on this project is:\n{_ask(parsed)}\n\n"
             "You are not doing that task. You run once, ahead of it, because this project has "
             "no docs for the agents that work on it."
         )
     else:
-        # The description is embedded whole, never clamped: a cut phase summary
-        # loses detail, but a cut ask misinforms — the role would confidently
-        # build the wrong thing. It also stays in the task file, so this is belt
-        # and braces: the role has the ask even if it never opens the file.
-        prompt = (
-            f"Role: {role}. Task: {task_id}.\n\n"
-            f"Task description:\n{description}\n\n"
+        # *Goal* and *Done when* are embedded whole, never clamped: a cut
+        # phase summary loses detail, but a cut ask misinforms — the role
+        # would confidently build the wrong thing. The optional sections are
+        # not in the prompt: the two roles that plan and build are given the
+        # path and the names of the ones this description has, one file read
+        # away, and a reviewing role judges against *Done when* alone.
+        prompt = f"Role: {role}. Task: {task_id}.\n\nTask description:\n{_ask(parsed)}\n\n"
+        if role in _DESCRIPTION_READERS:
+            path = tasks.description_path(hive_dir, task_id)
+            optional = parsed.present_optional()
+            if optional:
+                prompt += (
+                    "Those are its Goal and Done when sections, whole. It also has "
+                    f"{', '.join(optional)}, not in this prompt: read {path} for them.\n\n"
+                )
+            else:
+                prompt += (
+                    "Those are its Goal and Done when sections, whole, and it has no others. "
+                    f"The stored text is {path}.\n\n"
+                )
+        prompt += (
             f"Read {task_file} for context handed off from the previous phase before starting."
         )
         if round_num is not None:
@@ -925,7 +952,7 @@ def reap_expired_locks(cfg: Config) -> list[str]:
     for task_id in context_transfer.list_task_ids(cfg.hive_tasks_dir):
         task = context_transfer.read_task_file(context_transfer.task_file_path(cfg.hive_tasks_dir, task_id))
         if task.status == "in_progress" and context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
-            context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
+            tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             reaped.append(task_id)
     return reaped
 
@@ -1442,7 +1469,7 @@ def dispatch_phase(
             # Claim the task before touching the worktree: a task another
             # account still owns (live heartbeat) must be refused outright,
             # not after work has already started on disk.
-            context_transfer.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account, ttl_seconds=cfg.heartbeat_ttl_seconds)
+            tasks.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account, ttl_seconds=cfg.heartbeat_ttl_seconds)
             lock_acquired = True
             workdir = docker_exec.create_worktree(container, cfg.projects_root, slug, task_id, role)
             with _HeartbeatLoop(cfg.hive_tasks_dir, task_id, cfg.heartbeat_interval_seconds):
@@ -1509,7 +1536,7 @@ def dispatch_phase(
             # returning — that permanently removes it from the pool.
             state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
             if lock_acquired:
-                context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
+                tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             raise
         finally:
             # Covers the failure paths too: `git worktree add` alone is enough
@@ -1529,13 +1556,13 @@ def dispatch_phase(
             # account, or the next recheck recovers it on stale local numbers.
             state_machine.record_rate_limit(cfg.state_dir, account)
             state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
-            context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
+            tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id
             continue
 
         if not _exec_succeeded(result):
             state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
-            context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
+            tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             return DispatchResult(
                 success=False, session_id=result.session_id, result_text=result.result_text,
                 account=account, handoff=_phase_handoff(container, result), gates=gate_report,
@@ -1585,7 +1612,7 @@ def _open_kanban_issue(cfg: Config, kanban: KanbanClient, task_id: str, descript
         logger.warning("kanban: task %s runs without a card: %s", task_id, exc)
         return None
     if issue_id is not None:
-        context_transfer.set_kanban_issue_id(cfg.hive_tasks_dir, task_id, issue_id)
+        tasks.set_kanban_issue_id(cfg.hive_tasks_dir, task_id, issue_id)
     return issue_id
 
 
@@ -1875,9 +1902,11 @@ def open_cycle(
     the card. That is a task nobody described, a description missing a
     required section, and a hive `dispatch migrate` has not been run on.
     """
-    # Before anything writes a task file: `context_transfer` no longer carries
-    # the `description` key, so its next write to a file that still has one —
-    # `reap_expired_locks` rewrites other tasks' files — would drop the ask.
+    # The whole-hive rule (`docs/business.md` *Task descriptions*): one
+    # unmigrated task file stops every cycle. `tasks.py`'s writer refuses such
+    # a file itself, so the ask is safe either way; this check is what makes
+    # the refusal one logged line before anything is written, not a traceback
+    # out of `reap_expired_locks` or the first phase's lock.
     stale = tasks.unmigrated_ids(cfg.hive_tasks_dir)
     if stale:
         logger.error(
@@ -2043,7 +2072,7 @@ def run_phase(
     gate_section = result.gates.render() if result.gates is not None else ""
     if gate_section:
         body = f"{body}\n\n{gate_section}"
-    context_transfer.handoff(
+    tasks.handoff(
         cfg.hive_tasks_dir, ctx.task_id,
         new_status="done" if final else "pending",
         body=body,
@@ -2149,7 +2178,7 @@ def run_single_phase(
             # otherwise have a hand-set list erased by a call that knows
             # nothing.
             if implemented is not None:
-                context_transfer.set_resolved_debt(
+                tasks.set_resolved_debt(
                     cfg.hive_tasks_dir, task_id, debt.resolved(implemented)
                 )
             filed = _file_accepted_debt(cfg, kanban, task_id, slug, implemented, reviewed)
@@ -2347,7 +2376,7 @@ def run_task_cycle(
         # Written to the task file rather than only handed to the auditor: the
         # merge that closes these cards can happen days later, in `merge-task`,
         # long after this handoff is prose in a file nobody parses.
-        context_transfer.set_resolved_debt(
+        tasks.set_resolved_debt(
             cfg.hive_tasks_dir, task_id, debt.resolved(implemented.handoff)
         )
         # Before the auditor, because the auditor writes the rows that point

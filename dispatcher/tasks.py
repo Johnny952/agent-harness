@@ -1,21 +1,26 @@
 """The task module: the one writer of the board's files.
 
 `docs/plans/board-service.md` section 5 gives a task three files and one
-module that writes them. So far only the description lives here: the ask, in
-sections, at `<hive root>/board/<task_id>/description.md`. The task file
-itself — status, lock, handoffs — is still written by `context_transfer`
-until the task that moves those writes onto this module.
+module that writes them. Two of them are written here: the description — the
+ask, in sections, at `<hive root>/board/<task_id>/description.md` — and the
+task file itself — status, lock, handoffs — whose writers (`acquire_lock`,
+`refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_kanban_issue_id`,
+`set_resolved_debt`) all end in `_write_task_file`. `context_transfer` keeps
+the `TaskFile` shape, its reader and the serializer `write_task_file`, which
+nothing under `dispatcher/` but this module calls.
 
 The description used to be the frontmatter key `description` of the task
-file. `context_transfer` no longer reads or writes that key, so every write
-it makes to a task file that still has one would drop the description
-silently. This module therefore refuses such a file by name, and
-`unmigrated_ids` lets the entry points that write task files refuse the whole
-hive until `dispatch migrate` has moved every description out.
+file. `read_task_file` no longer reads that key, so a write to a task file
+that still has one would drop the description silently. `_write_task_file`
+therefore refuses such a file by name (`UnmigratedTaskError`), as the
+description's own reader and writer do; `migrate` is the one path that writes
+over one, having stored the description first. `unmigrated_ids` is what lets
+an entry point refuse the whole hive until `dispatch migrate` has been run.
 """
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import os
 import re
 from pathlib import Path
@@ -24,8 +29,8 @@ import yaml
 
 from dispatcher import context_transfer
 
-# `_makedirs_readable`, `_write_atomic`, `_is_single_path_component` and
-# `_FRONTMATTER_DELIM` are private to `context_transfer` and used here on
+# `_makedirs_readable`, `_write_atomic`, `_is_single_path_component`,
+# `_read_or_new` and `_FRONTMATTER_DELIM` are private to `context_transfer` and used here on
 # purpose: the two modules are one seam mid-move, and renaming the helpers
 # would touch every doc that cites them.
 
@@ -72,6 +77,10 @@ class Description:
     surface: str | None = None
     steps: str | None = None
     out_of_scope: str | None = None
+
+    def present_optional(self) -> tuple[str, ...]:
+        """The names of the optional sections this description has, in `OPTIONAL`'s order."""
+        return tuple(name for name in OPTIONAL if getattr(self, _field(name)) is not None)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -145,17 +154,21 @@ def _read_frontmatter(path: str) -> object:
     return yaml.safe_load(fm_text)
 
 
+def _path_is_unmigrated(path: str) -> bool:
+    try:
+        fm = _read_frontmatter(path)
+    except (OSError, ValueError, yaml.YAMLError):
+        return False
+    return isinstance(fm, dict) and _LEGACY_KEY in fm
+
+
 def is_unmigrated(hive_dir: str, task_id: str) -> bool:
     """Does this task's file still have a `description` key in its frontmatter?
 
     A task file that is missing or will not parse answers `False`: it is not
     unmigrated, it is someone else's error to report.
     """
-    try:
-        fm = _read_frontmatter(context_transfer.task_file_path(hive_dir, task_id))
-    except (OSError, ValueError, yaml.YAMLError):
-        return False
-    return isinstance(fm, dict) and _LEGACY_KEY in fm
+    return _path_is_unmigrated(context_transfer.task_file_path(hive_dir, task_id))
 
 
 def unmigrated_ids(hive_dir: str) -> list[str]:
@@ -210,11 +223,124 @@ def write_description(hive_dir: str, task_id: str, text: str) -> str:
     return _write(hive_dir, task_id, text)
 
 
+def _write_task_file(path: str, task: context_transfer.TaskFile) -> None:
+    """Write a task file, unless the one on disk still carries its description.
+
+    Every writer below reads the file, changes a field and ends here, and
+    `read_task_file` does not carry the `description` key: written over, it
+    would be gone. So the refusal is the writer's own and no caller has to
+    remember a guard (`docs/debt/T-026-D1.md`). A file that is not there yet
+    is written; one that will not parse never gets this far, because the
+    writer's own read raised first. Atomic, as `write_task_file` is.
+    """
+    if _path_is_unmigrated(path):
+        raise UnmigratedTaskError(task.task_id, path)
+    context_transfer.write_task_file(path, task)
+
+
+def set_kanban_issue_id(hive_dir: str, task_id: str, issue_id: str) -> None:
+    """Point this task at a Vibe Kanban issue, creating the task file if needed.
+
+    Everything else on an existing file is preserved: attaching a board to
+    a task that already ran only adds the id.
+    """
+    path, task = context_transfer._read_or_new(hive_dir, task_id)
+    task.kanban_issue_id = issue_id
+    _write_task_file(path, task)
+
+
+def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:
+    """Record which debt entries this task's work resolved.
+
+    Replaces rather than appends: a re-run's implementation is the current
+    claim about what this task fixes, and the previous round's claim was
+    about code that has since been rewritten.
+    """
+    path, task = context_transfer._read_or_new(hive_dir, task_id)
+    task.resolved_debt = list(entries)
+    _write_task_file(path, task)
+
+
+def acquire_lock(
+    hive_dir: str, task_id: str, owner: str, ttl_seconds: int | None = None
+) -> context_transfer.TaskFile:
+    path, task = context_transfer._read_or_new(hive_dir, task_id)
+    # Two dispatcher processes, or a stale retry, must not both drive the same
+    # task. This is a read-then-write check, not a cross-process mutex — a
+    # real mutual-exclusion guard (e.g. flock) is separate future work.
+    if task.owner is not None and task.owner != owner:
+        # A live holder always refreshes its heartbeat, so a foreign owner
+        # with heartbeat None can only be a hand-edited or legacy file, not
+        # an active dispatcher. Treat it as stale when the caller opted into
+        # takeovers at all (ttl_seconds given) rather than locking the task
+        # forever with no way to reap it.
+        heartbeat_missing = task.heartbeat is None
+        if ttl_seconds is None or not (
+            heartbeat_missing or context_transfer.is_lock_expired(task, ttl_seconds)
+        ):
+            raise context_transfer.LockHeldError(task_id, task.owner)
+    task.owner = owner
+    task.heartbeat = dt.datetime.now(dt.timezone.utc).isoformat()
+    if task.status == "pending":
+        task.status = "in_progress"
+    _write_task_file(path, task)
+    return task
+
+
+def refresh_heartbeat(hive_dir: str, task_id: str) -> None:
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.heartbeat = dt.datetime.now(dt.timezone.utc).isoformat()
+    _write_task_file(path, task)
+
+
+def release_stale_lock(hive_dir: str, task_id: str) -> None:
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.owner = None
+    task.heartbeat = None
+    _write_task_file(path, task)
+
+
+def handoff(
+    hive_dir: str,
+    task_id: str,
+    new_status: str,
+    body: str,
+    depends_on: list[str] | None = None,
+) -> None:
+    path, task = context_transfer._read_or_new(hive_dir, task_id)
+    task.status = new_status
+    task.owner = None
+    task.heartbeat = None
+    # Accumulate phase summaries rather than replacing task.body — the next
+    # role needs the full trail of prior phases, not just the last one.
+    task.body = f"{task.body}\n\n{body}" if task.body else body
+    if depends_on is not None:
+        task.depends_on = depends_on
+    _write_task_file(path, task)
+
+
 def _legacy_text(old: str) -> str:
     return f"## {REQUIRED[0]}\n\n{old.strip()}\n\n## {REQUIRED[1]}\n\n{LEGACY_DONE_WHEN}\n"
 
 
-def migrate(hive_dir: str) -> MigrateReport:
+def _lock_is_live(task: context_transfer.TaskFile, ttl_seconds: int) -> bool:
+    """Is a dispatcher still writing this task file?
+
+    `release_stale_lock` leaves `status: in_progress` with no heartbeat, and
+    `is_lock_expired` answers False for a missing one, so the heartbeat is
+    tested first: without one there is no heartbeat thread to race, which is
+    how `acquire_lock` reads it too.
+    """
+    return (
+        task.status == "in_progress"
+        and task.heartbeat is not None
+        and not context_transfer.is_lock_expired(task, ttl_seconds)
+    )
+
+
+def migrate(hive_dir: str, ttl_seconds: int) -> MigrateReport:
     """Move the description out of every task file that still has one, once.
 
     `description.md` is written first and the task file second, so a run that
@@ -223,6 +349,12 @@ def migrate(hive_dir: str) -> MigrateReport:
     by construction what the dispatcher's next write would have left. A file
     with no `description` key is not rewritten at all. Anything this cannot
     move without guessing is left untouched and reported in `refused`.
+
+    So is a task whose lock is live — `in_progress` with a heartbeat younger
+    than `ttl_seconds`: its dispatcher's heartbeat thread rewrites the file
+    every few seconds, and this rewrite would race it. This is the one caller
+    of the raw `write_task_file`, because it is the one that must write over
+    a file `_write_task_file` refuses.
     """
     moved: list[tuple[str, str]] = []
     emptied: list[str] = []
@@ -238,8 +370,18 @@ def migrate(hive_dir: str) -> MigrateReport:
                 already += 1
                 continue
             task = context_transfer.read_task_file(task_path)
+            live = _lock_is_live(task, ttl_seconds)
         except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
             refused.append((task_id, f"unreadable task file: {exc!r}"))
+            continue
+        if live:
+            refused.append(
+                (
+                    task_id,
+                    f"its lock is live (owner {task.owner}): a dispatcher is still running "
+                    f"it; run `{MIGRATE_COMMAND}` again when that cycle has ended",
+                )
+            )
             continue
         old = fm[_LEGACY_KEY]
         if old is None or (isinstance(old, str) and not old.strip()):

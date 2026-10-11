@@ -1,12 +1,14 @@
 # Board service — the harness's own board, kept by agents over MCP
 
-**Status:** design, approved by the user on 2026-10-11. The first half of
-step 1 of *How it would be built* is built by T-026
-(`docs/implementations/T-026.md`): the task module `dispatcher/tasks.py`,
-the description in its own `description.md`, and `dispatch migrate`. The
-rest of step 1 (the prompt change to *Goal* and *Done when*, and the
-dispatcher's other writes moving onto the module) and every later step are
-not built. It records an idea the user raised on
+**Status:** design, approved by the user on 2026-10-11. Step 1 of *How it
+would be built* is built, by T-026 (`docs/implementations/T-026.md`) and
+T-027 (`docs/implementations/T-027.md`): the task module
+`dispatcher/tasks.py`, the description in its own `description.md`,
+`dispatch migrate`, the phase prompt on *Goal* and *Done when* plus the
+file's path, and the dispatcher's task-file writes on the module, whose
+writer refuses an unmigrated file. The per-task lock of section 5 comes
+with the service (step 4). Every later step is not built. It records an
+idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
 and tasks and writes their descriptions and steps, through a service that
 owns the board and that agents reach over MCP. The aim is a tidier board.

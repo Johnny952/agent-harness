@@ -1,3 +1,5 @@
+import ast
+import datetime as dt
 import os
 import stat
 from pathlib import Path
@@ -22,6 +24,9 @@ _HEAD = (
     "heartbeat: '2026-10-11T16:00:36+00:00'\n"
 )
 _BODY = "---\n\n## arquitecto\n\n**Status:** complete\n\n## implementador\n\nDone.\n"
+#: The heartbeat TTL `migrate` is given. `_HEAD`'s heartbeat is long past it,
+#: so that lock is a dead cycle's and the file moves.
+_TTL = 600
 
 
 def _hive(tmp_path: Path) -> str:
@@ -213,6 +218,79 @@ def test_unmigrated_ids_lists_only_the_files_that_still_have_the_key(tmp_path: P
     assert tasks.unmigrated_ids(str(tmp_path / "no-such-dir")) == []
 
 
+#: Each task-file writer, as a call on (hive, task id).
+_WRITERS = {
+    "acquire_lock": lambda hive, tid: tasks.acquire_lock(hive, tid, owner="cuenta1", ttl_seconds=_TTL),
+    "refresh_heartbeat": tasks.refresh_heartbeat,
+    "release_stale_lock": tasks.release_stale_lock,
+    "handoff": lambda hive, tid: tasks.handoff(hive, tid, new_status="review", body="## revisor"),
+    "set_kanban_issue_id": lambda hive, tid: tasks.set_kanban_issue_id(hive, tid, "an-issue"),
+    "set_resolved_debt": lambda hive, tid: tasks.set_resolved_debt(hive, tid, ["task-0-D1"]),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+def test_every_task_file_writer_refuses_an_unmigrated_file_and_leaves_it_alone(
+    tmp_path: Path, writer: str,
+) -> None:
+    hive = _hive(tmp_path)
+    legacy = _legacy(hive, "description: Add a /healthz endpoint.\n")
+    before = legacy.read_bytes()
+
+    with pytest.raises(tasks.UnmigratedTaskError) as excinfo:
+        _WRITERS[writer](hive, "task-1")
+
+    assert "dispatch migrate" in str(excinfo.value)
+    assert str(legacy) in str(excinfo.value)
+    assert legacy.read_bytes() == before
+    assert os.listdir(hive) == ["task-1.md"]  # no temp file left behind either
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+def test_the_writers_refusal_is_per_file_a_legacy_neighbour_does_not_stop_it(
+    tmp_path: Path, writer: str,
+) -> None:
+    hive = _hive(tmp_path)
+    neighbour = _legacy(hive, "description: Someone else's ask.\n", "task-2")
+    before = neighbour.read_bytes()
+    migrated = _legacy(hive, "")
+
+    _WRITERS[writer](hive, "task-1")
+
+    assert migrated.read_text() != _HEAD + _BODY
+    assert read_task_file(str(migrated)).task_id == "task-1"
+    assert neighbour.read_bytes() == before
+
+
+def test_a_writer_still_creates_a_task_file_that_is_not_there(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1")
+
+    task = read_task_file(task_file_path(hive, "task-1"))
+    assert (task.status, task.owner) == ("in_progress", "cuenta1")
+
+
+def test_no_module_under_dispatcher_but_tasks_calls_write_task_file() -> None:
+    """Section 5 of `docs/plans/board-service.md`, "One module writes": a call
+    anywhere else is a write that skips the refusal of an unmigrated file."""
+    package = Path(tasks.__file__).parent
+    modules = sorted(package.rglob("*.py"))
+    assert package / "context_transfer.py" in modules
+
+    callers = set()
+    for module in modules:
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == "write_task_file":
+                callers.add(module.name)
+
+    assert callers == {"tasks.py"}
+
+
 # -- migrate ------------------------------------------------------------------
 
 #: The four scalar styles the live hive's descriptions come in, each with the
@@ -239,7 +317,7 @@ def test_migrate_moves_the_description_and_leaves_the_rest_as_write_task_file_wr
     expected = tmp_path / "expected.md"
     write_task_file(str(expected), read_task_file(str(legacy)))
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     path = tasks.description_path(hive, "task-1")
     assert report == tasks.MigrateReport(
@@ -259,11 +337,11 @@ def test_migrate_moves_the_description_and_leaves_the_rest_as_write_task_file_wr
 def test_migrate_twice_changes_nothing(tmp_path: Path) -> None:
     hive = _hive(tmp_path)
     legacy = _legacy(hive, "description: Add a /healthz endpoint.\n")
-    tasks.migrate(hive)
+    tasks.migrate(hive, _TTL)
     path = Path(tasks.description_path(hive, "task-1"))
     before = [(p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino) for p in (legacy, path)]
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     assert report == tasks.MigrateReport(moved=[], emptied=[], refused=[], already=1)
     assert [(p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino) for p in (legacy, path)] == before
@@ -275,7 +353,7 @@ def test_migrate_moves_every_task_file_in_id_order(tmp_path: Path) -> None:
     _legacy(hive, "description: First.\n", "task-1")
     _legacy(hive, "", "task-3")
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     assert [task_id for task_id, _ in report.moved] == ["task-1", "task-2"]
     assert report.already == 1
@@ -290,7 +368,7 @@ def test_migrate_drops_an_empty_description_and_writes_no_file(
     hive = _hive(tmp_path)
     legacy = _legacy(hive, description_yaml)
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     assert report == tasks.MigrateReport(moved=[], emptied=["task-1"], refused=[], already=0)
     assert legacy.read_text() == _HEAD + _BODY
@@ -311,7 +389,7 @@ def test_migrate_refuses_what_it_would_have_to_guess_at(
     legacy = _legacy(hive, description_yaml)
     before = legacy.read_bytes()
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     assert report.moved == [] and report.emptied == []
     [(task_id, reason)] = report.refused
@@ -328,12 +406,84 @@ def test_migrate_reports_a_task_file_it_cannot_read_and_moves_the_others(tmp_pat
     keyless.write_text("---\nstatus: pending\ndescription: No task id.\n---\n\n")
     _legacy(hive, "description: Add a /healthz endpoint.\n")
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     assert [task_id for task_id, _ in report.refused] == ["task-0", "task-2"]
     assert [task_id for task_id, _ in report.moved] == ["task-1"]
     assert broken.read_text() == "TODO write this up\n"
     assert "description: No task id." in keyless.read_text()
+
+
+def _now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def test_migrate_refuses_a_task_whose_lock_is_live(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    # The heartbeat thread of the dispatcher running task-1 wrote this a moment ago.
+    live = _HEAD.replace("2026-10-11T16:00:36+00:00", _now())
+    legacy = Path(task_file_path(hive, "task-1"))
+    legacy.write_text(live + "description: Add a /healthz endpoint.\n" + _BODY)
+    before = legacy.read_bytes()
+    _legacy(hive, "description: Second.\n", "task-2")
+
+    report = tasks.migrate(hive, _TTL)
+
+    [(task_id, reason)] = report.refused
+    assert task_id == "task-1"
+    assert "lock is live" in reason and "cuenta1" in reason and "dispatch migrate" in reason
+    assert legacy.read_bytes() == before
+    assert not os.path.exists(os.path.dirname(tasks.description_path(hive, "task-1")))
+    # The dead cycle beside it still moves.
+    assert [moved_id for moved_id, _ in report.moved] == ["task-2"]
+
+
+def test_migrate_refuses_a_live_lock_with_an_empty_description_too(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    legacy = Path(task_file_path(hive, "task-1"))
+    legacy.write_text(
+        _HEAD.replace("2026-10-11T16:00:36+00:00", _now()) + "description: null\n" + _BODY
+    )
+    before = legacy.read_bytes()
+
+    report = tasks.migrate(hive, _TTL)
+
+    assert report.emptied == [] and [task_id for task_id, _ in report.refused] == ["task-1"]
+    assert legacy.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        # Past the TTL: the cycle that wrote it is dead.
+        _HEAD,
+        # What `release_stale_lock` leaves: in_progress, no heartbeat to race.
+        "---\ntask_id: task-1\nstatus: in_progress\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\n",
+    ],
+)
+def test_migrate_moves_an_in_progress_task_whose_lock_is_not_live(
+    tmp_path: Path, head: str,
+) -> None:
+    hive = _hive(tmp_path)
+    Path(task_file_path(hive, "task-1")).write_text(
+        head + "description: Add a /healthz endpoint.\n" + _BODY
+    )
+
+    report = tasks.migrate(hive, _TTL)
+
+    assert report.refused == []
+    assert [task_id for task_id, _ in report.moved] == ["task-1"]
+
+
+def test_migrate_moves_a_fresh_heartbeat_on_a_task_that_is_not_in_progress(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    head = _HEAD.replace("in_progress", "review").replace("2026-10-11T16:00:36+00:00", _now())
+    Path(task_file_path(hive, "task-1")).write_text(head + "description: Do it.\n" + _BODY)
+
+    report = tasks.migrate(hive, _TTL)
+
+    assert [task_id for task_id, _ in report.moved] == ["task-1"]
 
 
 def test_migrate_refuses_to_overwrite_a_different_description_file(tmp_path: Path) -> None:
@@ -344,7 +494,7 @@ def test_migrate_refuses_to_overwrite_a_different_description_file(tmp_path: Pat
     path.parent.mkdir(parents=True)
     path.write_text(_DESCRIPTION)
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     [(task_id, reason)] = report.refused
     assert task_id == "task-1" and "different content" in reason
@@ -361,7 +511,7 @@ def test_migrate_finishes_a_run_that_died_between_its_two_writes(tmp_path: Path)
         "## Goal\n\nAdd a /healthz endpoint.\n\n## Done when\n\nNot stated separately; see Goal.\n"
     )
 
-    report = tasks.migrate(hive)
+    report = tasks.migrate(hive, _TTL)
 
     assert report.moved == [("task-1", str(path))]
     assert legacy.read_text() == _HEAD + _BODY

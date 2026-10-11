@@ -1,3 +1,4 @@
+import datetime as dt
 import io
 import logging
 import sys
@@ -8,7 +9,8 @@ import pytest
 import dispatcher.cli as cli_mod
 import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import learnings, tasks
-from dispatcher.context_transfer import read_kanban_issue_id, set_resolved_debt
+from dispatcher.context_transfer import read_kanban_issue_id
+from dispatcher.tasks import set_resolved_debt
 from dispatcher.dispatcher import CycleOutcome, DispatchResult
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
 from dispatcher.vibe_kanban_client import LocalBoardClient, NullKanbanClient, VibeKanbanClient
@@ -237,6 +239,29 @@ def test_cli_migrate_exits_one_when_it_refused_a_file(
 
     assert excinfo.value.code == 1
     assert "task-9: not migrated" in capsys.readouterr().err
+    assert legacy.read_bytes() == before
+
+
+def test_cli_migrate_exits_one_on_a_task_whose_cycle_is_still_running(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    legacy = _legacy(tmp_path)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    legacy.write_text(
+        legacy.read_text()
+        .replace("status: pending", "status: in_progress")
+        .replace("owner: null", "owner: cuenta1")
+        .replace("heartbeat: null", f"heartbeat: '{now}'")
+    )
+    before = legacy.read_bytes()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "migrate")
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "task-9: not migrated" in err and "lock is live" in err
     assert legacy.read_bytes() == before
 
 

@@ -11,7 +11,6 @@ from dispatcher import debt, gates, handoff, learnings, project_docs, role_skill
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
-    acquire_lock,
     is_lock_expired,
     list_task_ids,
     read_handoff,
@@ -19,12 +18,11 @@ from dispatcher.context_transfer import (
     read_task_file,
     save_handoff,
     scratch_dir,
-    set_kanban_issue_id,
-    set_resolved_debt,
     task_file_path,
     usage_log_path,
     write_task_file,
 )
+from dispatcher.tasks import acquire_lock, set_kanban_issue_id, set_resolved_debt
 from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import (
     AccountState,
@@ -1931,7 +1929,7 @@ def test_heartbeat_loop_survives_transient_refresh_exception(tmp_path, monkeypat
         if len(calls) == 1:
             raise RuntimeError("transient")
 
-    monkeypatch.setattr(dispatcher_mod.context_transfer, "refresh_heartbeat", flaky_refresh_heartbeat)
+    monkeypatch.setattr(dispatcher_mod.tasks, "refresh_heartbeat", flaky_refresh_heartbeat)
 
     with dispatcher_mod._HeartbeatLoop(str(tmp_path), "task-1", interval_seconds=0.05) as loop:
         time.sleep(0.3)
@@ -2023,10 +2021,10 @@ def test_run_task_cycle_prompt_references_task_file(tmp_path, monkeypatch) -> No
 
 def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, monkeypatch) -> None:
     """The roles used to get a role name, a task id and a file path — the
-    arquitecto had nothing to plan from. The description goes in the prompt
-    whole (never truncated: a cut ask misinforms) for every phase, not just
-    the first, so a revisor or auditor can check the work against what was
-    actually asked for."""
+    arquitecto had nothing to plan from. *Goal* and *Done when* go in the
+    prompt whole (never truncated: a cut ask misinforms) for every phase, not
+    just the first, so a revisor or auditor can check the work against what
+    was actually asked for. The optional sections stay in `description.md`."""
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     captured = []
 
@@ -2040,13 +2038,18 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
 
     description = (
         "## Goal\n\nAdd a /healthz endpoint.\n\nIt must return 200 and no body.\n\n"
-        "## Done when\n\nGET /healthz answers 200.\n"
+        "## Done when\n\nGET /healthz answers 200.\n\n"
+        "## Steps\n\n1. Register the route first.\n"
     )
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=description)
 
     assert [role for role, _ in captured] == ["arquitecto", "implementador", "revisor", "auditor"]
     for role, prompt in captured:
-        assert description in prompt, f"{role}'s prompt does not carry the description"
+        assert (
+            "Task description:\n## Goal\n\nAdd a /healthz endpoint.\n\n"
+            "It must return 200 and no body.\n\n## Done when\n\nGET /healthz answers 200.\n\n"
+        ) in prompt, f"{role}'s prompt does not carry the ask"
+        assert "Register the route first." not in prompt
 
     # The revisor's verdict instruction has to stay the last thing it reads,
     # or a description ending in prose could bury it.
@@ -2155,9 +2158,10 @@ def test_run_task_cycle_refuses_a_hive_that_was_not_migrated(
     tmp_path, monkeypatch, caplog,
 ) -> None:
     """Another task's file still has its description in the frontmatter, and
-    its lock has expired: the reaper would rewrite that file through
-    `context_transfer`, which no longer carries the key, and the ask would be
-    gone. So nothing runs and nothing is written until `dispatch migrate` has."""
+    its lock has expired: the reaper's rewrite of that file would be refused
+    by `tasks.py`'s writer, as a traceback. The whole-hive rule says it first
+    and in one line: nothing runs and nothing is written until
+    `dispatch migrate` has."""
     cfg = _make_config(tmp_path)
     legacy = Path(task_file_path(cfg.hive_tasks_dir, "task-0"))
     legacy.parent.mkdir(parents=True, exist_ok=True)
@@ -2178,6 +2182,108 @@ def test_run_task_cycle_refuses_a_hive_that_was_not_migrated(
     assert legacy.read_bytes() == before
     assert "dispatch migrate" in caplog.text and "task-0" in caplog.text
     assert tasks.read_description(cfg.hive_tasks_dir, "task-1") is None
+
+
+def test_one_unmigrated_file_no_writer_would_touch_still_stops_every_task(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """The whole-hive rule of `docs/business.md` *Task descriptions*, apart from
+    the writer's own refusal: task-0 is `pending` and unlocked, so no reap, lock
+    or handoff of task-1's cycle would ever write it, and `tasks.py`'s writer
+    would never be asked. The cycle is refused all the same."""
+    cfg = _make_config(tmp_path)
+    legacy = Path(task_file_path(cfg.hive_tasks_dir, "task-0"))
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        "---\ntask_id: task-0\nstatus: pending\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\ndescription: An older ask.\n---\n\n"
+    )
+    before = legacy.read_bytes()
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
+
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        outcome = dispatcher_mod.run_task_cycle(
+            cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION
+        )
+
+    assert calls == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert legacy.read_bytes() == before
+    assert list_task_ids(cfg.hive_tasks_dir) == ["task-0"]
+    assert "dispatch migrate" in caplog.text and "task-0" in caplog.text
+
+
+_FIVE_SECTIONS = (
+    "## Goal\n\nAdd a /healthz endpoint.\n\n"
+    "## Done when\n\n- GET /healthz answers 200.\n- The suite passes.\n\n"
+    "## Surface\n\nThe router lives in `app/routes.py`.\n\n"
+    "## Steps\n\n1. Register the route first.\n\n"
+    "## Out of scope\n\nAuthentication stays as it is.\n"
+)
+_BOARD_PATH = "/data/.hive/board/task-1/description.md"
+
+
+def _prompt_for(role: str, description: str) -> str:
+    return dispatcher_mod._role_prompt(
+        role, "task-1", "myproj", "/data/.hive/tasks/task-1.md", description,
+        "/data/.hive/tasks/task-1", "/data/.hive/tasks",
+    )
+
+
+@pytest.mark.parametrize(
+    "role", ["arquitecto", "implementador", "revisor", "auditor", project_docs.MAPPER_ROLE],
+)
+def test_the_prompt_carries_goal_and_done_when_and_not_the_optional_sections(role) -> None:
+    prompt = _prompt_for(role, _FIVE_SECTIONS)
+
+    assert (
+        "## Goal\n\nAdd a /healthz endpoint.\n\n"
+        "## Done when\n\n- GET /healthz answers 200.\n- The suite passes.\n\n"
+    ) in prompt
+    for optional_body in (
+        "The router lives in `app/routes.py`.",
+        "Register the route first.",
+        "Authentication stays as it is.",
+    ):
+        assert optional_body not in prompt
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "implementador"])
+def test_the_roles_that_plan_and_build_are_given_the_path_of_the_description(role) -> None:
+    prompt = _prompt_for(role, _FIVE_SECTIONS)
+
+    assert f"It also has Surface, Steps, Out of scope, not in this prompt: read {_BOARD_PATH}" in prompt
+    # Only the sections this description has are named, so nobody opens the
+    # file to find nothing.
+    assert "It also has Steps, not in this prompt" in _prompt_for(
+        role, _DESCRIPTION + "\n## Steps\n\n1. first\n"
+    )
+    bare = _prompt_for(role, _DESCRIPTION)
+    assert f"it has no others. The stored text is {_BOARD_PATH}." in bare
+
+
+@pytest.mark.parametrize("role", ["revisor", "auditor", project_docs.MAPPER_ROLE])
+def test_the_other_roles_are_not_given_the_path_of_the_description(role) -> None:
+    for description in (_FIVE_SECTIONS, _DESCRIPTION):
+        prompt = _prompt_for(role, description)
+
+        assert _BOARD_PATH not in prompt
+        assert "description.md" not in prompt
+
+
+def test_a_long_done_when_reaches_the_prompt_whole() -> None:
+    done_when = "\n".join(f"- criterion {n} " + "x" * 90 for n in range(200))
+    assert len(done_when) > 20_000
+
+    for role in ("implementador", "revisor", project_docs.MAPPER_ROLE):
+        assert done_when in _prompt_for(role, f"## Goal\n\n{_GOAL}\n\n## Done when\n\n{done_when}\n")
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "revisor", project_docs.MAPPER_ROLE])
+def test_a_description_that_will_not_parse_is_an_error_and_not_half_a_prompt(role) -> None:
+    with pytest.raises(tasks.DescriptionError, match="`## Done when`"):
+        _prompt_for(role, f"## Goal\n\n{_GOAL}\n")
 
 
 def test_revisor_approved_matches_verdict_line() -> None:
@@ -3518,7 +3624,10 @@ def test_the_mapper_is_told_the_task_is_context_not_its_job() -> None:
         max_turns=12,
     )
 
-    assert _DESCRIPTION in prompt
+    assert (
+        f"The task about to run on this project is:\n## Goal\n\n{_GOAL}\n\n"
+        "## Done when\n\nGET /healthz answers 200.\n\n"
+    ) in prompt
     assert "You are not doing that task" in prompt
     assert "/data/.hive/tasks/task-1.md" not in prompt
     assert project_docs.INDEX in prompt
@@ -4195,7 +4304,7 @@ def test_close_resolved_debt_leaves_a_resolved_entry_with_no_card_alone(
     """Either the id is wrong or the row never got a card. Both are for a
     human to look at, and neither is worth failing a merge that succeeded."""
     cfg = _make_config(tmp_path)
-    dispatcher_mod.context_transfer.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
+    dispatcher_mod.tasks.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
     debt_index.text = (
         "| id | what | where | fix | card |\n"
         "|---|---|---|---|---|\n"
@@ -4213,7 +4322,7 @@ def test_close_resolved_debt_does_not_read_the_index_for_a_project_with_no_board
     """There is nothing to close, and the read costs a `docker exec` per merge
     on every project that never configured a board."""
     cfg = _make_config(tmp_path)
-    dispatcher_mod.context_transfer.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
+    dispatcher_mod.tasks.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
 
     assert dispatcher_mod.close_resolved_debt(cfg, NullKanbanClient(), "task-1", "myproj") == []
     assert debt_index.reads == []
