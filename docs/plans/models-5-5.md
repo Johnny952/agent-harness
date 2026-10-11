@@ -1,7 +1,7 @@
 # Models 5.5 — pinned model IDs, explicit effort, and prompts fit for unattended phases
 
-**Status:** proposed by the main thread on 2026-10-11 at the user's ask, not
-built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
+**Status:** proposed by the main thread on 2026-10-11 at the user's ask.
+Steps 1 and 2 built the same day (ADR 57); steps 3 to 6 not built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
 order across the plans*): it touches only the config, the role prompts and
 the console's model list, and it changes the cost of every phase after it.
 It follows Anthropic's guide to prompting Opus 5.5, read that day.
@@ -24,6 +24,9 @@ role prompts follow what the guide says about unattended runs.
   `docker/agent/Dockerfile`), so which model ran is not in the config.
 - **Effort is mostly implicit.** No effort is passed until a task passes
   `escalate_effort_after_round` (2), and then `escalated_effort: high`.
+  Since step 2 (2026-10-11), every phase carries `--effort`:
+  `default_effort` (`medium`), or the role's level in `role_effort`, until
+  the escalation takes over.
 - **The console's model list is a mock.** `front/src/lib/api/mock/ops-fixtures.ts`
   lists `claude-opus-4`, `claude-sonnet-4.5`, `claude-haiku-4.5` and three
   non-Claude models, and its role map uses them. `/models` reads it through
@@ -102,8 +105,9 @@ as `omniroute.md` is undecided.
 Each step is a single surface:
 
 1. The model IDs in `config.yaml` and `dispatcher/config.py`, after checking
-   the image's CLI accepts them. No quota.
+   the image's CLI accepts them. No quota. Built 2026-10-11: CLI 2.1.296.
 2. The per-role `effort` key and its `--effort` flag, with tests. No quota.
+   Built 2026-10-11: `default_effort` and `role_effort` (ADR 57).
 3. The premature-stop paragraph and the bounded resume on a missing handoff,
    with its `max_handoff_resumes` config key, with tests.
 4. The phrase check over `skills/`.
@@ -118,4 +122,5 @@ Each step is a single surface:
 - **Haiku.** Whether any role, the cartografo first, may run a smaller model
   is decided after step 6.
 - **`max_tokens`.** The guide suggests about 128k for long agentic turns.
-  Whether the CLI exposes it under `-p` is checked at step 2.
+  Checked at step 2: `claude --help` in 2.1.296 lists no flag for it, under
+  `-p` or otherwise, so the harness has nothing to set. It stays the CLI's.

@@ -37,6 +37,8 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.max_revision_rounds == 3
     assert cfg.escalate_effort_after_round == 2
     assert cfg.escalated_effort == "high"
+    assert cfg.default_effort == "medium"
+    assert cfg.role_effort == {}
     assert cfg.phase_timeout_seconds == 7200
 
 
@@ -56,6 +58,39 @@ def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
     assert cfg.escalate_effort_after_round == 1
     assert cfg.escalated_effort == "max"
     assert cfg.phase_timeout_seconds == 3600
+
+
+def test_load_config_reads_the_effort_per_role(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML + "\ndefault_effort: low\nrole_effort:\n  revisor: high\n  cartografo: low\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.default_effort == "low"
+    assert cfg.role_effort == {"revisor": "high", "cartografo": "low"}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "default_effort: extreme\n",
+        "escalated_effort: hgih\n",
+        "role_effort:\n  revisor: 3\n",
+        "role_effort:\n  implementor: high\n",
+        "role_effort: high\n",
+    ],
+)
+def test_load_config_refuses_a_bad_effort(tmp_path: Path, extra: str) -> None:
+    """A typo would otherwise reach the CLI, which exits on an unknown level
+    after the lock and the worktree are claimed, or, for a misspelt role, run
+    that role at the default without a word."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\n" + extra)
+
+    with pytest.raises(ValueError, match="effort"):
+        load_config(str(config_path))
 
 
 def test_the_permission_mode_defaults_to_the_one_this_harness_can_use(tmp_path: Path) -> None:

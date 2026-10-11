@@ -4,7 +4,7 @@ import dataclasses
 
 import yaml
 
-from dispatcher import docker_exec
+from dispatcher import docker_exec, project_docs, role_skills
 
 
 @dataclasses.dataclass
@@ -88,6 +88,13 @@ PERMISSION_MODES = frozenset(
     {"acceptEdits", "auto", "bypassPermissions", "dontAsk", "manual", "plan"}
 )
 
+#: The effort levels the CLI accepts (`claude --help`, 2.1.296), lowest first.
+#: Checked at load time like the permission mode, for the same reason.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+#: The roles a phase can run as, which are the keys `role_effort` may name.
+PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
+
 
 @dataclasses.dataclass
 class Config:
@@ -157,6 +164,21 @@ class Config:
     #: line rather than a patch. The ramp's own numbers are constants in
     #: `dispatcher/quota.py`, not keys: see `PACE_START_PCT` and its neighbours.
     pace_primary_week: bool = True
+    #: The effort every phase runs at, passed as `--effort` rather than left
+    #: to the CLI, so which level ran is in the config and not in whatever the
+    #: image's CLI version defaults to (`docs/plans/models-5-5.md`,
+    #: *Decisions*, 2). `medium` is Opus 5.5's own default, and the level the
+    #: plan starts every role at until a measurement says otherwise.
+    default_effort: str = "medium"
+    #: A level per role over `default_effort`, such as `{"revisor": "high"}`.
+    #: The escalation after `escalate_effort_after_round` still wins over both.
+    role_effort: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def effort_for(self, role: str, round_num: int | None = None) -> str:
+        """The `--effort` a phase of `role` runs at, in `round_num` if any."""
+        if round_num is not None and round_num > self.escalate_effort_after_round:
+            return self.escalated_effort
+        return self.role_effort.get(role, self.default_effort)
 
 
 def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
@@ -269,6 +291,28 @@ def _load_permission_mode(raw: dict) -> str | None:
             f"permission_mode must be null or one of: {', '.join(sorted(PERMISSION_MODES))}"
         )
     return mode
+
+
+def _check_effort(key: str, level: object) -> str:
+    if not isinstance(level, str) or level not in EFFORT_LEVELS:
+        raise ValueError(f"{key} must be one of: {', '.join(EFFORT_LEVELS)}")
+    return level
+
+
+def _load_role_effort(raw: dict) -> dict[str, str]:
+    """`role_effort`, checked: a misspelt role would otherwise run at the
+    default without a word, which is the silent change this key exists to
+    prevent."""
+    block = raw.get("role_effort") or {}
+    if not isinstance(block, dict):
+        raise ValueError("role_effort must be a mapping of role to effort level")
+    unknown = sorted(set(block) - PHASE_ROLES)
+    if unknown:
+        raise ValueError(
+            f"role_effort names unknown roles {unknown}; "
+            f"roles are: {', '.join(sorted(PHASE_ROLES))}"
+        )
+    return {role: _check_effort(f"role_effort.{role}", level) for role, level in block.items()}
 
 
 def _load_allowed_tools(raw: dict) -> list[str]:
@@ -454,7 +498,9 @@ def load_config(path: str) -> Config:
         allowed_tools=_load_allowed_tools(raw),
         max_revision_rounds=raw.get("max_revision_rounds", 3),
         escalate_effort_after_round=raw.get("escalate_effort_after_round", 2),
-        escalated_effort=raw.get("escalated_effort", "high"),
+        escalated_effort=_check_effort("escalated_effort", raw.get("escalated_effort", "high")),
+        default_effort=_check_effort("default_effort", raw.get("default_effort", "medium")),
+        role_effort=_load_role_effort(raw),
         phase_timeout_seconds=phase_timeout_seconds,
         # Off by default: merging is the one thing a run does to the branch the
         # human works from, so it waits to be asked for. `dispatch merge-task`

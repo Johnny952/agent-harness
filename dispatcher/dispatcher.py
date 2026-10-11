@@ -1879,11 +1879,7 @@ def run_phase(
     """
     cfg = ctx.cfg
     _update_task_status(ctx.kanban, ctx.issue_id, f"in_progress:{role}")
-    effort = (
-        cfg.escalated_effort
-        if round_num is not None and round_num > cfg.escalate_effort_after_round
-        else None
-    )
+    effort = cfg.effort_for(role, round_num)
     try:
         result = dispatch_phase(
             cfg, ctx.task_id, ctx.slug, role,

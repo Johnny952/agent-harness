@@ -2535,7 +2535,7 @@ def test_run_task_cycle_approves_on_first_round(tmp_path, monkeypatch) -> None:
 
     roles = [c["role"] for c in calls]
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
-    assert all(c["effort"] is None for c in calls)
+    assert all(c["effort"] == "medium" for c in calls)
     assert all(c["model"] == "opus" for c in calls)
     assert (_ISSUE_ID, "done") in kanban.statuses
 
@@ -2596,7 +2596,7 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
         if c["role"] in ("implementador", "revisor") and ("round 1" in c["prompt"] or "round 2" in c["prompt"])
     ]
     round3 = [c for c in calls if c["role"] in ("implementador", "revisor") and "round 3" in c["prompt"]]
-    assert early_rounds and all(c["effort"] is None for c in early_rounds)
+    assert early_rounds and all(c["effort"] == "medium" for c in early_rounds)
     assert round3, "expected round 3 to run"
     assert all(c["effort"] == "high" for c in round3)
     assert (_ISSUE_ID, "done") in kanban.statuses
@@ -5903,3 +5903,33 @@ def test_a_usage_log_that_cannot_be_written_does_not_cost_the_phase(
         "implementador" in r.getMessage() and "No space left on device" in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_run_task_cycle_passes_an_effort_on_every_phase(tmp_path, monkeypatch) -> None:
+    """No phase is left to the CLI's own default: each gets `default_effort`
+    unless `role_effort` names its role (docs/plans/models-5-5.md, step 2)."""
+    cfg = _make_config(tmp_path, default_effort="low", role_effort={"revisor": "xhigh"})
+    calls = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        calls.append((role, effort))
+        return _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt)
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+
+    assert {role for role, _ in calls} >= {"arquitecto", "implementador", "revisor", "auditor"}
+    for role, effort in calls:
+        assert effort == ("xhigh" if role == "revisor" else "low"), role
+
+
+def test_effort_for_escalation_wins_over_the_role_level(tmp_path) -> None:
+    cfg = _make_config(
+        tmp_path, escalate_effort_after_round=2, escalated_effort="max",
+        default_effort="medium", role_effort={"implementador": "low"},
+    )
+    assert cfg.effort_for("implementador") == "low"
+    assert cfg.effort_for("implementador", round_num=2) == "low"
+    assert cfg.effort_for("implementador", round_num=3) == "max"
+    assert cfg.effort_for("cartografo") == "medium"

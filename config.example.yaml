@@ -204,9 +204,23 @@ allowed_tools:
 # forever. Optional; defaults to 3.
 max_revision_rounds: 3
 
+# The effort every phase runs at, passed as `claude --effort` on every phase
+# rather than left to the CLI's own default: low, medium, high, xhigh or max.
+# `medium` is Opus 5.5's default and the plan's starting level for every role
+# (docs/plans/models-5-5.md, Decisions 2); change a level only after measuring
+# it on real tasks. Changing it between rounds of one session costs that
+# session its prompt cache. Optional; defaults to medium.
+default_effort: medium
+
+# A level per role over default_effort. Roles: arquitecto, implementador,
+# revisor, auditor, cartografo. An unknown role or level is refused at load.
+# Optional; defaults to none.
+# role_effort:
+#   revisor: high
+
 # Once a revision round exceeds this number without the revisor approving,
 # subsequent implementador/revisor rounds run with the `claude --effort` flag
-# set to `escalated_effort` instead of the CLI's own default, on the theory
+# set to `escalated_effort` instead of the role's own level, on the theory
 # that a task still bouncing between implementador and revisor this many
 # times over may need more reasoning effort, not just another attempt.
 # Optional; defaults to 2 (i.e. escalate starting round 3).

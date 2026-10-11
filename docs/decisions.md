@@ -4061,3 +4061,34 @@ projects move one at a time. A refused fetch with a key asks whether its
 public half is among the repository's deploy keys. The push of C-5 is not
 built, so it has no SSH path yet; it takes the same choice when it is.
 `docker-compose.coolify.yml` mounts neither credential, as before.
+
+## ADR 57 — every phase runs at an effort the config names, per role
+
+**Status:** accepted (user, 2026-10-11, out of cycle; `docs/plans/models-5-5.md`
+step 2). Narrows the effort half of the revision loop's escalation: the
+escalation stands, and what a round below it runs at changes.
+
+**Context.** Until now a phase carried no `--effort` until its round passed
+`escalate_effort_after_round`, so it ran at whatever the image's CLI defaults
+to. Under Opus 5.5 a level thinks more per turn than the same level did
+before, and the plan sets each role's level on purpose and measures it.
+
+**Decision.**
+
+- **`default_effort`**, `medium` by default, is passed as `--effort` on every
+  phase, the cartografo's included.
+- **`role_effort`** maps a role to its own level over the default. Its keys
+  are the phase roles (`role_skills.ROLE_SKILLS` and the cartografo).
+- **The escalation wins over both** once a round passes
+  `escalate_effort_after_round`, as before. `Config.effort_for(role,
+  round_num)` is the one place this order lives.
+- **Checked at load.** `default_effort`, `escalated_effort` and each
+  `role_effort` level must be one of `low`, `medium`, `high`, `xhigh`, `max`
+  (`claude --help`, 2.1.296), and an unknown role is refused, so a misspelt
+  role cannot run at the default without a word.
+
+**Consequences.** Which level ran is in the config, not in the CLI version. A
+config that names none of the keys runs every phase at `medium`, which is
+Opus 5.5's own default, so the cost of a round below the escalation should not
+move; step 6's measurement is what decides any other level. The CLI has no
+`max_tokens` flag, so that open question closes with nothing to set.
