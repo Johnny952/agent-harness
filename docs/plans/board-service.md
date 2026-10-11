@@ -140,8 +140,9 @@ are the same task files, told apart by `status`:
   |---|---|
   | Ready | `pending`, every `depends_on` merged |
   | Waiting | `pending`, a dependency not merged yet |
-  | Arquitecto · Implementador · Revisor · Auditor | `in_progress` plus a new `phase` field the dispatcher writes as each phase starts |
+  | Arquitecto · Implementador · Revisor · Auditor · Integrador | `in_progress` plus a new `phase` field the dispatcher writes as each phase starts |
   | Awaiting review | the state `review.md` adds between the audit and the merge |
+  | Conflict | a task under review whose branch no longer merges into the base cleanly, or whose gate went red after the base moved (`review.md` *Decisions*, 6); while the integrador runs it shows in its own phase column |
   | Blocked | `blocked` |
   | Merged | the `merged` block from `task-split.md` |
 
@@ -280,7 +281,8 @@ phase that has it (`docs/plans/token-economy.md`):
     `_file_split` files it all or nothing through the module.
   - The arquitecto gets the read tools so it can see the epic and the sibling
     tasks it is planning next to.
-- **The implementador, revisor and auditor get no tools at first.** What
+- **The implementador, revisor, auditor and integrador get no tools at
+  first.** What
   they need is in their prompt and the files it names. A tool is added later
   only if a phase is seen to need one.
 - **Retries make no duplicates.** Every create is idempotent on its title
@@ -342,7 +344,7 @@ read the api; the others are Lovable drafts over mock data.
 | Debt (`/debt`) | real, read-only from `docs/debt/` | stays the index's view; each open entry links to its backlog item and shows whether it was accepted |
 | Task (`/tasks/$taskId`) | real: status, owner, dependencies, running record, declared debt | adds the description's sections, the comment thread with a form, the epic it belongs to, and its `phase` |
 | Epic | missing | new: the epic's tasks with their states, its `split_into` and `depends_on` as a graph or ordered list, and progress to merged |
-| Approvals (`/approvals`) | mock: approve or reject pushes, merges, permissions and budgets | becomes `review.md`'s screen: a task's diff with line comments and the three verdicts; it lists the *Awaiting review* column |
+| Approvals (`/approvals`) | mock: approve or reject pushes, merges, permissions and budgets | becomes `review.md`'s screen: a task's diff with line comments and the verdicts; it lists the *Awaiting review* and *Conflict* columns, with *resolve conflict* on the latter |
 | Queue (`/queue`) | mock | out of scope here; dispatching from the console waits for the C-4 ruling |
 
 Two rules keep the screens apart:

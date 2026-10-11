@@ -306,15 +306,19 @@ question [`docs/plans/front.md`](plans/front.md),
 pushes, or you are deciding whether one needs a separate authorization.
 
 A verdict a person gives on a task in the console — *approve*, *request
-changes* or *comment*, as `review.md` defines them — is that person
-authorizing what the verdict starts. It is a C-4 authorization, given from a
+changes*, *comment* or *resolve conflict*, as `review.md` defines them — is
+that person authorizing what the verdict starts. It is a C-4 authorization, given from a
 page instead of the conversation:
 
 - *request changes* spends quota: it reopens the task's cycle at the
   arquitecto, with the same account pick and quota rules as any phase;
 - *approve* spends none: it merges the task branch and pushes the base. It is
   the human's merge call and push call of C-5, taken together over the diff;
-- *comment* starts nothing.
+- *comment* starts nothing;
+- *resolve conflict* spends quota: it starts the integrador on a task whose
+  branch no longer merges cleanly. *Approve* never authorizes it in advance,
+  because a person who approved one diff has not seen the next. (Added the
+  same day.)
 
 What does not change: C-1 still makes the conversation the one place a model
 is talked to, and the console a place a person decides, not a session. C-4
