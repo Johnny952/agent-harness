@@ -3798,3 +3798,145 @@ ia-harness implementador costs X% of a window" — and one task's records are no
 a median, nor is a token count a window percentage, whose weighting is still
 unpublished. P4's surface proxy and P8's 5-point margin stand as written until
 enough of these files exist to replace them.
+
+## ADR 54 — the usage log is served verbatim, one group per attempt, and nothing in it is summed
+
+**Status:** accepted (T-024-D1, 2026-10-10, by the operator, out of cycle).
+**Narrows ADR 53 and does not supersede it**: the write, the seventeen keys and
+the file are unchanged, and this entry decides only the reader ADR 53 declined
+to — its row shape, its route and what it may compute. Extends ADR 3's route
+list by one and leaves `/api/phases` (ADR 27) as it is.
+
+**Context.** ADR 53 appends one line per `claude` call to
+`<hive_tasks_dir>/<task_id>/usage/calls.jsonl` and nothing opens it
+(`docs/debt/T-024-D1.md`). Three things make the reader's shape a decision
+rather than a detail. A line is one call, an attempt is up to four calls on one
+account, a phase is as many attempts as a failover tries, and a task is several
+phases over several rounds
+(`docs/learnings/a-phase-is-not-one-claude-call.md`). Whether a resumed call's
+`usage` counts that one turn or re-counts the session is unknown
+(`docs/debt/T-024-D2.md`), and was not probed here because this task was
+forbidden a live container. And which keys the CLI actually prints is not
+pinned — ADR 53 records `raw_keys` precisely because no stored `raw` exists to
+read them off.
+
+**Decision.** A reader and a route, and no aggregate that depends on D2.
+
+The reader is `dispatcher/context_transfer.py:read_usage(hive_dir, task_id)`,
+returning `UsageLog(lines, skipped)`. It is ADR 53's reader half, written as
+that entry states it: a line that will not parse — bad UTF-8, bad JSON, `NaN`
+or `Infinity`, nesting deep enough to raise `RecursionError`, or a value that
+is not an object — is skipped and **counted**, and the last line is trusted
+only if it ends in a newline, because an append can be cut short. Blank lines
+are skipped and not counted; they are not damage. A missing log, usage
+directory or scratch directory reads as empty, since a task that has made no
+call has written none of the three. Every other `OSError` propagates, so a
+caller can tell "no calls" from "may not look". An id that is not one path
+component raises `ValueError` before anything is opened. The count replaces an
+`unreadable()` sibling on the `LocalBoardClient` model
+(`docs/learnings/a-silently-dropping-reader-needs-an-unreadable-sibling.md`):
+the damage is per line, not per file, and a count returned by the one read is
+a second read the caller does not have to make.
+
+The route is `GET /api/tasks/<task_id>/usage`, behind the same auth as every
+other route, taking no query parameters. It answers `{"data": [group, ...],
+"warnings": [...]}`, one group per attempt in file order:
+
+```
+{"task_id": str, "role": <line's>, "round": <line's>, "account": <line's>,
+ "calls": [line, ...], "call_count": int, "call_kinds": [str],
+ "measured_calls": int, "unmeasured_calls": int,
+ "phase_call": line | null}
+```
+
+A line opens a new group when its `call` is `"phase"`, the one an attempt
+always writes first, or when its `(role, round, account)` differs from the open
+group's — what a failover or a re-dispatch looks like if a `phase` line is
+missing. Values are compared with `==` and never hashed, because a hand-edited
+line may hold a list where a string belongs.
+
+`calls` is the lines **verbatim**: nothing projected, renamed or defaulted, so
+a key the CLI adds or drops reaches the reader as it is and no subkey is
+assumed. The group adds only what is true under either answer to D2: how many
+calls, which kinds in order of first appearance, how many were measured
+(`measured is True`) and unmeasured (`is False`) — a line holding anything else
+in `measured` is in neither, so the two falling short of `call_count` is the
+sign the format drifted — and the attempt's `phase` line under `phase_call`,
+the one per-attempt figure that is right whatever D2 says, since a session's
+first call has nothing to accumulate. `phase_call` is `null` for a group with
+no `phase` line, never a retry's line promoted into its place.
+
+**Nothing is summed, averaged or totalled** — not tokens, not cost, not
+`num_turns`, not `duration_ms`. If a resumed call's `usage` is cumulative, a
+sum over an attempt's lines counts the phase's context once per retry, and the
+reader would serve a number somebody trusts that is wrong by a factor of up to
+four. So the sum is **deferred to D2's answer**, and what changes then is
+already known. If usage is per call, a per-attempt total is the sum of its
+lines' fields. If it is cumulative, it is the last line's value, or the
+consecutive differences where a per-call figure is wanted. Either way it lands
+as a **new** key on the group under a **new** ADR narrowing this one — never as
+a rewrite of `calls` and never into this entry
+(`docs/learnings/an-adr-is-never-where-a-deferred-answer-lands.md`) — and a
+null field in any line of the attempt makes that total null, on ADR 53's never
+a guessed number.
+
+Responses:
+
+- **404** `no task '<id>'` for an id `_is_bare_task_id` refuses, and `no task
+  '<id>' in <hive_tasks_dir>` when there is no task file — even if a log
+  exists for it. The detail route's two answers in its own words. A
+  `ValueError` from the reader, reachable only through `.` and `..`, which
+  pass the bare-filename check but leave the hive as a directory name, is the
+  first 404 too.
+- **200, `data: []`** for a task that has made no call.
+- **200, `data: null`** with a warning when the log cannot be read: `permission
+  denied reading the usage log`, citing this entry, for a `PermissionError`,
+  and `unreadable usage log` for any other `OSError`, or for lines whose values
+  break grouping or serialisation. `null` and not `[]`, because an empty list
+  claims the task made no call.
+- **A warning beside the data** naming how many lines were skipped, and, past
+  `MAX_USAGE_CALLS` (1000) lines, that only the newest were served — the
+  attempt a reader came for is the last one — and that the first group served
+  may lack its `phase` line.
+
+Never 500, on ADR 5; the guard wraps the use of the parsed values and not the
+parse (`docs/learnings/a-never-500-read-wraps-the-use-not-the-parse.md`).
+
+**Why a path segment and not `/api/usage?task_id=`.** The id is required and
+names one task, which this api already spells `/api/tasks/<task_id>`; a query
+parameter here is a filter on a list, and there is no unfiltered form of this
+read worth bounding — one log is one task's.
+
+**Why 404 and not ADR 27's 200 for an unknown task.** ADR 27 answers 200 on
+`/api/phases` because that route is a list filtered by task, where an empty
+list is the honest answer to a filter that matches nothing. This route is one
+task's resource, read by whatever opens `/api/tasks/<task_id>` first, and that
+route already answers 404 for the same id: a 200 here would contradict its own
+parent.
+
+**Why not per phase or per task.** A per-phase row is a total over attempts
+and a per-task row a total over phases, so both are sums and both wait on D2.
+Per call alone, a flat list, is correct under D2 but leaves the reader to
+re-derive attempts from a stream whose boundaries ADR 53 already marks, and a
+consumer that wants the flat list has it as the concatenation of `calls`.
+
+**Consequences.** The write side is unchanged, and one of its properties is
+recorded rather than fixed: `append_usage` creates the file 0644 on the
+descriptor, but the usage directory is created by `os.makedirs` at the
+dispatcher's umask, so on a host with umask 077 it is 0700 and this service's
+uid cannot list it
+(`docs/learnings/a-0644-file-under-hive-still-sits-in-a-umask-directory.md`).
+`handoffs/` and the scratch directory share the same risk. The route names that
+cause in its warning instead of serving `[]`; a fix belongs to the writer and
+to all three directories at once.
+
+No screen consumes this route, and none is built here. No console screen and
+no card owns a view of what a phase cost — the Tokens screen is a container's
+provider login (`docs/learnings/the-tokens-screen-is-logins-not-spend.md`) —
+so the route is a contract without a consumer, and `front/` is untouched. That
+work is filed as `docs/debt/T-024-D3.md`.
+
+D2 stays open and is now the only thing between this route and a per-attempt
+total. `raw_keys` travels in every served line, so the first real dispatched
+phase's log answers which keys the CLI printed without another probe. P4 is
+still not unblocked: a route over one task's lines is not a median either.

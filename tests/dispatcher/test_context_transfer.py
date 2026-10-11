@@ -22,6 +22,7 @@ from dispatcher.context_transfer import (
     read_handoff_envelope,
     read_kanban_issue_id,
     read_task_file,
+    read_usage,
     refresh_heartbeat,
     release_stale_lock,
     save_handoff,
@@ -808,6 +809,122 @@ def test_append_usage_does_not_show_up_as_a_handoff_or_a_task(tmp_path: Path) ->
 
     assert list_handoff_roles(hive_dir, "task-1") == []
     assert list_task_ids(hive_dir) == []
+
+
+def _write_usage_bytes(hive_dir: str, task_id: str, data: bytes) -> None:
+    path = usage_log_path(hive_dir, task_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Path(path).write_bytes(data)
+
+
+def test_read_usage_round_trips_what_append_usage_wrote(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    first = {"call": "phase", "account": "cuenta1", "raw_keys": ["usage"]}
+    second = {"call": "gate-retry", "account": "cuenta1", "input_tokens": None}
+    append_usage(hive_dir, "task-1", first)
+    append_usage(hive_dir, "task-1", second)
+
+    log = read_usage(hive_dir, "task-1")
+
+    assert log.lines == [first, second]
+    assert log.skipped == 0
+
+
+def test_read_usage_of_a_task_with_no_log_is_empty(tmp_path: Path) -> None:
+    # No scratch dir, and a scratch dir with no `usage/` in it: a task never
+    # dispatched and one dispatched before ADR 53 read the same.
+    hive_dir = str(tmp_path)
+    assert read_usage(hive_dir, "task-1").lines == []
+    os.makedirs(scratch_dir(hive_dir, "task-1"))
+    log = read_usage(hive_dir, "task-1")
+    assert (log.lines, log.skipped) == ([], 0)
+    # And a hive dir that is not there at all.
+    assert read_usage(str(tmp_path / "missing"), "task-1").lines == []
+
+
+def test_read_usage_skips_blank_lines_without_counting_them(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    _write_usage_bytes(hive_dir, "task-1", b'\n{"call": "phase"}\n   \n\n{"call": "gate-retry"}\n')
+
+    log = read_usage(hive_dir, "task-1")
+
+    assert [line["call"] for line in log.lines] == ["phase", "gate-retry"]
+    assert log.skipped == 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        b"not json at all",
+        b'{"call": "phase"',  # cut short, but newline-terminated
+        b"\xff\xfe garbage",  # not UTF-8
+        b"[1, 2, 3]",  # parses, but not an object
+        b'"a string"',
+        b"42",
+        b"null",
+        b'{"input_tokens": NaN}',  # Python's json admits it; JSON does not
+        b'{"input_tokens": Infinity}',
+        b"[" * 100_000,  # costs `json` a RecursionError
+    ],
+)
+def test_read_usage_skips_and_counts_a_line_that_is_not_a_record(tmp_path: Path, bad: bytes) -> None:
+    hive_dir = str(tmp_path)
+    _write_usage_bytes(hive_dir, "task-1", b'{"call": "phase"}\n' + bad + b'\n{"call": "gate-retry"}\n')
+
+    log = read_usage(hive_dir, "task-1")
+
+    assert log.lines == [{"call": "phase"}, {"call": "gate-retry"}]
+    assert log.skipped == 1
+
+
+def test_read_usage_never_trusts_a_last_line_with_no_newline(tmp_path: Path) -> None:
+    # Even one that parses: `append_usage` writes a record and its newline in
+    # one call, so a line without one is not the record its writer meant.
+    hive_dir = str(tmp_path)
+    _write_usage_bytes(hive_dir, "task-1", b'{"call": "phase"}\n{"call": "gate-retry"}')
+    log = read_usage(hive_dir, "task-1")
+    assert log.lines == [{"call": "phase"}]
+    assert log.skipped == 1
+
+    _write_usage_bytes(hive_dir, "task-1", b'{"call": "phase"}\n{"call": "gate-re')
+    log = read_usage(hive_dir, "task-1")
+    assert log.lines == [{"call": "phase"}]
+    assert log.skipped == 1
+
+
+@pytest.mark.parametrize("task_id", ["", ".", "..", "a/b", "../task-1", "a\0b"])
+def test_read_usage_refuses_a_task_id_that_is_not_one_path_component(tmp_path: Path, task_id: str) -> None:
+    # `..`'s scratch dir is the hive dir's parent: a log planted there must not
+    # be reachable through this function.
+    hive_dir = tmp_path / "hive"
+    hive_dir.mkdir()
+    planted = tmp_path / "usage" / "calls.jsonl"
+    planted.parent.mkdir()
+    planted.write_text('{"call": "phase"}\n')
+
+    with pytest.raises(ValueError):
+        read_usage(str(hive_dir), task_id)
+
+
+def test_read_usage_raises_a_permission_error_rather_than_reading_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A log this process may not read is a different fact from no log; the
+    # caller says which. Monkeypatched rather than chmodded, so the test holds
+    # when the suite runs as root.
+    hive_dir = str(tmp_path)
+    append_usage(hive_dir, "task-1", {"call": "phase"})
+    real_open = open
+
+    def denied(path, *args, **kwargs):
+        if str(path) == usage_log_path(hive_dir, "task-1"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", denied)
+
+    with pytest.raises(PermissionError):
+        read_usage(hive_dir, "task-1")
 
 
 def _card_with_body(tmp_path: Path, body: str) -> str:

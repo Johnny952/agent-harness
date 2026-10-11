@@ -40,6 +40,7 @@ ROUTES = [
     "/api/events",
     "/api/debt",
     "/api/phases",
+    "/api/tasks/T-1/usage",
     "/api/learnings",
 ]
 
@@ -1607,6 +1608,330 @@ def test_the_answer_is_clamped_and_the_clamp_names_itself(
     assert len(body["data"]) == 2
     assert "3 phase records" in body["warnings"][0]
     assert "?task_id=" in body["warnings"][0]
+
+
+# --- usage ----------------------------------------------------------------
+
+#: The fields of a usage line that hold a measured quantity: the ones a sum
+#: would be made of, and therefore the ones no group key may carry a total of.
+_MEASURED_FIELDS = (
+    "num_turns",
+    "duration_ms",
+    "total_cost_usd",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _call(
+    role: str = "implementador",
+    round_num: int | None = 1,
+    account: str = "cuenta1",
+    call: str = "phase",
+    measured: bool = True,
+    tokens: int = 100,
+) -> dict:
+    """One usage line with the seventeen keys `dispatcher._usage_record` writes."""
+    return {
+        "task_id": "T-1",
+        "role": role,
+        "round": round_num,
+        "account": account,
+        "call": call,
+        "session_id": "s-1" if measured else None,
+        "recorded_at": "2026-10-10T00:00:00+00:00",
+        "measured": measured,
+        "raw_keys": ["usage", "total_cost_usd"] if measured else [],
+        "is_error": False if measured else None,
+        "num_turns": 3 if measured else None,
+        "duration_ms": 1000 if measured else None,
+        "total_cost_usd": 0.25 if measured else None,
+        "input_tokens": tokens if measured else None,
+        "output_tokens": tokens if measured else None,
+        "cache_read_input_tokens": tokens if measured else None,
+        "cache_creation_input_tokens": tokens if measured else None,
+    }
+
+
+def _usage(tasks_dir: str, task_id: str, *records: dict) -> None:
+    # Through the dispatcher's own writer, per this module's docstring.
+    for record in records:
+        context_transfer.append_usage(tasks_dir, task_id, record)
+
+
+def test_usage_groups_a_tasks_calls_by_the_attempt_that_made_them(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    phase = _call(tokens=10)
+    gate = _call(call="gate-retry", tokens=20)
+    review = _call(call="review-retry", measured=False)
+    _usage(harness.tasks_dir, "T-1", phase, gate, review)
+
+    body = _get(harness, "/api/tasks/T-1/usage").get_json()
+
+    assert body["warnings"] == []
+    assert body["data"] == [
+        {
+            "task_id": "T-1",
+            "role": "implementador",
+            "round": 1,
+            "account": "cuenta1",
+            # Verbatim: every key the writer wrote, and nothing projected.
+            "calls": [phase, gate, review],
+            "call_count": 3,
+            "call_kinds": ["phase", "gate-retry", "review-retry"],
+            "measured_calls": 2,
+            "unmeasured_calls": 1,
+            "phase_call": phase,
+        }
+    ]
+
+
+def test_usage_starts_a_new_group_on_failover_and_on_re_dispatch(tmp_path: Path) -> None:
+    # Failover: the next account's attempt writes its own `phase` line. A
+    # re-dispatch on the same account does too. A line whose `(role, round,
+    # account)` changed opens a group even without one, so a log missing a
+    # `phase` line never folds two attempts into one.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _usage(
+        harness.tasks_dir,
+        "T-1",
+        _call(account="cuenta1"),
+        _call(account="cuenta1", call="shrink-retry"),
+        _call(account="cuenta2"),
+        _call(account="cuenta2"),  # re-dispatched, same key
+        _call(role="revisor", account="cuenta2", call="gate-retry"),  # no phase line
+        _call(role="implementador", round_num=2, account="cuenta2", call="gate-retry"),
+    )
+
+    groups = _get(harness, "/api/tasks/T-1/usage").get_json()["data"]
+
+    assert [(g["role"], g["round"], g["account"], g["call_count"]) for g in groups] == [
+        ("implementador", 1, "cuenta1", 2),
+        ("implementador", 1, "cuenta2", 1),
+        ("implementador", 1, "cuenta2", 1),
+        ("revisor", 1, "cuenta2", 1),
+        ("implementador", 2, "cuenta2", 1),
+    ]
+    # A group with no `phase` line says so rather than promoting a retry.
+    assert [g["phase_call"] is None for g in groups] == [False, False, False, True, True]
+
+
+def test_usage_never_sums_a_measured_field_across_calls(tmp_path: Path) -> None:
+    # `docs/debt/T-024-D2.md`: whether a resumed call's usage is cumulative is
+    # unknown, so a total across `calls` may count the phase twice. The only
+    # place a measured value may appear is inside a line served verbatim.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _usage(
+        harness.tasks_dir,
+        "T-1",
+        _call(tokens=100),
+        _call(call="gate-retry", tokens=250),
+        _call(call="review-retry", tokens=700),
+    )
+
+    (group,) = _get(harness, "/api/tasks/T-1/usage").get_json()["data"]
+
+    assert set(group) == {
+        "task_id",
+        "role",
+        "round",
+        "account",
+        "calls",
+        "call_count",
+        "call_kinds",
+        "measured_calls",
+        "unmeasured_calls",
+        "phase_call",
+    }
+    outside_lines = {k: v for k, v in group.items() if k not in ("calls", "phase_call")}
+    for field in _MEASURED_FIELDS:
+        assert field not in outside_lines
+    # Neither the sum of the tokens nor the sum of the cost appears anywhere
+    # outside the verbatim lines, under any key.
+    for total in (100 + 250 + 700, 2 * (100 + 250 + 700), 0.75):
+        assert total not in outside_lines.values()
+    # And the phase line is the phase line, not a total dressed as one.
+    assert group["phase_call"]["input_tokens"] == 100
+
+
+def test_usage_counts_neither_measured_nor_unmeasured_for_a_drifted_line(tmp_path: Path) -> None:
+    # The two counts falling short of `call_count` is the signal.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    drifted = {**_call(call="gate-retry"), "measured": "yes"}
+    unknown_kind = {**_call(), "call": ["phase"]}
+    _usage(harness.tasks_dir, "T-1", _call(), drifted, unknown_kind)
+
+    groups = _get(harness, "/api/tasks/T-1/usage").get_json()["data"]
+
+    # A `call` that is not a string is neither a kind nor a `phase` line, so it
+    # stays in the group its key puts it in.
+    assert len(groups) == 1
+    (group,) = groups
+    assert group["call_count"] == 3
+    assert (group["measured_calls"], group["unmeasured_calls"]) == (2, 0)
+    assert group["call_kinds"] == ["phase", "gate-retry"]
+
+
+def test_usage_of_a_task_that_made_no_call_is_an_empty_list_and_no_warning(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    resp = _get(harness, "/api/tasks/T-1/usage")
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"data": [], "warnings": []}
+
+
+def test_usage_of_a_task_with_no_task_file_is_404_like_the_detail_route(tmp_path: Path) -> None:
+    # Even when a log is there: the task file is what makes the id a task.
+    harness = _harness(tmp_path)
+    _usage(harness.tasks_dir, "T-9", _call())
+
+    resp = _get(harness, "/api/tasks/T-9/usage")
+
+    assert resp.status_code == 404
+    assert "T-9" in resp.get_json()["error"]
+    assert _get(harness, "/api/tasks/T-9").status_code == 404
+
+
+@pytest.mark.parametrize("task_id", ["..", ".", "..%2F..", "a%2Fb", "a%5Cb"])
+def test_usage_of_an_id_that_is_not_bare_is_404_and_reads_nothing(
+    tmp_path: Path, task_id: str
+) -> None:
+    # `..`'s scratch dir is the hive dir's parent. A log planted there, and a
+    # task file that would make `..` look like a task, must not be served.
+    harness = _harness(tmp_path)
+    planted = Path(harness.tasks_dir).parent / "usage" / "calls.jsonl"
+    planted.parent.mkdir()
+    planted.write_text(json.dumps(_call()) + "\n")
+    (Path(harness.tasks_dir) / "...md").write_text("---\ntask_id: ..\n---\n")
+
+    resp = _get(harness, f"/api/tasks/{task_id}/usage")
+
+    assert resp.status_code == 404
+    assert "data" not in (resp.get_json(silent=True) or {})
+
+
+def test_usage_answers_404_if_the_reader_refuses_an_id_the_route_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The second lock, pinned on its own: `read_usage` refusing is a 404 and
+    # never a 500, whatever the route checked first.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    def refuse(hive_dir: str, task_id: str):
+        raise ValueError("not a single path component")
+
+    monkeypatch.setattr(context_transfer, "read_usage", refuse)
+
+    resp = _get(harness, "/api/tasks/T-1/usage")
+
+    assert resp.status_code == 404
+    assert set(resp.get_json()) == {"error"}
+
+
+def test_usage_the_api_may_not_read_is_null_and_a_warning_saying_permission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The 0700 directory case ADR 54 records: not a 500, not `[]` (which would
+    # say the task made no call), and worded apart from any other failure.
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    def denied(hive_dir: str, task_id: str):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(context_transfer, "read_usage", denied)
+
+    resp = _get(harness, "/api/tasks/T-1/usage")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["data"] is None
+    (warning,) = body["warnings"]
+    assert "permission denied" in warning
+    assert context_transfer.usage_log_path(harness.tasks_dir, "T-1") in warning
+    assert "ADR 54" in warning
+
+
+def test_usage_that_fails_to_read_another_way_is_null_and_a_different_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    def broken(hive_dir: str, task_id: str):
+        raise IsADirectoryError(21, "Is a directory")
+
+    monkeypatch.setattr(context_transfer, "read_usage", broken)
+
+    body = _get(harness, "/api/tasks/T-1/usage").get_json()
+
+    assert body["data"] is None
+    (warning,) = body["warnings"]
+    assert "unreadable usage log" in warning
+    assert "permission denied" not in warning
+
+
+def test_usage_lines_the_reader_skipped_are_counted_in_a_warning(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _usage(harness.tasks_dir, "T-1", _call())
+    path = context_transfer.usage_log_path(harness.tasks_dir, "T-1")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("garbage\n[1]\n{\"call\": \"gate-re")  # two bad, one cut short
+
+    body = _get(harness, "/api/tasks/T-1/usage").get_json()
+
+    assert len(body["data"]) == 1
+    assert body["data"][0]["call_count"] == 1
+    (warning,) = body["warnings"]
+    assert path in warning
+    assert "3 unreadable usage line(s)" in warning
+
+
+def test_the_usage_answer_is_clamped_to_the_newest_lines_and_names_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api_app, "MAX_USAGE_CALLS", 2)
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _usage(
+        harness.tasks_dir,
+        "T-1",
+        _call(round_num=1),
+        _call(round_num=2),
+        _call(round_num=2, call="gate-retry"),
+    )
+
+    body = _get(harness, "/api/tasks/T-1/usage").get_json()
+
+    assert [(g["round"], g["call_count"]) for g in body["data"]] == [(2, 2)]
+    (warning,) = body["warnings"]
+    assert "3 usage lines" in warning
+    assert "newest 2" in warning
+
+
+def test_reading_the_usage_route_writes_nothing(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _get(harness, "/api/tasks/T-1/usage")
+    assert not Path(context_transfer.scratch_dir(harness.tasks_dir, "T-1")).exists()
+
+    _usage(harness.tasks_dir, "T-1", _call())
+    path = Path(context_transfer.usage_log_path(harness.tasks_dir, "T-1"))
+    before = path.read_bytes()
+    _get(harness, "/api/tasks/T-1/usage")
+    assert path.read_bytes() == before
 
 
 # --- learnings ------------------------------------------------------------
