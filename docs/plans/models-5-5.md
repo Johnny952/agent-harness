@@ -1,7 +1,7 @@
 # Models 5.5 — pinned model IDs, explicit effort, and prompts fit for unattended phases
 
 **Status:** proposed by the main thread on 2026-10-11 at the user's ask.
-Steps 1 to 5 built the same day (ADRs 57 and 58); step 6 not built. **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
+Steps 1 to 6 built the same day (ADRs 57 and 58; step 6 measured on T-025). **Priority 1** of the 2026-10-11 list (`server-deployment.md`, *The
 order across the plans*): it touches only the config, the role prompts and
 the console's model list, and it changes the cost of every phase after it.
 It follows Anthropic's guide to prompting Opus 5.5, read that day.
@@ -125,18 +125,38 @@ Each step is a single surface:
    by step" or "explain your reasoning", and lets a mention through, such as
    "push back with technical reasoning".
 5. The mock's model list and role map. A front task, behind its own ask for
-   a build. Built 2026-10-11 in the source, typechecked and tested, not
-   built: `MODEL_OPTIONS` names the three 5.5 IDs, and the role map follows
+   a build. Built 2026-10-11, typechecked, tested and built
+   (`bun run build` passed): `MODEL_OPTIONS` names the three 5.5 IDs, and the role map follows
    `config.yaml` (the cartografo on `mapping_model`, the rest on
    `default_model`). The `context_k` values stay the mock's 200.
 6. One measured task run at `medium` against the last comparable run at the
    old settings (`token-economy.md`). Spends quota, so it waits for the
-   user's go.
+   user's go. Run 2026-10-11 with the user's go, on T-025 (step 1 of
+   `task-split.md`), from `.hive/tasks/T-025/usage/calls.jsonl`. Every phase
+   at `medium`, all on cuenta2, one round, no handoff resume, every gate
+   passed, the revisor approving at once; about nine minutes and $4.03 in all:
+
+   | Phase | Turns | Cache read | Cache write | Output | Duration |
+   |---|---|---|---|---|---|
+   | arquitecto | 20 | 315k | 126k | 12.3k | 137 s |
+   | implementador r1 | 38 | 525k | 81k | 16.0k | 158 s |
+   | revisor r1 | 13 | 131k | 58k | 4.3k | 52 s |
+   | auditor | 37 | 601k | 85k | 13.0k | 137 s |
+
+   Against T-016's first round (`claude-opus-5`, no effort passed), the
+   implementador went from 148 turns, 19.7M cache read and 70k output to 38,
+   525k and 16k, and the revisor from 66, 7.0M and 44k to 13, 131k and 4.3k.
+   Not a controlled comparison: T-025 is a much smaller task (+484 lines over
+   four files), so the drop cannot be laid on the model or the effort alone.
+   What it shows is that a whole cycle at `medium` lands in one round with no
+   resume; no role's level is changed on it.
 
 ## Open questions
 
 - **Haiku.** Whether any role, the cartografo first, may run a smaller model
-  is decided after step 6.
+  was to be decided after step 6. Still open: T-025 ran no cartografo, so
+  step 6 says nothing about it, and the question needs a measured mapping run
+  of its own, at the user's go.
 - **`max_tokens`.** The guide suggests about 128k for long agentic turns.
   Checked at step 2: `claude --help` in 2.1.296 lists no flag for it, under
   `-p` or otherwise, so the harness has nothing to set. It stays the CLI's.
