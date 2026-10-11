@@ -13,6 +13,9 @@ before it could send a message was given the same day (C-1, C-8 and C-12,
 history per thread with separators where its session, account or model
 changed (*Decisions*, 2 and 5), and the next task started by a button on the
 board rather than by the thread (`board-service.md`, *Starting development*).
+Amended again the same day, on the user's third round: a task that runs gets
+an execution thread beside the main one, chosen from a selector, and kept
+until the task closes (*Decisions*, 8; `projects.md`).
 
 ## The goal
 
@@ -80,7 +83,9 @@ Each thread is a file in the hive, `threads/<id>.json`, with these fields:
 - `segments`, the stretches of the thread, oldest first. Each one holds
   `session_id`, `account`, `model`, `effort` and `from` (the time it began),
   and a new one starts whenever any of them changes;
-- `created` and `status`.
+- `created` and `status`;
+- `task`, set only on a thread opened to talk about one task (*Decisions*,
+  8), and empty on the main thread.
 
 Because sessions live on the shared volume, a thread's account can change
 between turns: the next turn runs on the account the record names, under the
@@ -90,7 +95,8 @@ does not remember across.
 
 There is one main thread, the one the console opens on. Others may be opened
 beside it, one per project or line of work, as `balancer.md` already allows,
-but the main thread is the console's centre.
+but the main thread is the console's centre. A task's execution thread is not
+one of these records unless the person talks to it (*Decisions*, 8).
 
 ### 3. The primary is assigned from the console
 
@@ -145,8 +151,9 @@ draws a separator that says what changed and why:
 
 The screen has three parts:
 
-- the list of threads, the main one first, each showing its current account
-  and model;
+- the selector: the main thread first, then each running task's execution
+  thread (*Decisions*, 8), then any other thread, each showing its current
+  account and model;
 - the history;
 - the composer, which waits for *Decisions*, 1.
 
@@ -190,6 +197,38 @@ state, the board and the thread's records. It is a new segment, so the
 history goes on with a separator rather than in a new thread. A thread never
 compacts by itself.
 
+### 8. Each running task has an execution thread, chosen from the selector
+
+When a task is started (`board-service.md`, *Starting development*), the
+selector gains an entry for it, and loses it when the task is merged or
+dropped. The user settled its shape on 2026-10-11: the task is already
+written and designed when it starts, so its thread follows the workflow
+rather than drives it, and talking to it is optional.
+
+- **It is a view first.** The dispatcher drives the cycle, one `claude -p`
+  per phase, so the execution thread shows that cycle in one scroll: the
+  person's note from the start, each phase as a segment with its role,
+  account and model, the phase's stream events under the same switch as the
+  main thread's, its handoff, and each gate's result. It spends no quota of
+  its own. The separators are drawn from the phases, as the main thread's are
+  from its segments.
+- **The note is its first line.** The person's note from *Start development*
+  heads the thread, as it heads the task's comments.
+- **Talking to it is a button.** *Talk about this task* opens a thread record
+  with `task` set, on the primary by default, seeded with the task's
+  description, its handoffs so far and the note. From then on the execution
+  thread shows that conversation's turns between the phases. It does not stop
+  or steer the cycle: that is still the board's buttons.
+- **It is temporary.** When the task closes, the entry leaves the selector
+  and is reachable from the task's view. Its events stay on disk as every
+  phase's do; a `conversations/<thread>.jsonl` opened for it is kept like any
+  other (*Decisions*, 6).
+- **The selector shows the limit.** Above the execution threads it shows the
+  slots of `projects.md` *Decisions*, 6: one per account that may take a
+  phase, what is on each, and which started tasks wait and why. A task that is
+  started but waiting has an entry too, marked with the reason, so the person
+  sees that approving a third task with two accounts queues it.
+
 ## How it would be built
 
 Each step is a single surface. Steps 2 onward need `board-service.md`'s queue
@@ -204,6 +243,10 @@ and worker.
    task, behind its own ask for a build.
 5. The composer and *stop*, now that *Decisions*, 1 is ruled.
 6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`).
+7. The execution threads and the selector's slots (*Decisions*, 8). They read
+   what the phases already write, so they need board Phase 5's transport and
+   `projects.md`'s slots, not the composer. *Talk about this task* comes with
+   step 5.
 
 ## Open questions
 

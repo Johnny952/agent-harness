@@ -1928,7 +1928,7 @@ depends on. A gate that fails reshapes the item before any design work.
 | 6. Observability and hardening | V0.5, V0.6b | Note: the dispatcher mounts `claude_shared` and `docker.sock` |
 | 7. Code-intelligence tooling | D4 (for `--mcp-config`), D7 | Memory headroom for indexers, as in D6; D7 sizes the per-worktree index |
 | 8. Mid-phase compaction | — | Only if V3 or stage 1 runs show long phases failing |
-| 9. Parallel dispatch | V5 | Low value with 2 accounts |
+| 9. Parallel dispatch | V5 | Low value with 2 accounts. Across projects it comes with `docs/plans/projects.md` (one cycle per project). Within a project, and a fair share of quota between projects, are taken last, on the user's word of 2026-10-11 (`projects.md`, *Decisions*, 5) |
 | 10. Multi-provider containers | V1 and V5.1 per provider | The target CLI needs headless JSON output and session resume |
 
 ### Deferred gates

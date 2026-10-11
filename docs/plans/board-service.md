@@ -233,20 +233,33 @@ ruling before it is built (*Open questions*).
   already queued or running shows no button, so a double click starts
   nothing twice.
 - **What it does.** The board service writes an action
-  `{kind: "start", task, by, at}` to the queue, and the worker opens the
+  `{kind: "start", task, by, at, note}` to the queue, and the worker opens the
   task's cycle when an account is free, under `balancer.md`'s pick and quota
-  rules. Until then the card shows *Queued, waiting for an account*, with
-  *Cancel*. Once a phase has started, cancelling is the dispatcher's own
+  rules, and no other task of the same project is running (`projects.md`,
+  *Decisions*, 5). Until then the card shows *Queued, waiting for an account*
+  or *Queued, waiting for the project*, with *Cancel*. Once a phase has started, cancelling is the dispatcher's own
   stop, not this button.
 - **What it authorizes.** The task's cycle, from the arquitecto to *Awaiting
   review*, including the dispatcher's own retries, and nothing after it:
   *request changes* and *resolve conflict* stay their own verdicts. Before it
   queues anything, the button says so, with the roles the cycle runs, the
   state of the pool, and the cost of past cycles when there is one to show.
-  It never shows a guessed estimate.
+  It never shows a guessed estimate. It also shows the slots: how many
+  accounts may take a phase now and where the task would stand
+  (`projects.md`, *Decisions*, 6).
+- **A note with the start.** Added on the user's word, 2026-10-11. The
+  confirmation has an optional text box. Its text goes in the action's `note`
+  and, when the worker takes the start, becomes a comment from `operator` in
+  the task's `comments.jsonl`. The arquitecto's prompt names that file when
+  the cycle starts with a note, so the first role reads it; later roles find
+  it there as the person's word. The note adds context to the task; it does
+  not widen what the start authorizes. *Start epic* takes one note for the
+  epic, copied to each task it queues.
 - **Per epic.** The epic's view has *Start epic*. It queues the epic's
   *Ready* tasks, and each later task as its dependencies merge, in the
-  board's order. As many run at once as there are free accounts. It covers
+  board's order. One task of the epic runs at a time, since its tasks share a
+  project (`projects.md`, *Decisions*, 5): the next is queued when the one
+  before it is awaiting review. It covers
   the tasks in `split_into` when the button is pressed, and the sub-tasks the
   arquitecto splits them into; a task added to the epic later is not
   covered, because the person has not seen it. *Stop epic* drops what is
