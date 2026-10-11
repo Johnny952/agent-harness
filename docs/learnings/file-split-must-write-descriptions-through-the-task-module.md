@@ -5,7 +5,15 @@ onward of `docs/plans/task-split.md` section 8), or any other code that
 creates a task file together with its description.
 
 **Status:** unconfirmed — read off the plan by T-026's implementador and
-revisor; the code it warns about is not written yet.
+revisor, before the code it warns about was written. T-029 built it as this
+entry says: `file_split` is in `dispatcher/tasks.py`, writes no `description`
+key and stores each ask through `write_description`
+(`docs/implementations/T-029.md`, *`file_split`, as built*). The plan's
+section 2 still carries the sketch, so the trap is still there for task 3's
+`_file_split` and for any other filer. The two open choices under *What to
+do* are decided: the entry's own description must carry the sections (a
+`SplitError` otherwise, nothing is wrapped), and the order is description
+first, task file second, parent last.
 
 ## What is true
 
