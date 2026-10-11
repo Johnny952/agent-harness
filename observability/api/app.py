@@ -511,15 +511,17 @@ def create_app(
             # `data: null` and not `[]`: an empty list says the task made no
             # call, which is a different claim from "the api may not look".
             # Named apart from the other `OSError`s because it has one known
-            # cause here: `append_usage` makes the directory at the
-            # dispatcher's umask, and a 0700 one is closed to this service's
-            # uid. ADR 54 records it.
+            # cause here: a 0700 scratch or usage directory, closed to this
+            # service's uid. ADR 54 records it; ADR 55 makes the dispatcher
+            # create both 0755, so what is left is a directory made before
+            # that, or by something other than the dispatcher.
             return _envelope(
                 None,
                 [
                     f"{path}: permission denied reading the usage log: {exc} "
-                    "(the usage directory may be 0700 under the dispatcher's umask; "
-                    "docs/decisions.md ADR 54)"
+                    "(the task's scratch or usage directory may be 0700 — made at "
+                    "the dispatcher's umask before docs/decisions.md ADR 55, or "
+                    "not by the dispatcher; ADR 54)"
                 ],
             )
         except OSError as exc:

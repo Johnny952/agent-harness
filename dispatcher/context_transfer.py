@@ -103,9 +103,60 @@ def scratch_dir(hive_dir: str, task_id: str) -> str:
     return os.path.join(hive_dir, task_id)
 
 
+#: The mode of a directory the dispatcher creates under the hive tasks dir:
+#: `_write_atomic`'s 0644 with the traverse bit, for the same readers.
+_DIR_MODE = 0o755
+
+
+def _makedirs_readable(hive_dir: str, path: str) -> None:
+    """`os.makedirs(path, exist_ok=True)`, leaving what it made 0755 whatever the umask.
+
+    The directory half of the rule `_write_atomic` and `append_usage` keep for
+    files (`docs/decisions.md` ADR 55): a 0644 file in a directory made at a
+    077 umask is still closed to `observability/api/` over its `:ro` mount as
+    another uid, and to an agent container that is not root
+    (`docs/learnings/a-0644-file-under-hive-still-sits-in-a-umask-directory.md`).
+
+    Only below `hive_dir`, and only what this call created. The hive tasks dir
+    itself is made, if missing, at the umask as before: it and everything above
+    it belong to whoever set up `.hive/`, and widening them is not this
+    module's call. Each component under it is `os.mkdir`ed on its own, and a
+    `FileExistsError` — there already, or made by another process a moment ago
+    — leaves its mode alone, so this never changes a directory some other uid
+    owns, and the `exist_ok` race has one answer: whoever's `mkdir` won owns
+    the mode. The chmod is on a descriptor opened `O_NOFOLLOW`, because the
+    scratch dir is writable by the phases and a name swapped for a symlink in
+    the window between `mkdir` and chmod must not redirect it.
+
+    Raises `ValueError` for a `path` that is not under `hive_dir`, and `OSError`
+    to its caller, chmod failures included: `append_usage`'s rule, so each
+    caller decides whether its write may fail on this — `_UsageRecorder`
+    swallows, `save_handoff` and the cycle's `ensure_scratch_dir` do not.
+    """
+    hive = os.path.abspath(hive_dir)
+    rel = os.path.relpath(os.path.abspath(path), hive)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        raise ValueError(f"{path!r} is not under the hive tasks dir {hive_dir!r}")
+    os.makedirs(hive, exist_ok=True)
+    if rel == os.curdir:
+        return
+    current = hive
+    for part in rel.split(os.sep):
+        current = os.path.join(current, part)
+        try:
+            os.mkdir(current, _DIR_MODE)
+        except FileExistsError:
+            continue
+        fd = os.open(current, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(fd, _DIR_MODE)  # The umask masked the mode above.
+        finally:
+            os.close(fd)
+
+
 def ensure_scratch_dir(hive_dir: str, task_id: str) -> str:
     path = scratch_dir(hive_dir, task_id)
-    os.makedirs(path, exist_ok=True)
+    _makedirs_readable(hive_dir, path)
     return path
 
 
@@ -157,6 +208,10 @@ def save_handoff(
         "saved_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "handoff": payload,
     }
+    # Made here rather than by `_write_atomic`'s own mkdir, which cannot tell
+    # the hive from what is under it: `handoffs/` and the scratch dir have to
+    # be traversable by `/api/phases`' uid, the file alone is not enough.
+    _makedirs_readable(hive_dir, os.path.dirname(path))
     _write_atomic(path, json.dumps(envelope, indent=2, sort_keys=True) + "\n")
     return path
 
@@ -260,14 +315,16 @@ def append_usage(hive_dir: str, task_id: str, record: dict) -> str:
     and the reader ADR 53 names is `observability/api/` over a `:ro` mount as
     another uid. `open(..., "a")` would create at the process umask, so the
     file is created `O_EXCL` and `fchmod`ed instead: only at creation, on the
-    descriptor, so this never changes the mode of a file another uid owns.
+    descriptor, so this never changes the mode of a file another uid owns. The
+    directories it creates on the way are 0755 by `_makedirs_readable`, for
+    the same reader (ADR 55).
 
     Raises `OSError` to its caller. Swallowing belongs at the call site, where
     the dispatcher knows this is bookkeeping on a path that may already be
     failing and must never be what fails a phase.
     """
     path = usage_log_path(hive_dir, task_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _makedirs_readable(hive_dir, os.path.dirname(path))
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError:
@@ -486,6 +543,12 @@ def _write_atomic(path: str, content: str) -> None:
     directory, because `os.replace` is only atomic within one filesystem, and
     carries a non-".md" suffix so a leftover from a crash is never picked up
     by `list_task_ids` as a task.
+
+    The file is 0644 whatever the umask; the mkdir below is not, and is left
+    at the umask on purpose, because for a task file its parent is the hive
+    tasks dir itself. A caller writing under a task's scratch dir makes the
+    parent with `_makedirs_readable` first, as `save_handoff` does, so this
+    mkdir finds it there.
     """
     parent = Path(path).parent
     parent.mkdir(parents=True, exist_ok=True)

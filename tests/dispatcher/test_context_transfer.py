@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from dispatcher.context_transfer import (
+    _makedirs_readable,
     acquire_lock,
     append_usage,
+    ensure_scratch_dir,
     handoff,
     handoff_path,
     has_phase_section,
@@ -798,6 +800,106 @@ def test_append_usage_leaves_the_log_readable_whatever_the_umask(tmp_path: Path)
         os.umask(previous)
 
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+
+
+@pytest.fixture
+def tight_umask():
+    """A dispatcher started under umask 077, restored whatever the test does."""
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: str) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def test_the_directories_a_task_gets_are_traversable_whatever_the_umask(
+    tmp_path: Path, tight_umask: None
+) -> None:
+    # ADR 55: the 0644 files are no use to `observability/api/`'s uid if the
+    # directories on the way are 0700, which is what a 077 umask makes them.
+    hive_dir = str(tmp_path / "tasks")
+    os.mkdir(hive_dir, 0o700)
+
+    handoff_file = save_handoff(hive_dir, "task-1", "revisor", {"verdict": "APPROVED"})
+    usage_file = append_usage(hive_dir, "task-2", {"call": "phase"})
+    scratch = ensure_scratch_dir(hive_dir, "task-3")
+
+    for directory in (
+        scratch_dir(hive_dir, "task-1"),
+        os.path.dirname(handoff_file),
+        scratch_dir(hive_dir, "task-2"),
+        os.path.dirname(usage_file),
+        scratch,
+    ):
+        assert _mode(directory) == 0o755, directory
+    assert _mode(handoff_file) == 0o644
+    assert _mode(usage_file) == 0o644
+    # The hive tasks dir is not one this module made; its mode is its owner's.
+    assert _mode(hive_dir) == 0o700
+
+
+def test_a_directory_that_was_already_there_keeps_its_mode(
+    tmp_path: Path, tight_umask: None
+) -> None:
+    # Only what the call created is chmodded: a scratch dir made earlier — by
+    # an older dispatcher, a phase, or the operator — is somebody's choice.
+    hive_dir = str(tmp_path)
+    os.mkdir(scratch_dir(hive_dir, "task-1"))
+    os.chmod(scratch_dir(hive_dir, "task-1"), 0o710)
+
+    usage_file = append_usage(hive_dir, "task-1", {"call": "phase"})
+    save_handoff(hive_dir, "task-1", "revisor", None)
+    ensure_scratch_dir(hive_dir, "task-1")
+
+    assert _mode(scratch_dir(hive_dir, "task-1")) == 0o710
+    assert _mode(os.path.dirname(usage_file)) == 0o755
+    assert _mode(os.path.dirname(handoff_path(hive_dir, "task-1", "revisor"))) == 0o755
+
+
+def test_a_hive_tasks_dir_that_is_missing_is_made_but_not_widened(
+    tmp_path: Path, tight_umask: None
+) -> None:
+    # `os.makedirs` used to make the hive and its parents too; that stays, at
+    # the umask, because nothing at or above the hive is this module's to open.
+    hive_dir = str(tmp_path / "a" / "tasks")
+
+    ensure_scratch_dir(hive_dir, "task-1")
+
+    assert _mode(hive_dir) == 0o700
+    assert _mode(str(tmp_path / "a")) == 0o700
+    assert _mode(scratch_dir(hive_dir, "task-1")) == 0o755
+
+
+def test_makedirs_readable_refuses_a_path_outside_the_hive(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path / "tasks")
+
+    for outside in (str(tmp_path), str(tmp_path / "elsewhere"), os.path.join(hive_dir, "..", "x")):
+        with pytest.raises(ValueError):
+            _makedirs_readable(hive_dir, outside)
+    assert not (tmp_path / "tasks").exists()
+    assert not (tmp_path / "elsewhere").exists()
+    assert not (tmp_path / "x").exists()
+
+
+def test_makedirs_readable_does_not_chmod_through_a_link_it_did_not_make(
+    tmp_path: Path, tight_umask: None
+) -> None:
+    # A name that already exists — here a link a phase could plant in its
+    # writable scratch dir — is not created by this call, so it is not chmodded
+    # and neither is what it points at.
+    hive_dir = str(tmp_path / "tasks")
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    os.makedirs(scratch_dir(hive_dir, "task-1"))
+    os.symlink(target, os.path.join(scratch_dir(hive_dir, "task-1"), "usage"))
+
+    append_usage(hive_dir, "task-1", {"call": "phase"})
+
+    assert _mode(str(target)) == 0o700
 
 
 def test_append_usage_does_not_show_up_as_a_handoff_or_a_task(tmp_path: Path) -> None:

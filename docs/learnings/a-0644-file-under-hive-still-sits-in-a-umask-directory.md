@@ -30,6 +30,15 @@ traverse to it.
 The file half is the half that has a rule and a test; the directory half has
 neither, in this module or anywhere under `dispatcher/`.
 
+Since `docs/decisions.md` **ADR 55** (2026-10-10, out of cycle) that is no
+longer true of the scratch dir, `handoffs/` and `usage/`:
+`context_transfer._makedirs_readable` makes each directory it creates below the
+hive tasks dir 0755 whatever the umask, and `ensure_scratch_dir`,
+`save_handoff` and `append_usage` go through it. It leaves alone what it did
+not create — a directory made before ADR 55, the hive tasks dir itself, and
+whatever a phase or the gates log makes — so the trap still applies to any
+other directory on the path, and to a new writer that calls `os.makedirs`.
+
 ## The file half, and how to get it right
 
 Worth knowing alongside, because the two are usually written in one go.
@@ -68,5 +77,7 @@ Read by hand in `dispatcher/context_transfer.py` — `scratch_dir`,
 round 2 and confirmed by its auditor against the same four symbols. The file
 half is covered by
 `tests/dispatcher/test_context_transfer.py:test_append_usage_leaves_the_log_readable_whatever_the_umask`,
-which was red at 0600 under a `077` umask before the `fchmod`; no test covers
-the directory half.
+which was red at 0600 under a `077` umask before the `fchmod`. The directory
+half is covered since ADR 55 by
+`test_the_directories_a_task_gets_are_traversable_whatever_the_umask` in the
+same file.
