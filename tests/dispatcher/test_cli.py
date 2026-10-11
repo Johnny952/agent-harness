@@ -893,3 +893,50 @@ def test_cli_run_phase_exits_with_the_held_code_when_no_account_took_it(
 
     assert excinfo.value.code == cli_mod.EXIT_HELD
     assert "held" in capsys.readouterr().err
+
+
+def _keygen(monkeypatch, config_path: Path, *extra: str) -> None:
+    monkeypatch.setattr(sys, "argv", [
+        "ia-harness-dispatcher", "--config", str(config_path), "project-keygen", *extra,
+    ])
+    cli_mod.main()
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ssh-keygen"), reason="no ssh-keygen")
+def test_cli_project_keygen_prints_the_public_half_and_never_the_private(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    keys = tmp_path / "keys"
+
+    _keygen(monkeypatch, _write_config(tmp_path), "--project", "myproj", "--keys-dir", str(keys))
+
+    out = capsys.readouterr().out
+    public = (keys / "myproj" / "id_ed25519.pub").read_text().strip()
+    assert out.splitlines()[0] == public
+    assert "fingerprint: 256 SHA256:" in out and "Deploy keys" in out
+    assert "PRIVATE KEY" not in out
+    private_body = (keys / "myproj" / "id_ed25519").read_text().splitlines()[1]
+    assert private_body not in out
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ssh-keygen"), reason="no ssh-keygen")
+def test_cli_project_keygen_refuses_an_existing_key_without_replace(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    keys = tmp_path / "keys"
+    config_path = _write_config(tmp_path)
+    _keygen(monkeypatch, config_path, "--project", "myproj", "--keys-dir", str(keys))
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as exc:
+        _keygen(monkeypatch, config_path, "--project", "myproj", "--keys-dir", str(keys))
+
+    assert exc.value.code == cli_mod.EXIT_BLOCKED
+    assert "--replace" in capsys.readouterr().err
+
+
+def test_cli_project_keygen_rejects_a_bad_slug(tmp_path: Path, monkeypatch) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _keygen(monkeypatch, _write_config(tmp_path), "--project", "../x", "--keys-dir", str(tmp_path / "k"))
+
+    assert exc.value.code == 2

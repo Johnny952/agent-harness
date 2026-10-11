@@ -12,10 +12,13 @@ FROM node:24-bookworm-slim
 
 # python3-requests comes from apt: it is what /usr/bin/python3 needs for the
 # observability hook, which runs as bare `python3` and must keep working even
-# if the venv below is ever bypassed.
+# if the venv below is ever bypassed. openssh-client is for a project's deploy
+# key (docs/plans/projects.md, Decisions 2): git fetches over SSH with
+# GIT_SSH_COMMAND naming the key, and the host key it trusts is pinned below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
+        openssh-client \
         python3 \
         python3-requests \
         python3-venv \
@@ -51,6 +54,12 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
         "pytest>=8.0"
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
+# github.com's host keys, pinned in the system-wide known_hosts so ssh never
+# has to accept one on first use, which would trust whoever answers first. The
+# dispatcher's ssh command also sets StrictHostKeyChecking=yes and points the
+# per-user file at /dev/null, so this file is the only thing ssh trusts.
+COPY docker/agent/github_known_hosts /etc/ssh/ssh_known_hosts
 
 # bun, for the gate that runs front/'s typecheck, test and lint scripts (see
 # docs/README.md's `install:`, `test:` and `lint:`). front/ is a bun project —

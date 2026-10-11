@@ -124,6 +124,10 @@ class Config:
     update_project_before_task: bool = False
     #: Where that credential is read from, inside the container.
     git_credentials_path: str = docker_exec.GIT_CREDENTIALS_PATH
+    #: Where each project's SSH deploy key is, inside the container: one
+    #: directory per slug, made by `project-keygen`. A project with a key there
+    #: fetches over SSH and the credential above is not consulted.
+    project_keys_dir: str = docker_exec.PROJECT_KEYS_DIR
     #: Which account the conversational thread runs under, or None for a flat
     #: pool. None is the shape every config had before this existed, and it
     #: keeps the picker's old behaviour exactly: no account is ranked last, no
@@ -486,6 +490,7 @@ def load_config(path: str) -> Config:
         git_credentials_path=raw.get(
             "git_credentials_path", docker_exec.GIT_CREDENTIALS_PATH
         ),
+        project_keys_dir=raw.get("project_keys_dir", docker_exec.PROJECT_KEYS_DIR),
         primary_account=primary_account,
         reserve_pct=reserve_pct,
         fallback_roles=_load_fallback_roles(raw),

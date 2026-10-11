@@ -4017,3 +4017,47 @@ name that cause rather than today's dispatcher. Other writers under the scratch
 dir — the gates' test log, whatever a phase writes there — are not this
 entry's; neither are `learnings.ensure_dirs`' directories, which sit beside the
 hive tasks dir, not under it.
+
+## ADR 56 — a project with a deploy key fetches over SSH, and the key is made on the dispatcher's side
+
+**Status:** accepted (user, 2026-10-11, out of cycle; `docs/plans/projects.md`
+step 2). **Supersedes ADR 36's *Consequences*** where they say an `ssh://` or
+`git@…` remote is always `unavailable` because the agent image has no ssh. ADR
+36's flag, its HTTPS store, its fast-forward-only rule and its outcomes stand.
+
+**Context.** ADR 36 fetched with one HTTPS token, mounted from the host, and a
+personal access token usually opens every repository of its owner. The user
+asked first, among the projects work, for a key per project: a GitHub deploy
+key opens one repository and is revoked from that one
+(`docs/plans/projects.md`, *Decisions*, 2).
+
+**Decision.**
+
+- **Both images carry `openssh-client`.** The agent image copies
+  `docker/agent/github_known_hosts` to `/etc/ssh/ssh_known_hosts`: github.com's
+  three published host keys, pinned, checked against GitHub's published
+  fingerprints by `tests/integration/test_agent_dockerfile.py`. Trusting the
+  first answer would trust whoever answers first.
+- **The key lives at `{project_keys_dir}/<slug>/id_ed25519`.**
+  `project_keys_dir` defaults to `/run/secrets/projects`, from the host's
+  `.data/credentials/projects`: writable in the dispatcher, read-only in the
+  agents, never backed up, never in the environment.
+- **`project-keygen --project <slug>`** runs `ssh-keygen -t ed25519` with no
+  passphrase and the comment `ia-harness:<slug>`, under a temporary name moved
+  into place, and refuses an existing key without `--replace`. It prints the
+  public half, its fingerprint and where to paste it; nothing in it reads the
+  private half.
+- **`update_project_branch` chooses per project.** When the remote is SSH or
+  `https://github.com/` and the key file exists, it fetches with
+  `GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes -o BatchMode=yes -o
+  StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null"`; an HTTPS GitHub
+  remote goes through `-c url.git@github.com:.insteadOf=https://github.com/`
+  for that one command, so the operator's remote is still never rewritten.
+  Otherwise it uses ADR 36's store. An SSH remote with no key is `unavailable`
+  and names the key path and `project-keygen`.
+
+**Consequences.** The token keeps working for every project without a key, so
+projects move one at a time. A refused fetch with a key asks whether its
+public half is among the repository's deploy keys. The push of C-5 is not
+built, so it has no SSH path yet; it takes the same choice when it is.
+`docker-compose.coolify.yml` mounts neither credential, as before.

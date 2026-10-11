@@ -54,6 +54,13 @@ services:
       # at that path has to go first. It is gitignored (.gitignore ignores
       # .data/), one line in git's `store` format, and needs no write scope.
       - ../../.data/credentials/git-credentials:/run/secrets/git-credentials:ro
+      # Each project's SSH deploy key, at <slug>/id_ed25519, made by the
+      # dispatcher's `project-keygen` (docs/plans/projects.md, Decisions 2).
+      # Read-only here: an agent uses a key, it never makes or replaces one. A
+      # directory mount, so the missing-source trap of the file above does not
+      # apply: Docker creates it empty, and a project with no key in it falls
+      # back to the https:// credential.
+      - ../../.data/credentials/projects:/run/secrets/projects:ro
     depends_on:
       - dind-cuenta1
     networks:
@@ -93,6 +100,7 @@ services:
       - ../../.hive:/data/.hive
       # See agent-cuenta1: the same host file, shared, read-only.
       - ../../.data/credentials/git-credentials:/run/secrets/git-credentials:ro
+      - ../../.data/credentials/projects:/run/secrets/projects:ro
     depends_on:
       - dind-cuenta2
     networks:

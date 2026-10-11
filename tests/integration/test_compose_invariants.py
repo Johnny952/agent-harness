@@ -401,3 +401,27 @@ def test_the_flask_board_service_is_gone_from_both_files(compose_file: str) -> N
 
     `vibe-kanban` is a different board and stays."""
     assert "board" not in _load(compose_file)["services"]
+
+
+def _short_volumes(service: dict) -> list[str]:
+    return [v for v in service.get("volumes", []) if isinstance(v, str)]
+
+
+def test_every_agent_mounts_the_deploy_keys_read_only() -> None:
+    # A phase runs in an agent with the model's hands on the shell, so it may
+    # use a project's key to fetch but never make, replace or delete one
+    # (docs/plans/projects.md, Decisions 2; charter C-5).
+    services = _load("docker-compose.agents.yml")["services"]
+    agents = [name for name in services if name.startswith("agent-")]
+    assert agents
+    for name in agents:
+        mounts = [v for v in _short_volumes(services[name]) if ":/run/secrets/projects" in v]
+        assert mounts == ["../../.data/credentials/projects:/run/secrets/projects:ro"], name
+
+
+def test_the_dispatcher_mounts_the_deploy_keys_writable_at_the_agents_path() -> None:
+    # `project-keygen` runs in the dispatcher and writes the pair there; the
+    # same container path lets one `project_keys_dir` name both sides.
+    dispatcher = _load("docker-compose.yml")["services"]["dispatcher"]
+    mounts = [v for v in _short_volumes(dispatcher) if ":/run/secrets/projects" in v]
+    assert mounts == ["../../.data/credentials/projects:/run/secrets/projects"]

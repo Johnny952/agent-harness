@@ -171,3 +171,47 @@ def test_rejects_unpinned_variants(name: str) -> None:
 
     with pytest.raises(AssertionError):
         _assert_claude_code_pinned(mutated)
+
+
+KNOWN_HOSTS_PATH = DOCKERFILE_PATH.parent / "github_known_hosts"
+
+# github.com's SSH host key fingerprints, as GitHub publishes them
+# (docs.github.com, "GitHub's SSH key fingerprints", checked 2026-10-11).
+GITHUB_FINGERPRINTS = {
+    "ssh-ed25519": "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+    "ecdsa-sha2-nistp256": "SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM",
+    "ssh-rsa": "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+}
+
+
+def _final_stage(text: str) -> str:
+    return text[text.rfind("\nFROM "):]
+
+
+def test_the_agent_image_has_an_ssh_client() -> None:
+    joined = _final_stage(_read()).replace("\\\n", " ")
+    assert re.search(r"apt-get install[^\n]*\bopenssh-client\b", joined)
+
+
+def test_the_agent_image_pins_githubs_host_keys_system_wide() -> None:
+    # Pinned, not accepted on first use, which would trust whoever answers
+    # first; system-wide, so ssh reads it whatever UserKnownHostsFile says.
+    assert re.search(
+        r"^COPY docker/agent/github_known_hosts /etc/ssh/ssh_known_hosts$",
+        _final_stage(_read()), re.MULTILINE,
+    )
+
+
+def test_the_pinned_host_keys_are_the_ones_github_publishes() -> None:
+    import base64
+    import hashlib
+
+    found = {}
+    for line in KNOWN_HOSTS_PATH.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        host, kind, blob = line.split()[:3]
+        assert host == "github.com"
+        digest = hashlib.sha256(base64.b64decode(blob)).digest()
+        found[kind] = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+    assert found == GITHUB_FINGERPRINTS

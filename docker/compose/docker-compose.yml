@@ -139,6 +139,11 @@ services:
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
+      # The projects' deploy keys, writable here and read-only in the agents:
+      # `project-keygen` writes a pair at <slug>/id_ed25519, and only this side
+      # makes one (charter C-5). The same container path as the agents', so the
+      # one `project_keys_dir` in config.yaml names both. Never backed up.
+      - ../../.data/credentials/projects:/run/secrets/projects
       # No config.yaml exists in this repo yet — the operator must copy
       # ../../config.example.yaml to ../../config.yaml (and adjust values)
       # at this host path before `docker compose up`.

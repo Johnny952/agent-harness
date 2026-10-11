@@ -1670,6 +1670,7 @@ def update_project_branch(cfg: Config, slug: str) -> docker_exec.UpdateOutcome |
             cfg.projects_root,
             slug,
             credentials_path=cfg.git_credentials_path,
+            keys_dir=cfg.project_keys_dir,
         )
     finally:
         docker_exec.restore_owner(container, project_dir, owner)

@@ -1741,6 +1741,7 @@ def _update_responder(
     *,
     branch=("main", 0),
     credential=True,
+    key=False,
     url="https://github.com/me/proj.git",
     url_rc=0,
     fetch=(0, "", ""),
@@ -1752,11 +1753,14 @@ def _update_responder(
     """A docker exec that answers each of the update's probes separately.
 
     Defaults describe the uninteresting case: on a branch, credential mounted,
-    https remote, fetch works, nothing to do. Each test spoils one of them.
+    no deploy key, https remote, fetch works, nothing to do. Each test spoils
+    one of them.
     """
 
     def respond(args):
         if args[:2] == ["test", "-f"]:
+            if args[2].endswith("/id_ed25519"):
+                return (0 if key else 1, "", "")
             return (0 if credential else 1, "", "")
         if args[:2] == ["git", "symbolic-ref"]:
             name, rc = branch
@@ -1884,20 +1888,126 @@ def test_update_project_branch_asks_for_a_file_not_merely_a_path(monkeypatch) ->
 
     _update(monkeypatch, calls)
 
-    probe = next(args for args in map(_in_container, calls) if args[0] == "test")
-    assert probe == ["test", "-f", docker_exec_mod.GIT_CREDENTIALS_PATH]
+    probes = [args for args in map(_in_container, calls) if args[0] == "test"]
+    assert ["test", "-f", docker_exec_mod.GIT_CREDENTIALS_PATH] in probes
+    assert all(probe[1] == "-f" for probe in probes)
 
 
-def test_update_project_branch_reports_an_ssh_remote_rather_than_rewriting_it(monkeypatch) -> None:
-    """The mounted credential only answers for https, and the image has no ssh."""
+_KEY = "/run/secrets/projects/myproj/id_ed25519"
+
+
+def _fetch_cmd(calls):
+    return next(cmd for cmd in calls if "fetch" in _in_container(cmd))
+
+
+def _ssh_command(cmd):
+    """The GIT_SSH_COMMAND a recorded docker exec was given, or None."""
+    for part in cmd:
+        if part.startswith("GIT_SSH_COMMAND="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def test_update_project_branch_reports_an_ssh_remote_with_no_deploy_key(monkeypatch) -> None:
+    """No key for an SSH remote: said, with the command that makes one, not rewritten."""
     calls = []
 
     outcome = _update(monkeypatch, calls, url="git@github.com:me/proj.git")
 
     assert outcome.status == docker_exec_mod.UNAVAILABLE
-    assert "https://" in outcome.detail
+    assert _KEY in outcome.detail and "project-keygen --project myproj" in outcome.detail
     assert not [args for args in map(_in_container, calls) if "fetch" in args]
     assert not [args for args in map(_in_container, calls) if "set-url" in args]
+
+
+def test_update_project_branch_fetches_an_ssh_remote_with_its_deploy_key(monkeypatch) -> None:
+    """One key, never a prompt, and only the host keys the image pins."""
+    calls = []
+
+    outcome = _update(monkeypatch, calls, key=True, url="git@github.com:me/proj.git", counts="0\t1\n")
+
+    assert outcome.status == docker_exec_mod.UPDATED
+    cmd = _fetch_cmd(calls)
+    ssh = _ssh_command(cmd)
+    assert ssh is not None and f"-i {_KEY}" in ssh
+    for option in ("IdentitiesOnly=yes", "BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=/dev/null"):
+        assert option in ssh
+    fetch = _in_container(cmd)
+    assert fetch[1] == "fetch"
+    assert not [part for part in fetch if "credential.helper" in part]
+    assert ["test", "-f", docker_exec_mod.GIT_CREDENTIALS_PATH] not in map(_in_container, calls)
+
+
+def test_update_project_branch_fetches_a_github_https_clone_over_ssh_when_it_has_a_key(monkeypatch) -> None:
+    """insteadOf for the one command, so the operator's remote is left as it is."""
+    calls = []
+
+    _update(monkeypatch, calls, key=True)
+
+    cmd = _fetch_cmd(calls)
+    assert _ssh_command(cmd) is not None
+    fetch = _in_container(cmd)
+    assert fetch[1:3] == ["-c", "url.git@github.com:.insteadOf=https://github.com/"]
+    assert not [part for part in fetch if "credential.helper" in part]
+    assert not [args for args in map(_in_container, calls) if "set-url" in args]
+
+
+def test_update_project_branch_keeps_the_token_for_an_https_remote_off_github(monkeypatch) -> None:
+    """A key could not reach it through insteadOf, so the store is used, and the key is not probed."""
+    calls = []
+
+    _update(monkeypatch, calls, key=True, url="https://gitlab.example/me/proj.git")
+
+    cmd = _fetch_cmd(calls)
+    assert _ssh_command(cmd) is None
+    assert _in_container(cmd)[2].startswith("credential.helper=store")
+    assert ["test", "-f", _KEY] not in map(_in_container, calls)
+
+
+def test_update_project_branch_names_the_deploy_key_in_a_refused_fetch(monkeypatch) -> None:
+    outcome = _update(
+        monkeypatch,
+        key=True,
+        url="git@github.com:me/proj.git",
+        fetch=(128, "", "git@github.com: Permission denied (publickey).\n"),
+    )
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert "Permission denied (publickey)" in outcome.detail
+    assert _KEY in outcome.detail and "deploy key" in outcome.detail
+
+
+def test_update_project_branch_reports_a_remote_that_is_neither_ssh_nor_https(monkeypatch) -> None:
+    calls = []
+
+    outcome = _update(monkeypatch, calls, url="/srv/git/proj.git")
+
+    assert outcome.status == docker_exec_mod.UNAVAILABLE
+    assert not [args for args in map(_in_container, calls) if "fetch" in args]
+
+
+def test_update_project_branch_uses_the_keys_dir_it_is_given(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker(calls, _update_responder(key=True, url="ssh://git@github.com/me/proj.git")),
+    )
+
+    update_project_branch(_CONTAINER, "/data/projects", "myproj", keys_dir="/k")
+
+    assert "-i /k/myproj/id_ed25519" in _ssh_command(_fetch_cmd(calls))
+
+
+def test_is_ssh_remote_tells_the_forms_apart() -> None:
+    assert docker_exec_mod.is_ssh_remote("git@github.com:me/proj.git")
+    assert docker_exec_mod.is_ssh_remote("ssh://git@github.com/me/proj.git")
+    assert not docker_exec_mod.is_ssh_remote("https://github.com/me/proj.git")
+    assert not docker_exec_mod.is_ssh_remote("/srv/git/proj.git")
+    assert not docker_exec_mod.is_ssh_remote("file:///srv/git/proj.git")
+
+
+def test_ssh_command_quotes_the_key_path() -> None:
+    assert "-i '/a b/id_ed25519'" in docker_exec_mod.ssh_command("/a b/id_ed25519")
 
 
 def test_update_project_branch_reports_a_missing_remote(monkeypatch) -> None:

@@ -265,10 +265,25 @@ update_project_before_task: false
 # agent by docker-compose.agents.yml, which is both why the containers can be
 # thrown away without logging each one in again and why it must never be passed
 # as an environment variable: run_docker_exec puts env on the `docker exec`
-# argv, where any `ps` on the host reads it. The project's remote must be
-# https:// for this credential to answer for it — the agent image ships no ssh.
-# Optional; defaults to /run/secrets/git-credentials.
+# argv, where any `ps` on the host reads it. This credential only answers for
+# an https:// remote; a project with a deploy key (project_keys_dir) uses that
+# instead. Optional; defaults to /run/secrets/git-credentials.
 git_credentials_path: /run/secrets/git-credentials
+
+# Where each project's SSH deploy key is, inside the containers: one directory
+# per project slug holding id_ed25519 and id_ed25519.pub. On the host it is
+# .data/credentials/projects, mounted read-only into the agents and writable
+# into the dispatcher's container, and never backed up. Make a key with
+#   dispatch project-keygen --project <slug>
+# which prints only the public half and its fingerprint; add that half under the
+# repository's Settings -> Deploy keys. A deploy key opens that one repository,
+# where a token usually opens every repository of its owner. A project with a
+# key fetches over SSH with it: an SSH remote as it is, and an
+# https://github.com/ clone through a one-command url.insteadOf, so the remote
+# is never rewritten. A project with no key keeps the https:// credential above.
+# Only github.com's host keys are pinned in the agent image. Optional; defaults
+# to /run/secrets/projects.
+project_keys_dir: /run/secrets/projects
 
 # A project with no docs index (docs/README.md) gets one mapping phase before
 # the arquitecto: a read-only role that walks the checkout and writes the

@@ -541,3 +541,17 @@ def test_load_config_rejects_a_blank_fallback_role(tmp_path: Path, bad_entry: st
 
     with pytest.raises(ValueError, match="fallback_roles entries must be non-empty strings"):
         load_config(str(config_path))
+
+
+def test_load_config_defaults_project_keys_dir_to_the_mount(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    assert load_config(str(config_path)).project_keys_dir == "/run/secrets/projects"
+
+
+def test_load_config_reads_project_keys_dir(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nproject_keys_dir: /keys\n")
+
+    assert load_config(str(config_path)).project_keys_dir == "/keys"

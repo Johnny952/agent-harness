@@ -3,6 +3,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
+import shlex
 import subprocess
 from collections.abc import Sequence
 
@@ -545,6 +547,52 @@ too — containers are built to be thrown away, and a file on the host outlives
 them and is shared by every agent without logging each one in.
 """
 
+PROJECT_KEYS_DIR = "/run/secrets/projects"
+"""Where a container is handed each project's SSH deploy key.
+
+One subdirectory per project slug, holding `id_ed25519` and its `.pub`
+(project_key_path). Read-only in the agents and writable only in the
+dispatcher's container, where `project-keygen` makes a pair
+(dispatcher/project_keys.py): a deploy key opens one repository, where the
+token at GIT_CREDENTIALS_PATH usually opens every repository of its owner
+(docs/plans/projects.md, Decisions 2).
+"""
+
+PROJECT_KEY_NAME = "id_ed25519"
+
+
+def project_key_path(keys_dir: str, slug: str) -> str:
+    """The private half of `slug`'s deploy key, under `keys_dir`."""
+    return f"{keys_dir}/{slug}/{PROJECT_KEY_NAME}"
+
+
+def ssh_command(key_path: str) -> str:
+    """The GIT_SSH_COMMAND that fetches with exactly one key and never asks.
+
+    IdentitiesOnly so ssh offers this key and no other it finds; BatchMode so
+    a refused key fails instead of prompting on a terminal nobody watches; and
+    StrictHostKeyChecking=yes with the per-user known_hosts pointed at
+    /dev/null, so the only host keys trusted are the ones the agent image pins
+    in /etc/ssh/ssh_known_hosts (docker/agent/github_known_hosts) and none is
+    ever accepted on first use. It goes on the `docker exec` argv as env, which
+    `ps` reads, and that is fine: it names a path, never a secret.
+    """
+    return (
+        f"ssh -i {shlex.quote(key_path)} -o IdentitiesOnly=yes -o BatchMode=yes "
+        f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null"
+    )
+
+
+# `git@github.com:owner/repo.git`, git's scp-like form, or an ssh:// URL.
+_SCP_LIKE_REMOTE = re.compile(r"^[\w.-]+@[\w.-]+:(?!//)")
+_GITHUB_HTTPS = "https://github.com/"
+_GITHUB_SSH = "git@github.com:"
+
+
+def is_ssh_remote(url: str) -> bool:
+    return url.startswith("ssh://") or bool(_SCP_LIKE_REMOTE.match(url))
+
+
 UPDATED = "updated"
 UNCHANGED = "unchanged"
 DIVERGED = "diverged"
@@ -568,8 +616,9 @@ class UpdateOutcome:
       task never gave it ends blocked and says so rather than inventing one.
       This is the only blocking outcome.
     * UNAVAILABLE — the update could not be attempted: no remote, an SSH remote
-      the mounted credential cannot serve, or a fetch that failed, a private
-      remote with no credential mounted for it among the reasons it can fail.
+      with no deploy key for its project, a remote that is neither SSH nor
+      https://, or a fetch that failed, a private remote with no credential
+      mounted for it among the reasons it can fail.
       The base is then as stale as it was before any of this existed, which is
       the behaviour every run had until now, so it is a warning and not a stop.
     """
@@ -621,6 +670,7 @@ def update_project_branch(
     remote: str = "origin",
     credentials_path: str = GIT_CREDENTIALS_PATH,
     timeout: float | None = None,
+    keys_dir: str = PROJECT_KEYS_DIR,
 ) -> UpdateOutcome:
     """Fast-forward the project's own checkout onto its remote, or say why not.
 
@@ -635,6 +685,12 @@ def update_project_branch(
     Nothing here pushes, so the credential it asks for only ever needs to read,
     and a public remote needs none: the mounted file is named to git only when
     it is there, and a fetch that then fails is reported rather than prevented.
+
+    A project with a deploy key (project_key_path) fetches over SSH with it, and
+    the https:// token is not consulted: an SSH remote as it is, and an
+    `https://github.com/` clone through `url.<ssh>.insteadOf` for this one
+    command, so the operator's remote is never rewritten. A project with no key
+    keeps the token, so the token works until every project has moved.
 
     The fetch is `--quiet` and the comparison is against FETCH_HEAD rather than
     refs/remotes/<remote>/<branch>: what was just fetched is what we want to
@@ -655,48 +711,77 @@ def update_project_branch(
         return UpdateOutcome(
             UNAVAILABLE, f"{project_dir} has no remote named {remote}; {branch} left as it is"
         )
-    if not url.stdout.strip().startswith("https://"):
-        # Said rather than fixed: rewriting someone's remote is a change to
-        # their clone, and the credential format mounted here can only answer
-        # for HTTPS. The agent image ships no ssh at all, so an SSH remote
-        # cannot be fetched from in here by any means.
+    remote_url = url.stdout.strip()
+    ssh_remote = is_ssh_remote(remote_url)
+    key_path = project_key_path(keys_dir, slug)
+    # Probed only for a remote it could serve, and with `test -f` for the same
+    # reason as the credential below. A key for a host other than github.com is
+    # used too; the image pins no host key for it, so that fetch fails on the
+    # host check and says so, rather than trusting the first answer.
+    has_key = (ssh_remote or remote_url.startswith(_GITHUB_HTTPS)) and (
+        run_docker_exec(container, "/", ["test", "-f", key_path]).returncode == 0
+    )
+    # Without GIT_TERMINAL_PROMPT a credential git cannot find turns into a
+    # prompt on a terminal nobody is watching, and the call hangs until the
+    # phase timeout instead of failing in a second with a reason.
+    env = {**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"}
+    if has_key:
+        env["GIT_SSH_COMMAND"] = ssh_command(key_path)
+        # `-c` and not `remote set-url`: rewriting someone's remote is a change
+        # to their clone, and this lasts for the one fetch.
+        git_args = (
+            [] if ssh_remote
+            else ["-c", f"url.{_GITHUB_SSH}.insteadOf={_GITHUB_HTTPS}"]
+        )
+        missing = (
+            f" (with the deploy key at {key_path}; is its public half one of "
+            f"the repository's deploy keys?)"
+        )
+    elif ssh_remote:
         return UpdateOutcome(
             UNAVAILABLE,
-            f"{remote} is not an https:// remote, which is the only kind the "
-            f"mounted credential can serve; {branch} left as it is",
+            f"{remote} is an SSH remote and there is no deploy key at {key_path} "
+            f"(`project-keygen --project {slug}` makes one); {branch} left as it is",
         )
-
-    # `test -f` and not path_exists's `test -e`, because the thing most likely to
-    # be at this path is a directory: a bind mount whose host source does not
-    # exist gets one created for it, so the operator who brought the agents up
-    # before writing the credential file has an empty directory here, and a
-    # directory is not something git's store helper can read.
-    has_credential = (
-        run_docker_exec(container, "/", ["test", "-f", credentials_path]).returncode == 0
-    )
-    # A missing credential is not a reason to skip the fetch, only a reason not
-    # to name a helper. A public repo over https needs no credential at all, and
-    # this runs against whatever project the operator put under projects_root. A
-    # private remote refuses in a second instead, and comes back through the
-    # failure below in git's own words with the path that was looked for added.
-    helper = (
-        ["-c", f"credential.helper=store --file={credentials_path}"]
-        if has_credential
-        else []
-    )
+    elif not remote_url.startswith("https://"):
+        # Said rather than fixed: rewriting someone's remote is a change to
+        # their clone, and the credential format mounted here can only answer
+        # for HTTPS.
+        return UpdateOutcome(
+            UNAVAILABLE,
+            f"{remote} is neither an SSH nor an https:// remote, the only kinds "
+            f"a deploy key or the mounted credential can serve; {branch} left as it is",
+        )
+    else:
+        # `test -f` and not path_exists's `test -e`, because the thing most
+        # likely to be at this path is a directory: a bind mount whose host
+        # source does not exist gets one created for it, so the operator who
+        # brought the agents up before writing the credential file has an empty
+        # directory here, and a directory is not something git's store helper
+        # can read.
+        has_credential = (
+            run_docker_exec(container, "/", ["test", "-f", credentials_path]).returncode == 0
+        )
+        # A missing credential is not a reason to skip the fetch, only a reason
+        # not to name a helper. A public repo over https needs no credential at
+        # all, and this runs against whatever project the operator put under
+        # projects_root. A private remote refuses in a second instead, and comes
+        # back through the failure below in git's own words with the path that
+        # was looked for added.
+        git_args = (
+            ["-c", f"credential.helper=store --file={credentials_path}"]
+            if has_credential
+            else []
+        )
+        missing = "" if has_credential else f" (no credential file at {credentials_path})"
     fetched = run_docker_exec(
         container, project_dir,
-        ["git", *helper, "fetch", "--quiet", remote, branch],
-        # Without this a credential git cannot find turns into a prompt on a
-        # terminal nobody is watching, and the call hangs until the phase
-        # timeout instead of failing in a second with a reason.
-        env={**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"},
+        ["git", *git_args, "fetch", "--quiet", remote, branch],
+        env=env,
         timeout=timeout,
     )
     if fetched.returncode != 0:
-        why = _output_tail(fetched)
-        if not has_credential:
-            why = f"{why} (no credential file at {credentials_path})"
+        why = f"{_output_tail(fetched)}{missing}"
         return UpdateOutcome(
             UNAVAILABLE,
             f"fetching {branch} from {remote} failed; {branch} left as it is: {why}",

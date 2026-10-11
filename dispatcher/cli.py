@@ -3,11 +3,20 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
 
-from dispatcher import context_transfer, docker_exec, learnings, operator, project_docs, role_skills
+from dispatcher import (
+    context_transfer,
+    docker_exec,
+    learnings,
+    operator,
+    project_docs,
+    project_keys,
+    role_skills,
+)
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     CycleOutcome,
@@ -401,6 +410,27 @@ def main() -> None:
         "account away; /usage cannot see that.",
     )
 
+    keygen_parser = sub.add_parser(
+        "project-keygen",
+        help="Make an SSH deploy key for one project and print its public half "
+        "and fingerprint, never the private one. Add the public half under the "
+        "repository's Settings -> Deploy keys; from then on the project fetches "
+        "over SSH with it instead of the https:// credential.",
+    )
+    keygen_parser.add_argument("--project", required=True, help="Project slug")
+    keygen_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Make a new pair over an existing one. The old public key stops "
+        "working at once and stays on GitHub until you delete it there.",
+    )
+    keygen_parser.add_argument(
+        "--keys-dir",
+        help="Where the keys live on this machine; defaults to project_keys_dir. "
+        "From the host rather than the dispatcher's container, that is "
+        ".data/credentials/projects.",
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -563,6 +593,34 @@ def main() -> None:
         print(outcome.detail)
     elif args.command == "learnings":
         _run_learnings(args, cfg)
+    elif args.command == "project-keygen":
+        _run_project_keygen(args, cfg, parser)
+
+
+def _run_project_keygen(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:
+    keys_dir = args.keys_dir or cfg.project_keys_dir
+    try:
+        key = project_keys.generate(keys_dir, args.project, replace=args.replace)
+    except ValueError as exc:
+        parser.error(str(exc))
+    except project_keys.KeyExists as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # ssh-keygen's stderr says nothing of the key it did not make, so it is
+        # safe to show; a missing binary is an OSError with no stderr at all.
+        why = getattr(exc, "stderr", None) or exc
+        print(f"could not make a key for {args.project}: {why}", file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    print(key.public)
+    print(f"fingerprint: {key.fingerprint}")
+    print(
+        f"Add the line above under the repository's Settings -> Deploy keys: "
+        f"read-only for fetching, with write access only if this project pushes "
+        f"its task branches. The private half stays at {key.path}."
+    )
+    if args.replace:
+        print("The key it replaced stays on GitHub until you delete it there.")
 
 
 if __name__ == "__main__":

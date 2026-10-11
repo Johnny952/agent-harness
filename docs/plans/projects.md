@@ -50,8 +50,16 @@ Checked on 2026-10-11.
   `update_project_branch` only fetches, and its comment notes the mount can
   only answer HTTPS. A personal access token usually reaches every repository
   of its owner.
-- **The agent image has no SSH client.** `ssh` and `ssh-keygen` are not in
-  `docker/agent/Dockerfile`.
+- **SSH with a deploy key, since step 2 (2026-10-11).** Both images carry
+  `openssh-client`; the agent image pins github.com's host keys in
+  `/etc/ssh/ssh_known_hosts`. `project-keygen --project <slug>` makes a pair
+  at `.data/credentials/projects/<slug>/id_ed25519`, mounted writable in the
+  dispatcher and read-only in the agents at `/run/secrets/projects`, and
+  prints only the public half and its fingerprint. `update_project_branch`
+  fetches over SSH when the project has a key (an HTTPS GitHub remote through
+  `url.git@github.com:.insteadOf`, never rewritten), and through the HTTPS
+  store otherwise. The push of C-5 is not built yet, so it has no SSH path.
+  `docker-compose.coolify.yml` mounts neither credential.
 - **Locks.** A task is locked to one dispatcher by `acquire_lock`
   (`dispatcher/context_transfer.py`), and a phase locks one account through
   `pick_account`. Nothing locks a project: two cycles of one project could
@@ -206,11 +214,11 @@ module; steps 2, 4 and 5 need its queue and worker.
 
 1. **The project record**, and `project` on every card, with its migration.
    The dispatcher reads the record's settings over `config.yaml`'s.
-2. **SSH in the dispatcher.** The image's `openssh-client` and pinned host
-   key, `GIT_SSH_COMMAND`, and a CLI command, `dispatch project keygen
-   <slug>`, that makes the pair and prints the public half. This is the part
-   the user put first, and it needs no console: until the queue exists, the
-   operator runs the command.
+2. **SSH in the dispatcher.** Built 2026-10-11. The image's `openssh-client`
+   and pinned host key, `GIT_SSH_COMMAND`, and a CLI command, `project-keygen
+   --project <slug>`, that makes the pair and prints the public half. This is
+   the part the user put first, and it needs no console: until the queue
+   exists, the operator runs the command.
 3. **The worker's one-cycle-per-project rule**, and the epic taking one task
    at a time.
 4. **The sidebar and the routes**, read-only first: the project's screens
