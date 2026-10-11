@@ -5,7 +5,6 @@ import logging
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 from dispatcher import (
@@ -22,16 +21,9 @@ from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     CycleOutcome,
     cleanup_container,
-    close_resolved_debt,
     container_for,
     run_single_phase,
     run_task_cycle,
-)
-from dispatcher.vibe_kanban_client import (
-    KanbanClient,
-    LocalBoardClient,
-    NullKanbanClient,
-    VibeKanbanClient,
 )
 
 
@@ -139,35 +131,6 @@ def _resolve_description(
     return text
 
 
-def _seed_kanban_issue_id(
-    args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser
-) -> None:
-    """Record which board issue this task mirrors, when the operator named one.
-
-    Stored in the task file rather than kept for this run only: the id is
-    what every later phase — and every later `run-task` on the same task —
-    needs to move the issue along.
-    """
-    if args.kanban_issue_id is None:
-        return
-    if cfg.vibe_kanban is None and cfg.local_board is None:
-        parser.error(
-            "--kanban-issue-id, but config.yaml has no vibe_kanban and no local_board "
-            "block: nothing would ever read the id. Configure a board, or drop the flag."
-        )
-    try:
-        uuid.UUID(args.kanban_issue_id)
-    except ValueError:
-        # A board shows a short id (VK-7); every MCP tool wants the uuid, and a
-        # local board mints one. Catching the mix-up here beats a rejected
-        # update_issue four phases in.
-        parser.error(
-            f"--kanban-issue-id: {args.kanban_issue_id!r} is not a uuid. An issue_id is "
-            "the issue's uuid, not the short id shown on the card."
-        )
-    tasks.set_kanban_issue_id(cfg.hive_tasks_dir, args.task_id, args.kanban_issue_id)
-
-
 def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
     """The human half of the learnings inbox.
 
@@ -223,21 +186,6 @@ def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
     )))
     print()
     print(f"the entries themselves are in {learnings.root_dir(hive)}/, one file per row")
-
-
-def _kanban(cfg: Config) -> KanbanClient:
-    """The board this config talks to, or the one that does nothing.
-
-    Every subcommand that can move a card builds it the same way, so that a
-    project with no board block runs the identical code path and says nothing
-    about a board it was never given. Both blocks at once never reaches here:
-    `load_config` refuses that rather than picking one.
-    """
-    if cfg.vibe_kanban:
-        return VibeKanbanClient(cfg.vibe_kanban)
-    if cfg.local_board:
-        return LocalBoardClient(cfg.local_board)
-    return NullKanbanClient()
 
 
 #: Read once, at startup, so a run can be made louder or quieter without
@@ -303,13 +251,6 @@ def main() -> None:
         help="Read the description from this file instead of the command line; "
         "'-' reads stdin. Use it for anything longer than a sentence.",
     )
-    run_parser.add_argument(
-        "--kanban-issue-id",
-        help="The uuid of the board issue this task mirrors, so the board "
-        "follows the run. Stored in the task file, so it is only needed once "
-        "per task. Without it (or without a vibe_kanban or local_board block "
-        "in config.yaml) the run simply has no board.",
-    )
 
     phase_parser = sub.add_parser(
         "run-phase",
@@ -342,8 +283,8 @@ def main() -> None:
         action="store_true",
         help="This phase closes the task: the learnings are carried to it "
         "beforehand, the debt the earlier phases declared is recorded and "
-        "filed off the handoffs they left on disk, the task file and the "
-        "board are moved to done, and the entries are not orphaned on the "
+        "filed off the handoffs they left on disk, the task file is moved "
+        "to done, and the entries are not orphaned on the "
         "way out. In the role set that is the auditor. Without it the handoff "
         "leaves the task pending, which is what every phase before the last "
         "one should do.",
@@ -354,7 +295,7 @@ def main() -> None:
         help="Extra context appended to this one phase's prompt. An operator "
         "resuming a run uses it to say what the dead process took with it. "
         "Under --final the dispatcher appends its own note to it, naming the "
-        "debt cards it filed, rather than replacing it: the phase is owed "
+        "debt entries it gave ids, rather than replacing it: the phase is owed "
         "both.",
     )
 
@@ -502,11 +443,7 @@ def main() -> None:
     elif args.command == "run-task":
         _require_migrated(cfg, parser)
         description = _resolve_description(args, cfg, parser)
-        _seed_kanban_issue_id(args, cfg, parser)
-        # No vibe_kanban block, no board: the cycle runs exactly as before and
-        # says nothing about a board it was never given.
-        kanban = _kanban(cfg)
-        outcome = run_task_cycle(cfg, args.task_id, args.project, kanban, description=description)
+        outcome = run_task_cycle(cfg, args.task_id, args.project, description=description)
         # Before ADR 52 every one of these exited 0, so a cycle that never got
         # an account looked, to whatever ran it, like one that shipped.
         if outcome is CycleOutcome.HELD:
@@ -535,7 +472,6 @@ def main() -> None:
             cfg,
             args.task_id,
             args.project,
-            _kanban(cfg),
             args.role,
             round_num=args.round_num,
             final=args.final,
@@ -629,14 +565,6 @@ def main() -> None:
                     f"so that phase never filed them: "
                     f"{', '.join(entry.ref for entry in kept)}"
                 )
-        # And the other half of the same "the branch landed": the debt this
-        # task says it resolved is resolved in the docs now, so its cards have
-        # stopped being work anybody should pick up.
-        closed = close_resolved_debt(cfg, _kanban(cfg), args.task_id, args.project)
-        if closed:
-            # Named by entry, not by card: the entry id is the one a human can
-            # look the work up by, on the board and in the index both.
-            print(f"closed the card of {len(closed)} resolved debt entr(y/ies): {', '.join(closed)}")
     elif args.command == "status":
         print(
             operator.format_status(

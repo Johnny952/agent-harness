@@ -329,8 +329,8 @@ def read_dir(root: str, path: str) -> list[Entry]:
 def unreadable(path: str) -> list[str]:
     """The `.md` files in one directory `read_dir` skipped.
 
-    `LocalBoardClient.unreadable()`'s shape (`docs/decisions.md` ADR 3, ADR 4,
-    `docs/debt/T-008-D2.md`), and it exists for the same reason: a reader that
+    The shape the removed local board's `unreadable()` had (`docs/decisions.md`
+    ADR 4, `docs/debt/T-008-D2.md`), and it exists for the same reason: a reader that
     silently drops what it cannot parse leaves the one caller whose whole
     contract is "report the damage" — `observability/api/app.py`'s
     `/api/learnings` — nothing to report. `read_dir`'s own four callers inside

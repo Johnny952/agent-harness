@@ -397,10 +397,25 @@ def test_the_flask_board_service_is_gone_from_both_files(compose_file: str) -> N
     of the four screens it duplicated — tasks, task detail, debt and tail — and
     those four now come from `front/` against the real api (docs/decisions.md
     ADR 32). A compose file still naming the service is a build that fails at
-    `up`, the same failure the dashboard's row above pins.
-
-    `vibe-kanban` is a different board and stays."""
+    `up`, the same failure the dashboard's row above pins."""
     assert "board" not in _load(compose_file)["services"]
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+def test_the_vibe_kanban_service_and_its_volume_are_gone_from_both_files(
+    compose_file: str,
+) -> None:
+    """The board seam is removed (docs/decisions.md ADR 59): no service, no
+    `kanban` profile on any service, and no declaration of its volume."""
+    compose = _load(compose_file)
+    assert "vibe-kanban" not in compose["services"]
+    assert "vibe_kanban_data" not in compose["volumes"]
+    for name, service in compose["services"].items():
+        assert "kanban" not in service.get("profiles", []), name
+        assert "vibe-kanban" not in service.get("depends_on", []), name
+    assert "kanban" not in (COMPOSE_DIR / compose_file).read_text().lower()
 
 
 def _short_volumes(service: dict) -> list[str]:

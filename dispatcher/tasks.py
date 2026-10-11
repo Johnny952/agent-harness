@@ -4,8 +4,8 @@
 module that writes them. Two of them are written here: the description — the
 ask, in sections, at `<hive root>/board/<task_id>/description.md` — and the
 task file itself — status, lock, handoffs — whose writers (`acquire_lock`,
-`refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_kanban_issue_id`,
-`set_resolved_debt`) all end in `_write_task_file`. `context_transfer` keeps
+`refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_resolved_debt`)
+all end in `_write_task_file`. `context_transfer` keeps
 the `TaskFile` shape, its reader and the serializer `write_task_file`, which
 nothing under `dispatcher/` but this module calls.
 
@@ -236,17 +236,6 @@ def _write_task_file(path: str, task: context_transfer.TaskFile) -> None:
     if _path_is_unmigrated(path):
         raise UnmigratedTaskError(task.task_id, path)
     context_transfer.write_task_file(path, task)
-
-
-def set_kanban_issue_id(hive_dir: str, task_id: str, issue_id: str) -> None:
-    """Point this task at a Vibe Kanban issue, creating the task file if needed.
-
-    Everything else on an existing file is preserved: attaching a board to
-    a task that already ran only adds the id.
-    """
-    path, task = context_transfer._read_or_new(hive_dir, task_id)
-    task.kanban_issue_id = issue_id
-    _write_task_file(path, task)
 
 
 def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:

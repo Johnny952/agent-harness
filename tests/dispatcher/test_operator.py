@@ -29,8 +29,6 @@ def _make_config(tmp_path, **overrides):
         projects_root=str(tmp_path / "projects"),
         hive_tasks_dir=str(tmp_path / "hive"),
         state_dir=str(tmp_path / "state"),
-        vibe_kanban=None,
-        local_board=None,
         collector_url="http://127.0.0.1:8787",
         default_model="opus",
         permission_mode="acceptEdits",

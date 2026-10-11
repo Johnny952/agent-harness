@@ -20,50 +20,10 @@ class AccountConfig:
     is_primary: bool = False
 
 
-#: What the dispatcher's own status strings become on the board. The left side
-#: is this harness's vocabulary (`_update_task_status` sends "blocked", "done"
-#: and "in_progress:<role>", of which only the prefix is mapped); the right
-#: side has to match a status *name* on the Vibe Kanban project, which is
-#: per-project and which no MCP tool lists — so these are defaults for the
-#: names Vibe Kanban ships with, and an operator whose project renamed them
-#: says so in `vibe_kanban.status_map`. "blocked" maps to review because the
-#: dispatcher blocks a task exactly when a human has to look at it.
-DEFAULT_KANBAN_STATUS_MAP = {
-    "in_progress": "In Progress",
-    "blocked": "In Review",
-    "done": "Done",
-}
-
-
-@dataclasses.dataclass
-class VibeKanbanConfig:
-    """How to reach a Vibe Kanban board, when there is one.
-
-    `command` is an argv the dispatcher spawns and talks MCP to over stdio —
-    Vibe Kanban's server has no SSE endpoint, so there is no URL to point at.
-    `project_id` is the uuid of the project new issues land in; it is optional
-    because the server can infer it when it runs inside a workspace already
-    linked to a remote project.
-    """
-
-    command: list[str]
-    project_id: str | None = None
-    status_map: dict[str, str] = dataclasses.field(
-        default_factory=lambda: dict(DEFAULT_KANBAN_STATUS_MAP)
-    )
-
-
-@dataclasses.dataclass
-class LocalBoardConfig:
-    """Where a board with no service behind it keeps its cards.
-
-    `dir` is a directory inside the dispatcher container, one JSON document
-    per issue. It is the whole configuration: there is no project to name and
-    no status_map to correct, because nothing here renames a column — the
-    dispatcher's own status strings are what gets stored.
-    """
-
-    dir: str
+#: The config keys the board seam read, all refused now that it is gone
+#: (`docs/decisions.md` ADR 59). `vibe_kanban_mcp_url` is the oldest of the
+#: three and was already refused; it stays refused, under the one message.
+REMOVED_BOARD_KEYS = ("vibe_kanban", "local_board", "vibe_kanban_mcp_url")
 
 
 #: The phases the primary will take on as fallback when no worker can. The
@@ -106,8 +66,6 @@ class Config:
     projects_root: str
     hive_tasks_dir: str
     state_dir: str
-    vibe_kanban: VibeKanbanConfig | None
-    local_board: LocalBoardConfig | None
     collector_url: str
     default_model: str
     permission_mode: str | None
@@ -186,86 +144,20 @@ class Config:
         return self.role_effort.get(role, self.default_effort)
 
 
-def _load_vibe_kanban(raw: dict) -> VibeKanbanConfig | None:
-    """Read the optional `vibe_kanban` block, or None when there is none.
+def _refuse_board_keys(raw: dict) -> None:
+    """Fail on a config that still configures a board.
 
-    The board is a visibility aid, not a dependency: a harness with no
-    `vibe_kanban` block runs tasks exactly as before and the dispatcher never
-    mentions a board it was not given.
+    Refused rather than ignored: a block nothing reads would leave an operator
+    watching a board no run moves. On the key being present at all, whatever
+    its value — `local_board:` left empty is the same mistake.
     """
-    if "vibe_kanban_mcp_url" in raw:
-        # This key promised an SSE endpoint that Vibe Kanban's MCP server
-        # never served. Failing loudly beats ignoring it, which would leave an
-        # operator believing their board is wired up when nothing reaches it.
-        raise ValueError(
-            "vibe_kanban_mcp_url is gone: Vibe Kanban's MCP server speaks stdio, "
-            "not SSE. Replace it with a vibe_kanban block, or drop it to run "
-            "without a board."
-        )
-    block = raw.get("vibe_kanban")
-    if block is None:
-        return None
-    if not isinstance(block, dict):
-        raise ValueError("vibe_kanban must be a mapping")
-    command = block.get("command")
-    if (
-        not isinstance(command, list)
-        or not command
-        or not all(isinstance(part, str) for part in command)
-    ):
-        raise ValueError("vibe_kanban.command must be a non-empty list of strings")
-    project_id = block.get("project_id")
-    if project_id is not None and not isinstance(project_id, str):
-        raise ValueError("vibe_kanban.project_id must be a string")
-    status_map = dict(DEFAULT_KANBAN_STATUS_MAP)
-    overrides = block.get("status_map") or {}
-    if not isinstance(overrides, dict):
-        raise ValueError("vibe_kanban.status_map must be a mapping")
-    for key, value in overrides.items():
-        if key not in DEFAULT_KANBAN_STATUS_MAP:
+    for key in REMOVED_BOARD_KEYS:
+        if key in raw:
             raise ValueError(
-                f"vibe_kanban.status_map has no status {key!r}; known statuses are "
-                + ", ".join(sorted(DEFAULT_KANBAN_STATUS_MAP))
+                f"{key} is no longer a config key: the board seam was removed "
+                "(docs/decisions.md ADR 59). The task files are the board and the "
+                f"console shows them. Delete {key} from config.yaml."
             )
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"vibe_kanban.status_map[{key!r}] must be a non-empty string")
-        status_map[key] = value
-    return VibeKanbanConfig(command=command, project_id=project_id, status_map=status_map)
-
-
-def _load_local_board(raw: dict) -> LocalBoardConfig | None:
-    """Read the optional `local_board` block, or None when there is none.
-
-    Opt-in, exactly like `vibe_kanban`: a harness that has been running with
-    no cards should not start writing them because it was upgraded.
-    """
-    block = raw.get("local_board")
-    if block is None:
-        return None
-    if not isinstance(block, dict):
-        raise ValueError("local_board must be a mapping")
-    directory = block.get("dir")
-    if not isinstance(directory, str) or not directory:
-        raise ValueError("local_board.dir must be a non-empty string")
-    return LocalBoardConfig(dir=directory)
-
-
-def _load_boards(raw: dict) -> tuple[VibeKanbanConfig | None, LocalBoardConfig | None]:
-    """The one board this config configures, as the pair of optional blocks.
-
-    Both blocks at once is a config error rather than a precedence rule: an
-    operator who wrote both meant one of them, and silently ignoring the other
-    leaves them watching a board the run never touches.
-    """
-    vibe_kanban = _load_vibe_kanban(raw)
-    local_board = _load_local_board(raw)
-    if vibe_kanban is not None and local_board is not None:
-        raise ValueError(
-            "vibe_kanban and local_board are both configured, and a run talks to one "
-            "board. Drop local_board to keep the Vibe Kanban board, or drop "
-            "vibe_kanban to keep the local one."
-        )
-    return vibe_kanban, local_board
 
 
 def _load_permission_mode(raw: dict) -> str | None:
@@ -486,7 +378,7 @@ def load_config(path: str) -> Config:
         or gates_test_timeout_seconds <= 0
     ):
         raise ValueError("gates_test_timeout_seconds must be a positive integer")
-    vibe_kanban, local_board = _load_boards(raw)
+    _refuse_board_keys(raw)
     return Config(
         accounts=accounts,
         quota_threshold_pct=quota_threshold_pct,
@@ -502,8 +394,6 @@ def load_config(path: str) -> Config:
         projects_root=raw["projects_root"],
         hive_tasks_dir=raw["hive_tasks_dir"],
         state_dir=raw["state_dir"],
-        vibe_kanban=vibe_kanban,
-        local_board=local_board,
         collector_url=raw["collector_url"],
         default_model=raw.get("default_model", "claude-opus-5-5"),
         permission_mode=_load_permission_mode(raw),

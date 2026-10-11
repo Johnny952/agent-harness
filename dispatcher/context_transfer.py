@@ -54,15 +54,10 @@ class TaskFile:
     depends_on: list[str]
     heartbeat: str | None
     body: str
-    # The uuid of the Vibe Kanban issue this task shows up as, when there is
-    # a board at all. It lives here rather than in a dispatcher-side map
-    # because the task file is what survives a restart, and because the id is
-    # server-assigned: the harness can't derive it from the task id.
-    kanban_issue_id: str | None = None
     # The debt entries this task's implementation says it resolved. Kept here
-    # for the same reason as the issue id: the merge that closes their cards
-    # can happen in a later process — `merge-task` by hand, days after the
-    # cycle — and by then the handoff that claimed them is only prose.
+    # because the task file is what survives a restart: the merge can happen
+    # in a later process — `merge-task` by hand, days after the cycle — and
+    # by then the handoff that claimed them is only prose.
     resolved_debt: list[str] = dataclasses.field(default_factory=list)
 
 
@@ -469,7 +464,6 @@ def read_task_file(path: str) -> TaskFile:
         depends_on=fm.get("depends_on", []),
         heartbeat=_as_heartbeat_str(fm.get("heartbeat")),
         body=body.lstrip("\n"),
-        kanban_issue_id=fm.get("kanban_issue_id"),
         resolved_debt=fm.get("resolved_debt") or [],
     )
 
@@ -581,17 +575,10 @@ def write_task_file(path: str, task: TaskFile) -> None:
         "depends_on": task.depends_on,
         "heartbeat": task.heartbeat,
     }
-    if task.kanban_issue_id is not None:
-        fm["kanban_issue_id"] = task.kanban_issue_id
     if task.resolved_debt:
         fm["resolved_debt"] = task.resolved_debt
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
-
-
-def read_kanban_issue_id(hive_dir: str, task_id: str) -> str | None:
-    """The issue this task mirrors, or None when it mirrors none."""
-    return _read_or_new(hive_dir, task_id)[1].kanban_issue_id
 
 
 def read_resolved_debt(hive_dir: str, task_id: str) -> list[str]:

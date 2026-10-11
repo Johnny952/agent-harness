@@ -1,26 +1,25 @@
 # dispatcher/debt.py
-"""Work a task decided not to do, declared, ruled on, and put on the board.
+"""Work a task decided not to do, declared, ruled on, and filed in the index.
 
 Debt that only exists as a line in a handoff is debt nobody will ever find
 again: the handoff is read by the next phase of *this* task and by nobody
 else. So it takes a fixed route. The implementador declares it, the revisor
-rules on each declaration, the auditor — the only writer of the indexes —
-files the accepted ones in `docs/debt/`, and the dispatcher mirrors each
-filed entry as one card on the board.
+rules on each declaration, and the auditor — the only writer of the indexes —
+files the accepted ones in `docs/debt/`.
 
 Two rules shape everything here:
 
-- **The index is the source of truth, the board is a viewing aid.** The index
-  is versioned with the code, so a clone has it and a project with no board
-  loses nothing. That is why the dispatcher can run the whole flow against a
-  `NullKanbanClient` and only the cards go missing.
-- **The dispatcher creates the cards, not an agent.** An agent that can create
-  tasks can assign itself work, and an agent re-run for a second review round
-  would create the same card twice.
+- **The index is the only record.** It is versioned with the code, so a clone
+  has it. Nothing mirrors a row anywhere else (`docs/decisions.md` ADR 59);
+  the index keeps its `card` column because the api and the console read it,
+  and the auditor writes `none` there until a backlog item's id has a place
+  to come from (`docs/plans/board-service.md`, step 5).
+- **The dispatcher assigns the ids, not an agent.** An agent re-run for a
+  second review round would number the same entry twice.
 
 This module is the pieces of that flow that are not prompt text: the shape of
 a declaration, the fingerprint two of them are compared by, who ruled what,
-and how an index row and a card point at each other.
+and how an index row is read back.
 """
 from __future__ import annotations
 
@@ -44,18 +43,10 @@ REJECTED = "rejected"
 BLOCKS = "blocks"
 RULINGS = (ACCEPTED, REJECTED, BLOCKS)
 
-#: The index's columns, in order. The dispatcher reads two of them back — the
-#: entry id and the card it points at — so this is a contract, not a
+#: The index's columns, in order. The dispatcher reads **what** back to dedupe
+#: and the api serves all five by name, so this is a contract, not a
 #: suggestion, and it is handed to the auditor as one.
 COLUMNS = ("id", "what", "where", "fix", "card")
-
-#: The label the spec asks every debt card to carry. `create_issue` takes no
-#: labels, so it rides in the title, where a board filter can still find it.
-LABEL = "debt"
-
-#: Same cap as a task card's title, for the same reason: a board column shows
-#: the first line and a 400-character title is a wall.
-TITLE_MAX = 120
 
 _VOLATILE_RE = re.compile(r"[0-9a-f]{6,}|\d+")
 _NOISE_RE = re.compile(r"[^a-z0-9]+")
@@ -173,7 +164,7 @@ def accepted(implemented: dict | None, reviewed: dict | None) -> list[Declaratio
     Accept-by-default, deliberately. This is only ever called on the round the
     revisor approved, and an approving round has rejected nothing — so the
     open question is not "was this accepted?" but "did the fingerprint match?"
-    A miss then costs one extra card on the board, while the other default
+    A miss then costs one extra row in the index, while the other default
     would silently drop real debt on a wording change. One of those a human
     notices; the other is invisible.
     """
@@ -189,47 +180,9 @@ def entry_id(task_id: str, number: int) -> str:
     """The id of the nth entry a task files, stable across a re-run.
 
     Derived rather than assigned by the index, so the dispatcher can name the
-    entries in the auditor's prompt *before* the auditor writes them, which is
-    what lets each side record the other's id in one pass.
+    entries in the auditor's prompt *before* the auditor writes them.
     """
     return f"{task_id}-D{number}"
-
-
-def card_title(declaration: Declaration) -> str:
-    title = f"[{LABEL}] {declaration.what}".replace("\n", " ").strip()
-    return title if len(title) <= TITLE_MAX else title[: TITLE_MAX - 1].rstrip() + "…"
-
-
-def card_description(task_id: str, entry: str, declaration: Declaration) -> str:
-    """The card's body: the declaration, plus where the real entry lives.
-
-    Deliberately a copy and not a summary — a human triaging the board should
-    not have to clone the repo to know what they are approving — but the entry
-    it points at stays the source of truth, and it is named here so the card
-    can never become the only record of anything.
-    """
-    lines = [
-        f"Declared by task `{task_id}` ({declaration.origin}).",
-        "",
-        f"**What:** {declaration.what}",
-    ]
-    for label, value in (
-        ("Where", declaration.where),
-        ("Why it stays", declaration.why),
-        ("Cost of leaving it", declaration.cost),
-        ("Fix", declaration.fix),
-    ):
-        if value:
-            lines.append(f"**{label}:** {value}")
-    lines += [
-        "",
-        f"Entry `{entry}` in `{project_docs.DEBT_INDEX}`, which is the source of truth; "
-        "this card mirrors it.",
-        "",
-        "In the backlog this is a record, not work. Move it out of the backlog to "
-        "approve the work; the task that resolves it closes this card.",
-    ]
-    return "\n".join(lines)
 
 
 def read_index(container: str, workdir: str) -> str:
@@ -347,26 +300,11 @@ def index_rows(text: str) -> list[dict]:
 def index_fingerprints(text: str) -> set[str]:
     """What the index already holds, for deciding what is new.
 
-    Only accepted debt gets a card, and only debt the index does not already
-    describe: a project whose board fills with the same entry once per task is
-    a board nobody reads.
+    Only accepted debt gets an id, and only debt the index does not already
+    describe: an index that fills with the same entry once per task is an
+    index nobody reads.
     """
     return {fingerprint(row["what"]) for row in index_rows(text) if row["what"]}
-
-
-def card_ids(text: str, entries: list[str]) -> dict[str, str]:
-    """The card each of these entries points at, as the index records it.
-
-    The lookup the merge path needs: a task's return names the entries it
-    resolved, and the cards to close are whatever those rows say.
-    """
-    wanted = set(entries)
-    found = {}
-    for row in index_rows(text):
-        entry, card = row["id"], row["card"]
-        if entry in wanted and card and card.lower() not in ("-", "none", "n/a"):
-            found[entry] = card
-    return found
 
 
 def resolved(payload: dict | None) -> list[str]:
@@ -386,32 +324,29 @@ def resolved(payload: dict | None) -> list[str]:
     return seen
 
 
-def filing_note(filed: list[tuple[str, str | None, Declaration]]) -> str:
+def filing_note(filed: list[tuple[str, Declaration]]) -> str:
     """What the auditor is told about the entries it is about to write.
 
-    The ids are assigned here, before the phase runs, because the card exists
-    before the row does: handing the auditor both ids lets it write the row
-    that points at the card in the same pass, and keeps it the only writer of
-    the index.
+    The ids are assigned by the dispatcher, before the phase runs, so a
+    re-run names the same entry the same way; the auditor stays the only
+    writer of the index.
     """
     if not filed:
         return ""
     columns = " | ".join(COLUMNS)
     lines = [
-        "The debt the revisor accepted in this task already has its ids, and its cards are "
-        f"already on the board. File one row per entry in `{project_docs.DEBT_INDEX}`, with "
-        f"these columns in this order: {columns}. Use the id given here — it is what the card "
-        "points back at — and put the card's id in the `card` column, in backticks, verbatim. "
-        "Then write the entry itself as a file under "
+        "The debt the revisor accepted in this task already has its ids. File one row per "
+        f"entry in `{project_docs.DEBT_INDEX}`, with these columns in this order: {columns}. "
+        "Use the id given here, and write `none` in the `card` column: nothing mirrors an "
+        "entry outside the index. Then write the entry itself as a file under "
         f"`{project_docs.DEBT_DIR}/`, named after its id.",
         "",
     ]
-    for entry, card, declaration in filed:
-        card_text = f"card `{card}`" if card else "no card (this project has no board)"
-        lines.append(f"- `{entry}` — {declaration.what} ({card_text})")
+    for entry, declaration in filed:
+        lines.append(f"- `{entry}` — {declaration.what}")
     lines.append("")
     lines.append(
         "Do not file anything else as debt: work the revisor did not accept is not an entry, "
-        "and an entry with no id here has no card to point at."
+        "and neither is one with no id here."
     )
     return "\n".join(lines)

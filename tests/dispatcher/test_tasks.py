@@ -224,7 +224,6 @@ _WRITERS = {
     "refresh_heartbeat": tasks.refresh_heartbeat,
     "release_stale_lock": tasks.release_stale_lock,
     "handoff": lambda hive, tid: tasks.handoff(hive, tid, new_status="review", body="## revisor"),
-    "set_kanban_issue_id": lambda hive, tid: tasks.set_kanban_issue_id(hive, tid, "an-issue"),
     "set_resolved_debt": lambda hive, tid: tasks.set_resolved_debt(hive, tid, ["task-0-D1"]),
 }
 
@@ -289,6 +288,52 @@ def test_no_module_under_dispatcher_but_tasks_calls_write_task_file() -> None:
                 callers.add(module.name)
 
     assert callers == {"tasks.py"}
+
+
+# -- the board seam is gone (docs/decisions.md ADR 59) --------------------------
+
+
+def test_a_task_file_that_still_has_kanban_issue_id_reads_and_loses_it_on_its_next_write(
+    tmp_path: Path,
+) -> None:
+    """The key has no reader left, so there is nothing to move first: the file
+    reads without error and the next writer drops the key and nothing else."""
+    hive = _hive(tmp_path)
+    path = _legacy(hive, "kanban_issue_id: 0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f\n")
+
+    task = read_task_file(str(path))
+
+    assert not hasattr(task, "kanban_issue_id")
+    assert (task.status, task.owner, task.depends_on) == ("in_progress", "cuenta1", ["task-0"])
+
+    tasks.handoff(hive, "task-1", new_status="review", body="## revisor\n\nRead it.")
+
+    text = path.read_text()
+    assert "kanban_issue_id" not in text
+    assert "0e1d2c3b" not in text
+    after = read_task_file(str(path))
+    assert (after.status, after.depends_on) == ("review", ["task-0"])
+    assert "## arquitecto" in after.body and "## implementador" in after.body
+    assert after.body.rstrip().endswith("## revisor\n\nRead it.")
+
+
+def test_no_module_under_dispatcher_or_observability_names_the_board_seam() -> None:
+    """Neither the deleted client module nor the key it stored. The one place
+    the word survives is `config.py`'s refusal of a config that still has it."""
+    repo = Path(tasks.__file__).parent.parent
+    modules = sorted((repo / "dispatcher").rglob("*.py")) + sorted(
+        (repo / "observability").rglob("*.py")
+    )
+    assert repo / "observability" / "api" / "app.py" in modules
+    assert not (repo / "dispatcher" / "vibe_kanban_client.py").exists()
+
+    naming = {
+        str(module.relative_to(repo))
+        for module in modules
+        if "kanban" in module.read_text(encoding="utf-8").lower()
+    }
+
+    assert naming == {"dispatcher/config.py"}
 
 
 # -- migrate ------------------------------------------------------------------

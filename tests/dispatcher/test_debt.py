@@ -125,7 +125,7 @@ def test_debt_the_revisor_rejected_is_not_filed() -> None:
     assert accepted == []
 
 
-# --- the entry and the card that point at each other ----------------------
+# --- the entry's id --------------------------------------------------------
 
 
 def test_entry_ids_are_numbered_inside_the_task_that_declared_them() -> None:
@@ -133,46 +133,6 @@ def test_entry_ids_are_numbered_inside_the_task_that_declared_them() -> None:
     the auditor's prompt before the auditor writes a single row."""
     assert debt.entry_id("task-7", 1) == "task-7-D1"
     assert debt.entry_id("task-7", 2) == "task-7-D2"
-
-
-def test_a_card_title_carries_the_label_a_board_filter_looks_for() -> None:
-    title = debt.card_title(debt.Declaration(what="The retry loop is untested"))
-
-    assert title == "[debt] The retry loop is untested"
-
-
-def test_a_long_card_title_is_cut_where_a_board_column_ends() -> None:
-    title = debt.card_title(debt.Declaration(what="T" * 400))
-
-    assert len(title) == debt.TITLE_MAX
-    assert title.endswith("…")
-
-
-def test_a_card_says_what_it_mirrors_and_what_moving_it_means() -> None:
-    body = debt.card_description(
-        "task-7",
-        "task-7-D1",
-        debt.Declaration(
-            what="The retry loop is untested",
-            where="a task touching dispatcher/cli.py",
-            fix="a fake clock in conftest",
-            origin=debt.FOUND,
-        ),
-    )
-
-    assert "task-7" in body and "task-7-D1" in body
-    assert project_docs.DEBT_INDEX in body
-    assert debt.FOUND in body
-    assert "a fake clock in conftest" in body
-    # The one thing a human has to know before they touch it: this is a
-    # record until they drag it out of the backlog.
-    assert "backlog" in body
-
-
-def test_a_card_leaves_out_the_fields_the_declaration_left_empty() -> None:
-    body = debt.card_description("task-7", "task-7-D1", debt.Declaration(what="Untested"))
-
-    assert "**Why it stays:**" not in body
 
 
 # --- reading the index back ----------------------------------------------
@@ -390,19 +350,14 @@ def test_a_renamed_heading_costs_a_dedupe_not_a_crash() -> None:
     )
 
     assert debt.index_fingerprints(renamed) == {debt.fingerprint("The retry loop is untested")}
-    assert debt.card_ids(renamed, ["task-3-D1"]) == {"task-3-D1": "card-aaa"}
+    [row] = debt.index_rows(renamed)
+    assert (row["id"], row["card"]) == ("task-3-D1", "card-aaa")
 
 
 def test_prose_between_two_tables_does_not_carry_the_header_over() -> None:
     text = _INDEX + "\nSome prose.\n\n| id | what |\n|---|---|\n| `task-5-D1` | Something else |\n"
 
     assert debt.fingerprint("Something else") in debt.index_fingerprints(text)
-
-
-def test_the_cards_to_close_come_from_the_rows_that_have_one() -> None:
-    assert debt.card_ids(_INDEX, ["task-3-D1", "task-4-D1", "task-9-D1"]) == {
-        "task-3-D1": "card-aaa"
-    }
 
 
 def test_the_entries_a_task_says_it_resolved_are_read_once_each() -> None:
@@ -440,22 +395,23 @@ def test_a_task_that_filed_nothing_says_nothing_to_the_auditor() -> None:
     assert debt.filing_note([]) == ""
 
 
-def test_the_note_hands_the_auditor_both_ids_and_the_column_order() -> None:
+def test_the_note_hands_the_auditor_the_ids_and_the_column_order() -> None:
     note = debt.filing_note(
-        [("task-7-D1", "card-aaa", debt.Declaration(what="The retry loop is untested"))]
+        [("task-7-D1", debt.Declaration(what="The retry loop is untested"))]
     )
 
     assert " | ".join(debt.COLUMNS) in note
-    assert "`task-7-D1`" in note and "`card-aaa`" in note
-    assert "The retry loop is untested" in note
+    assert "- `task-7-D1` — The retry loop is untested" in note.splitlines()
     assert project_docs.DEBT_INDEX in note
-    # The closing rule, because an entry with no id here has nothing to point at.
+    # The closing rule: an entry the dispatcher gave no id is not an entry.
     assert "Do not file anything else as debt" in note
 
 
-def test_the_note_says_so_when_the_project_has_no_board() -> None:
-    """The index is the source of truth, so a board-less project still files
-    the row — with nothing in the column that mirrors a card."""
-    note = debt.filing_note([("task-7-D1", None, debt.Declaration(what="Untested"))])
+def test_the_note_tells_the_auditor_to_write_none_in_the_card_column() -> None:
+    """ADR 59: nothing mirrors an entry, and the column stays because the api
+    and the console read it. A value to copy, not a per-entry phrase."""
+    note = debt.filing_note([("task-7-D1", debt.Declaration(what="Untested"))])
 
-    assert "no card" in note
+    assert "write `none` in the `card` column" in note
+    assert "no card" not in note
+    assert "board" not in note
