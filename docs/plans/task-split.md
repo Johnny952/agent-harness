@@ -5,9 +5,9 @@
 implementation is itself split* — the handoff shape, inert — is built by
 T-025 (`docs/implementations/T-025.md`): `_SPLIT_PROPERTY`, `SubTask`,
 `split_of`, `split_problems` and `render`'s `**Split**` section. Steps 2 to 4
-are not built, and no role's schema offers `split` until step 4. It settles
-the decisions P4
-leaves "for an ADR", so the work can be dispatched in one-surface tasks. The
+are not built, and no role's schema offers `split` until step 4. This design
+settles the decisions P4 leaves "for an ADR", so the work can be dispatched in
+one-surface tasks. The
 ADR lands in `docs/decisions.md` with the task that builds it; the text is
 under *Proposed ADR*, to be brought in line with `board-service.md` first
 (below). Written 2026-10-10 by the operator's
