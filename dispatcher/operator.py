@@ -22,7 +22,7 @@ import dataclasses
 import datetime as dt
 import time
 
-from dispatcher import context_transfer, docker_exec, quota, state_machine
+from dispatcher import context_transfer, docker_exec, quota, state_machine, tasks
 from dispatcher.config import AccountConfig, Config
 from dispatcher.state_machine import AccountState
 
@@ -302,7 +302,7 @@ def release_account(
         # reaps these (reap_expired_locks is called from there and nowhere
         # else), so an account released without its card leaves the task
         # unstartable for the next cycle.
-        context_transfer.release_stale_lock(cfg.hive_tasks_dir, task_id)
+        tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
         lines.append(f"unlocked task {task_id} (owner and heartbeat cleared; status untouched)")
     if clear_rate_limit and rate_limited_at is not None:
         state_machine.clear_rate_limit(cfg.state_dir, name)

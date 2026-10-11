@@ -57,11 +57,14 @@ _UNMIGRATED_SHOWN = 5
 
 
 def _require_migrated(cfg: Config, parser: argparse.ArgumentParser) -> None:
-    """Refuse a verb that writes task files while one still holds its description.
+    """Refuse a verb that writes task files while any of them still holds its description.
 
-    `context_transfer` no longer carries the `description` key, so its next
-    write to such a file would drop the ask; `dispatch migrate` moves it out
-    first. A usage error, like every other refusal made before a run starts.
+    The whole-hive rule of `docs/business.md` *Task descriptions*: one
+    unmigrated file stops every task, until `dispatch migrate` has moved it
+    out. Losing the ask is no longer what this guards — `tasks.py`'s writer
+    refuses such a file itself — but that refusal is per file and raises from
+    wherever the write happens to be. This one is hive-wide and a usage
+    error, like every other refusal made before a run starts.
     """
     stale = tasks.unmigrated_ids(cfg.hive_tasks_dir)
     if not stale:
@@ -77,7 +80,7 @@ def _require_migrated(cfg: Config, parser: argparse.ArgumentParser) -> None:
 
 def _run_migrate(cfg: Config) -> None:
     """Move every description out of its task file, and print what moved."""
-    report = tasks.migrate(cfg.hive_tasks_dir)
+    report = tasks.migrate(cfg.hive_tasks_dir, cfg.heartbeat_ttl_seconds)
     for task_id, path in report.moved:
         print(f"{task_id}: description moved to {path}")
     for task_id in report.emptied:
@@ -162,7 +165,7 @@ def _seed_kanban_issue_id(
             f"--kanban-issue-id: {args.kanban_issue_id!r} is not a uuid. An issue_id is "
             "the issue's uuid, not the short id shown on the card."
         )
-    context_transfer.set_kanban_issue_id(cfg.hive_tasks_dir, args.task_id, args.kanban_issue_id)
+    tasks.set_kanban_issue_id(cfg.hive_tasks_dir, args.task_id, args.kanban_issue_id)
 
 
 def _run_learnings(args: argparse.Namespace, cfg: Config) -> None:
@@ -486,8 +489,9 @@ def main() -> None:
         "migrate",
         help="Move the description out of every task file that still carries it "
         "in the frontmatter, into the task's description.md on the board. Run "
-        "it once after upgrading, with no cycle in flight; a second run changes "
-        "nothing. It prints what it moved.",
+        "it once after upgrading; a second run changes nothing. It prints what "
+        "it moved, and refuses a task whose cycle is still in flight: run it "
+        "again when that cycle has ended.",
     )
 
     args = parser.parse_args()
@@ -642,8 +646,9 @@ def main() -> None:
             )
         )
     elif args.command == "release-account":
-        # `release_account` clears a dead cycle's lock with `release_stale_lock`,
-        # a task-file write.
+        # The only hive-wide check this verb has: `release_account` writes just
+        # the task files the account holds (`tasks.release_stale_lock`), and
+        # the writer's refusal would stop it on those alone.
         _require_migrated(cfg, parser)
         try:
             outcome = operator.release_account(

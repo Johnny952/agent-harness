@@ -38,7 +38,7 @@ _TaskDumper.add_representer(str, _represent_str)
 
 
 class LockHeldError(RuntimeError):
-    """Raised when acquire_lock is asked to take a task whose lock is live under a different owner."""
+    """Raised when `tasks.acquire_lock` is asked to take a task whose lock is live under a different owner."""
 
     def __init__(self, task_id: str, owner: str) -> None:
         super().__init__(f"task {task_id} is locked by {owner}")
@@ -477,7 +477,7 @@ def read_task_file(path: str) -> TaskFile:
 def has_phase_section(hive_dir: str, task_id: str, role: str) -> bool:
     """The dispatcher's own record that this role's phase returned on this task.
 
-    `handoff()` appends one `## <label>` block per phase that finished, and the
+    `tasks.handoff()` appends one `## <label>` block per phase that finished, and the
     phase loop only builds that label after `run_phase` returned something — so
     a section is there because a phase came back, and it outlives the worktree,
     the container and the process the phase ran in. That makes it the local
@@ -567,6 +567,13 @@ def _write_atomic(path: str, content: str) -> None:
 
 
 def write_task_file(path: str, task: TaskFile) -> None:
+    """Serialize a task file, atomically. Not the dispatcher's way in.
+
+    The writers — the lock, the heartbeat, the handoff — live in
+    `dispatcher/tasks.py`, behind a writer that refuses a file still carrying
+    its description. That module is the only caller of this one under
+    `dispatcher/`, and a test in `tests/dispatcher/test_tasks.py` holds it.
+    """
     fm = {
         "task_id": task.task_id,
         "status": task.status,
@@ -582,66 +589,14 @@ def write_task_file(path: str, task: TaskFile) -> None:
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 
 
-def set_kanban_issue_id(hive_dir: str, task_id: str, issue_id: str) -> None:
-    """Point this task at a Vibe Kanban issue, creating the task file if needed.
-
-    Everything else on an existing file is preserved: attaching a board to
-    a task that already ran only adds the id.
-    """
-    path, task = _read_or_new(hive_dir, task_id)
-    task.kanban_issue_id = issue_id
-    write_task_file(path, task)
-
-
 def read_kanban_issue_id(hive_dir: str, task_id: str) -> str | None:
     """The issue this task mirrors, or None when it mirrors none."""
     return _read_or_new(hive_dir, task_id)[1].kanban_issue_id
 
 
-def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:
-    """Record which debt entries this task's work resolved.
-
-    Replaces rather than appends: a re-run's implementation is the current
-    claim about what this task fixes, and the previous round's claim was
-    about code that has since been rewritten.
-    """
-    path, task = _read_or_new(hive_dir, task_id)
-    task.resolved_debt = list(entries)
-    write_task_file(path, task)
-
-
 def read_resolved_debt(hive_dir: str, task_id: str) -> list[str]:
     """The debt entries this task claims to have resolved, empty when none."""
     return _read_or_new(hive_dir, task_id)[1].resolved_debt
-
-
-def acquire_lock(hive_dir: str, task_id: str, owner: str, ttl_seconds: int | None = None) -> TaskFile:
-    path, task = _read_or_new(hive_dir, task_id)
-    # Two dispatcher processes, or a stale retry, must not both drive the same
-    # task. This is a read-then-write check, not a cross-process mutex — a
-    # real mutual-exclusion guard (e.g. flock) is separate future work.
-    if task.owner is not None and task.owner != owner:
-        # A live holder always refreshes its heartbeat, so a foreign owner
-        # with heartbeat None can only be a hand-edited or legacy file, not
-        # an active dispatcher. Treat it as stale when the caller opted into
-        # takeovers at all (ttl_seconds given) rather than locking the task
-        # forever with no way to reap it.
-        heartbeat_missing = task.heartbeat is None
-        if ttl_seconds is None or not (heartbeat_missing or is_lock_expired(task, ttl_seconds)):
-            raise LockHeldError(task_id, task.owner)
-    task.owner = owner
-    task.heartbeat = dt.datetime.now(dt.timezone.utc).isoformat()
-    if task.status == "pending":
-        task.status = "in_progress"
-    write_task_file(path, task)
-    return task
-
-
-def refresh_heartbeat(hive_dir: str, task_id: str) -> None:
-    path = task_file_path(hive_dir, task_id)
-    task = read_task_file(path)
-    task.heartbeat = dt.datetime.now(dt.timezone.utc).isoformat()
-    write_task_file(path, task)
 
 
 def is_lock_expired(task: TaskFile, ttl_seconds: int, now: dt.datetime | None = None) -> bool:
@@ -650,30 +605,3 @@ def is_lock_expired(task: TaskFile, ttl_seconds: int, now: dt.datetime | None = 
     now = now or dt.datetime.now(dt.timezone.utc)
     heartbeat_dt = dt.datetime.fromisoformat(task.heartbeat)
     return (now - heartbeat_dt).total_seconds() > ttl_seconds
-
-
-def release_stale_lock(hive_dir: str, task_id: str) -> None:
-    path = task_file_path(hive_dir, task_id)
-    task = read_task_file(path)
-    task.owner = None
-    task.heartbeat = None
-    write_task_file(path, task)
-
-
-def handoff(
-    hive_dir: str,
-    task_id: str,
-    new_status: str,
-    body: str,
-    depends_on: list[str] | None = None,
-) -> None:
-    path, task = _read_or_new(hive_dir, task_id)
-    task.status = new_status
-    task.owner = None
-    task.heartbeat = None
-    # Accumulate phase summaries rather than replacing task.body — the next
-    # role needs the full trail of prior phases, not just the last one.
-    task.body = f"{task.body}\n\n{body}" if task.body else body
-    if depends_on is not None:
-        task.depends_on = depends_on
-    write_task_file(path, task)

@@ -53,7 +53,9 @@ def test_no_vendored_skill_asks_for_the_reasoning(path: Path) -> None:
 def test_no_prompt_the_dispatcher_builds_asks_for_the_reasoning(role: str, tmp_path: Path) -> None:
     texts = [
         dispatcher_mod._role_prompt(
-            role, "T-1", "myproj", "/hive/T-1.md", "Do the thing.", str(tmp_path / "scratch"),
+            role, "T-1", "myproj", "/hive/T-1.md",
+            "## Goal\n\nDo the thing.\n\n## Done when\n\nIt is done.\n",
+            str(tmp_path / "scratch"),
             str(tmp_path / "hive"), round_num=3, max_turns=40, note="",
         ),
         dispatcher_mod._phase_system_prompt(role) or "",

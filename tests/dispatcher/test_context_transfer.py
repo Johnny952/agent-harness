@@ -9,10 +9,8 @@ import pytest
 
 from dispatcher.context_transfer import (
     _makedirs_readable,
-    acquire_lock,
     append_usage,
     ensure_scratch_dir,
-    handoff,
     handoff_path,
     has_phase_section,
     is_lock_expired,
@@ -24,15 +22,22 @@ from dispatcher.context_transfer import (
     read_kanban_issue_id,
     read_task_file,
     read_usage,
-    refresh_heartbeat,
-    release_stale_lock,
     save_handoff,
     scratch_dir,
-    set_kanban_issue_id,
     task_file_path,
     TaskFile,
     usage_log_path,
     write_task_file,
+)
+
+# The task-file writers live in `dispatcher/tasks.py` now; their tests stay
+# here, beside the reader's.
+from dispatcher.tasks import (
+    acquire_lock,
+    handoff,
+    refresh_heartbeat,
+    release_stale_lock,
+    set_kanban_issue_id,
 )
 
 

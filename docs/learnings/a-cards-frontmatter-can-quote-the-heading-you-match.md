@@ -29,7 +29,7 @@ halves, and only the second is the dispatcher's record.
 
 The frontmatter carries `description`, which is operator or main-thread prose of
 any length and may quote anything — headings, code fences, other cards' text.
-The body is what `context_transfer.handoff` appends to, one `## <label>` block
+The body is what `tasks.handoff` appends to, one `## <label>` block
 per phase that returned, rendered by `dispatcher/handoff.py:body` over the label
 the phase loop builds. `read_task_file` splits the two on the `---` delimiters
 and hands back `TaskFile.body` already separated.

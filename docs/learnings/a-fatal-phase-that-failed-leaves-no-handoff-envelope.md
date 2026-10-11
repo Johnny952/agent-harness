@@ -16,7 +16,7 @@ ones are.
 
 ## Why
 
-`run_phase` returns **before** it reaches `context_transfer.handoff` and
+`run_phase` returns **before** it reaches `tasks.handoff` and
 `context_transfer.save_handoff`. The order in that function is: dispatch, then
 `if not result.success and fatal` → log the diagnosis, set the card `blocked`,
 `return None`. The prose rendering into the task file and the JSON envelope
@@ -47,7 +47,7 @@ argument in full and is the worked example of designing around this.
 ## Evidence
 
 `dispatcher/dispatcher.py:run_phase` — the `if not result.success:` block, its
-`if fatal: … return None`, and the `context_transfer.handoff` /
+`if fatal: … return None`, and the `tasks.handoff` /
 `context_transfer.save_handoff` calls below it; `grep -n "fatal" ` over that
 file finds the parameter, the branch and the single `fatal=False`, which is the
 `run_phase` call guarded by `_needs_mapping`.
