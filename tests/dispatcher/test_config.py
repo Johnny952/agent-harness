@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dispatcher.config import DEFAULT_KANBAN_STATUS_MAP, load_config
+from dispatcher.config import load_config
 
 CONFIG_YAML = """
 accounts:
@@ -31,7 +31,6 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.quota_threshold_pct == 90
     assert cfg.heartbeat_ttl_seconds == 120
     assert cfg.projects_root == "/data/projects"
-    assert cfg.vibe_kanban is None
     assert cfg.default_model == "claude-opus-5-5"
     assert cfg.permission_mode == "acceptEdits"
     assert cfg.max_revision_rounds == 3
@@ -306,131 +305,44 @@ def test_load_config_rejects_invalid_phase_timeout_seconds(tmp_path: Path, bad_v
         load_config(str(config_path))
 
 
-KANBAN_YAML = """
-vibe_kanban:
-  command: ["npx", "vibe-kanban@0.1.44", "mcp"]
-  project_id: 0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f
-"""
-
-
-def test_load_config_reads_the_vibe_kanban_block(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + KANBAN_YAML)
-
-    cfg = load_config(str(config_path))
-
-    assert cfg.vibe_kanban is not None
-    assert cfg.vibe_kanban.command == ["npx", "vibe-kanban@0.1.44", "mcp"]
-    assert cfg.vibe_kanban.project_id == "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
-    assert cfg.vibe_kanban.status_map == DEFAULT_KANBAN_STATUS_MAP
-
-
-def test_load_config_leaves_project_id_unset(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + '\nvibe_kanban:\n  command: ["vibe-kanban", "mcp"]\n')
-
-    cfg = load_config(str(config_path))
-
-    assert cfg.vibe_kanban is not None
-    assert cfg.vibe_kanban.project_id is None
-
-
-def test_load_config_overrides_one_status_name(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + KANBAN_YAML + '  status_map:\n    done: Shipped\n')
-
-    cfg = load_config(str(config_path))
-
-    assert cfg.vibe_kanban is not None
-    # A project that renamed one column keeps the defaults for the rest.
-    assert cfg.vibe_kanban.status_map["done"] == "Shipped"
-    assert cfg.vibe_kanban.status_map["blocked"] == DEFAULT_KANBAN_STATUS_MAP["blocked"]
-
-
-def test_load_config_rejects_the_dead_sse_url(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + "\nvibe_kanban_mcp_url: http://vibe-kanban:9100/sse\n")
-
-    with pytest.raises(ValueError, match="speaks stdio"):
-        load_config(str(config_path))
-
-
 @pytest.mark.parametrize(
-    ("block", "message"),
+    ("key", "block"),
     [
-        ("vibe_kanban: http://vibe-kanban:9100\n", "must be a mapping"),
-        ("vibe_kanban:\n  project_id: abc\n", "command must be a non-empty list"),
-        ("vibe_kanban:\n  command: []\n", "command must be a non-empty list"),
-        ('vibe_kanban:\n  command: "npx vibe-kanban mcp"\n', "command must be a non-empty list"),
-        ('vibe_kanban:\n  command: ["npx", 44]\n', "command must be a non-empty list"),
-        ('vibe_kanban:\n  command: ["vk"]\n  project_id: 44\n', "project_id must be a string"),
-        ('vibe_kanban:\n  command: ["vk"]\n  status_map:\n    doing: Doing\n', "no status 'doing'"),
-        ('vibe_kanban:\n  command: ["vk"]\n  status_map:\n    done: 44\n', "must be a non-empty string"),
+        ("vibe_kanban", 'vibe_kanban:\n  command: ["npx", "vibe-kanban@0.1.44", "mcp"]\n'),
+        ("local_board", "local_board:\n  dir: /state/board\n"),
+        # Present is enough, whatever the value: an emptied block is the same
+        # operator still expecting a board.
+        ("vibe_kanban", "vibe_kanban:\n"),
+        ("local_board", "local_board: {}\n"),
+        ("vibe_kanban_mcp_url", "vibe_kanban_mcp_url: http://vibe-kanban:9100/sse\n"),
     ],
 )
-def test_load_config_rejects_a_malformed_vibe_kanban_block(
-    tmp_path: Path, block: str, message: str
+def test_load_config_refuses_a_config_that_still_configures_a_board(
+    tmp_path: Path, key: str, block: str
 ) -> None:
+    """ADR 59: the board seam is gone, and a block nothing reads would leave
+    an operator watching a board no run moves. The error names the key and
+    the decision."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(CONFIG_YAML + "\n" + block)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError) as excinfo:
         load_config(str(config_path))
 
+    message = str(excinfo.value)
+    assert message.startswith(f"{key} is no longer a config key")
+    assert "the board seam was removed" in message
+    assert "ADR 59" in message
 
-LOCAL_BOARD_YAML = """
-local_board:
-  dir: /state/board
-"""
 
-
-def test_load_config_has_no_local_board_by_default(tmp_path: Path) -> None:
+def test_a_loaded_config_has_no_board_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(CONFIG_YAML)
 
-    # Opt-in: a harness that has been running with no cards must not start
-    # writing them because it was upgraded.
-    assert load_config(str(config_path)).local_board is None
-
-
-def test_load_config_reads_the_local_board_block(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + LOCAL_BOARD_YAML)
-
     cfg = load_config(str(config_path))
 
-    assert cfg.local_board is not None
-    assert cfg.local_board.dir == "/state/board"
-    assert cfg.vibe_kanban is None
-
-
-def test_load_config_refuses_two_boards(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + KANBAN_YAML + LOCAL_BOARD_YAML)
-
-    # Not a precedence rule: an operator who wrote both meant one of them, and
-    # the message has to say which one to drop.
-    with pytest.raises(ValueError, match="Drop local_board"):
-        load_config(str(config_path))
-
-
-@pytest.mark.parametrize(
-    ("block", "message"),
-    [
-        ("local_board: /state/board\n", "must be a mapping"),
-        ("local_board: {}\n", "dir must be a non-empty string"),
-        ("local_board:\n  dir: 44\n", "dir must be a non-empty string"),
-        ('local_board:\n  dir: ""\n', "dir must be a non-empty string"),
-    ],
-)
-def test_load_config_rejects_a_malformed_local_board_block(
-    tmp_path: Path, block: str, message: str
-) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML + "\n" + block)
-
-    with pytest.raises(ValueError, match=message):
-        load_config(str(config_path))
+    assert not hasattr(cfg, "vibe_kanban")
+    assert not hasattr(cfg, "local_board")
 
 
 def test_the_refusal_cooldown_defaults_to_half_an_hour(tmp_path: Path) -> None:

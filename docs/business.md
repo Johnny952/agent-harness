@@ -18,11 +18,11 @@ cite the entry and move it up, or drop the row.
 
 ## Reading the harness's state
 
-- **A task's `card` is the board document its `kanban_issue_id` points at, or
-  `null`; a harness with no board configured is not an error.** Confirmed:
-  `docs/plans/board.md`, "Phase 1 — a read API in Python", and
-  `docs/decisions.md` ADR 3, which narrows it further — only a `local_board`
-  harness gets cards, and a `vibe_kanban` one gets `null` plus one warning.
+- **A task row has no `card` and no `kanban_issue_id`: the task file is the
+  board's data and nothing mirrors it.** Confirmed: `docs/decisions.md` ADR 59,
+  which removed the board seam and supersedes ADR 3. A task file that still
+  carries a `kanban_issue_id` key is served without it and without a warning,
+  and a config that still names a board stops the api at startup.
 - **Events are tailed by id and never by time: `since` filters `id > since`.**
   Confirmed: the same spec section. uuid4 task ids admit no other stable order,
   so there is deliberately no time-based filter beside it.
@@ -161,6 +161,22 @@ cite the entry and move it up, or drop the row.
   is listed here rather than as a defect; what no doc settles is whether an
   operator should be able to see another project's unreviewed entries on this
   screen, which today they cannot, by the same filter.
+
+## Unconfirmed — inferred from the code by T-028
+
+- **A task that stopped blocked is not marked blocked anywhere a reader of
+  the hive can see: its task file says `pending` or `in_progress`, as if it
+  were waiting or running.** A task file's `status` is written by
+  `dispatcher/tasks.py`'s `acquire_lock` (`in_progress`) and `handoff`
+  (`done` for the final phase, `pending` otherwise), and no code writes or
+  reads `blocked`; the cycle reports it as `CycleOutcome.BLOCKED`, a log line
+  and an exit code. Until T-028 a board card carried that status, on a
+  harness that had a board (`docs/decisions.md` ADR 59 removed the seam).
+  `docs/plans/board-service.md` sections 4 and 6 plan the write, so the
+  intent is on paper, but nothing rules on today's behaviour: a human should
+  say whether a blocked task reading as `pending` — and so as something a
+  later run may pick up again — is acceptable until that step is built.
+  Filed as [`docs/debt/T-028-D3`](debt/T-028-D3.md).
 
 ## Unconfirmed — inferred from the code by T-024
 

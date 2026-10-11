@@ -22,19 +22,15 @@ Two rules shape the whole module:
   in this module enforce over the files they read, not a property of Flask, and
   the two raises Flask keeps for itself answer HTML.
 - **An unknown query parameter is a 400.** Answering a misspelled filter with
-  everything is the failure mode that costs the caller without telling them —
-  the same reasoning `LocalBoardClient.list_issues` follows for an unknown
-  filter key.
+  everything is the failure mode that costs the caller without telling them.
 
 It writes nothing, anywhere: `db.init_db` is never called (it runs
-`CREATE TABLE` and the events volume is read-only), the board client is only
-ever read from, the learnings read calls neither `ensure_dirs` nor `reconcile`,
+`CREATE TABLE` and the events volume is read-only), the learnings read calls neither `ensure_dirs` nor `reconcile`,
 and there is no docker socket on this service — `dispatcher/docker_exec.py`
 arrives as an import, for one frozenset, and is never called.
 """
 from __future__ import annotations
 
-import dataclasses
 import os
 import sqlite3
 from pathlib import Path
@@ -53,7 +49,6 @@ from dispatcher import (
 # Aliased: `create_app` names its `/api/tasks` view `tasks`.
 from dispatcher import tasks as task_store
 from dispatcher.config import Config, load_config
-from dispatcher.vibe_kanban_client import LocalBoardClient
 from observability import auth
 from observability.collector import db
 
@@ -161,14 +156,6 @@ _SQLITE_INT_MIN = -(2**63)
 #: into a `list`, and `read_task_file`'s `fm["task_id"]` then subscripts it.
 _UNREADABLE = (OSError, TypeError, ValueError, KeyError, yaml.YAMLError)
 
-#: Said once per request that would have read cards, when the harness is
-#: pointed at a remote board instead of a local one. See `docs/decisions.md`
-#: ADR 3: this service does not dial Vibe Kanban.
-_REMOTE_BOARD_WARNING = (
-    "config.yaml configures vibe_kanban, and this API reads cards only from a local_board: "
-    "every task's `card` is null. See docs/decisions.md ADR 3."
-)
-
 
 def create_app(
     config_path: str,
@@ -211,7 +198,7 @@ def create_app(
         rejected = _reject_unknown_parameters(frozenset())
         if rejected is not None:
             return rejected
-        cards, warnings = _read_cards(cfg)
+        warnings: list[str] = []
         data = []
         for task_id in sorted(context_transfer.list_task_ids(cfg.hive_tasks_dir)):
             path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
@@ -219,21 +206,20 @@ def create_app(
                 task = context_transfer.read_task_file(path)
                 # The guard wraps the *use* of the parsed values and not only
                 # the parse. A frontmatter value of the wrong shape raises
-                # where it is used: `_task` looks `kanban_issue_id` up as a
-                # dict key, so a mapping or a sequence there is an unhashable
-                # type. `app.json.dumps` is the serialisation `_envelope` does
+                # where it is used, not where it is read.
+                # `app.json.dumps` is the serialisation `_envelope` does
                 # anyway, run here so a value YAML builds and JSON cannot —
                 # `owner: !!set {a: null}` — costs this one task a warning
                 # instead of 500-ing the whole list from outside every
                 # `except` in the module. It is the provider `jsonify` uses,
                 # not `json.dumps`, so a YAML date still serialises. Narrowing
-                # this `try` back to the parse reopens both.
+                # this `try` back to the parse reopens that.
                 # The description is read inside the guard too: a task file
                 # `dispatch migrate` has not moved yet raises here, a
                 # `ValueError` whose text names the command, and costs this
                 # task its row rather than serving it with no ask.
                 description = task_store.read_description(cfg.hive_tasks_dir, task_id)
-                row = _task(task, description, cards, cfg.heartbeat_ttl_seconds)
+                row = _task(task, description, cfg.heartbeat_ttl_seconds)
                 app.json.dumps(row)
             except _UNREADABLE as exc:
                 warnings.append(f"{path}: unreadable task file: {exc}")
@@ -252,13 +238,13 @@ def create_app(
         path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
         if not os.path.exists(path):
             return _error(f"no task {task_id!r} in {cfg.hive_tasks_dir}", 404)
-        cards, warnings = _read_cards(cfg)
+        warnings: list[str] = []
         try:
             found = context_transfer.read_task_file(path)
             # Shaping and serialisation inside the guard, as on `/api/tasks`
             # and for the same reason; the comment there says why.
             description = task_store.read_description(cfg.hive_tasks_dir, task_id)
-            row = _task(found, description, cards, cfg.heartbeat_ttl_seconds)
+            row = _task(found, description, cfg.heartbeat_ttl_seconds)
             # The running record, on this route and not on the list: `handoff()`
             # appends every phase's summary to `body`, so it only grows for the
             # life of a task id, and `/api/tasks` is the list a screen polls.
@@ -601,9 +587,8 @@ def create_app(
             # is the same shape one level up.
             try:
                 entries += learnings.read_dir(root, directory)
-                # The damage the parser drops silently, on `_read_cards`'
-                # wording: named, in no row, and the rest of the list still
-                # comes back. ADR 41 part 6.
+                # The damage the parser drops silently: named, in no row,
+                # and the rest of the list still comes back. ADR 41 part 6.
                 warnings += [
                     f"{path}: unreadable learning entry; it is in no row"
                     for path in learnings.unreadable(directory)
@@ -679,7 +664,7 @@ def _envelope(data, warnings: list[str]):
 def _capped(warnings: list[str]) -> list[str]:
     """At most `MAX_WARNINGS` strings, the last of them a tally of the rest.
 
-    A `local_board.dir` holding many documents that will not parse produces one
+    A directory holding many files that will not parse produces one
     warning each, and the envelope is materialised whole before `jsonify`
     serialises it. The cap is on what the caller receives, not on what was
     found, so nothing is silently dropped: the last slot says how many were.
@@ -718,8 +703,7 @@ def _is_bare_task_id(task_id: str) -> bool:
     """Can this id only ever name a file inside the task directory?
 
     The id arrives from a URL, so it is text a stranger wrote, and one with a
-    separator in it would name a file somewhere else — the same reach
-    `LocalBoardClient._card_path` refuses for a `kanban_issue_id`. Werkzeug's
+    separator in it would name a file somewhere else. Werkzeug's
     default converter already declines to match a `/`, so this is the second
     lock and not the first: it is what keeps a later `<path:task_id>` from
     turning the route into a file reader.
@@ -792,18 +776,16 @@ def _lock_expired(task: context_transfer.TaskFile, ttl_seconds: int) -> bool | N
 def _task(
     task: context_transfer.TaskFile,
     description: str | None,
-    cards: dict[str, dict],
     ttl_seconds: int,
 ) -> dict:
-    """One task as `TaskFile` has it, plus its description and the card it points at.
+    """One task as `TaskFile` has it, plus its description.
 
     The fields are `TaskFile`'s, but for `description` — the text of the task's
     `description.md` as `dispatcher/tasks.py:read_description` returned it,
     served verbatim and `null` when there is none — and this invents none but
-    `lock_expired`, which
-    is argued at `_lock_expired`. `card` is `null` for a task with no
-    `kanban_issue_id`, for a harness with no board, and for an id the board does
-    not hold — none of the three is an error.
+    `lock_expired`, which is argued at `_lock_expired`. No card: the task
+    file is the board's data and nothing mirrors it (`docs/decisions.md`
+    ADR 59).
 
     `ttl_seconds` is an argument and not a module global: it is
     `cfg.heartbeat_ttl_seconds`, which `create_app` has already loaded, and a
@@ -822,9 +804,7 @@ def _task(
         "depends_on": task.depends_on,
         "heartbeat": task.heartbeat,
         "description": description,
-        "kanban_issue_id": task.kanban_issue_id,
         "resolved_debt": task.resolved_debt,
-        "card": cards.get(task.kanban_issue_id) if task.kanban_issue_id else None,
         "lock_expired": _lock_expired(task, ttl_seconds),
     }
 
@@ -954,45 +934,6 @@ def _bounded_body(path: str, body: str) -> tuple[str, list[str]]:
         "are served and the start of the running record is not. The whole "
         "record is in the task file."
     ]
-
-
-def _read_cards(cfg: Config) -> tuple[dict[str, dict], list[str]]:
-    """Every card the board holds, by issue id, and what it could not read.
-
-    The board is built here from the config rather than taken from
-    `dispatcher/cli.py`, because this service is the one caller that has to
-    know which implementation it got: `unreadable()` is a `LocalBoardClient`
-    method by design (`docs/decisions.md` ADR 3 and ADR 4), and it is what
-    turns a board that is quietly short — `docs/debt/T-008-D2.md` — into a
-    warning a reader can see.
-
-    The `except (OSError, TypeError)` is on this side of the seam on purpose.
-    `LocalBoardClient._scan` catches `FileNotFoundError` only, because for the
-    dispatcher a missing directory is a board with no issues while a
-    `local_board.dir` that is a regular file must raise — `create_issue` would
-    otherwise mint cards nobody can list. Here the contract is the other one:
-    no read answers 500, and every path it could not read is named.
-
-    `TypeError` is in there because a card's fields are text some phase wrote
-    and `_read_path` validates one of them: it checks the document is a mapping
-    with a string `issue_id` and leaves the rest whatever was on disk. `_scan`
-    then sorts on `created_at`, so two cards whose `created_at` are of
-    different types compare a `str` against an `int`. Fixing that in `_scan` or
-    `_read_path` would be a `dispatcher/` contract change this service has no
-    reason to make; never-500 belongs on this side.
-    """
-    if cfg.local_board is None:
-        return {}, [_REMOTE_BOARD_WARNING] if cfg.vibe_kanban is not None else []
-    board = LocalBoardClient(cfg.local_board)
-    try:
-        warnings = [
-            f"{path}: unreadable board card; it is on no task's `card`"
-            for path in board.unreadable()
-        ]
-        cards = {issue.issue_id: dataclasses.asdict(issue) for issue in board.list_issues()}
-    except (OSError, TypeError) as exc:
-        return {}, [f"{cfg.local_board.dir}: unreadable board: {exc}"]
-    return cards, warnings
 
 
 def _no_events_warning(db_path: str, exc: Exception) -> str:

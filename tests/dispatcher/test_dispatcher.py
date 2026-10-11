@@ -22,7 +22,7 @@ from dispatcher.context_transfer import (
     usage_log_path,
     write_task_file,
 )
-from dispatcher.tasks import acquire_lock, set_kanban_issue_id, set_resolved_debt
+from dispatcher.tasks import acquire_lock, set_resolved_debt
 from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import (
     AccountState,
@@ -34,7 +34,6 @@ from dispatcher.state_machine import (
     record_rate_limit,
     set_state,
 )
-from dispatcher.vibe_kanban_client import NullKanbanClient
 
 
 @pytest.fixture(autouse=True)
@@ -56,29 +55,6 @@ _GOAL = "Add a /healthz endpoint that returns 200."
 _DESCRIPTION = f"## Goal\n\n{_GOAL}\n\n## Done when\n\nGET /healthz answers 200.\n"
 
 
-#: Vibe Kanban assigns every id itself, so a card's uuid is only ever
-#: something the board answered with — never something the harness picked.
-_ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
-
-
-class _FakeKanban:
-    """A board that answers, and remembers what the run put on it."""
-
-    enabled = True
-
-    def __init__(self, issue_id=_ISSUE_ID):
-        self.issue_id = issue_id
-        self.created = []
-        self.statuses = []
-
-    def create_issue(self, title, description=None):
-        self.created.append((title, description))
-        return self.issue_id
-
-    def set_status(self, issue_id, status):
-        self.statuses.append((issue_id, status))
-
-
 def _make_config(tmp_path, **overrides):
     defaults = dict(
         accounts=[AccountConfig(name="cuenta1", container="agent-cuenta1")],
@@ -89,8 +65,6 @@ def _make_config(tmp_path, **overrides):
         projects_root=str(tmp_path / "projects"),
         hive_tasks_dir=str(tmp_path / "hive"),
         state_dir=str(tmp_path / "state"),
-        vibe_kanban=None,
-        local_board=None,
         collector_url="http://127.0.0.1:8787",
         default_model="opus",
         permission_mode="acceptEdits",
@@ -1958,11 +1932,10 @@ def test_run_task_cycle_reaps_expired_locks_before_dispatching(tmp_path, monkeyp
         lambda *a, **kw: dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account=""),
     )
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert len(reap_calls) == 1
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
 def test_run_task_cycle_blocks_without_raising_when_task_locked_by_other_owner(
@@ -1990,12 +1963,11 @@ def test_run_task_cycle_blocks_without_raising_when_task_locked_by_other_owner(
     monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "create_worktree", spy_create_worktree)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert worktree_calls == []
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     assert "task-1" in caplog.text
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert task.owner == "otro"
@@ -2011,8 +1983,7 @@ def test_run_task_cycle_prompt_references_task_file(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     expected_path = task_file_path(cfg.hive_tasks_dir, "task-1")
     assert captured_prompts
@@ -2041,7 +2012,7 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
         "## Done when\n\nGET /healthz answers 200.\n\n"
         "## Steps\n\n1. Register the route first.\n"
     )
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=description)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=description)
 
     assert [role for role, _ in captured] == ["arquitecto", "implementador", "revisor", "auditor"]
     for role, prompt in captured:
@@ -2071,7 +2042,7 @@ def test_run_task_cycle_seeds_the_description_onto_the_board(tmp_path, monkeypat
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert tasks.read_description(cfg.hive_tasks_dir, "task-1") == _DESCRIPTION
     raw = Path(task_file_path(cfg.hive_tasks_dir, "task-1")).read_text()
@@ -2082,7 +2053,7 @@ def test_run_task_cycle_seeds_the_description_onto_the_board(tmp_path, monkeypat
     assert "description:" not in raw
 
     prompts.clear()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban())
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
 
     assert prompts, "the re-run should have dispatched using the stored description"
     assert all(_DESCRIPTION in prompt for prompt in prompts)
@@ -2104,15 +2075,13 @@ def test_run_task_cycle_blocks_without_dispatching_when_no_description_exists(
         ),
     )
 
-    kanban = _FakeKanban()
     with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
 
     assert calls == []
-    # Nothing reaches the board either: with no ask there is nothing to name a
-    # card after, and a task that never dispatched has nothing to show.
-    assert kanban.created == []
-    assert kanban.statuses == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    # Nothing is written either: a task that never dispatched has no task file.
+    assert not os.path.exists(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert "description" in caplog.text
 
 
@@ -2126,11 +2095,10 @@ def test_run_task_cycle_blocks_when_the_stored_description_is_blank(tmp_path, mo
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
 
     assert calls == []
-    assert kanban.created == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
 def test_run_task_cycle_blocks_when_the_stored_description_lost_a_section(
@@ -2145,12 +2113,11 @@ def test_run_task_cycle_blocks_when_the_stored_description_lost_a_section(
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
 
-    kanban = _FakeKanban()
     with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
 
     assert calls == []
-    assert kanban.created == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     assert "`## Done when`" in caplog.text
 
 
@@ -2173,12 +2140,11 @@ def test_run_task_cycle_refuses_a_hive_that_was_not_migrated(
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
 
-    kanban = _FakeKanban()
     with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert calls == []
-    assert kanban.created == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     assert legacy.read_bytes() == before
     assert "dispatch migrate" in caplog.text and "task-0" in caplog.text
     assert tasks.read_description(cfg.hive_tasks_dir, "task-1") is None
@@ -2204,7 +2170,7 @@ def test_one_unmigrated_file_no_writer_would_touch_still_stops_every_task(
 
     with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
         outcome = dispatcher_mod.run_task_cycle(
-            cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION
+            cfg, "task-1", "myproj", description=_DESCRIPTION
         )
 
     assert calls == []
@@ -2418,8 +2384,7 @@ def test_run_task_cycle_keeps_handoff_tail_for_long_phase_output(tmp_path, monke
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert "T" * 1500 in task.body
@@ -2452,7 +2417,7 @@ def test_run_task_cycle_writes_the_rendered_handoff_into_the_task_file(tmp_path,
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert "- dispatcher/handoff.py" in task.body
@@ -2478,7 +2443,7 @@ def test_run_task_cycle_skips_the_revisor_when_the_gates_blocked(tmp_path, monke
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert roles == [
         ("arquitecto", None),
@@ -2505,7 +2470,7 @@ def test_run_task_cycle_writes_the_gate_findings_under_the_handoff(tmp_path, mon
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert "**Dispatcher gates**" in task.body
@@ -2528,11 +2493,10 @@ def test_run_task_cycle_blocks_the_card_when_every_round_was_gated(tmp_path, mon
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert roles == ["arquitecto", "implementador", "implementador"]
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
 def test_run_task_cycle_stops_when_the_arquitecto_blocked(tmp_path, monkeypatch, caplog) -> None:
@@ -2557,12 +2521,11 @@ def test_run_task_cycle_stops_when_the_arquitecto_blocked(tmp_path, monkeypatch,
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert roles == ["arquitecto"]
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     # The reason has to reach the operator: a block naming nothing is a task
     # nobody can restart.
     logged = "\n".join(r.getMessage() for r in caplog.records)
@@ -2589,11 +2552,10 @@ def test_run_task_cycle_releases_the_implementador_on_a_partial_arquitecto(tmp_p
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
 def test_run_task_cycle_approves_on_a_verdict_field(tmp_path, monkeypatch) -> None:
@@ -2612,11 +2574,10 @@ def test_run_task_cycle_approves_on_a_verdict_field(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
 def test_run_task_cycle_rejects_on_a_verdict_field(tmp_path, monkeypatch) -> None:
@@ -2633,11 +2594,10 @@ def test_run_task_cycle_rejects_on_a_verdict_field(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert "auditor" not in roles
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
 def test_run_task_cycle_gives_every_role_the_scratch_dir(tmp_path, monkeypatch) -> None:
@@ -2656,7 +2616,7 @@ def test_run_task_cycle_gives_every_role_the_scratch_dir(tmp_path, monkeypatch) 
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     scratch = scratch_dir(cfg.hive_tasks_dir, "task-1")
     assert os.path.isdir(scratch)
@@ -2677,7 +2637,7 @@ def test_run_task_cycle_scratch_dir_is_not_mistaken_for_a_task(tmp_path, monkeyp
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert list_task_ids(cfg.hive_tasks_dir) == ["task-1"]
 
@@ -2700,44 +2660,13 @@ def test_run_task_cycle_approves_on_first_round(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     roles = [c["role"] for c in calls]
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
     assert all(c["effort"] == "medium" for c in calls)
     assert all(c["model"] == "opus" for c in calls)
-    assert (_ISSUE_ID, "done") in kanban.statuses
-
-
-def test_run_task_cycle_completes_when_kanban_status_updates_always_raise(tmp_path, monkeypatch) -> None:
-    cfg = _make_config(tmp_path)
-    calls = []
-
-    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
-        calls.append(role)
-        if role == "revisor":
-            return dispatcher_mod.DispatchResult(
-                success=True, session_id=None, result_text="VERDICT: APPROVED", account="cuenta1",
-            )
-        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
-
-    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
-
-    class _RaisingKanban:
-        enabled = True
-
-        def create_issue(self, title, description=None):
-            return _ISSUE_ID
-
-        def set_status(self, issue_id, status):
-            raise RuntimeError("kanban is down")
-
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _RaisingKanban(), description=_DESCRIPTION)
-
-    assert calls == ["arquitecto", "implementador", "revisor", "auditor"]
-    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
-    assert task.status == "done"
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
 def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkeypatch) -> None:
@@ -2758,8 +2687,7 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     early_rounds = [
         c for c in calls
@@ -2769,7 +2697,7 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
     assert early_rounds and all(c["effort"] == "medium" for c in early_rounds)
     assert round3, "expected round 3 to run"
     assert all(c["effort"] == "high" for c in round3)
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
 def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypatch) -> None:
@@ -2786,13 +2714,11 @@ def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypa
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert calls.count("revisor") == 2
     assert "auditor" not in calls
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
-    assert (_ISSUE_ID, "done") not in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
 def _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
@@ -2824,7 +2750,7 @@ def test_run_task_cycle_says_why_a_task_came_out_blocked(tmp_path, monkeypatch, 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
 
     with caplog.at_level("WARNING"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert any(
         "task-1" in r.getMessage() and "blocked after 2 of 2" in r.getMessage()
@@ -2841,7 +2767,7 @@ def test_the_blocked_line_counts_rounds_that_ran_not_rounds_allowed(tmp_path, mo
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
 
     with caplog.at_level("WARNING"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert any("blocked after 0 of 0" in r.getMessage() for r in caplog.records)
 
@@ -2870,7 +2796,7 @@ def test_a_timed_out_phase_says_so_instead_of_ending_the_run_at_exit_zero(
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     with caplog.at_level("ERROR"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     logged = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert any("claude timed out after 1800s" in m for m in logged)
@@ -2893,7 +2819,7 @@ def test_a_phase_that_failed_without_a_word_still_logs_that_it_failed(
     )
 
     with caplog.at_level("ERROR"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert any(
         "no diagnosis" in r.getMessage()
@@ -2902,21 +2828,23 @@ def test_a_phase_that_failed_without_a_word_still_logs_that_it_failed(
 
 
 @pytest.mark.parametrize(
-    "dispatch,status",
-    [(_approving_dispatch_phase, "done"), (_rejecting_dispatch_phase, "blocked")],
+    "dispatch,ended",
+    [
+        (_approving_dispatch_phase, dispatcher_mod.CycleOutcome.FINISHED),
+        (_rejecting_dispatch_phase, dispatcher_mod.CycleOutcome.BLOCKED),
+    ],
     ids=["done", "blocked"],
 )
 def test_run_task_cycle_drops_the_review_worktrees_when_the_task_ends(
-    tmp_path, monkeypatch, fake_git, dispatch, status,
+    tmp_path, monkeypatch, fake_git, dispatch, ended,
 ) -> None:
     """Blocked is as terminal as done here: nobody is reading those checkouts."""
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", dispatch)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, status) in kanban.statuses
+    assert outcome is ended
     assert fake_git.review_cleanups == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
     assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
 
@@ -2931,7 +2859,7 @@ def test_run_task_cycle_drops_the_review_worktrees_after_a_failed_phase(
         lambda *a, **kw: dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account=""),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert len(fake_git.review_cleanups) == 1
 
@@ -2953,11 +2881,10 @@ def test_run_task_cycle_leaves_another_owners_worktrees_alone(tmp_path, monkeypa
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert fake_git.review_cleanups == []
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
 def test_run_task_cycle_still_finishes_when_the_cleanup_fails(tmp_path, monkeypatch, caplog) -> None:
@@ -2970,11 +2897,10 @@ def test_run_task_cycle_still_finishes_when_the_cleanup_fails(tmp_path, monkeypa
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "remove_review_worktrees", exploding_cleanup)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert "docker daemon went away" in caplog.text
 
 
@@ -2988,7 +2914,7 @@ def test_run_task_cycle_cleanup_does_not_swallow_a_real_failure(tmp_path, monkey
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", exploding_dispatch_phase)
 
     with pytest.raises(RuntimeError, match="phase blew up"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
 
 def test_cleanup_container_returns_none_without_accounts(tmp_path) -> None:
@@ -3001,10 +2927,9 @@ def test_run_task_cycle_does_not_merge_by_default(tmp_path, monkeypatch, fake_gi
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert fake_git.merges == []
 
 
@@ -3012,10 +2937,9 @@ def test_run_task_cycle_merges_a_done_task_when_asked_to(tmp_path, monkeypatch, 
     cfg = _make_config(tmp_path, merge_on_done=True)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
 
 
@@ -3040,7 +2964,7 @@ def test_run_task_cycle_still_drops_the_entries_its_auditor_filed(
         "---\n\n## Rule\n\nStart postgres before the suite.\n"
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert "## auditor" in read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).body
     assert not filed.exists()
@@ -3052,10 +2976,9 @@ def test_run_task_cycle_does_not_merge_a_blocked_task(tmp_path, monkeypatch, fak
     cfg = _make_config(tmp_path, merge_on_done=True)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     assert fake_git.merges == []
 
 
@@ -3071,11 +2994,10 @@ def test_run_task_cycle_logs_a_refused_merge_and_still_finishes(tmp_path, monkey
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", refusing_merge)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert "has uncommitted changes" in caplog.text
 
 
@@ -3088,11 +3010,10 @@ def test_run_task_cycle_survives_a_merge_that_raises(tmp_path, monkeypatch, capl
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", exploding_merge)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert "docker daemon went away" in caplog.text
 
 
@@ -3101,7 +3022,7 @@ def test_run_task_cycle_hands_the_tree_back_after_merging(tmp_path, monkeypatch,
     cfg = _make_config(tmp_path, merge_on_done=True)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     project_dir = f"{cfg.projects_root}/myproj"
     # Once for the merge, once for the review-worktree cleanup that follows it.
@@ -3280,7 +3201,7 @@ def test_dispatch_phase_hands_the_tree_back_even_when_the_phase_raises(tmp_path,
     assert fake_git.restored == [(f"{cfg.projects_root}/myproj", "1000:1000")]
 
 
-# --- the board, for a harness that was given one --------------------------
+# --- the task file is the board's data, and nothing mirrors it (ADR 59) ----
 
 
 def _approve_on_first_round(monkeypatch):
@@ -3297,112 +3218,45 @@ def _approve_on_first_round(monkeypatch):
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
 
-def test_run_task_cycle_opens_a_card_for_a_task_that_has_none(tmp_path, monkeypatch) -> None:
-    """Creating the issue is the only way a task id becomes a uuid, and the
-    uuid has to outlive the run: a later phase after a restart must move this
-    same card rather than open a second one."""
-    cfg = _make_config(tmp_path)
-    _approve_on_first_round(monkeypatch)
-
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
-
-    # Titled from *Goal*, not from the description's first line, `## Goal`.
-    assert kanban.created == [(f"task-1: {_GOAL}", _DESCRIPTION)]
-    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
-    assert task.kanban_issue_id == _ISSUE_ID
-    assert (_ISSUE_ID, "done") in kanban.statuses
-
-
-def test_run_task_cycle_reuses_the_card_the_task_already_names(tmp_path, monkeypatch) -> None:
-    seeded = "aaaabbbb-cccc-dddd-eeee-ffff00001111"
-    cfg = _make_config(tmp_path)
-    set_kanban_issue_id(cfg.hive_tasks_dir, "task-1", seeded)
-    _approve_on_first_round(monkeypatch)
-
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
-
-    # `run-task --kanban-issue-id`, or an earlier run: either way the board
-    # already has this task on it and a second card would split its history.
-    assert kanban.created == []
-    assert {issue for issue, _ in kanban.statuses} == {seeded}
-
-
-def test_run_task_cycle_blocks_the_card_a_task_with_no_description_names(
-    tmp_path, monkeypatch,
-) -> None:
-    """The unaskable task still owes the board an answer, once it has a card:
-    blocked is what a human has to come and look at."""
-    cfg = _make_config(tmp_path)
-    set_kanban_issue_id(cfg.hive_tasks_dir, "task-1", _ISSUE_ID)
-    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: pytest.fail("dispatched"))
-
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
-
-    assert kanban.created == []
-    assert kanban.statuses == [(_ISSUE_ID, "blocked")]
-
-
-def test_run_task_cycle_runs_the_phases_when_the_board_refuses_a_card(
+def test_a_finished_cycle_leaves_done_in_the_task_file_and_no_board_key(
     tmp_path, monkeypatch, caplog,
 ) -> None:
-    """A board is a visibility aid, not dispatch state: one that can't be
-    reached costs a warning and the run goes on without a card."""
+    """The run opens no card and stores no id for one: the task file ends
+    `done`, carries no `kanban_issue_id`, and the log never mentions a board."""
     cfg = _make_config(tmp_path)
     _approve_on_first_round(monkeypatch)
 
-    class _RefusingKanban(_FakeKanban):
-        def create_issue(self, title, description=None):
-            raise RuntimeError("vibe-kanban: not logged in")
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    kanban = _RefusingKanban()
-    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
-
-    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status == "done"
-    # No card, so no status to move — and one warning, not one per phase.
-    assert kanban.statuses == []
-    assert sum("runs without a card" in r.getMessage() for r in caplog.records) == 1
-
-
-def test_run_task_cycle_without_a_board_says_nothing_about_one(
-    tmp_path, monkeypatch, caplog,
-) -> None:
-    """`vibe_kanban` is optional, so most runs have no board at all. Such a run
-    must not carry a warning per phase about something it was never asked for."""
-    cfg = _make_config(tmp_path)
-    _approve_on_first_round(monkeypatch)
-
-    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        dispatcher_mod.run_task_cycle(
-            cfg, "task-1", "myproj", NullKanbanClient(), description=_DESCRIPTION,
-        )
-
-    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
-    assert task.status == "done"
-    assert task.kanban_issue_id is None
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    path = task_file_path(cfg.hive_tasks_dir, "task-1")
+    assert read_task_file(path).status == "done"
+    assert "kanban_issue_id" not in Path(path).read_text()
     assert "kanban" not in caplog.text.lower()
 
 
-def test_issue_title_leads_with_the_task_id_and_the_first_line_of_the_ask() -> None:
-    # The id lines the card up with a task file by eye; the ask is what a human
-    # recognises without opening it.
-    title = dispatcher_mod._issue_title("task-1", "\n  Add /healthz.\nThen document it.\n")
+def test_a_cycle_drops_the_kanban_issue_id_an_older_run_left_in_the_task_file(
+    tmp_path, monkeypatch,
+) -> None:
+    """A task seeded by `run-task --kanban-issue-id` before ADR 59 still runs,
+    and its first phase's write is the one that drops the key."""
+    cfg = _make_config(tmp_path)
+    path = Path(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntask_id: task-1\nstatus: pending\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\nkanban_issue_id: aaaabbbb-cccc-dddd-eeee-ffff00001111\n"
+        "---\n\nan earlier note\n"
+    )
+    _approve_on_first_round(monkeypatch)
 
-    assert title == "task-1: Add /healthz."
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-
-def test_issue_title_stops_at_a_glance() -> None:
-    title = dispatcher_mod._issue_title("task-1", "W" * 400)
-
-    assert len(title) == dispatcher_mod._ISSUE_TITLE_MAX
-    assert title.endswith("\u2026")
-
-
-def test_issue_title_of_an_ask_with_no_line_is_just_the_task_id() -> None:
-    assert dispatcher_mod._issue_title("task-1", "   ") == "task-1"
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    text = path.read_text()
+    assert "kanban_issue_id" not in text and "aaaabbbb" not in text
+    assert "an earlier note" in text
 
 
 # --- the mapping phase, for a project nobody has written down yet ---------
@@ -3451,7 +3305,7 @@ def test_run_task_cycle_does_not_map_unless_the_operator_asked(tmp_path, monkeyp
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert asked == []
     assert calls[0]["role"] == "arquitecto"
@@ -3467,7 +3321,7 @@ def test_run_task_cycle_maps_a_project_that_has_no_index_first(tmp_path, monkeyp
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     # Asked of the project's own checkout, not of a task worktree: the
     # checkout is the state a later task will inherit.
@@ -3489,7 +3343,7 @@ def test_run_task_cycle_does_not_remap_a_project_that_has_an_index(tmp_path, mon
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert project_docs.MAPPER_ROLE not in [call["role"] for call in calls]
     assert calls[0]["role"] == "arquitecto"
@@ -3502,7 +3356,7 @@ def test_run_task_cycle_cannot_map_without_a_container_to_ask(tmp_path, monkeypa
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert calls[0]["role"] == "arquitecto"
 
@@ -3522,7 +3376,7 @@ def test_run_task_cycle_runs_the_task_anyway_when_the_map_fails(
 
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_task_cycle(
-            cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION,
+            cfg, "task-1", "myproj", description=_DESCRIPTION,
         )
 
     assert calls[1]["role"] == "arquitecto"
@@ -3549,11 +3403,10 @@ def test_run_task_cycle_stops_when_the_map_bounces_off_another_owners_lock(
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", locked)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert calls == [project_docs.MAPPER_ROLE]
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     # And the other run's worktrees are left where they are.
     assert fake_git.review_cleanups == []
 
@@ -3696,7 +3549,7 @@ def test_run_task_cycle_hands_every_role_its_duty_to_the_project_docs(
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     by_role = {call["role"]: call["prompt"] for call in calls}
     assert project_docs.DECISIONS in by_role["arquitecto"]
@@ -3757,7 +3610,7 @@ def test_run_task_cycle_opens_the_inbox_before_the_first_phase(
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert os.path.isdir(learnings.inbox_dir(cfg.hive_tasks_dir))
     assert os.path.isdir(learnings.harness_dir(cfg.hive_tasks_dir))
@@ -3773,7 +3626,7 @@ def test_run_task_cycle_confirms_a_trap_a_second_task_also_reported(
     _learning(cfg, "task-9-db.md", task="task-9")
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     statuses = {ref: entry.status for ref, entry in _inbox(cfg).items()}
     assert statuses == {
@@ -3792,7 +3645,7 @@ def test_run_task_cycle_hands_every_role_the_inbox_and_the_auditor_its_own_rows(
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     by_role = {call["role"]: call["prompt"] for call in calls}
     for role, prompt in by_role.items():
@@ -3822,7 +3675,7 @@ def test_the_entries_are_stamped_before_the_auditor_files_them(
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", recording)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert stamped["implementador"] == {"inbox/task-8-db.md": ""}
     assert stamped["auditor"] == {"inbox/task-8-db.md": "task-1"}
@@ -3837,10 +3690,9 @@ def test_a_blocked_task_lets_go_of_the_entries_it_never_filed(
     _learning(cfg, "task-8-db.md", carried_by="task-1")
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     entry = _inbox(cfg)["inbox/task-8-db.md"]
     assert entry.carried_by == ""
     # And the breadcrumb, so a human reading the file can see it was dropped
@@ -3855,7 +3707,7 @@ def test_a_merged_task_drops_the_entries_it_filed(tmp_path, monkeypatch, fake_gi
     path = _learning(cfg, "task-8-db.md")
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
     assert not os.path.exists(path)
@@ -3877,7 +3729,7 @@ def test_a_refused_merge_keeps_the_entries_where_the_next_task_sees_them(
     monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", refusing_merge)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert os.path.exists(path)
     # Still stamped: the task did file them, and the stamp is what stops the
@@ -3898,15 +3750,14 @@ def test_a_run_that_bounced_off_another_owners_lock_leaves_its_entries_alone(
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", locked)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert _inbox(cfg)["inbox/task-8-db.md"].carried_by == "task-1"
 
 
-# Debt the task declared, ruled on by the review, mirrored onto the board.
-# The index is the source of truth and the board is the viewing aid, so every
-# test below has to hold on both halves: what the auditor is told to file, and
-# what a human looking at the backlog ends up seeing.
+# Debt the task declared, ruled on by the review, and named for the auditor.
+# The index is the only record (ADR 59), so every test below holds on what
+# the auditor is told to file.
 
 _DEBT = {
     "origin": debt.FOUND,
@@ -3925,23 +3776,6 @@ _MIGRATION = {
     "cost": "a bad deploy is rolled forward or not at all",
     "fix": "write the down step once the backfill policy is decided",
 }
-
-
-class _DebtBoard(_FakeKanban):
-    """A board that answers with a different id per card.
-
-    The task's own card is opened first and keeps `_ISSUE_ID`, so a run can
-    still be checked on the status it set; every debt card after it gets an id
-    of its own, which is what the auditor is handed and what a merge closes.
-    """
-
-    def create_issue(self, title, description=None):
-        self.created.append((title, description))
-        return self.issue_id if len(self.created) == 1 else f"card-{len(self.created) - 1}"
-
-    @property
-    def debt_cards(self):
-        return self.created[1:]
 
 
 class _FakeDebtIndex:
@@ -3966,18 +3800,12 @@ def debt_index(monkeypatch):
 
 
 def _debt_dispatch_phase(
-    calls, board=None, declared=(), rulings=(), resolved=(), verdict="APPROVED",
+    calls, declared=(), rulings=(), resolved=(), verdict="APPROVED",
 ):
     """Every phase succeeds; the implementador declares and the revisor rules."""
 
     def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
-        calls.append(
-            dict(
-                role=role,
-                prompt=prompt,
-                cards=len(board.created) if board is not None else 0,
-            )
-        )
+        calls.append(dict(role=role, prompt=prompt))
         payload = {"status": "complete"}
         if role == "implementador":
             payload["debt"] = [dict(item) for item in declared]
@@ -4004,84 +3832,56 @@ def _by_role(calls):
     return {call["role"]: call["prompt"] for call in calls}
 
 
-def test_the_debt_the_review_accepted_becomes_one_card_each_on_the_board(
+def _filed_lines(prompt):
+    """The entries a filing note names, as its own bullet lines."""
+    return [line for line in prompt.splitlines() if line.startswith("- `task-")]
+
+
+def test_the_debt_the_review_accepted_gets_one_id_each_in_the_auditors_prompt(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
-    """One card per accepted declaration, opened by the dispatcher: an agent
-    that can create tasks can assign itself work, and a re-run of the phase
-    would open the same card twice."""
+    """One id per accepted declaration, assigned by the dispatcher: an agent
+    that numbered its own entries would number them again on a re-run."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
     calls = []
     monkeypatch.setattr(
         dispatcher_mod,
         "dispatch_phase",
         _debt_dispatch_phase(
             calls,
-            board=kanban,
             declared=(_DEBT, _MIGRATION),
             rulings=({"debt": "The retry loop has no test", "ruling": debt.ACCEPTED},),
         ),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    titles = [title for title, _ in kanban.debt_cards]
-    assert titles == [
-        "[debt] The retry loop has no test.",
-        "[debt] The migration has no down step.",
+    assert _filed_lines(_by_role(calls)["auditor"]) == [
+        "- `task-1-D1` — The retry loop has no test.",
+        "- `task-1-D2` — The migration has no down step.",
     ]
-    # The card carries the declaration whole — a human triaging the backlog
-    # should not have to clone the repo to know what they are approving — and
-    # names the entry that stays the source of truth.
-    first = kanban.debt_cards[0][1]
-    assert "**Fix:** a fake clock in conftest, then one case per branch" in first
-    assert "`task-1-D1`" in first and project_docs.DEBT_INDEX in first
-    assert "`task-1-D2`" in kanban.debt_cards[1][1]
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
-def test_a_debt_card_opens_before_the_auditor_writes_the_row_that_points_at_it(
-    tmp_path, monkeypatch, fake_git, debt_index,
-) -> None:
-    """That order is the whole trick: the card exists first, so the auditor
-    can write a row that already points at it and stay the only writer."""
-    cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
-    calls = []
-    monkeypatch.setattr(
-        dispatcher_mod,
-        "dispatch_phase",
-        _debt_dispatch_phase(calls, board=kanban, declared=(_DEBT,)),
-    )
-
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
-
-    seen = {call["role"]: call["cards"] for call in calls}
-    # One card through the whole review: the task's own.
-    assert seen["implementador"] == 1 and seen["revisor"] == 1
-    assert seen["auditor"] == 2
-
-
-def test_only_the_auditor_is_handed_the_entry_and_card_ids(
+def test_only_the_auditor_is_handed_the_entry_ids(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
     """The ids are assigned before the phase runs, and handed to the one role
     that writes the index — every other role is told to propose, not file."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
     calls = []
     monkeypatch.setattr(
         dispatcher_mod,
         "dispatch_phase",
-        _debt_dispatch_phase(calls, board=kanban, declared=(_DEBT,)),
+        _debt_dispatch_phase(calls, declared=(_DEBT,)),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     by_role = _by_role(calls)
     assert "`task-1-D1`" in by_role["auditor"]
-    assert "`card-1`" in by_role["auditor"]
+    # Nothing mirrors the entry (ADR 59): the column is kept and told `none`.
+    assert "write `none` in the `card` column" in by_role["auditor"]
     assert " | ".join(debt.COLUMNS) in by_role["auditor"]
     assert "`task-1-D1`" not in by_role["implementador"]
     assert "`task-1-D1`" not in by_role["revisor"]
@@ -4093,13 +3893,11 @@ def test_a_task_that_declared_no_debt_says_nothing_about_debt_to_the_auditor(
     """A filing note with no entries under it reads as an instruction to find
     something to file, and the auditor files only what it is handed."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
     calls = []
-    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _debt_dispatch_phase(calls, board=kanban))
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _debt_dispatch_phase(calls))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert kanban.debt_cards == []
     assert "already has its ids" not in _by_role(calls)["auditor"]
     # And nothing was read: there is no declaration to compare against.
     assert debt_index.reads == []
@@ -4111,61 +3909,58 @@ def test_debt_the_revisor_rejected_sends_an_approving_round_back_around(
     """A rejected declaration is work the revisor says this task should have
     done, which is a finding — and a finding outranks the verdict field."""
     cfg = _make_config(tmp_path, max_revision_rounds=2)
-    kanban = _DebtBoard()
     calls = []
     monkeypatch.setattr(
         dispatcher_mod,
         "dispatch_phase",
         _debt_dispatch_phase(
             calls,
-            board=kanban,
             declared=(_DEBT,),
             rulings=({"debt": "The retry loop has no test", "ruling": debt.REJECTED},),
             verdict="APPROVED",
         ),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    # Both rounds spent, no auditor, and nothing filed or carded.
+    # Both rounds spent, no auditor, and nothing filed: no index was read.
     assert _roles(calls).count("implementador") == 2
     assert "auditor" not in _roles(calls)
-    assert kanban.debt_cards == []
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert debt_index.reads == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
-def test_debt_the_revisor_read_as_a_block_ends_the_task_with_no_card(
+def test_debt_the_revisor_read_as_a_block_ends_the_task_with_nothing_filed(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
     """Another round cannot supply a decision the task was never given, so it
     ends here rather than burning the rest of the rounds to say so again."""
     cfg = _make_config(tmp_path, max_revision_rounds=3)
-    kanban = _DebtBoard()
     calls = []
     monkeypatch.setattr(
         dispatcher_mod,
         "dispatch_phase",
         _debt_dispatch_phase(
             calls,
-            board=kanban,
             declared=(_MIGRATION,),
             rulings=({"debt": "The migration has no down step", "ruling": debt.BLOCKS},),
         ),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert _roles(calls).count("implementador") == 1
+    # No auditor, so nobody was handed an id to file, and no index was read.
     assert "auditor" not in _roles(calls)
-    assert kanban.debt_cards == []
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert debt_index.reads == []
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
 
-def test_debt_the_index_already_carries_gets_no_second_card(
+def test_debt_the_index_already_carries_is_not_filed_a_second_time(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
-    """A board that fills with the same entry once per task is a board nobody
-    reads, and the index is what knows the entry is already there."""
+    """An index that fills with the same entry once per task is an index
+    nobody reads, and the index is what knows the entry is already there."""
     cfg = _make_config(tmp_path)
     debt_index.text = (
         "| id | what | where | fix | card |\n"
@@ -4173,65 +3968,44 @@ def test_debt_the_index_already_carries_gets_no_second_card(
         "| `task-4-D1` | The retry loop has no test | backoff changes | a fake clock "
         "| `card-9` |\n"
     )
-    kanban = _DebtBoard()
     calls = []
     monkeypatch.setattr(
         dispatcher_mod,
         "dispatch_phase",
-        _debt_dispatch_phase(calls, board=kanban, declared=(_DEBT, _MIGRATION)),
+        _debt_dispatch_phase(calls, declared=(_DEBT, _MIGRATION)),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert [title for title, _ in kanban.debt_cards] == ["[debt] The migration has no down step."]
-    # And the entry that did get filed is the first this task files, not the
+    # The entry that did get filed is the first this task files, not the
     # second: the numbering counts what was filed, not what was declared.
-    assert "`task-1-D1`" in _by_role(calls)["auditor"]
+    assert _filed_lines(_by_role(calls)["auditor"]) == [
+        "- `task-1-D1` — The migration has no down step."
+    ]
 
 
 def test_the_index_is_read_from_the_branch_the_task_is_being_built_on(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
     """A re-run of a task that already filed entries has them on its own
-    branch and nowhere else; reading the checkout would card them twice."""
+    branch and nowhere else; reading the checkout would file them twice."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
     monkeypatch.setattr(
         dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], declared=(_DEBT,)),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert debt_index.reads == [
         ("agent-cuenta1", f"{cfg.projects_root}/myproj/worktrees/task-1/work"),
     ]
 
 
-def test_a_project_with_no_board_files_its_debt_anyway(
-    tmp_path, monkeypatch, fake_git, debt_index,
-) -> None:
-    """`vibe_kanban` is optional, and the index is the source of truth — so a
-    project without a board loses the cards and nothing else."""
-    cfg = _make_config(tmp_path)
-    calls = []
-    monkeypatch.setattr(
-        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase(calls, declared=(_DEBT,)),
-    )
-
-    dispatcher_mod.run_task_cycle(
-        cfg, "task-1", "myproj", NullKanbanClient(), description=_DESCRIPTION,
-    )
-
-    note = _by_role(calls)["auditor"]
-    assert "`task-1-D1`" in note
-    assert "no card (this project has no board)" in note
-
-
 def test_the_entries_a_task_resolved_outlive_the_handoff_that_named_them(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
-    """The merge that closes these cards can be days later, in `merge-task`,
-    long after this handoff is prose in a file nobody parses."""
+    """The merge can be days later, in `merge-task`, long after this handoff
+    is prose in a file nobody parses, and the api serves the list."""
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(
         dispatcher_mod,
@@ -4239,16 +4013,16 @@ def test_the_entries_a_task_resolved_outlive_the_handoff_that_named_them(
         _debt_dispatch_phase([], resolved=("`task-4-D1`", "task-4-D1", "task-6-D2")),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _DebtBoard(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-4-D1", "task-6-D2"]
 
 
-def test_a_merged_task_closes_the_cards_of_the_debt_it_resolved(
+def test_a_merged_task_closes_nothing_for_the_debt_it_resolved(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
-    """Only after the merge: the row is marked resolved on the branch, so a
-    branch that never lands leaves the board exactly as it was."""
+    """The auditor marks the row resolved on the branch, and that is the whole
+    of it: after the merge nothing reads the index to go and close a card."""
     cfg = _make_config(tmp_path, merge_on_done=True)
     debt_index.text = (
         "| id | what | where | fix | card |\n"
@@ -4256,76 +4030,17 @@ def test_a_merged_task_closes_the_cards_of_the_debt_it_resolved(
         "| `task-4-D1` | The retry loop has no test | backoff changes | a fake clock "
         "| `card-9` |\n"
     )
-    kanban = _DebtBoard()
     monkeypatch.setattr(
         dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], resolved=("task-4-D1",)),
     )
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert ("card-9", "done") in kanban.statuses
-    # Read from the merged checkout this time, not the branch: the card id was
-    # written by whichever task filed the entry, which is not this one.
-    assert debt_index.reads == [("agent-cuenta1", f"{cfg.projects_root}/myproj")]
-
-
-def test_a_refused_merge_leaves_the_resolved_cards_open(
-    tmp_path, monkeypatch, fake_git, debt_index,
-) -> None:
-    """Nothing landed, so the debt is not resolved anywhere a later clone can
-    see — closing the card would be the board lying about the repo."""
-    cfg = _make_config(tmp_path, merge_on_done=True)
-    debt_index.text = (
-        "| id | what | where | fix | card |\n"
-        "|---|---|---|---|---|\n"
-        "| `task-4-D1` | The retry loop has no test | backoff | a fake clock | `card-9` |\n"
-    )
-
-    def refusing_merge(container, projects_root, slug, task_id):
-        return dispatcher_mod.docker_exec.MergeOutcome(
-            dispatcher_mod.docker_exec.REFUSED, "main", "has uncommitted changes"
-        )
-
-    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", refusing_merge)
-    kanban = _DebtBoard()
-    monkeypatch.setattr(
-        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], resolved=("task-4-D1",)),
-    )
-
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
-
-    assert ("card-9", "done") not in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-4-D1"]
     assert debt_index.reads == []
-
-
-def test_close_resolved_debt_leaves_a_resolved_entry_with_no_card_alone(
-    tmp_path, monkeypatch, debt_index,
-) -> None:
-    """Either the id is wrong or the row never got a card. Both are for a
-    human to look at, and neither is worth failing a merge that succeeded."""
-    cfg = _make_config(tmp_path)
-    dispatcher_mod.tasks.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
-    debt_index.text = (
-        "| id | what | where | fix | card |\n"
-        "|---|---|---|---|---|\n"
-        "| `task-4-D1` | The retry loop has no test | backoff | a fake clock | - |\n"
-    )
-    kanban = _DebtBoard()
-
-    assert dispatcher_mod.close_resolved_debt(cfg, kanban, "task-1", "myproj") == []
-    assert kanban.statuses == []
-
-
-def test_close_resolved_debt_does_not_read_the_index_for_a_project_with_no_board(
-    tmp_path, monkeypatch, debt_index,
-) -> None:
-    """There is nothing to close, and the read costs a `docker exec` per merge
-    on every project that never configured a board."""
-    cfg = _make_config(tmp_path)
-    dispatcher_mod.tasks.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-4-D1"])
-
-    assert dispatcher_mod.close_resolved_debt(cfg, NullKanbanClient(), "task-1", "myproj") == []
-    assert debt_index.reads == []
+    assert not hasattr(dispatcher_mod, "close_resolved_debt")
 
 
 # --- _file_accepted_debt, off the handoffs rather than the results ----------
@@ -4335,24 +4050,22 @@ def test_close_resolved_debt_does_not_read_the_index_for_a_project_with_no_board
 # has to answer for either caller: two `dict | None` and nothing else.
 
 
-def test_filing_accepted_debt_opens_one_card_per_declaration_the_review_kept(
+def test_filing_accepted_debt_gives_an_id_to_each_declaration_the_review_kept(
     tmp_path, debt_index,
 ) -> None:
-    """The unit the cycle and the hand-resume share: declarations in, entries
-    and cards out, with the revisor's rulings deciding which survive."""
+    """The unit the cycle and the hand-resume share: declarations in, entry
+    ids out, with the revisor's rulings deciding which survive."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
-    kanban.create_issue("the task's own card")
 
     filed = dispatcher_mod._file_accepted_debt(
-        cfg, kanban, "task-1", "myproj",
+        cfg, "task-1", "myproj",
         {"debt": [dict(_DEBT), dict(_MIGRATION)]},
         {"debt_rulings": [{"debt": "The migration has no down step", "ruling": debt.REJECTED}]},
     )
 
-    assert [entry for entry, _, _ in filed] == ["task-1-D1"]
-    assert [card for _, card, _ in filed] == ["card-1"]
-    assert [title for title, _ in kanban.debt_cards] == ["[debt] The retry loop has no test."]
+    assert [(entry, declaration.what) for entry, declaration in filed] == [
+        ("task-1-D1", _DEBT["what"])
+    ]
 
 
 def test_filing_accepted_debt_with_no_review_on_disk_keeps_every_declaration(
@@ -4362,15 +4075,12 @@ def test_filing_accepted_debt_with_no_review_on_disk_keeps_every_declaration(
     handoff was never stored has no rulings to read, and the answer to "was
     this accepted?" on a round that reached the auditor is yes."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
-    kanban.create_issue("the task's own card")
 
     filed = dispatcher_mod._file_accepted_debt(
-        cfg, kanban, "task-1", "myproj", {"debt": [dict(_DEBT), dict(_MIGRATION)]}, None,
+        cfg, "task-1", "myproj", {"debt": [dict(_DEBT), dict(_MIGRATION)]}, None,
     )
 
-    assert [entry for entry, _, _ in filed] == ["task-1-D1", "task-1-D2"]
-    assert len(kanban.debt_cards) == 2
+    assert [entry for entry, _ in filed] == ["task-1-D1", "task-1-D2"]
 
 
 def test_filing_accepted_debt_with_nothing_declared_reads_no_index_and_files_nothing(
@@ -4379,13 +4089,11 @@ def test_filing_accepted_debt_with_nothing_declared_reads_no_index_and_files_not
     """A missing handoff declares nothing, which is the same answer as a
     handoff that declared nothing — and neither is worth a docker exec."""
     cfg = _make_config(tmp_path)
-    kanban = _DebtBoard()
 
-    assert dispatcher_mod._file_accepted_debt(cfg, kanban, "task-1", "myproj", None, None) == []
+    assert dispatcher_mod._file_accepted_debt(cfg, "task-1", "myproj", None, None) == []
     assert dispatcher_mod._file_accepted_debt(
-        cfg, kanban, "task-1", "myproj", {"debt": []}, {"debt_rulings": []},
+        cfg, "task-1", "myproj", {"debt": []}, {"debt_rulings": []},
     ) == []
-    assert kanban.created == []
     assert debt_index.reads == []
 
 
@@ -4393,7 +4101,7 @@ def test_filing_accepted_debt_skips_what_the_branch_index_already_carries(
     tmp_path, debt_index,
 ) -> None:
     """Read from the branch, not the checkout: a re-run of the closing phase
-    must not card the same entry twice."""
+    must not file the same entry twice."""
     cfg = _make_config(tmp_path)
     debt_index.text = (
         "| id | what | where | fix | card |\n"
@@ -4401,58 +4109,48 @@ def test_filing_accepted_debt_skips_what_the_branch_index_already_carries(
         "| `task-1-D1` | The retry loop has no test | backoff changes | a fake clock "
         "| `card-9` |\n"
     )
-    kanban = _DebtBoard()
-    kanban.create_issue("the task's own card")
 
     filed = dispatcher_mod._file_accepted_debt(
-        cfg, kanban, "task-1", "myproj", {"debt": [dict(_DEBT), dict(_MIGRATION)]}, None,
+        cfg, "task-1", "myproj", {"debt": [dict(_DEBT), dict(_MIGRATION)]}, None,
     )
 
-    assert [declaration.what for _, _, declaration in filed] == [_MIGRATION["what"]]
+    assert [declaration.what for _, declaration in filed] == [_MIGRATION["what"]]
     # Numbered by what was filed, not by what was declared.
-    assert [entry for entry, _, _ in filed] == ["task-1-D1"]
+    assert [entry for entry, _ in filed] == ["task-1-D1"]
 
 
 def test_filing_accepted_debt_survives_an_index_it_cannot_read(
     tmp_path, monkeypatch, caplog,
 ) -> None:
-    """The index is read to avoid a duplicate card. Failing to read it costs a
-    duplicate card, never the entry."""
+    """The index is read to avoid a duplicate row. Failing to read it costs a
+    duplicate row, never the entry."""
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(
         dispatcher_mod.debt, "read_index",
         lambda container, workdir: (_ for _ in ()).throw(RuntimeError("no container")),
     )
-    kanban = _DebtBoard()
-    kanban.create_issue("the task's own card")
 
     with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
         filed = dispatcher_mod._file_accepted_debt(
-            cfg, kanban, "task-1", "myproj", {"debt": [dict(_DEBT)]}, None,
+            cfg, "task-1", "myproj", {"debt": [dict(_DEBT)]}, None,
         )
 
-    assert [entry for entry, _, _ in filed] == ["task-1-D1"]
+    assert [entry for entry, _ in filed] == ["task-1-D1"]
     assert any("no container" in r.getMessage() for r in caplog.records)
 
 
-def test_filing_accepted_debt_files_the_entry_even_when_the_board_refuses(
-    tmp_path, debt_index, caplog,
+def test_filing_accepted_debt_returns_the_id_and_the_declaration_and_nothing_else(
+    tmp_path, debt_index,
 ) -> None:
-    """The index is the source of truth and the board is the aid: a project
-    whose board is down loses the cards, not the debt."""
+    """The shape `debt.filing_note` takes: an id and what it names. No card
+    rides along (`docs/decisions.md` ADR 59)."""
     cfg = _make_config(tmp_path)
 
-    class _BrokenBoard(_FakeKanban):
-        def create_issue(self, title, description=None):
-            raise RuntimeError("board is down")
+    filed = dispatcher_mod._file_accepted_debt(
+        cfg, "task-1", "myproj", {"debt": [dict(_DEBT)]}, None,
+    )
 
-    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
-        filed = dispatcher_mod._file_accepted_debt(
-            cfg, _BrokenBoard(), "task-1", "myproj", {"debt": [dict(_DEBT)]}, None,
-        )
-
-    assert filed == [("task-1-D1", None, debt.Declaration(**_DEBT))]
-    assert any("task-1-D1" in r.getMessage() for r in caplog.records)
+    assert filed == [("task-1-D1", debt.Declaration(**_DEBT))]
 
 
 # --- run_single_phase -------------------------------------------------------
@@ -4490,7 +4188,7 @@ def test_run_single_phase_dispatches_that_phase_and_no_other(tmp_path, monkeypat
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     result = dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
     assert calls == ["revisor"]
@@ -4511,7 +4209,7 @@ def test_run_single_phase_runs_the_round_it_was_told_it_is_on(tmp_path, monkeypa
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
     assert seen["round_num"] == 2
@@ -4534,7 +4232,7 @@ def test_run_single_phase_hands_the_note_to_the_prompt(tmp_path, monkeypatch) ->
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2,
+        cfg, "task-1", "myproj", "revisor", round_num=2,
         description=_DESCRIPTION, note="The host rebooted mid-round.",
     )
 
@@ -4544,21 +4242,19 @@ def test_run_single_phase_hands_the_note_to_the_prompt(tmp_path, monkeypatch) ->
 def test_run_single_phase_leaves_the_task_pending_and_orphans_its_entries(
     tmp_path, monkeypatch,
 ) -> None:
-    """Every phase but the last one. The task is still going, so the card is
+    """Every phase but the last one. The task is still going, so it is
     not closed — and nobody filed these entries, so they stop naming a carrier
     that is no longer running."""
     cfg = _make_config(tmp_path)
     seen = _spy_learnings(monkeypatch)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    kanban = _FakeKanban()
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert task.status == "pending"
-    assert (_ISSUE_ID, "done") not in kanban.statuses
     assert seen["carried"] == []
     assert seen["orphaned"] == ["task-1"]
 
@@ -4568,19 +4264,18 @@ def test_run_single_phase_final_closes_the_task_the_way_a_cycle_does(
 ) -> None:
     """--final is the operator saying this phase is the last one. It buys what
     the cycle gives its auditor: the entries carried in beforehand, done in the
-    task file and on the board, and no orphaning on the way out."""
+    task file, and no orphaning on the way out."""
     cfg = _make_config(tmp_path)
     seen = _spy_learnings(monkeypatch)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
     )
 
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert task.status == "done"
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert result is not None and result.success
     assert seen["carried"] == [("myproj", "task-1")]
     assert seen["orphaned"] == []
 
@@ -4599,7 +4294,7 @@ def test_run_single_phase_does_not_act_on_the_verdict_it_got_back(tmp_path, monk
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
     result = dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
     assert calls == ["revisor"]
@@ -4615,7 +4310,7 @@ def test_run_single_phase_never_merges_even_when_the_config_says_to(
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
     )
 
     assert fake_git.merges == []
@@ -4624,14 +4319,14 @@ def test_run_single_phase_never_merges_even_when_the_config_says_to(
 def test_run_single_phase_says_what_closing_by_hand_did_not_do(
     tmp_path, monkeypatch, caplog,
 ) -> None:
-    """Invisible from the task file otherwise: a card closed this way was
+    """Invisible from the task file otherwise: a task closed this way was
     closed by a phase, not by a cycle that read a verdict."""
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
     with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_single_phase(
-            cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
+            cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
         )
 
     assert any(
@@ -4640,7 +4335,7 @@ def test_run_single_phase_says_what_closing_by_hand_did_not_do(
     )
 
 
-def test_run_single_phase_that_did_not_land_blocks_the_card_and_returns_none(
+def test_run_single_phase_that_did_not_land_returns_none_and_closes_nothing(
     tmp_path, monkeypatch, fake_git,
 ) -> None:
     """The operator is driving the cycle by hand now, so a phase that failed
@@ -4652,14 +4347,13 @@ def test_run_single_phase_that_did_not_land_blocks_the_card_and_returns_none(
         lambda *a, **kw: dispatcher_mod.DispatchResult(success=False, session_id=None, result_text="stop", account=""),
     )
 
-    kanban = _FakeKanban()
     result = dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
     )
 
     assert result is None
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
-    assert (_ISSUE_ID, "done") not in kanban.statuses
+    # --final or not, a phase that failed hands nothing off: no `done`.
+    assert not os.path.exists(task_file_path(cfg.hive_tasks_dir, "task-1"))
     # --final asked for the entries, the phase did not file them: they go back.
     assert seen["orphaned"] == ["task-1"]
     assert len(fake_git.review_cleanups) == 1
@@ -4669,14 +4363,12 @@ def test_run_single_phase_refuses_a_task_nobody_described(tmp_path, monkeypatch)
     """Same preamble as the cycle, same refusal: a role told a task id and
     nothing else costs a phase of quota to learn nothing."""
     cfg = _make_config(tmp_path)
-    set_kanban_issue_id(cfg.hive_tasks_dir, "task-1", _ISSUE_ID)
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(1))
 
-    kanban = _FakeKanban()
-    assert dispatcher_mod.run_single_phase(cfg, "task-1", "myproj", kanban, "auditor") is None
+    assert dispatcher_mod.run_single_phase(cfg, "task-1", "myproj", "auditor") is None
     assert calls == []
-    assert kanban.statuses == [(_ISSUE_ID, "blocked")]
+    assert not os.path.exists(task_file_path(cfg.hive_tasks_dir, "task-1"))
 
 
 def test_run_single_phase_leaves_another_owners_worktrees_alone(
@@ -4699,14 +4391,12 @@ def test_run_single_phase_leaves_another_owners_worktrees_alone(
 
     monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
 
-    kanban = _FakeKanban()
     result = dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
     assert result is None
     assert fake_git.review_cleanups == []
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
     assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).owner == "otro"
 
 
@@ -4722,7 +4412,7 @@ def test_run_single_phase_cleanup_does_not_swallow_a_real_failure(tmp_path, monk
 
     with pytest.raises(RuntimeError, match="phase blew up"):
         dispatcher_mod.run_single_phase(
-            cfg, "task-1", "myproj", _FakeKanban(), "auditor", final=True, description=_DESCRIPTION,
+            cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
         )
 
 
@@ -4738,7 +4428,7 @@ def test_run_single_phase_stores_what_the_phase_returned(tmp_path, monkeypatch) 
     )
 
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _FakeKanban(), "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
     assert read_handoff(cfg.hive_tasks_dir, "task-1", "revisor") == payload
@@ -4748,7 +4438,7 @@ def test_run_single_phase_final_files_the_debt_the_stored_handoffs_declared(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:
     """The whole point of storing them: a task driven a phase at a time closes
-    with the same cards, entries and resolved rows a cycle would have left."""
+    with the same entries and resolved rows a cycle would have left."""
     cfg = _make_config(tmp_path)
     save_handoff(
         cfg.hive_tasks_dir, "task-1", "implementador",
@@ -4764,15 +4454,13 @@ def test_run_single_phase_final_files_the_debt_the_stored_handoffs_declared(
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    kanban = _DebtBoard()
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
     )
 
-    # The revisor's ruling survived the round trip through disk: one card, not two.
-    assert [title for title, _ in kanban.debt_cards] == ["[debt] The retry loop has no test."]
-    # And the auditor is told the entry it owns, so its row points at the card.
-    assert "`task-1-D1`" in calls[0]["prompt"]
+    # The revisor's ruling survived the round trip through disk: the auditor
+    # is told one entry, not two.
+    assert _filed_lines(calls[0]["prompt"]) == ["- `task-1-D1` — The retry loop has no test."]
     assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-0-D3"]
 
 
@@ -4788,7 +4476,7 @@ def test_run_single_phase_final_appends_its_filing_note_to_the_operators(
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", _DebtBoard(), "auditor", final=True,
+        cfg, "task-1", "myproj", "auditor", final=True,
         description=_DESCRIPTION, note="The host rebooted mid-round.",
     )
 
@@ -4805,15 +4493,15 @@ def test_run_single_phase_final_without_stored_handoffs_files_nothing_and_says_s
     something very different when there was a record to file from."""
     cfg = _make_config(tmp_path)
     set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["task-0-D3"])
-    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([]))
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    kanban = _DebtBoard()
     with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_single_phase(
-            cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+            cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
         )
 
-    assert kanban.debt_cards == []
+    assert "already has its ids" not in calls[0]["prompt"]
     # set_resolved_debt replaces, so a call that knows nothing must not make it.
     assert read_resolved_debt(cfg.hive_tasks_dir, "task-1") == ["task-0-D3"]
     assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status == "done"
@@ -4831,13 +4519,13 @@ def test_run_single_phase_final_names_which_handoffs_it_closed_off(
 
     with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
         dispatcher_mod.run_single_phase(
-            cfg, "task-1", "myproj", _DebtBoard(), "auditor", final=True,
+            cfg, "task-1", "myproj", "auditor", final=True,
             description=_DESCRIPTION,
         )
 
     assert any(
         "implementador: found" in r.getMessage() and "revisor: missing" in r.getMessage()
-        and "1 debt card(s) filed" in r.getMessage()
+        and "1 debt entr(y/ies) named for filing" in r.getMessage()
         for r in caplog.records
     )
 
@@ -4847,17 +4535,17 @@ def test_run_single_phase_that_is_not_final_files_no_debt(
 ) -> None:
     """A middle phase has no business closing anything out. The handoffs are
     on disk from the moment they are returned, so what keeps a revisor round
-    from carding its own task's debt is --final and nothing else."""
+    from filing its own task's debt is --final and nothing else."""
     cfg = _make_config(tmp_path)
     save_handoff(cfg.hive_tasks_dir, "task-1", "implementador", {"debt": [dict(_DEBT)]})
-    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([]))
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
 
-    kanban = _DebtBoard()
     dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "revisor", round_num=2, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
     )
 
-    assert kanban.debt_cards == []
+    assert "`task-1-D1`" not in calls[0]["prompt"]
     assert debt_index.reads == []
 
 
@@ -5477,7 +5165,7 @@ def test_run_task_cycle_updates_the_project_before_the_first_phase(tmp_path, mon
     monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", fake_update)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert order[0] == ("update", "agent-cuenta1", cfg.projects_root, "myproj")
     assert [step for step in order if step[0] == "update"] == [order[0]]
@@ -5495,10 +5183,9 @@ def test_run_task_cycle_leaves_the_remote_alone_when_the_operator_did_not_ask(tm
     monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", never)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    kanban = _FakeKanban()
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
 def test_run_task_cycle_blocks_when_the_project_diverged_from_its_remote(
@@ -5523,12 +5210,11 @@ def test_run_task_cycle_blocks_when_the_project_diverged_from_its_remote(
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert roles == []
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
     # Blocked naming nothing is a task nobody can restart.
     assert detail in "\n".join(r.getMessage() for r in caplog.records)
 
@@ -5549,11 +5235,10 @@ def test_run_task_cycle_starts_anyway_when_the_update_could_not_be_attempted(
     )
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    kanban = _FakeKanban()
     with caplog.at_level("WARNING"):
-        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
-    assert (_ISSUE_ID, "done") in kanban.statuses
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert detail in "\n".join(r.getMessage() for r in caplog.records)
 
 
@@ -5571,7 +5256,7 @@ def test_run_task_cycle_does_not_warn_about_an_update_that_worked(tmp_path, monk
     records = []
     monkeypatch.setattr(dispatcher_mod.logger, "warning", lambda *a, **kw: records.append(a))
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert records == []
 
@@ -5658,24 +5343,24 @@ def test_run_task_cycle_says_it_finished_when_the_auditor_closed_it(tmp_path, mo
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
 @pytest.mark.parametrize("role", ["arquitecto", "implementador", "revisor", "auditor"])
 def test_run_task_cycle_is_held_when_no_account_takes_a_phase(tmp_path, monkeypatch, role) -> None:
-    """Whichever phase it is: the card is blocked as for any stop, but the run
-    is held, which is what lets the CLI exit with a code a wait answers."""
+    """Whichever phase it is: the run stops as for any stop, but it is held,
+    which is what lets the CLI exit with a code a wait answers."""
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for(role))
 
-    kanban = _FakeKanban()
-    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert outcome is dispatcher_mod.CycleOutcome.HELD
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
-    assert (_ISSUE_ID, "done") not in kanban.statuses
+    # Stopped, not closed: the auditor's handoff is the only writer of `done`.
+    path = task_file_path(cfg.hive_tasks_dir, "task-1")
+    assert not os.path.exists(path) or read_task_file(path).status != "done"
 
 
 def test_run_task_cycle_is_blocked_not_held_when_a_phase_fails_on_its_own(tmp_path, monkeypatch) -> None:
@@ -5688,7 +5373,7 @@ def test_run_task_cycle_is_blocked_not_held_when_a_phase_fails_on_its_own(tmp_pa
         ),
     )
 
-    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
@@ -5697,7 +5382,7 @@ def test_run_task_cycle_is_blocked_when_the_rounds_run_out(tmp_path, monkeypatch
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
 
-    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
@@ -5706,7 +5391,7 @@ def test_run_task_cycle_is_blocked_when_there_is_no_description(tmp_path, monkey
     cfg = _make_config(tmp_path)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
 
-    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban())
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
 
     assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
 
@@ -5718,7 +5403,7 @@ def test_run_task_cycle_is_not_held_by_an_optional_map_that_found_no_account(tmp
     _fake_index(monkeypatch, exists=False)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for(project_docs.MAPPER_ROLE))
 
-    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
@@ -5732,15 +5417,14 @@ def test_run_single_phase_hands_back_a_held_result_when_no_account_took_it(
     seen = _spy_learnings(monkeypatch)
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for("auditor"))
 
-    kanban = _FakeKanban()
     result = dispatcher_mod.run_single_phase(
-        cfg, "task-1", "myproj", kanban, "auditor", final=True, description=_DESCRIPTION,
+        cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
     )
 
     assert result is not None
     assert result.success is False and result.no_account is True
-    assert (_ISSUE_ID, "blocked") in kanban.statuses
-    assert (_ISSUE_ID, "done") not in kanban.statuses
+    # The phase never ran, so it handed nothing off and closed nothing.
+    assert not os.path.exists(task_file_path(cfg.hive_tasks_dir, "task-1"))
     # Not completed: the entries --final carried go back, as for any stop.
     assert seen["orphaned"] == ["task-1"]
 
@@ -6091,7 +5775,7 @@ def test_run_task_cycle_passes_an_effort_on_every_phase(tmp_path, monkeypatch) -
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert {role for role, _ in calls} >= {"arquitecto", "implementador", "revisor", "auditor"}
     for role, effort in calls:

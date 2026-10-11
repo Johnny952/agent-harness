@@ -9,11 +9,9 @@ import pytest
 import dispatcher.cli as cli_mod
 import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import learnings, tasks
-from dispatcher.context_transfer import read_kanban_issue_id
 from dispatcher.tasks import set_resolved_debt
 from dispatcher.dispatcher import CycleOutcome, DispatchResult
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
-from dispatcher.vibe_kanban_client import LocalBoardClient, NullKanbanClient, VibeKanbanClient
 
 CONFIG_YAML = """
 accounts:
@@ -27,18 +25,6 @@ hive_tasks_dir: {hive_tasks_dir}
 state_dir: /data/dispatcher_state
 collector_url: http://127.0.0.1:8787
 """
-
-KANBAN_YAML = """
-vibe_kanban:
-  command: ["vibe-kanban", "mcp"]
-"""
-
-LOCAL_BOARD_YAML = """
-local_board:
-  dir: {board_dir}
-"""
-
-ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
 
 #: A description the CLI accepts: the two required sections.
 _DESCRIPTION = "## Goal\n\nAdd a /healthz endpoint.\n\n## Done when\n\nGET /healthz answers 200.\n"
@@ -58,27 +44,19 @@ def _legacy(tmp_path: Path, task_id: str = "task-9") -> Path:
     return path
 
 
-def _write_config(tmp_path: Path, board: bool = False, local_board: bool = False) -> Path:
+def _write_config(tmp_path: Path) -> Path:
     """A config whose hive_tasks_dir is a real directory: run-task reads it
-    to decide whether the task already carries a description. `board` adds the
-    optional vibe_kanban block and `local_board` the optional local one, which
-    most runs don't have — and which config.yaml refuses to carry together."""
+    to decide whether the task already carries a description."""
     config_path = tmp_path / "config.yaml"
-    text = CONFIG_YAML.format(hive_tasks_dir=str(tmp_path / "hive"))
-    if board:
-        text += KANBAN_YAML
-    if local_board:
-        text += LOCAL_BOARD_YAML.format(board_dir=str(tmp_path / "board"))
-    config_path.write_text(text)
+    config_path.write_text(CONFIG_YAML.format(hive_tasks_dir=str(tmp_path / "hive")))
     return config_path
 
 
 def _capture_cycle(monkeypatch, outcome: CycleOutcome | None = CycleOutcome.FINISHED) -> dict:
     captured: dict = {}
 
-    def fake_run_task_cycle(cfg, task_id, slug, kanban, description=None):
+    def fake_run_task_cycle(cfg, task_id, slug, description=None):
         captured.update(task_id=task_id, slug=slug, description=description)
-        captured["kanban"] = kanban
         return outcome
 
     monkeypatch.setattr(cli_mod, "run_task_cycle", fake_run_task_cycle)
@@ -357,99 +335,39 @@ def test_cli_bootstrap_project_creates_project_dir(tmp_path: Path, monkeypatch) 
     }
 
 
-def test_cli_run_task_without_a_board_uses_the_null_client(tmp_path: Path, monkeypatch) -> None:
-    config_path = _write_config(tmp_path)
-    captured = _capture_cycle(monkeypatch)
-
-    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
-
-    # No vibe_kanban block: the cycle gets a board that answers every call and
-    # reaches nothing, rather than a client pointed at a server that isn't there.
-    assert isinstance(captured["kanban"], NullKanbanClient)
-
-
-def test_cli_run_task_with_a_board_uses_the_real_client(tmp_path: Path, monkeypatch) -> None:
-    config_path = _write_config(tmp_path, board=True)
-    captured = _capture_cycle(monkeypatch)
-
-    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
-
-    assert isinstance(captured["kanban"], VibeKanbanClient)
-    assert captured["kanban"].config.command == ["vibe-kanban", "mcp"]
-
-
-def test_cli_run_task_with_a_local_board_uses_the_local_client(
-    tmp_path: Path, monkeypatch
-) -> None:
-    config_path = _write_config(tmp_path, local_board=True)
-    captured = _capture_cycle(monkeypatch)
-
-    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
-
-    assert isinstance(captured["kanban"], LocalBoardClient)
-    assert captured["kanban"].config.dir == str(tmp_path / "board")
-
-
-def test_cli_run_task_stores_an_issue_id_for_a_local_board(tmp_path: Path, monkeypatch) -> None:
-    config_path = _write_config(tmp_path, local_board=True)
-    _capture_cycle(monkeypatch)
-
-    _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", ISSUE_ID)
-
-    # A local board reads the id the same way the remote one does, so the flag
-    # has to be accepted for it too — the check is "no board", not "no MCP".
-    assert read_kanban_issue_id(str(tmp_path / "hive"), "task-1") == ISSUE_ID
-
-
-def test_cli_run_task_stores_the_kanban_issue_id(tmp_path: Path, monkeypatch) -> None:
-    config_path = _write_config(tmp_path, board=True)
-    _capture_cycle(monkeypatch)
-
-    _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", ISSUE_ID)
-
-    # In the task file, so a re-run of the same task needs the flag only once.
-    assert read_kanban_issue_id(str(tmp_path / "hive"), "task-1") == ISSUE_ID
-
-
-def test_cli_run_task_leaves_an_unnamed_issue_unset(tmp_path: Path, monkeypatch) -> None:
-    config_path = _write_config(tmp_path, board=True)
-    _capture_cycle(monkeypatch)
-
-    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
-
-    assert read_kanban_issue_id(str(tmp_path / "hive"), "task-1") is None
-
-
-def test_cli_run_task_rejects_the_short_id_shown_on_the_card(
+def test_cli_run_task_no_longer_takes_a_kanban_issue_id(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
-    """Every MCP tool takes the issue's uuid; the board shows "VK-7". Caught
-    here, the mix-up costs a usage error instead of a rejected update_issue
-    four phases into a run."""
-    config_path = _write_config(tmp_path, board=True)
-    captured = _capture_cycle(monkeypatch)
-
-    with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", "VK-7")
-
-    assert excinfo.value.code == 2
-    assert captured == {}
-    assert "uuid" in capsys.readouterr().err
-
-
-def test_cli_run_task_rejects_an_issue_id_with_no_board_configured(
-    tmp_path: Path, monkeypatch, capsys,
-) -> None:
+    """ADR 59 removed the flag with the board seam: a usage error, before any
+    cycle runs and before anything is written."""
     config_path = _write_config(tmp_path)
     captured = _capture_cycle(monkeypatch)
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, config_path, "--description", _DESCRIPTION, "--kanban-issue-id", ISSUE_ID)
+        _run(
+            monkeypatch, config_path, "--description", _DESCRIPTION,
+            "--kanban-issue-id", "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f",
+        )
 
     assert excinfo.value.code == 2
     assert captured == {}
-    # Silently storing an id nothing reads would look like a wired-up board.
-    assert "vibe_kanban" in capsys.readouterr().err
+    assert "--kanban-issue-id" in capsys.readouterr().err
+    assert not (tmp_path / "hive" / "task-1.md").exists()
+
+
+@pytest.mark.parametrize("block", ['vibe_kanban:\n  command: ["vibe-kanban", "mcp"]\n', "local_board:\n  dir: /state/board\n"])
+def test_cli_refuses_to_start_on_a_config_that_still_configures_a_board(
+    tmp_path: Path, monkeypatch, block: str,
+) -> None:
+    """The refusal is `load_config`'s, so it is every verb's: nothing runs."""
+    config_path = _write_config(tmp_path)
+    config_path.write_text(config_path.read_text() + block)
+    captured = _capture_cycle(monkeypatch)
+
+    with pytest.raises(ValueError, match="the board seam was removed .*ADR 59"):
+        _run(monkeypatch, config_path, "--description", _DESCRIPTION)
+
+    assert captured == {}
 
 
 # --- `dispatch learnings`, the human half of the inbox ---------------------
@@ -703,54 +621,19 @@ _DEBT_INDEX = (
 )
 
 
-class _CountingBoard:
-    """A board that only remembers what was asked of it."""
-
-    enabled = True
-
-    def __init__(self) -> None:
-        self.statuses: list[tuple[str, str]] = []
-
-    def set_status(self, issue_id: str, status: str) -> None:
-        self.statuses.append((issue_id, status))
-
-
-def _fake_debt(monkeypatch, board=None, index: str = _DEBT_INDEX) -> None:
-    """The debt half of a merge, faked where `close_resolved_debt` reads it."""
-    monkeypatch.setattr(dispatcher_mod, "cleanup_container", lambda cfg: "agent-cuenta1")
-    monkeypatch.setattr(dispatcher_mod.debt, "read_index", lambda container, workdir: index)
-    if board is not None:
-        monkeypatch.setattr(cli_mod, "_kanban", lambda cfg: board)
-
-
-def test_cli_merge_task_closes_the_cards_of_the_debt_the_branch_resolved(
+def test_cli_merge_task_closes_no_card_for_the_debt_the_branch_resolved(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
-    """The card outlives the run that opened it, so closing it is the merge's
-    job, not the cycle's: the entry can be resolved days later by another task
-    in another process, which is exactly when this command gets run by hand."""
-    config_path = _write_config(tmp_path, board=True)
-    set_resolved_debt(str(tmp_path / "hive"), "task-1", ["task-4-D1"])
-    board = _CountingBoard()
-    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
-    _fake_debt(monkeypatch, board)
-
-    _run_command(
-        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
-    )
-
-    assert board.statuses == [("card-9", "done")]
-    assert "closed the card of 1 resolved debt entr(y/ies): task-4-D1" in capsys.readouterr().out
-
-
-def test_cli_merge_task_without_a_board_says_nothing_about_debt_cards(
-    tmp_path: Path, monkeypatch, capsys,
-) -> None:
-    """`vibe_kanban` is optional and the index is the source of truth, so a
-    project with no board merges exactly as before and reads as before."""
+    """ADR 59: the auditor marks the row resolved on the branch and nothing
+    mirrors it, so the merge reads no index and says nothing about debt."""
     config_path = _write_config(tmp_path)
     set_resolved_debt(str(tmp_path / "hive"), "task-1", ["task-4-D1"])
     _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    reads = []
+    monkeypatch.setattr(
+        dispatcher_mod.debt, "read_index",
+        lambda container, workdir: reads.append(workdir) or _DEBT_INDEX,
+    )
 
     _run_command(
         monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
@@ -759,6 +642,7 @@ def test_cli_merge_task_without_a_board_says_nothing_about_debt_cards(
     out = capsys.readouterr().out
     assert "merged agent/task/task-1 into main" in out
     assert "debt" not in out
+    assert reads == []
 
 
 def _basic_config_recorder(monkeypatch) -> dict:
@@ -846,22 +730,21 @@ def _capture_single_phase(monkeypatch, result: DispatchResult | None = _LANDED) 
     """Stand in for the one phase, and record what the parser decided."""
     captured: dict = {}
 
-    def fake_run_single_phase(cfg, task_id, slug, kanban, role, round_num=None, final=False, description=None, note=""):
+    def fake_run_single_phase(cfg, task_id, slug, role, round_num=None, final=False, description=None, note=""):
         captured.update(
             task_id=task_id, slug=slug, role=role,
             round_num=round_num, final=final, description=description, note=note,
         )
-        captured["kanban"] = kanban
         return result
 
     monkeypatch.setattr(cli_mod, "run_single_phase", fake_run_single_phase)
     return captured
 
 
-def _described(tmp_path: Path, board: bool = False) -> Path:
+def _described(tmp_path: Path) -> Path:
     """A config whose task-1 is already under way, which is the only kind of
     task this verb runs on."""
-    config_path = _write_config(tmp_path, board=board)
+    config_path = _write_config(tmp_path)
     tasks.write_description(str(tmp_path / "hive"), "task-1", _DESCRIPTION)
     return config_path
 
@@ -889,7 +772,7 @@ def test_cli_run_phase_passes_the_phase_it_was_given_through(tmp_path: Path, mon
 def test_cli_run_phase_defaults_to_a_phase_that_does_not_close_the_task(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """--final is the destructive half of this verb — it moves the card to
+    """--final is the destructive half of this verb — it moves the task to
     done. Leaving it out has to mean the ordinary middle-of-a-cycle phase."""
     captured = _capture_single_phase(monkeypatch)
 
@@ -913,26 +796,6 @@ def test_cli_run_phase_final_is_passed_along(tmp_path: Path, monkeypatch) -> Non
     )
 
     assert captured["final"] is True
-
-
-def test_cli_run_phase_gives_the_cycle_a_board_when_the_config_has_one(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """Same rule as run-task: no vibe_kanban block, no board — and a phase
-    run by hand still has to move whatever card the task already has."""
-    captured = _capture_single_phase(monkeypatch)
-    _run_command(
-        monkeypatch, _described(tmp_path),
-        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
-    )
-    assert isinstance(captured["kanban"], NullKanbanClient)
-
-    captured = _capture_single_phase(monkeypatch)
-    _run_command(
-        monkeypatch, _described(tmp_path, board=True),
-        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
-    )
-    assert isinstance(captured["kanban"], VibeKanbanClient)
 
 
 def test_cli_run_phase_rejects_a_role_nothing_knows_how_to_prompt(

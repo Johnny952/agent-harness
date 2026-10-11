@@ -19,7 +19,6 @@ from dispatcher.context_transfer import (
     LockHeldError,
     read_handoff,
     read_handoff_envelope,
-    read_kanban_issue_id,
     read_task_file,
     read_usage,
     save_handoff,
@@ -37,7 +36,6 @@ from dispatcher.tasks import (
     handoff,
     refresh_heartbeat,
     release_stale_lock,
-    set_kanban_issue_id,
 )
 
 
@@ -367,68 +365,6 @@ def test_the_task_file_no_longer_carries_the_description(tmp_path: Path) -> None
     assert not hasattr(task, "description")
     assert task.body.strip() == "old body"
     assert "description" not in Path(path).read_text()
-
-
-_ISSUE_ID = "0e1d2c3b-4a59-6878-9706-5a4b3c2d1e0f"
-
-
-def test_kanban_issue_id_roundtrips(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-
-    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
-
-    assert read_kanban_issue_id(hive_dir, "task-1") == _ISSUE_ID
-
-
-def test_set_kanban_issue_id_keeps_everything_else(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-    acquire_lock(hive_dir, "task-1", owner="cuenta1")
-    handoff(hive_dir, "task-1", new_status="review", body="arquitecto: plan ready")
-
-    # Attaching a board to a task that already ran is a legitimate move.
-    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
-
-    task = read_task_file(task_file_path(hive_dir, "task-1"))
-    assert task.kanban_issue_id == _ISSUE_ID
-    assert task.body.strip() == "arquitecto: plan ready"
-    assert task.status == "review"
-
-
-def test_handoff_keeps_the_kanban_issue_id(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-    set_kanban_issue_id(hive_dir, "task-1", _ISSUE_ID)
-
-    handoff(hive_dir, "task-1", new_status="review", body="implementador: done")
-
-    # Every phase re-reads the file to find the issue it has to move along.
-    assert read_kanban_issue_id(hive_dir, "task-1") == _ISSUE_ID
-
-
-def test_task_file_written_before_the_board_existed_is_still_readable(tmp_path: Path) -> None:
-    path = str(tmp_path / "task-1.md")
-    Path(path).write_text(
-        "---\ntask_id: task-1\nstatus: pending\nowner: null\ndepends_on: []\n"
-        "heartbeat: null\n---\n\nold body\n"
-    )
-
-    task = read_task_file(path)
-
-    assert task.kanban_issue_id is None
-
-
-def test_a_task_with_no_board_writes_no_kanban_key(tmp_path: Path) -> None:
-    hive_dir = str(tmp_path)
-
-    acquire_lock(hive_dir, "task-1", owner="cuenta1")
-
-    assert read_kanban_issue_id(hive_dir, "task-1") is None
-    # Absent, not null: a harness without a board leaves no trace of one.
-    assert "kanban_issue_id" not in Path(task_file_path(hive_dir, "task-1")).read_text()
-
-
-def test_read_kanban_issue_id_of_an_unseeded_task_is_none(tmp_path: Path) -> None:
-    assert read_kanban_issue_id(str(tmp_path), "task-1") is None
-    assert list_task_ids(str(tmp_path)) == []
 
 
 def test_save_handoff_round_trips_the_structured_return(tmp_path: Path) -> None:

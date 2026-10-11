@@ -4128,3 +4128,68 @@ and the missing handoff surfaced only later, as a role with nothing to read.
 a failed round. A phase that cannot produce its handoff now fails at once
 rather than one role later. The worst case is `max_handoff_resumes` extra
 calls per phase, each bounded by `phase_timeout_seconds`.
+
+## ADR 59 — the board seam is removed: the task files are the board and nothing mirrors them
+
+**Status:** accepted (T-028, 2026-10-11; `docs/plans/board-service.md` step
+2). Supersedes ADR 1, ADR 2, ADR 3 and ADR 4. Their headings are left
+unstruck because T-028's card forbids editing an earlier entry; this entry is
+the pointer.
+
+**Context.** The dispatcher talked to a board through a four-method seam with
+three clients behind it. No run ever used anything but the client that does
+nothing: Vibe Kanban never got past its cloud login, and the local board's
+cards repeated what the task files already say. The user ruled on 2026-10-10
+that the board is the harness's own: the task files are its data and the
+console is its view (`docs/plans/board-service.md` section 1).
+
+**Decision.**
+
+- **The seam is deleted.** The client module with its three clients and its
+  test file, the client factory and the issue-id seeding in `dispatcher/cli.py`,
+  the `--kanban-issue-id` flag, and the client argument of `open_cycle`,
+  `run_task_cycle`, `run_single_phase` and `_file_accepted_debt` all go.
+- **`_update_task_status` goes with it.** It only ever moved a card: the task
+  file's `status` is written by `tasks.handoff` and `tasks.acquire_lock`, and
+  still is. So nothing about the task file changes, and a cycle that stops
+  blocked still leaves no `blocked` in it; its record is the log line and the
+  exit code (ADR 52). Writing that status is the dispatcher's later work
+  (the plan's sections 4 and 6), not this removal's.
+- **`kanban_issue_id` is no longer a `TaskFile` field.** A task file that
+  still has the key reads without error and loses it on its next write. This
+  is the silent drop
+  `docs/learnings/dropping-a-key-from-read-task-file-deletes-it-on-the-next-write.md`
+  warns about, taken on purpose: the value has no reader left, so there is
+  nothing to move first and no refusal to add.
+- **Either board block is a startup error.** `load_config` refuses
+  `vibe_kanban`, `local_board` and the older `vibe_kanban_mcp_url` when the
+  key is present at all, naming the key and this ADR. A block that was
+  silently ignored would leave an operator watching a board nothing moves,
+  which is ADR 2's argument and the part of it that survives.
+- **Debt is filed without cards.** The dispatcher still assigns each accepted
+  declaration its id and names it to the auditor; it opens nothing. The
+  index and its five columns (`COLUMNS` in `dispatcher/debt.py`) do not
+  change, because the api and the console read them: the auditor writes
+  `none` under `card` until step 5 of the plan puts a backlog item's id
+  there. `card_title`, `card_description`, `card_ids` and
+  `close_resolved_debt` had no other caller and go; `merge-task` no longer
+  closes anything. `resolved_debt` stays in the task file and on the api.
+- **The api serves no card.** `/api/tasks` and `/api/tasks/<task_id>` drop
+  `card` and `kanban_issue_id`, read no board and warn about none. A task row
+  is eight keys: `task_id`, `status`, `owner`, `depends_on`, `heartbeat`,
+  `description`, `resolved_debt`, `lock_expired`, plus `body` on the detail
+  route (ADR 21).
+- **The compose service is removed** from both compose files, with its
+  `kanban` profile and the `vibe_kanban_data` volume declaration.
+
+**Consequences.** One thing less to configure, and no path left by which a
+second copy of a task's state can disagree with the task file. Removing a
+volume's declaration deletes no volume: a host that ever ran the profile
+keeps `vibe_kanban_data` until someone removes it by hand. The console's
+types still declare `card` and `kanban_issue_id` on a task; no screen reads
+either, so they are stale annotations until a front task removes them. The
+`mcp` package is still installed by `pyproject.toml` and the agent image and
+nothing imports it. `docs/plans/board.md` *The shapes* and ADR 10, ADR 21 and
+ADR 23 quote the old task key set; they are records and stay as written. A
+later step that wants a board tool builds it on `dispatcher/tasks.py`, not on
+a client seam.

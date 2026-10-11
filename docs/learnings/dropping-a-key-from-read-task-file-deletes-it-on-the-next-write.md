@@ -39,6 +39,15 @@ has the key, and a test fails if any other module under `dispatcher/` calls
 drop, the shape is the same and so is the remedy: make `_write_task_file`
 refuse a file that still has it, rather than guard the entry points.
 
+The exception is a key whose value has no reader left. T-028 removed
+`kanban_issue_id` from `TaskFile` (and `set_kanban_issue_id` from the writers
+listed above, which are five now) and let this trap do the cleanup on
+purpose: a file that still has the key is read without error and loses it,
+and only it, on the next write (`docs/decisions.md` ADR 59;
+`tests/dispatcher/test_tasks.py`
+`test_a_task_file_that_still_has_kanban_issue_id_reads_and_loses_it_on_its_next_write`).
+No refusal was added, because there was nothing to move first.
+
 The same shape cuts the other way for a new key: a writer that builds a fresh
 `TaskFile` rather than reading the old one drops every optional key it does
 not set.

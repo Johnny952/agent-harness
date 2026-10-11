@@ -1,29 +1,5 @@
 # docker/compose/docker-compose.yml
 services:
-  # Behind a profile, and off by default: `ghcr.io/bloopai/vibe-kanban:latest`
-  # is private or does not exist (anonymous pulls are denied on a host where
-  # other GHCR pulls work), and Compose pre-pulls every named image before
-  # starting anything — so leaving this service in the default set made a
-  # plain `up -d` fail for all four. Bring it up with
-  # `--profile kanban` once `image:` points at something you can actually
-  # pull (build it from upstream, or a vetted image of your own).
-  #
-  # Nothing in the harness reaches this service over the network: Vibe
-  # Kanban's MCP server speaks stdio, so the dispatcher spawns its own
-  # (`vibe_kanban.command` in config.yaml) rather than dialling a URL. This
-  # is the web UI, for the human. The publish below stays bound to 127.0.0.1
-  # per the spec's "control UI stays loopback-only" requirement (sec. 1).
-  vibe-kanban:
-    profiles: ["kanban"]
-    image: ghcr.io/bloopai/vibe-kanban:latest
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9100:9100"
-    volumes:
-      - vibe_kanban_data:/data
-    networks:
-      - ia_harness_net
-
   collector:
     build:
       context: ../..
@@ -149,8 +125,6 @@ services:
       # at this host path before `docker compose up`.
       - ../../config.yaml:/app/config.yaml:ro
     depends_on:
-      # Not vibe-kanban: the dispatcher never dials it, and depending on a
-      # profiled service would drag its unpullable image back in.
       - collector
     networks:
       - ia_harness_net
@@ -163,7 +137,6 @@ networks:
     name: ia_harness_net
 
 volumes:
-  vibe_kanban_data:
   observability_data:
   registry_mirror_data:
   claude_shared:

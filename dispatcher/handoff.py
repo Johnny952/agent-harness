@@ -10,7 +10,7 @@ a per-role byte budget the dispatcher enforces itself.
 
 The fields are the ones a later phase actually needs: what changed, what was
 verified, what is still open, what might bite, which subagents exist and what
-each was doing, what deserves to become a learning or a debt card, and where
+each was doing, what deserves to become a learning or a debt entry, and where
 the detail lives. The detail itself never travels — it goes to files and the
 handoff cites their paths.
 """
@@ -163,7 +163,7 @@ _DEBT_RULINGS_PROPERTY = {
                     "type": "string",
                     "enum": list(debt.RULINGS),
                     "description": (
-                        f"{debt.ACCEPTED}: it gets filed and put on the board. "
+                        f"{debt.ACCEPTED}: it gets filed in the debt index. "
                         f"{debt.REJECTED}: it is a finding, fix it this round. "
                         f"{debt.BLOCKS}: it is not debt, it is a block wearing a debt costume."
                     ),

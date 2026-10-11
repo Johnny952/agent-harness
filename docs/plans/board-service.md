@@ -6,7 +6,9 @@ T-027 (`docs/implementations/T-027.md`): the task module
 `dispatcher/tasks.py`, the description in its own `description.md`,
 `dispatch migrate`, the phase prompt on *Goal* and *Done when* plus the
 file's path, and the dispatcher's task-file writes on the module, whose
-writer refuses an unmigrated file. The per-task lock of section 5 comes
+writer refuses an unmigrated file. Step 2 is built by T-028
+(`docs/implementations/T-028.md`, `docs/decisions.md` ADR 59): the board
+seam is removed. The per-task lock of section 5 comes
 with the service (step 4). Every later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
@@ -67,6 +69,8 @@ Written by the operator's session, out of cycle, from the code at `a838508`.
     `NullKanbanClient`.
   - Vibe Kanban never got past its cloud login.
   - `LocalBoardClient`'s cards repeat what the task files already say.
+  - T-028 removed all of it under `docs/decisions.md` ADR 59 (step 2 below):
+    this bullet describes the tree before that task.
 - **Phases get their tools from outside.** `docker_exec` passes
   `--allowed-tools` from `config.allowed_tools`, and a phase cannot widen its
   own permissions. A per-phase `--mcp-config` would be added the same way.

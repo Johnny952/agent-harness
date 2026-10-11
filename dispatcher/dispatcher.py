@@ -26,7 +26,6 @@ from dispatcher import (
 )
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
-from dispatcher.vibe_kanban_client import KanbanClient
 
 logger = logging.getLogger(__name__)
 
@@ -892,7 +891,7 @@ def _role_prompt(
     if traps:
         prompt += f"\n\n{traps}"
     # Something this one call has to be told that no rule covers: today, the
-    # debt ids and card ids the auditor is about to file. It is computed by
+    # debt ids the auditor is about to file. It is computed by
     # the dispatcher between phases, so it cannot come from `duties`.
     if note:
         prompt += f"\n\n{note}"
@@ -1579,79 +1578,22 @@ def dispatch_phase(
         )
 
 
-#: A card is a glance, not a log: past this, the ask goes in its description.
-_ISSUE_TITLE_MAX = 120
-
-
-def _issue_title(task_id: str, description: str) -> str:
-    """What the card says on the board.
-
-    The task id leads, so a card and a task file can be lined up by eye; the
-    first line of the ask follows, so the card says something a human
-    recognises without opening it.
-    """
-    lines = [line.strip() for line in description.strip().splitlines() if line.strip()]
-    title = f"{task_id}: {lines[0]}" if lines else task_id
-    return title if len(title) <= _ISSUE_TITLE_MAX else title[: _ISSUE_TITLE_MAX - 1].rstrip() + "…"
-
-
-def _open_kanban_issue(cfg: Config, kanban: KanbanClient, task_id: str, description: str) -> str | None:
-    """Put this task on the board, and remember which card it became.
-
-    The uuid is server-assigned, so it goes back into the task file: a later
-    phase after a restart, or a second `run-task` on the same task, has to
-    move this same card rather than open another one. A board that can't be
-    reached costs one warning and nothing else — the run is not a board
-    operation.
-    """
-    try:
-        # Titled from *Goal*: the description's own first line is `## Goal`.
-        goal = tasks.parse_description(description).goal
-        issue_id = kanban.create_issue(_issue_title(task_id, goal), description)
-    except Exception as exc:
-        logger.warning("kanban: task %s runs without a card: %s", task_id, exc)
-        return None
-    if issue_id is not None:
-        tasks.set_kanban_issue_id(cfg.hive_tasks_dir, task_id, issue_id)
-    return issue_id
-
-
-def _update_task_status(kanban: KanbanClient, issue_id: str | None, status: str) -> None:
-    # Vibe Kanban is a visibility aid, not the source of truth for dispatch
-    # state (that's the task file / account state machine) — an outage or
-    # API error there must not abort an otherwise-healthy phase run.
-    if issue_id is None:
-        # No board, or a board this task never got a card on. Silent on
-        # purpose: a harness configured without one would otherwise carry a
-        # warning per phase about something it was never asked to do.
-        return
-    try:
-        kanban.set_status(issue_id, status)
-    except Exception as exc:
-        logger.warning("kanban status update failed for issue %s (%s): %s", issue_id, status, exc)
-
-
 def _file_accepted_debt(
     cfg: Config,
-    kanban: KanbanClient,
     task_id: str,
     slug: str,
     implemented: dict | None,
     reviewed: dict | None,
-) -> list[tuple[str, str | None, debt.Declaration]]:
-    """Put the debt this task declared on the board, and name it for the auditor.
+) -> list[tuple[str, debt.Declaration]]:
+    """Give the debt this task declared its ids, and name it for the auditor.
 
-    The dispatcher does this, not an agent, for two reasons the spec is blunt
-    about: an agent that can create tasks can assign itself work, and an agent
-    re-run for a second review round would create the same card twice.
+    The dispatcher does this, not an agent: an agent that numbers its own
+    entries numbers them again when it is re-run for a second review round.
 
-    It runs *before* the auditor because the card exists before the row does.
-    That order is what lets each side record the other's id: the ids are
-    assigned here, the cards are opened here, and the auditor — still the only
-    writer of the indexes — writes one row that already points at its card.
-
-    A project with no board loses only the cards. The entries are filed either
-    way, because the index is the source of truth and the board is the aid.
+    It runs *before* the auditor because the ids go into the auditor's
+    prompt: the ids are assigned here, and the auditor — still the only
+    writer of the indexes — writes one row per id (`docs/decisions.md` ADR 59:
+    nothing is opened anywhere else).
 
     Takes the two handoffs rather than the two results, because the caller may
     not have either result: `run-phase` closes a task out of what previous
@@ -1663,9 +1605,9 @@ def _file_accepted_debt(
     if not accepted:
         return []
     # Read from the branch being built, not the project checkout: a re-run of
-    # a task that already filed entries has them on its own branch, and a
-    # board that fills with the same entry once per run is a board nobody
-    # reads. A read that fails costs a duplicate card, never the entry.
+    # a task that already filed entries has them on its own branch, and an
+    # index that fills with the same entry once per run is an index nobody
+    # reads. A read that fails costs a duplicate row, never the entry.
     known: set[str] = set()
     container = cleanup_container(cfg)
     if container is not None:
@@ -1677,65 +1619,14 @@ def _file_accepted_debt(
             known = debt.index_fingerprints(debt.read_index(container, worktree))
         except Exception as exc:
             logger.warning("task %s: could not read %s: %s", task_id, project_docs.DEBT_INDEX, exc)
-    filed: list[tuple[str, str | None, debt.Declaration]] = []
+    filed: list[tuple[str, debt.Declaration]] = []
     for declaration in accepted:
         if declaration.fingerprint in known:
-            logger.info("task %s: debt already in the index, no card: %s", task_id, declaration.what)
+            logger.info("task %s: debt already in the index, not filed again: %s", task_id, declaration.what)
             continue
         known.add(declaration.fingerprint)
-        entry = debt.entry_id(task_id, len(filed) + 1)
-        card = None
-        try:
-            card = kanban.create_issue(
-                debt.card_title(declaration),
-                debt.card_description(task_id, entry, declaration),
-            )
-        except Exception as exc:
-            # Same rule as everywhere else the board is touched: it is a
-            # visibility aid, and the entry is filed with or without it.
-            logger.warning("kanban: debt %s gets no card: %s", entry, exc)
-        filed.append((entry, card, declaration))
+        filed.append((debt.entry_id(task_id, len(filed) + 1), declaration))
     return filed
-
-
-def close_resolved_debt(cfg: Config, kanban: KanbanClient, task_id: str, slug: str) -> list[str]:
-    """Close the cards of the debt a merged task says it resolved.
-
-    Only half of the spec's "mark the entry resolved and close the card" is
-    here, and deliberately: the row is marked resolved by the auditor, on the
-    branch, because it is the only writer of the indexes and the mark should
-    land with the merge commit that made it true. What is left is the half the
-    repository cannot do, and it runs after the merge — a branch that never
-    lands leaves the board exactly as it was.
-    """
-    entries = context_transfer.read_resolved_debt(cfg.hive_tasks_dir, task_id)
-    if not entries or not kanban.enabled:
-        return []
-    container = cleanup_container(cfg)
-    if container is None:
-        return []
-    # The merged checkout, this time: the card ids were written by whichever
-    # task filed the entry, which is usually not this one.
-    project_dir = f"{cfg.projects_root}/{slug}"
-    try:
-        cards = debt.card_ids(debt.read_index(container, project_dir), entries)
-    except Exception as exc:
-        logger.warning("task %s: could not read %s: %s", task_id, project_docs.DEBT_INDEX, exc)
-        return []
-    closed = []
-    for entry in entries:
-        card = cards.get(entry)
-        if card is None:
-            # Either the entry id is wrong or its row never got a card. Both
-            # are worth saying out loud: the work landed, and a human is still
-            # looking at an open card for it.
-            logger.warning(
-                "task %s: resolved debt %s has no card in %s", task_id, entry, project_docs.DEBT_INDEX
-            )
-            continue
-        _update_task_status(kanban, card, "done")
-        closed.append(entry)
-    return closed
 
 
 def cleanup_container(cfg: Config) -> str | None:
@@ -1864,8 +1755,8 @@ class CycleContext:
 
     `run-task` and `run-phase` disagree about how many phases follow and about
     almost nothing else: both reap the same stale locks, want the same scratch
-    directory, prompt against the same harness fingerprint and the same board
-    card before their first phase, and have to put the learnings back the same
+    directory and prompt against the same harness fingerprint before their
+    first phase, and have to put the learnings back the same
     way after their last one. Until this was an object that bookkeeping lived
     in `run_task_cycle`'s locals, which is why a phase was not a thing the CLI
     could run one of.
@@ -1874,18 +1765,16 @@ class CycleContext:
     cfg: Config
     task_id: str
     slug: str
-    kanban: KanbanClient
     description: str
     task_file: str
     scratch_dir: str
     harness: str
-    issue_id: str | None = None
     # Set when a phase bounced off another owner's lock: that run's worktrees
     # are in use, so close_cycle has to keep its hands off them.
     foreign_lock: bool = False
     # Set when a phase the run depends on stopped because no account could
-    # take it: the card is blocked the same as any other stop, but the run is
-    # held, not failed, and says so in its exit code (ADR 52).
+    # take it: the run stops the same as any other stop, but it is held, not
+    # failed, and says so in its exit code (ADR 52).
     held: bool = False
 
 
@@ -1893,13 +1782,11 @@ def open_cycle(
     cfg: Config,
     task_id: str,
     slug: str,
-    kanban: KanbanClient,
     description: str | None = None,
 ) -> CycleContext | None:
     """Get a run to the point where a phase can be dispatched.
 
-    Returns None when it cannot get there, having already said why and moved
-    the card. That is a task nobody described, a description missing a
+    Returns None when it cannot get there, having already said why. That is a task nobody described, a description missing a
     required section, and a hive `dispatch migrate` has not been run on.
     """
     # The whole-hive rule (`docs/business.md` *Task descriptions*): one
@@ -1937,13 +1824,6 @@ def open_cycle(
         cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES
     )
     learnings.reconcile(cfg.hive_tasks_dir, harness)
-    # The card this task already mirrors, if any: seeded by `run-task
-    # --kanban-issue-id`, or left behind by an earlier run that opened one.
-    issue_id = (
-        context_transfer.read_kanban_issue_id(cfg.hive_tasks_dir, task_id)
-        if kanban.enabled
-        else None
-    )
 
     supplied = description is not None
     if not supplied:
@@ -1960,7 +1840,6 @@ def open_cycle(
             task_id,
             tasks.description_path(cfg.hive_tasks_dir, task_id),
         )
-        _update_task_status(kanban, issue_id, "blocked")
         return None
     try:
         # A stored one is parsed too: a hand-edited `description.md` missing a
@@ -1968,27 +1847,18 @@ def open_cycle(
         tasks.parse_description(description)
     except tasks.DescriptionError as exc:
         logger.error("task %s: the task description %s", task_id, exc)
-        _update_task_status(kanban, issue_id, "blocked")
         return None
     if supplied:
         tasks.write_description(cfg.hive_tasks_dir, task_id, description)
-
-    if kanban.enabled and issue_id is None:
-        # First run of this task against a board nobody pointed at a card:
-        # the harness opens one, which is the only way a task id ever becomes
-        # a uuid — every id in Vibe Kanban's schema is server-assigned.
-        issue_id = _open_kanban_issue(cfg, kanban, task_id, description)
 
     return CycleContext(
         cfg=cfg,
         task_id=task_id,
         slug=slug,
-        kanban=kanban,
         description=description,
         task_file=task_file,
         scratch_dir=scratch_dir,
         harness=harness,
-        issue_id=issue_id,
     )
 
 
@@ -2009,7 +1879,6 @@ def run_phase(
     of it per cycle, which is what lets `run-phase` exist at all.
     """
     cfg = ctx.cfg
-    _update_task_status(ctx.kanban, ctx.issue_id, f"in_progress:{role}")
     effort = cfg.effort_for(role, round_num)
     try:
         result = dispatch_phase(
@@ -2027,14 +1896,12 @@ def run_phase(
         )
     except context_transfer.LockHeldError as exc:
         # A re-run within the TTL after a Ctrl+C, or a second dispatcher
-        # process, hits this on every phase. Block the task instead of
-        # letting the LockHeldError climb out as a CLI traceback and
-        # leave Kanban stuck at in_progress. The foreign lock is left
-        # alone: after a Ctrl+C the in-container claude keeps running
-        # until its own timeout, so the heartbeat TTL, not this run,
-        # decides when the task can be taken over.
+        # process, hits this on every phase. Stop the run instead of
+        # letting the LockHeldError climb out as a CLI traceback. The
+        # foreign lock is left alone: after a Ctrl+C the in-container
+        # claude keeps running until its own timeout, so the heartbeat
+        # TTL, not this run, decides when the task can be taken over.
         logger.warning("task %s is locked by another owner: %s", ctx.task_id, exc)
-        _update_task_status(ctx.kanban, ctx.issue_id, "blocked")
         ctx.foreign_lock = True
         return None
     if not result.success:
@@ -2054,12 +1921,11 @@ def run_phase(
                 role if round_num is None else f"{role} (round {round_num})",
                 result.result_text or "no diagnosis: the phase produced no output",
             )
-            _update_task_status(ctx.kanban, ctx.issue_id, "blocked")
             ctx.held = result.no_account
             return None
         # A phase the task does not depend on. It still hands off what it
         # managed — a partial map is worth having, and the next phase
-        # should know it is partial — but it does not block the card.
+        # should know it is partial — but it does not stop the run.
         logger.warning(
             "optional phase %s did not finish for task %s: %s",
             role, ctx.task_id, result.result_text,
@@ -2119,7 +1985,6 @@ def run_single_phase(
     cfg: Config,
     task_id: str,
     slug: str,
-    kanban: KanbanClient,
     role: str,
     round_num: int | None = None,
     final: bool = False,
@@ -2139,8 +2004,7 @@ def run_single_phase(
     operator saying this phase closes the task — in the role set, the auditor —
     and buys what the full cycle gives its last phase: the learnings carried in
     beforehand, the debt the earlier phases declared recorded and filed,
-    `status: done` in the task file and on the board, and no orphaning on the
-    way out.
+    `status: done` in the task file, and no orphaning on the way out.
 
     The debt half of that is only possible because `run_phase` persists each
     phase's structured return, so the implementador's and the revisor's answers
@@ -2148,12 +2012,12 @@ def run_single_phase(
     before that existed has no such record; it closes the way this path always
     did, with nothing filed, and the log line says which of the two happened.
 
-    None means the phase did not land and the card is blocked. A phase that
+    None means the phase did not land. A phase that
     never ran because no account could take it comes back instead as an
-    unsuccessful result with `no_account` set — the card is blocked the same
-    way, but the CLI exits on it with the held code, not the failed one.
+    unsuccessful result with `no_account` set — it did not land either,
+    but the CLI exits on it with the held code, not the failed one.
     """
-    ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
+    ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
         return None
     result: DispatchResult | None = None
@@ -2167,8 +2031,8 @@ def run_single_phase(
             # The two steps the full cycle runs between the carry and its last
             # phase, off what `run_phase` left on disk rather than off results
             # this call never held. Written before the phase for the same
-            # reason: the cards are opened here so the auditor can write rows
-            # that already point at them.
+            # reason: the ids are assigned here so the auditor's prompt can
+            # name them.
             implemented = context_transfer.read_handoff(
                 cfg.hive_tasks_dir, task_id, "implementador"
             )
@@ -2181,7 +2045,7 @@ def run_single_phase(
                 tasks.set_resolved_debt(
                     cfg.hive_tasks_dir, task_id, debt.resolved(implemented)
                 )
-            filed = _file_accepted_debt(cfg, kanban, task_id, slug, implemented, reviewed)
+            filed = _file_accepted_debt(cfg, task_id, slug, implemented, reviewed)
             # Appended rather than replaced: `--note` is the operator's
             # instruction to this phase and the filing note is the
             # dispatcher's, and the phase is owed both.
@@ -2199,9 +2063,8 @@ def run_single_phase(
                 )
             return None
         if final:
-            _update_task_status(kanban, ctx.issue_id, "done")
             # Said out loud because the difference is invisible from the task
-            # file: a card closed this way was closed by a phase, not by a
+            # file: a task closed this way was closed by a phase, not by a
             # cycle that read a verdict, and the merge a finished `run-task`
             # can do has not happened. Which handoffs were found is part of
             # that difference — "no debt filed" means something very different
@@ -2210,7 +2073,7 @@ def run_single_phase(
                 logger.info(
                     "task %s: closed by a single %s phase. No stored handoff was found "
                     "for the implementador or the revisor, so no resolved debt was "
-                    "recorded and no debt card was filed; phases run before the "
+                    "recorded and no debt was filed; phases run before the "
                     "dispatcher started storing them leave no record to read. No merge "
                     "was attempted — use `merge-task` when the branch is ready.",
                     task_id, role,
@@ -2218,7 +2081,7 @@ def run_single_phase(
             else:
                 logger.info(
                     "task %s: closed by a single %s phase, off the stored handoffs "
-                    "(implementador: %s, revisor: %s). %d debt card(s) filed. No merge "
+                    "(implementador: %s, revisor: %s). %d debt entr(y/ies) named for filing. No merge "
                     "was attempted — use `merge-task` when the branch is ready.",
                     task_id, role,
                     "found" if implemented is not None else "missing",
@@ -2234,7 +2097,6 @@ def run_task_cycle(
     cfg: Config,
     task_id: str,
     slug: str,
-    kanban: KanbanClient,
     description: str | None = None,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
@@ -2244,7 +2106,7 @@ def run_task_cycle(
     it — merged or not, since a refused merge is reported by `merge-task` and
     leaves the task done.
     """
-    ctx = open_cycle(cfg, task_id, slug, kanban, description=description)
+    ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
         return CycleOutcome.BLOCKED
     # Every stop after a phase that returned None reads this: the phase knows
@@ -2267,7 +2129,6 @@ def run_task_cycle(
                     "task %s: the project's own branch diverged from its remote: %s",
                     task_id, update.detail,
                 )
-                _update_task_status(kanban, ctx.issue_id, "blocked")
                 return CycleOutcome.BLOCKED
             # Said out loud either way: a task that started from a stale base is
             # the thing this exists to prevent, and a run that could not reach
@@ -2304,7 +2165,6 @@ def run_task_cycle(
                 "task %s: the arquitecto blocked before implementation: %s",
                 task_id, "; ".join(missing) or "no reason given",
             )
-            _update_task_status(kanban, ctx.issue_id, "blocked")
             return CycleOutcome.BLOCKED
 
         approved = False
@@ -2357,8 +2217,7 @@ def run_task_cycle(
                 )
 
         if not approved:
-            # Said out loud because otherwise nothing says it: the board move
-            # below is a no-op when the task has no kanban issue, the task
+            # Said out loud because otherwise nothing says it: the task
             # file's `status:` is only written by a handoff, and before ADR 52
             # the run exited 0 either way — so a task that used up every round
             # looked exactly like one that was never dispatched.
@@ -2366,7 +2225,6 @@ def run_task_cycle(
                 "task %s: blocked after %d of %d revision round(s) without an approval",
                 task_id, rounds_run, cfg.max_revision_rounds,
             )
-            _update_task_status(kanban, ctx.issue_id, "blocked")
             return CycleOutcome.BLOCKED
 
         # Stamped before the phase that files them, so the auditor's prompt
@@ -2374,30 +2232,27 @@ def run_task_cycle(
         # was handed to a task from one nobody has picked up yet.
         learnings.carry(cfg.hive_tasks_dir, slug, task_id)
         # Written to the task file rather than only handed to the auditor: the
-        # merge that closes these cards can happen days later, in `merge-task`,
-        # long after this handoff is prose in a file nobody parses.
+        # merge can happen days later, in `merge-task`, long after this
+        # handoff is prose in a file nobody parses, and the api serves the
+        # list from the task file.
         tasks.set_resolved_debt(
             cfg.hive_tasks_dir, task_id, debt.resolved(implemented.handoff)
         )
-        # Before the auditor, because the auditor writes the rows that point
-        # at these cards.
+        # Before the auditor, because the auditor writes the rows these ids
+        # name.
         filed = _file_accepted_debt(
-        cfg, kanban, task_id, slug, implemented.handoff, revisor_result.handoff
-    )
+            cfg, task_id, slug, implemented.handoff, revisor_result.handoff
+        )
         if run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed)) is None:
             return stopped()
         completed = True
 
-        _update_task_status(kanban, ctx.issue_id, "done")
         if cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug):
             # Only now: the entries are in the project's docs on the branch
             # that just landed, so the inbox copy would charge every later
             # phase for a row the repo already has. A branch that did not
             # merge keeps them here, where the next task still sees them.
             learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
-            # Same "only now": the entry is marked resolved on the branch that
-            # just landed, so the card it mirrors has stopped being work.
-            close_resolved_debt(cfg, kanban, task_id, slug)
         return CycleOutcome.FINISHED
     finally:
         close_cycle(ctx, completed=completed)

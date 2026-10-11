@@ -5,9 +5,9 @@ the compose service mounts (`/state`, `/data/.hive/tasks`, `/data/projects`,
 the events volume) under `tmp_path` and writes a `config.yaml` pointing at
 them, so what is exercised is the same `dispatcher/config.py` load the
 dispatcher does. Fixtures are written through the dispatcher's own writers —
-`state_machine.set_state`, `context_transfer.write_task_file`,
-`LocalBoardClient.create_issue` — so a change to one of those formats shows up
-here as a failure rather than as two files that disagree.
+`state_machine.set_state`, `context_transfer.write_task_file` — so a change
+to one of those formats shows up here as a failure rather than as two files
+that disagree.
 """
 
 from __future__ import annotations
@@ -23,9 +23,8 @@ import yaml
 
 from dispatcher import context_transfer, docker_exec, learnings, state_machine
 from dispatcher import tasks as task_store
-from dispatcher.config import LocalBoardConfig, load_config
+from dispatcher.config import load_config
 from dispatcher.state_machine import AccountState
-from dispatcher.vibe_kanban_client import LocalBoardClient
 from observability.api import app as api_app
 from observability.api.app import _is_bare_task_id, create_app
 from observability.collector import db as collector_db
@@ -54,7 +53,6 @@ def _auth() -> dict:
 def _harness(
     tmp_path: Path,
     projects: tuple[str, ...] = ("ia-harness",),
-    board: str | None = "local",
     accounts: tuple[str, ...] = ("cuenta1",),
     with_db: bool = True,
     heartbeat_ttl_seconds: int | None = None,
@@ -68,7 +66,6 @@ def _harness(
     state_dir = tmp_path / "state"
     tasks_dir = tmp_path / "hive" / "tasks"
     projects_root = tmp_path / "projects"
-    board_dir = tmp_path / "board"
     events_dir = tmp_path / "events"
     for directory in (state_dir, tasks_dir, projects_root, events_dir):
         directory.mkdir(parents=True)
@@ -82,10 +79,6 @@ def _harness(
         "state_dir": str(state_dir),
         "collector_url": "http://collector:8787/events",
     }
-    if board == "local":
-        raw["local_board"] = {"dir": str(board_dir)}
-    elif board == "vibe":
-        raw["vibe_kanban"] = {"command": ["npx", "vibe-kanban", "mcp"]}
     if heartbeat_ttl_seconds is not None:
         # Left out by default, so `dispatcher/config.py`'s own default (120s) is
         # what `lock_expired` is derived against — the same value the dispatcher
@@ -122,8 +115,6 @@ def _harness(
         state_dir=str(state_dir),
         tasks_dir=str(tasks_dir),
         projects_root=projects_root,
-        board=LocalBoardClient(LocalBoardConfig(dir=str(board_dir))),
-        board_dir=board_dir,
         db_path=db_path,
     )
 
@@ -204,7 +195,7 @@ def test_every_route_answers_400_for_a_parameter_it_does_not_have(
     tmp_path: Path, route: str
 ) -> None:
     # A filter that silently does nothing costs the caller more than no filter:
-    # the reasoning LocalBoardClient.list_issues follows for an unknown key.
+    # and answering it with everything costs the caller without telling them.
     harness = _harness(tmp_path)
     _task(harness.tasks_dir, "T-1")
 
@@ -286,9 +277,7 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "heartbeat": "2026-09-26T18:00:00+00:00",
         # The text of the task's `description.md`, verbatim: not parsed.
         "description": _DESCRIPTION,
-        "kanban_issue_id": None,
         "resolved_debt": ["T-008-D2"],
-        "card": None,
         # A fixed timestamp in the past, so against any TTL this is a lock whose
         # holder stopped writing. The three values of this field have their own
         # tests below, against heartbeats relative to now.
@@ -345,31 +334,9 @@ def test_frontmatter_that_scans_into_a_scalar_is_a_warning_too(tmp_path: Path) -
     assert str(broken) in resp.get_json()["warnings"][0]
 
 
-def test_a_kanban_issue_id_that_is_not_a_string_is_a_warning_and_not_a_500(
-    tmp_path: Path,
-) -> None:
-    # The fourth way a task file fails, and the first that survives the parse:
-    # `read_task_file` hands `kanban_issue_id` back whatever YAML built, and
-    # `_task` looks it up as a dict key. A mapping there is unhashable, so the
-    # TypeError lands at the use and not at the read.
-    harness = _harness(tmp_path)
-    _task(harness.tasks_dir, "T-1")
-    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-2"))
-    broken.write_text(
-        "---\ntask_id: T-2\nstatus: in_progress\nowner: null\ndepends_on: []\n"
-        "heartbeat: null\nkanban_issue_id:\n  id: 11111111-2222-3333-4444-555555555555\n"
-        "---\n\nbody\n"
-    )
-
-    resp = _get(harness, "/api/tasks")
-
-    assert resp.status_code == 200
-    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
-    assert str(broken) in resp.get_json()["warnings"][0]
-
-
 def test_frontmatter_json_cannot_serialise_is_a_warning_and_not_a_500(tmp_path: Path) -> None:
-    # The fifth, and the one that used to land outside every `except` in the
+    # The fourth, the one that survives the parse and fails at the use, and
+    # that used to land outside every `except` in the
     # module: `!!set` is a tag `yaml.safe_load` builds and `jsonify` refuses,
     # and `jsonify` runs inside `_envelope`, after the guard has been left.
     harness = _harness(tmp_path)
@@ -409,51 +376,38 @@ def test_a_frontmatter_date_serialises_rather_than_costing_the_task_a_warning(
     assert task["owner"] == "Sat, 26 Sep 2026 00:00:00 GMT"
 
 
-def test_a_task_carries_the_card_its_issue_id_points_at(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "leftover",
+    [
+        "kanban_issue_id: 11111111-2222-3333-4444-555555555555\n",
+        # A mapping there used to be an unhashable dict key and cost the row.
+        "kanban_issue_id:\n  id: 11111111-2222-3333-4444-555555555555\n",
+    ],
+)
+def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
+    tmp_path: Path, leftover: str,
+) -> None:
+    """ADR 59: the key has no reader, so whatever is under it costs nothing —
+    no card, no key, no warning — on the list route and on the detail route."""
     harness = _harness(tmp_path)
-    issue_id = harness.board.create_issue("Phase 1", "a read API")
-    _task(harness.tasks_dir, "T-1", kanban_issue_id=issue_id)
-
-    [task] = _get(harness, "/api/tasks").get_json()["data"]
-
-    assert task["card"] == {
-        "issue_id": issue_id,
-        "title": "Phase 1",
-        "status": "pending",
-        "simple_id": None,
+    Path(context_transfer.task_file_path(harness.tasks_dir, "T-1")).write_text(
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: null\ndepends_on: []\n"
+        f"heartbeat: null\n{leftover}---\n\nbody\n"
+    )
+    row = {
+        "task_id": "T-1",
+        "status": "in_progress",
+        "owner": None,
+        "depends_on": [],
+        "heartbeat": None,
+        "description": None,
+        "resolved_debt": [],
+        "lock_expired": None,
     }
 
-
-def test_a_card_id_the_board_does_not_hold_is_a_null_card(tmp_path: Path) -> None:
-    harness = _harness(tmp_path)
-    _task(harness.tasks_dir, "T-1", kanban_issue_id="11111111-2222-3333-4444-555555555555")
-
-    [task] = _get(harness, "/api/tasks").get_json()["data"]
-
-    assert task["card"] is None
-
-
-def test_a_harness_with_no_board_is_not_an_error(tmp_path: Path) -> None:
-    harness = _harness(tmp_path, board=None)
-    _task(harness.tasks_dir, "T-1", kanban_issue_id="11111111-2222-3333-4444-555555555555")
-
-    body = _get(harness, "/api/tasks").get_json()
-
-    assert body == {
-        "data": [
-            {
-                "task_id": "T-1",
-                "status": "in_progress",
-                "owner": None,
-                "depends_on": [],
-                "heartbeat": None,
-                "description": None,
-                "kanban_issue_id": "11111111-2222-3333-4444-555555555555",
-                "resolved_debt": [],
-                "card": None,
-                "lock_expired": None,
-            }
-        ],
+    assert _get(harness, "/api/tasks").get_json() == {"data": [row], "warnings": []}
+    assert _get(harness, "/api/tasks/T-1").get_json() == {
+        "data": {**row, "body": "body\n"},
         "warnings": [],
     }
 
@@ -607,82 +561,28 @@ def test_an_api_with_no_token_configured_accepts_no_bearer_at_all(tmp_path: Path
     assert _get(harness, "/api/tasks").status_code == 200
 
 
-def test_a_card_that_will_not_parse_is_named_in_warnings(tmp_path: Path) -> None:
-    # T-008-D2: list_issues skips it with a log line nobody reads, so the board
-    # comes back quietly short. unreadable() is what puts it in the envelope.
-    harness = _harness(tmp_path)
-    good = harness.board.create_issue("Phase 1")
-    broken = harness.board_dir / "99999999-8888-7777-6666-555555555555.json"
-    broken.write_text("{truncated")
-    _task(harness.tasks_dir, "T-1", kanban_issue_id=good)
-
-    body = _get(harness, "/api/tasks").get_json()
-
-    assert body["data"][0]["card"]["issue_id"] == good
-    assert len(body["warnings"]) == 1
-    assert str(broken) in body["warnings"][0]
-
-
-def test_a_board_directory_that_is_a_file_is_a_warning_and_not_a_500(tmp_path: Path) -> None:
-    # LocalBoardClient._scan catches FileNotFoundError only — for the dispatcher
-    # a missing board is an empty board, but a `local_board.dir` that is a file
-    # must raise rather than mint cards nobody can list. Here the contract is
-    # the other one: never 500, say which path could not be read.
-    harness = _harness(tmp_path)
-    harness.board_dir.write_text("this is a file, not a board directory")
-    _task(harness.tasks_dir, "T-1", kanban_issue_id="11111111-2222-3333-4444-555555555555")
-
-    resp = _get(harness, "/api/tasks")
-
-    assert resp.status_code == 200
-    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
-    assert resp.get_json()["data"][0]["card"] is None
-    assert str(harness.board_dir) in resp.get_json()["warnings"][0]
-    assert "unreadable board" in resp.get_json()["warnings"][0]
-
-
-def test_a_card_whose_created_at_will_not_sort_is_a_warning_and_not_a_500(
-    tmp_path: Path,
+@pytest.mark.parametrize("key", ["vibe_kanban", "local_board"])
+def test_the_api_refuses_to_start_on_a_config_that_still_configures_a_board(
+    tmp_path: Path, key: str,
 ) -> None:
-    # `_read_path` checks the document is a mapping with a string `issue_id`
-    # and nothing else, so `created_at` is whatever was on disk and `_scan`
-    # sorts on it. Two cards are the point: a one-element sort compares
-    # nothing. The fix is this side's `except`, not `_scan`'s key — see
-    # `_read_cards`.
-    harness = _harness(tmp_path)
-    good = harness.board.create_issue("Phase 1")
-    unsortable = harness.board_dir / "99999999-8888-7777-6666-555555555555.json"
-    unsortable.write_text(
-        json.dumps(
+    """ADR 59: the config is loaded once, in `create_app`, so a leftover board
+    block stops the process instead of serving rows with no card."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
             {
-                "issue_id": "99999999-8888-7777-6666-555555555555",
-                "title": "hand-written",
-                "status": "pending",
-                "created_at": 1758900000,
+                "accounts": [{"name": "cuenta1", "container": "agent-cuenta1"}],
+                "projects_root": str(tmp_path),
+                "hive_tasks_dir": str(tmp_path / "hive" / "tasks"),
+                "state_dir": str(tmp_path),
+                "collector_url": "http://collector:8787/events",
+                key: {"dir": str(tmp_path / "board")},
             }
         )
     )
-    _task(harness.tasks_dir, "T-1", kanban_issue_id=good)
 
-    resp = _get(harness, "/api/tasks")
-
-    assert resp.status_code == 200
-    assert [task["task_id"] for task in resp.get_json()["data"]] == ["T-1"]
-    assert resp.get_json()["data"][0]["card"] is None
-    assert str(harness.board_dir) in resp.get_json()["warnings"][0]
-    assert "unreadable board" in resp.get_json()["warnings"][0]
-
-
-def test_a_remote_board_is_a_warning_rather_than_a_dialled_subprocess(tmp_path: Path) -> None:
-    # docs/decisions.md ADR 3: this service does not spawn Vibe Kanban's MCP
-    # server per request. The caller is told, rather than left reading nulls.
-    harness = _harness(tmp_path, board="vibe")
-    _task(harness.tasks_dir, "T-1", kanban_issue_id="11111111-2222-3333-4444-555555555555")
-
-    body = _get(harness, "/api/tasks").get_json()
-
-    assert body["data"][0]["card"] is None
-    assert "vibe_kanban" in body["warnings"][0]
+    with pytest.raises(ValueError, match=f"{key} is no longer a config key.*ADR 59"):
+        create_app(str(config_path), str(tmp_path / "events.db"), "admin", PASSWORD_HASH)
 
 
 def test_one_task_by_id(tmp_path: Path) -> None:
@@ -730,8 +630,7 @@ def test_one_task_by_an_id_no_file_answers_404(tmp_path: Path) -> None:
 
 
 def test_an_id_that_would_name_a_file_elsewhere_answers_404(tmp_path: Path) -> None:
-    # The same reach LocalBoardClient._card_path refuses: an id with a
-    # separator in it is not a task, it is a bug with reach.
+    # An id with a separator in it is not a task, it is a bug with reach.
     harness = _harness(tmp_path)
     (Path(harness.tasks_dir).parent / "secret.md").write_text("---\ntask_id: x\nstatus: y\n---\n")
 
@@ -763,17 +662,17 @@ def test_one_task_that_will_not_parse_is_null_with_a_warning_not_a_404(tmp_path:
     assert str(broken) in resp.get_json()["warnings"][0]
 
 
-def test_one_task_whose_kanban_issue_id_is_not_a_string_is_null_with_a_warning(
+def test_one_task_whose_owner_json_cannot_serialise_is_null_with_a_warning(
     tmp_path: Path,
 ) -> None:
     # Same guard as `/api/tasks`, reached by the route that reads one file:
-    # a task that will not shape answers `null` and the reason, not a 500.
+    # a value that parses and fails where it is used answers `null` and the
+    # reason, not a 500.
     harness = _harness(tmp_path)
     broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-1"))
     broken.write_text(
-        "---\ntask_id: T-1\nstatus: in_progress\nowner: null\ndepends_on: []\n"
-        "heartbeat: null\nkanban_issue_id:\n  - 11111111-2222-3333-4444-555555555555\n"
-        "---\n\nbody\n"
+        "---\ntask_id: T-1\nstatus: in_progress\nowner: !!set {a: null}\n"
+        "depends_on: []\nheartbeat: null\n---\n\nbody\n"
     )
 
     resp = _get(harness, "/api/tasks/T-1")
@@ -2333,14 +2232,13 @@ def test_reading_the_events_endpoint_creates_no_schema(tmp_path: Path) -> None:
 
 def test_the_task_endpoints_write_nothing(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    _task(harness.tasks_dir, "T-1", kanban_issue_id=harness.board.create_issue("Phase 1"))
-    before = {
-        path: path.read_bytes()
-        for path in (*Path(harness.tasks_dir).iterdir(), *harness.board_dir.iterdir())
-    }
+    _task(harness.tasks_dir, "T-1", description=_DESCRIPTION)
+    hive = Path(harness.tasks_dir).parent
+    before = {path: path.read_bytes() for path in hive.rglob("*") if path.is_file()}
+    assert len(before) == 2  # the task file and its description.md
 
     _get(harness, "/api/tasks")
     _get(harness, "/api/tasks/T-1")
 
-    assert {path: path.read_bytes() for path in before} == before
-    assert json.loads(next(iter(harness.board_dir.iterdir())).read_text())["status"] == "pending"
+    after = {path: path.read_bytes() for path in hive.rglob("*") if path.is_file()}
+    assert after == before

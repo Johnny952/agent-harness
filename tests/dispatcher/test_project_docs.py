@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from dispatcher import docker_exec, project_docs
+from dispatcher import debt, docker_exec, project_docs
 
 
 def _fake_cat(text: str, returncode: int = 0):
@@ -253,3 +253,35 @@ def test_the_mapper_is_told_its_turn_budget_when_it_has_one() -> None:
 
     assert "40 turns and no more" in bounded
     assert "turns and no more" not in unbounded
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "implementador", "revisor", "auditor"])
+def test_no_role_is_told_that_debt_has_a_card_on_a_board(role: str) -> None:
+    """The board seam is gone (`docs/decisions.md` ADR 59): nothing opens a
+    card for a debt entry and nothing closes one, so a prompt that says
+    otherwise sends a phase looking for a board. The phrases, not the word:
+    "card" is also what these prompts call the task file."""
+    duties = project_docs.duties(role, "task-1")
+
+    assert "on the board" not in duties
+    assert "its card" not in duties
+    assert "their cards" not in duties
+
+
+def test_the_implementador_is_told_what_resolved_debt_does() -> None:
+    duties = project_docs.duties("implementador", "task-1")
+
+    assert "`resolved_debt`" in duties
+    assert "the auditor marks" in duties
+
+
+def test_the_auditor_s_duties_and_the_filing_note_agree_about_the_card_column() -> None:
+    """Both land in one auditor prompt. The note says to write `none` in the
+    `card` column; duties that speak of cards the row points back at would
+    tell the same reader the opposite."""
+    auditor = project_docs.duties("auditor", "task-1")
+    note = debt.filing_note([("task-1-D1", debt.Declaration(what="Untested"))])
+
+    assert "write `none` in the `card` column" in note
+    assert "card" not in auditor.split("Debt works the other way round.")[1].split("\n\n")[0]
+    assert "the dispatcher assigns the ids" in auditor

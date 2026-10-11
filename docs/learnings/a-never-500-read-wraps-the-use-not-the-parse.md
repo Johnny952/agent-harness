@@ -3,7 +3,9 @@
 **When it applies:** you are writing or widening a reader whose contract is
 "report the damage, never crash" over `.hive/tasks/*.md`,
 `dispatcher_state/*.json` or a board card — `observability/api/app.py`'s views,
-or anything a later phase adds beside them.
+or anything a later phase adds beside them. Since T-028 there is no board card
+to read (`docs/decisions.md` ADR 59): the `card` and `kanban_issue_id` examples
+below are history, and the rule they illustrate stands for the other two.
 
 **Status:** confirmed — reported by T-009's arquitecto, revisor and
 implementador across four rounds, each case below pinned by a test in
