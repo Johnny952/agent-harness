@@ -15,13 +15,18 @@ written by a new `context_transfer.file_split` through `write_task_file`.
 The plan predates T-026 and was left as written, being a plan for code that
 does not exist.
 
-Since T-026 that sketch cannot be built literally, twice over:
+Since T-026 that sketch cannot be built literally, and since T-027 not for a
+third reason either:
 
 - `write_task_file` no longer writes a `description` key, and `TaskFile` has
   no such field, so the text would be dropped;
 - a file that did carry the key is what `dispatcher/tasks.py` calls
   unmigrated: `open_cycle` and three CLI verbs refuse the whole hive until
-  `dispatch migrate` has run.
+  `dispatch migrate` has run;
+- since T-027 no module under `dispatcher/` but `tasks.py` may call
+  `write_task_file` (a test in `tests/dispatcher/test_tasks.py` walks them),
+  so a `context_transfer.file_split` fails the suite: the filer belongs in
+  `dispatcher/tasks.py` and writes through its `_write_task_file`.
 
 ## What to do
 
@@ -42,4 +47,4 @@ deliberately.
 T-026: `docs/plans/task-split.md` decision 2 *Sub-task files*,
 `dispatcher/tasks.py` `write_description` and `migrate`,
 `docs/implementations/T-026.md` *Outside the card's file list*, closing
-paragraph.
+paragraph. T-027: `docs/implementations/T-027.md` *Decisions* items 1 and 2.

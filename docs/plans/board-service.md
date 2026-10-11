@@ -45,16 +45,20 @@ Written by the operator's session, out of cycle, from the code at `a838508`.
 ## What exists today
 
 - **The task file is the record.** `<hive_tasks_dir>/<task_id>.md`
-  (`context_transfer.TaskFile`) holds four things:
+  (`context_transfer.TaskFile`) holds three things:
   - the status, owner, `depends_on` and heartbeat in its frontmatter;
-  - the operator's description;
   - every handoff, appended to its body;
   - `kanban_issue_id`.
 
-  The console's task screens read these files through `/api/tasks`.
-- **The description rides in two places.** `_role_prompt` embeds it whole in
-  every phase's prompt, and every phase is told to read the task file, which
-  holds it again along with all the handoffs.
+  The operator's description is not in it: since T-026 it lives in
+  `.hive/board/<id>/description.md`, read and written through
+  `dispatcher/tasks.py`. The console's task screens read the task files and
+  descriptions through `/api/tasks`.
+- **The description rides once.** Since T-027 `_role_prompt` embeds only its
+  `## Goal` and `## Done when` in every phase's prompt, the mapper's included.
+  The arquitecto and implementador also get `tasks.description_path` and the
+  names of any optional sections present; the revisor, auditor and mapper get
+  no path.
 - **A board seam with nothing behind it.** `dispatcher/vibe_kanban_client.py`
   holds `NullKanbanClient`, `VibeKanbanClient` and `LocalBoardClient`.
   - `cli._kanban` picks one of them.
@@ -67,8 +71,10 @@ Written by the operator's session, out of cycle, from the code at `a838508`.
   `--allowed-tools` from `config.allowed_tools`, and a phase cannot widen its
   own permissions. A per-phase `--mcp-config` would be added the same way.
 - **The writes are scattered, and the api has none.**
-  - Task files are written by the dispatcher (`write_task_file`, atomic) and
-    by the operator, by hand.
+  - Task files are written by the dispatcher, and since T-027 only through
+    `dispatcher/tasks.py`, whose `_write_task_file` (atomic, over
+    `context_transfer.write_task_file`) refuses a file that still carries a
+    `description` key. The operator also writes them by hand.
   - `file_split` and `mark_merged` will write them next
     (`docs/plans/task-split.md`).
   - The api is `GET`-only with `:ro` mounts (`docs/plans/front.md`, *Tier 3*).

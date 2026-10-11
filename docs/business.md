@@ -68,10 +68,14 @@ cite the entry and move it up, or drop the row.
   2026-10-11, ruling on what T-026 inferred: `dispatcher/dispatcher.py`'s
   `open_cycle` and `dispatcher/cli.py`'s `_require_migrated` (on `run-task`,
   `run-phase` and `release-account`) refuse while `tasks.unmigrated_ids`
-  returns anything, because `reap_expired_locks` rewrites other tasks' files
-  and would delete the key (`docs/implementations/T-026.md` *Decisions* item
-  4). The api does the narrower thing: it drops that one task's row with a
-  warning. `dispatch migrate` is the way out.
+  returns anything. T-026 gave the reason that `reap_expired_locks` rewrites
+  other tasks' files and would delete the key (`docs/implementations/T-026.md`
+  *Decisions* item 4). Since T-027 the writer itself, `tasks._write_task_file`,
+  refuses such a file, so the key can no longer be deleted, and the checks
+  stay as the whole-hive rule the user confirmed
+  (`docs/implementations/T-027.md` *Decisions* item 3). The api does the
+  narrower thing: it drops that one task's row with a warning. `dispatch
+  migrate` is the way out.
 - **A task description is valid only under `dispatcher/tasks.py`'s
   `parse_description` grammar, which is stricter than "has `## Goal` and
   `## Done when`".** Confirmed by the user on 2026-10-11, ruling on what T-026
