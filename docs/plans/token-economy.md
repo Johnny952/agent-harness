@@ -147,6 +147,7 @@ some of that back: the 21k fixed context and a few orienting reads per task.
     (`dispatcher/handoff.py`) and a dispatcher path that files the sub-tasks
     and stops the cycle. Those are design decisions for an ADR, not for this
     page.
+    Those decisions are drafted, with a proposed ADR, in `docs/plans/task-split.md`.
 - **The trade-off.**
   - More tasks means more task files, more reviews and more merges.
   - A cross-surface contract, such as an api row shape that a screen reads,
