@@ -22,6 +22,7 @@ from dispatcher import (
     role_skills,
     state_machine,
     subagents,
+    tasks,
 )
 from dispatcher.config import Config
 from dispatcher.state_machine import AccountState
@@ -1577,7 +1578,9 @@ def _open_kanban_issue(cfg: Config, kanban: KanbanClient, task_id: str, descript
     operation.
     """
     try:
-        issue_id = kanban.create_issue(_issue_title(task_id, description), description)
+        # Titled from *Goal*: the description's own first line is `## Goal`.
+        goal = tasks.parse_description(description).goal
+        issue_id = kanban.create_issue(_issue_title(task_id, goal), description)
     except Exception as exc:
         logger.warning("kanban: task %s runs without a card: %s", task_id, exc)
         return None
@@ -1869,8 +1872,23 @@ def open_cycle(
     """Get a run to the point where a phase can be dispatched.
 
     Returns None when it cannot get there, having already said why and moved
-    the card. Today the only such case is a task nobody described.
+    the card. That is a task nobody described, a description missing a
+    required section, and a hive `dispatch migrate` has not been run on.
     """
+    # Before anything writes a task file: `context_transfer` no longer carries
+    # the `description` key, so its next write to a file that still has one —
+    # `reap_expired_locks` rewrites other tasks' files — would drop the ask.
+    stale = tasks.unmigrated_ids(cfg.hive_tasks_dir)
+    if stale:
+        logger.error(
+            "%d task file(s) still carry their description in the frontmatter (%s%s): "
+            "run `%s` first",
+            len(stale),
+            ", ".join(stale[:5]),
+            f" and {len(stale) - 5} more" if len(stale) > 5 else "",
+            tasks.MIGRATE_COMMAND,
+        )
+        return None
     reap_expired_locks(cfg)
     task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
     # Made by the dispatcher, not by the roles: a phase told to write its
@@ -1898,24 +1916,33 @@ def open_cycle(
         else None
     )
 
-    if description is not None:
-        context_transfer.set_description(cfg.hive_tasks_dir, task_id, description)
-    else:
+    supplied = description is not None
+    if not supplied:
         # A resume (or a task seeded by an earlier `run-task`) already has
         # the ask on disk; nothing to write.
-        description = context_transfer.read_description(cfg.hive_tasks_dir, task_id)
+        description = tasks.read_description(cfg.hive_tasks_dir, task_id)
     if not (description or "").strip():
         # Dispatching here would burn quota on a role that was told a task id
         # and nothing else. The CLI rejects this case before it gets here;
         # this is the backstop for library callers.
         logger.error(
             "task %s has no description: pass --description/--description-file to run-task, "
-            "or add a `description:` key to %s",
+            "or write one to %s",
             task_id,
-            task_file,
+            tasks.description_path(cfg.hive_tasks_dir, task_id),
         )
         _update_task_status(kanban, issue_id, "blocked")
         return None
+    try:
+        # A stored one is parsed too: a hand-edited `description.md` missing a
+        # section stops here, with the section named, rather than at a phase.
+        tasks.parse_description(description)
+    except tasks.DescriptionError as exc:
+        logger.error("task %s: the task description %s", task_id, exc)
+        _update_task_status(kanban, issue_id, "blocked")
+        return None
+    if supplied:
+        tasks.write_description(cfg.hive_tasks_dir, task_id, description)
 
     if kanban.enabled and issue_id is None:
         # First run of this task against a board nobody pointed at a card:

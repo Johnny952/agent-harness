@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills, subagents
+from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills, subagents, tasks
 from dispatcher.config import AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -54,7 +54,8 @@ def _phases_may_end_in_prose(monkeypatch):
 # run_task_cycle refuses to dispatch a task with no description (it would
 # spend four phases of quota on roles told nothing but an id), so every
 # cycle test has to supply one.
-_DESCRIPTION = "Add a /healthz endpoint that returns 200."
+_GOAL = "Add a /healthz endpoint that returns 200."
+_DESCRIPTION = f"## Goal\n\n{_GOAL}\n\n## Done when\n\nGET /healthz answers 200.\n"
 
 
 #: Vibe Kanban assigns every id itself, so a card's uuid is only ever
@@ -2037,7 +2038,10 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
 
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
 
-    description = "Add a /healthz endpoint.\n\nIt must return 200 and no body."
+    description = (
+        "## Goal\n\nAdd a /healthz endpoint.\n\nIt must return 200 and no body.\n\n"
+        "## Done when\n\nGET /healthz answers 200.\n"
+    )
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=description)
 
     assert [role for role, _ in captured] == ["arquitecto", "implementador", "revisor", "auditor"]
@@ -2050,10 +2054,9 @@ def test_run_task_cycle_embeds_the_description_in_every_role_prompt(tmp_path, mo
     assert revisor_prompt.rstrip().endswith("That field is what the dispatcher reads to decide.")
 
 
-def test_run_task_cycle_seeds_the_description_into_the_task_file(tmp_path, monkeypatch) -> None:
-    """Seeded once, then read from the file on a re-run: the roles open the
-    task file for handoff context anyway, and a resume (`run-task` with no
-    --description after a Ctrl+C) has to find the original ask there."""
+def test_run_task_cycle_seeds_the_description_onto_the_board(tmp_path, monkeypatch) -> None:
+    """Seeded once, then read from its file on a re-run: a resume (`run-task`
+    with no --description after a Ctrl+C) has to find the original ask there."""
     cfg = _make_config(tmp_path, max_revision_rounds=1)
     prompts = []
 
@@ -2067,11 +2070,13 @@ def test_run_task_cycle_seeds_the_description_into_the_task_file(tmp_path, monke
 
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban(), description=_DESCRIPTION)
 
-    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
-    assert task.description == _DESCRIPTION
+    assert tasks.read_description(cfg.hive_tasks_dir, "task-1") == _DESCRIPTION
+    raw = Path(task_file_path(cfg.hive_tasks_dir, "task-1")).read_text()
     # handoff() appended four phase summaries to the body; the description
-    # must not be one of them, or a re-run would stack copies of the ask.
-    assert _DESCRIPTION not in task.body
+    # must not be one of them, or a re-run would stack copies of the ask. Nor
+    # is it a frontmatter key any more.
+    assert _GOAL not in raw
+    assert "description:" not in raw
 
     prompts.clear()
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", _FakeKanban())
@@ -2109,16 +2114,12 @@ def test_run_task_cycle_blocks_without_dispatching_when_no_description_exists(
 
 
 def test_run_task_cycle_blocks_when_the_stored_description_is_blank(tmp_path, monkeypatch) -> None:
-    """A task file whose description is whitespace is as useless as none at
-    all — the guard is on content, not on the key being present."""
+    """A description file that is whitespace is as useless as none at all —
+    the guard is on content, not on the file being present."""
     cfg = _make_config(tmp_path)
-    write_task_file(
-        task_file_path(cfg.hive_tasks_dir, "task-1"),
-        dispatcher_mod.context_transfer.TaskFile(
-            task_id="task-1", status="pending", owner=None, depends_on=[],
-            heartbeat=None, body="", description="   \n",
-        ),
-    )
+    path = Path(tasks.description_path(cfg.hive_tasks_dir, "task-1"))
+    path.parent.mkdir(parents=True)
+    path.write_text("   \n")
     calls = []
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
 
@@ -2127,6 +2128,56 @@ def test_run_task_cycle_blocks_when_the_stored_description_is_blank(tmp_path, mo
 
     assert calls == []
     assert kanban.created == []
+
+
+def test_run_task_cycle_blocks_when_the_stored_description_lost_a_section(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """A hand-edited `description.md` stops at the door, with the section
+    named, rather than reaching a phase."""
+    cfg = _make_config(tmp_path)
+    path = Path(tasks.description_path(cfg.hive_tasks_dir, "task-1"))
+    path.parent.mkdir(parents=True)
+    path.write_text(f"## Goal\n\n{_GOAL}\n")
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
+
+    kanban = _FakeKanban()
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban)
+
+    assert calls == []
+    assert kanban.created == []
+    assert "`## Done when`" in caplog.text
+
+
+def test_run_task_cycle_refuses_a_hive_that_was_not_migrated(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """Another task's file still has its description in the frontmatter, and
+    its lock has expired: the reaper would rewrite that file through
+    `context_transfer`, which no longer carries the key, and the ask would be
+    gone. So nothing runs and nothing is written until `dispatch migrate` has."""
+    cfg = _make_config(tmp_path)
+    legacy = Path(task_file_path(cfg.hive_tasks_dir, "task-0"))
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        "---\ntask_id: task-0\nstatus: in_progress\nowner: cuenta1\ndepends_on: []\n"
+        "heartbeat: '2020-01-01T00:00:00+00:00'\ndescription: An older ask.\n---\n\n"
+    )
+    before = legacy.read_bytes()
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", lambda *a, **kw: calls.append(a))
+
+    kanban = _FakeKanban()
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
+
+    assert calls == []
+    assert kanban.created == []
+    assert legacy.read_bytes() == before
+    assert "dispatch migrate" in caplog.text and "task-0" in caplog.text
+    assert tasks.read_description(cfg.hive_tasks_dir, "task-1") is None
 
 
 def test_revisor_approved_matches_verdict_line() -> None:
@@ -3150,7 +3201,8 @@ def test_run_task_cycle_opens_a_card_for_a_task_that_has_none(tmp_path, monkeypa
     kanban = _FakeKanban()
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", kanban, description=_DESCRIPTION)
 
-    assert kanban.created == [(f"task-1: {_DESCRIPTION}", _DESCRIPTION)]
+    # Titled from *Goal*, not from the description's first line, `## Goal`.
+    assert kanban.created == [(f"task-1: {_GOAL}", _DESCRIPTION)]
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
     assert task.kanban_issue_id == _ISSUE_ID
     assert (_ISSUE_ID, "done") in kanban.statuses

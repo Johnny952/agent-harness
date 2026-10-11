@@ -542,19 +542,32 @@ python -m dispatcher.cli --config config.yaml bootstrap-project \
   --account cuenta1 --project my-project
 python -m dispatcher.cli --config config.yaml run-task \
   --task-id T-001 --project my-project \
-  --description "Add a /healthz endpoint that returns 200 without auth."
+  --description "## Goal
+
+Add a /healthz endpoint that returns 200 without auth.
+
+## Done when
+
+GET /healthz answers 200 with no credentials."
 ```
 
 (Or, without a host Python install, run the same commands inside the
 already-built dispatcher image: `docker compose -f docker/compose/docker-compose.yml --profile dispatcher run --rm dispatcher --config /app/config.yaml run-task --task-id T-001 --project my-project --description "…"`.)
 
 `--description` is what every role is actually told to work on: it goes
-into each phase's prompt verbatim and is stored in the task file's
-frontmatter (`<hive_tasks_dir>/T-001.md`), separate from the body where
-the phase summaries accumulate. Re-running the same task ID reuses the
-stored description, so `--description` can be omitted on a resume;
-running a task that has none anywhere is rejected as a usage error
-rather than spending four phases on roles that know only an ID. For
+into each phase's prompt verbatim and is stored in its own file,
+`board/T-001/description.md` beside the hive tasks dir, separate from the
+task file (`<hive_tasks_dir>/T-001.md`) where the phase summaries
+accumulate. It is written in sections: `## Goal` and `## Done when` are
+required, `## Surface`, `## Steps` and `## Out of scope` optional, and one
+missing a required section is a usage error that names it. Re-running the
+same task ID reuses the stored description, so `--description` can be
+omitted on a resume; running a task that has none anywhere is rejected as
+a usage error rather than spending four phases on roles that know only an
+ID. A hive from before the description had its own file is moved over
+once with `python -m dispatcher.cli --config config.yaml migrate`, with
+no cycle in flight; until then `run-task`, `run-phase` and
+`release-account` refuse and name that command. For
 anything longer than a sentence use `--description-file spec.md`, or
 `--description-file -` to read stdin — which is the shape that works
 from a container without bind-mounting the file:

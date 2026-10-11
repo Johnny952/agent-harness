@@ -22,6 +22,7 @@ import pytest
 import yaml
 
 from dispatcher import context_transfer, docker_exec, learnings, state_machine
+from dispatcher import tasks as task_store
 from dispatcher.config import LocalBoardConfig, load_config
 from dispatcher.state_machine import AccountState
 from dispatcher.vibe_kanban_client import LocalBoardClient
@@ -131,7 +132,14 @@ def _get(harness: types.SimpleNamespace, path: str):
     return harness.client.get(path, headers=_auth())
 
 
+#: A description `dispatcher/tasks.py` accepts: the two required sections.
+_DESCRIPTION = "## Goal\n\nDo the thing\n\n## Done when\n\nThe thing is done.\n"
+
+
 def _task(tasks_dir: str, task_id: str, **fields) -> None:
+    description = fields.pop("description", None)
+    if description is not None:
+        task_store.write_description(tasks_dir, task_id, description)
     context_transfer.write_task_file(
         context_transfer.task_file_path(tasks_dir, task_id),
         context_transfer.TaskFile(
@@ -263,7 +271,7 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         owner="cuenta1",
         depends_on=["T-0"],
         heartbeat="2026-09-26T18:00:00+00:00",
-        description="Do the thing",
+        description=_DESCRIPTION,
         resolved_debt=["T-008-D2"],
         body="arquitecto: plan ready",
     )
@@ -276,7 +284,8 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "owner": "cuenta1",
         "depends_on": ["T-0"],
         "heartbeat": "2026-09-26T18:00:00+00:00",
-        "description": "Do the thing",
+        # The text of the task's `description.md`, verbatim: not parsed.
+        "description": _DESCRIPTION,
         "kanban_issue_id": None,
         "resolved_debt": ["T-008-D2"],
         "card": None,
@@ -678,13 +687,37 @@ def test_a_remote_board_is_a_warning_rather_than_a_dialled_subprocess(tmp_path: 
 
 def test_one_task_by_id(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
-    _task(harness.tasks_dir, "T-1", description="Do the thing")
+    _task(harness.tasks_dir, "T-1", description=_DESCRIPTION)
     _task(harness.tasks_dir, "T-2")
 
     body = _get(harness, "/api/tasks/T-1").get_json()
 
     assert body["data"]["task_id"] == "T-1"
-    assert body["data"]["description"] == "Do the thing"
+    assert body["data"]["description"] == _DESCRIPTION
+    # T-2 has no `description.md`: that is `null`, not an error.
+    assert _get(harness, "/api/tasks/T-2").get_json()["data"]["description"] is None
+
+
+def test_a_task_file_not_yet_migrated_is_a_warning_naming_the_command(tmp_path: Path) -> None:
+    """A task file that still has its description in the frontmatter costs that
+    task its row on both routes, with a warning that says what to run."""
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    legacy = Path(context_transfer.task_file_path(harness.tasks_dir, "T-2"))
+    legacy.write_text(
+        "---\ntask_id: T-2\nstatus: pending\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\ndescription: Do the thing\n---\n\n"
+    )
+    before = legacy.read_bytes()
+
+    listed = _get(harness, "/api/tasks").get_json()
+    one = _get(harness, "/api/tasks/T-2").get_json()
+
+    assert [row["task_id"] for row in listed["data"]] == ["T-1"]
+    assert any("dispatch migrate" in warning for warning in listed["warnings"])
+    assert one["data"] is None
+    assert any("dispatch migrate" in warning for warning in one["warnings"])
+    assert legacy.read_bytes() == before
 
 
 def test_one_task_by_an_id_no_file_answers_404(tmp_path: Path) -> None:

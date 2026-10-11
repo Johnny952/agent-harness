@@ -16,6 +16,7 @@ from dispatcher import (
     project_docs,
     project_keys,
     role_skills,
+    tasks,
 )
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
@@ -51,13 +52,56 @@ EXIT_BLOCKED = 1
 EXIT_HELD = 75
 
 
+#: How many task ids a refusal lists before it says "and N more".
+_UNMIGRATED_SHOWN = 5
+
+
+def _require_migrated(cfg: Config, parser: argparse.ArgumentParser) -> None:
+    """Refuse a verb that writes task files while one still holds its description.
+
+    `context_transfer` no longer carries the `description` key, so its next
+    write to such a file would drop the ask; `dispatch migrate` moves it out
+    first. A usage error, like every other refusal made before a run starts.
+    """
+    stale = tasks.unmigrated_ids(cfg.hive_tasks_dir)
+    if not stale:
+        return
+    shown = ", ".join(stale[:_UNMIGRATED_SHOWN])
+    if len(stale) > _UNMIGRATED_SHOWN:
+        shown += f" and {len(stale) - _UNMIGRATED_SHOWN} more"
+    parser.error(
+        f"{len(stale)} task file(s) still carry their description in the frontmatter "
+        f"({shown}): run `{tasks.MIGRATE_COMMAND}` first"
+    )
+
+
+def _run_migrate(cfg: Config) -> None:
+    """Move every description out of its task file, and print what moved."""
+    report = tasks.migrate(cfg.hive_tasks_dir)
+    for task_id, path in report.moved:
+        print(f"{task_id}: description moved to {path}")
+    for task_id in report.emptied:
+        print(f"{task_id}: empty description dropped")
+    for task_id, reason in report.refused:
+        print(f"{task_id}: not migrated: {reason}", file=sys.stderr)
+    if report.moved or report.emptied or report.refused:
+        print(
+            f"moved {len(report.moved)} description(s); {report.already} already migrated"
+        )
+    else:
+        print("nothing to migrate")
+    if report.refused:
+        raise SystemExit(EXIT_BLOCKED)
+
+
 def _resolve_description(
     args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser
 ) -> str | None:
     """The description to seed this run with, or None to keep the stored one.
 
     Refuses to dispatch a task nobody described: without an ask, the four
-    phases can only produce noise at full quota cost. argparse's own
+    phases can only produce noise at full quota cost. Refuses one missing
+    `## Goal` or `## Done when` too, naming the section. argparse's own
     parser.error is used so the failure reads like any other usage error
     and exits 2.
     """
@@ -74,7 +118,7 @@ def _resolve_description(
     elif args.description is not None:
         text = args.description
     else:
-        stored = context_transfer.read_description(cfg.hive_tasks_dir, args.task_id)
+        stored = tasks.read_description(cfg.hive_tasks_dir, args.task_id)
         if (stored or "").strip():
             return None  # a resume: the ask is already on disk, don't rewrite it
         parser.error(
@@ -85,6 +129,10 @@ def _resolve_description(
 
     if not text.strip():
         parser.error("the task description is empty")
+    try:
+        tasks.parse_description(text)
+    except tasks.DescriptionError as exc:
+        parser.error(f"the task description {exc}")
     return text
 
 
@@ -240,9 +288,12 @@ def main() -> None:
     description_group = run_parser.add_mutually_exclusive_group()
     description_group.add_argument(
         "--description",
-        help="What the task actually asks for. Stored in the task file's frontmatter "
-        "and embedded in every role's prompt. Optional only when the task file "
-        "already carries a description (i.e. re-running a task).",
+        help="What the task actually asks for, in sections: `## Goal` and "
+        "`## Done when` are required, `## Surface`, `## Steps` and "
+        "`## Out of scope` optional. Stored as the task's description.md on "
+        "the board, beside the hive tasks dir, and embedded in every role's "
+        "prompt. Optional only when the task already has a stored description "
+        "(i.e. re-running a task).",
     )
     description_group.add_argument(
         "--description-file",
@@ -431,10 +482,21 @@ def main() -> None:
         ".data/credentials/projects.",
     )
 
+    sub.add_parser(
+        "migrate",
+        help="Move the description out of every task file that still carries it "
+        "in the frontmatter, into the task's description.md on the board. Run "
+        "it once after upgrading, with no cycle in flight; a second run changes "
+        "nothing. It prints what it moved.",
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
-    if args.command == "run-task":
+    if args.command == "migrate":
+        _run_migrate(cfg)
+    elif args.command == "run-task":
+        _require_migrated(cfg, parser)
         description = _resolve_description(args, cfg, parser)
         _seed_kanban_issue_id(args, cfg, parser)
         # No vibe_kanban block, no board: the cycle runs exactly as before and
@@ -454,12 +516,13 @@ def main() -> None:
             print(f"task {args.task_id} is blocked; the log above says why", file=sys.stderr)
             raise SystemExit(EXIT_BLOCKED)
     elif args.command == "run-phase":
+        _require_migrated(cfg, parser)
         if args.round_num is not None and args.round_num < 1:
             parser.error("--round counts from 1")
         # No --description: this verb only ever runs on a task some earlier
         # run already described, and rewriting the ask underneath a phase
         # that is resuming somebody else's work is not a thing to make easy.
-        if not (context_transfer.read_description(cfg.hive_tasks_dir, args.task_id) or "").strip():
+        if not (tasks.read_description(cfg.hive_tasks_dir, args.task_id) or "").strip():
             parser.error(
                 f"task {args.task_id} has no description: run-phase resumes a task that "
                 "is already under way. Start it with run-task."
@@ -579,6 +642,9 @@ def main() -> None:
             )
         )
     elif args.command == "release-account":
+        # `release_account` clears a dead cycle's lock with `release_stale_lock`,
+        # a task-file write.
+        _require_migrated(cfg, parser)
         try:
             outcome = operator.release_account(
                 cfg, args.name, force=args.force, clear_rate_limit=args.clear_rate_limit
