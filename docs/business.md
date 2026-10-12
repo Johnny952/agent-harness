@@ -214,3 +214,31 @@ cite the entry and move it up, or drop the row.
   failed optional phase *ought* to be a row a console shows beside the phases
   that finished — and if so, whether the row needs a field saying which it is,
   since nothing on the envelope distinguishes them today.
+
+## Unconfirmed — inferred from the code by T-030
+
+- **A dependency that landed before the merged record existed is unmet until
+  `merge-task` is run on it again.** `open_cycle` in
+  `dispatcher/dispatcher.py` refuses any task, an epic's child or not, and
+  `run-phase` as well, whose `depends_on` names a task with no `merged` block,
+  and only a merge path writes the block (`record_merge`). No task merged
+  before T-030 has one. Nothing migrates them: the re-run answers
+  `up-to-date` and writes it. A human should say whether that hand step per
+  old dependency is the intended price, or whether `done` tasks should be
+  given the block once.
+- **A branch the target already contains counts as merged, even one with no
+  commits past its base.** `record_merge` writes the `merged` block on an
+  `up-to-date` outcome when the task file has none, so a task that changed
+  nothing satisfies its dependents. Read off `record_merge`; the card asked
+  only that a merge be recorded.
+- **A sub-task of an epic that has closed cannot be run again without a hand
+  edit.** `tasks.epic_problems` reports a parent whose status is not `epic`,
+  and `tasks.close_epic` sets it to `done` on the last merged child, so a
+  later run of any child is refused with "has status done, not epic". The
+  card asks for the check; nothing says a finished epic's child should be
+  frozen.
+- **A task run while its status is `epic` or `done` and then blocked is
+  written `blocked`.** `_mark_blocked` does not look at the status it
+  overwrites. Refusing to run an epic is task 4 of
+  `docs/plans/task-split.md` section 8; until then the status of an epic run
+  by mistake is lost.
