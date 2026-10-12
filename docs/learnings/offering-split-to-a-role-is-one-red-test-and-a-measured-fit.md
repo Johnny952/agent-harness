@@ -1,18 +1,25 @@
 # Offering `split` to a role turns one test red on purpose, and the schema still fits the cap
 
-**When it applies:** you are adding `_SPLIT_PROPERTY` to `_ROLE_EXTRAS` in
-`dispatcher/handoff.py` — step 4 of `docs/plans/task-split.md` section 8 — or
-adding any other property to a role's handoff schema and budgeting it against
-the size cap.
+**When it applies:** you are adding a property to a role's handoff schema in
+`dispatcher/handoff.py` and budgeting it against the size cap, or offering
+`_SPLIT_PROPERTY` to a role other than the arquitecto, which has had it since
+T-031 (step 4 of `docs/plans/task-split.md` section 8).
 
 **Status:** unconfirmed — proposed by T-025's implementador and revisor; the
 number was re-measured by T-025's auditor, the red test is read off the code
-and has not been hit by any task yet.
+and has not been hit by any task yet. Amended by T-031's auditor: T-031 did
+step 4, so the first half is history. `test_no_role_is_offered_a_split_yet`
+is gone, replaced by `test_the_arquitecto_is_offered_a_split_and_has_to_answer_it`
+and `test_no_other_role_is_offered_a_split`, and
+`test_the_split_property_is_closed_like_the_other_object_lists` was kept.
+What still applies is the size half: the arquitecto's schema now carries
+`split`, and the cap test passes on T-031's tree. The sections below are as
+T-025 wrote them, for a task that offers the field to a second role.
 
 ## Symptom
 
-No error today. The moment `split` joins a role's extras, this fails for that
-role:
+No error. Before T-031, the moment `split` joined a role's extras, this
+failed for that role:
 
 ```
 tests/dispatcher/test_handoff.py::test_no_role_is_offered_a_split_yet

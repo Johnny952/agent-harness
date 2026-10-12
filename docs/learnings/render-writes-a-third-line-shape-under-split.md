@@ -7,7 +7,8 @@ changing `render`, `body` or the `## <role>` gate in
 `context_transfer.has_phase_section`.
 
 **Status:** unconfirmed — proposed by T-025's implementador, read against the
-code by the revisor and the auditor.
+code by the revisor and the auditor. The *Rule* was amended by T-031's
+auditor: it said the shape was inert.
 
 ## Symptom
 
@@ -39,9 +40,10 @@ description: that text goes to the sub-task's own file.
 ## Rule
 
 Any new `render` section that prints model text outside `_lines` collapses
-whitespace per line and gets a test with `\n## auditor` in the text; inert
-today, since no role's schema offers `split` until step 4 of
-`docs/plans/task-split.md` section 8.
+whitespace per line and gets a test with `\n## auditor` in the text. Live
+since T-031: the arquitecto's schema offers `split`, so a real run writes
+the `**Split**` section, and `run-phase` prints the same `_split` lines
+(`_print_proposed_split` in `dispatcher/cli.py`).
 
 ## Evidence
 

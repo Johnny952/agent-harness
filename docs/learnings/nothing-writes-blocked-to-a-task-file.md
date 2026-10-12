@@ -10,7 +10,8 @@ is one reading, not three. Amended twice, and the file keeps its first name.
 T-029's auditor amended it when `tasks.mark_blocked` was added with no caller.
 T-030's auditor rewrote the title and the two sections below when the
 dispatcher began to call it: the entry used to say no run writes `blocked`,
-which is no longer true.
+which is no longer true. T-031's auditor added the epic refusal and the
+split to the list below.
 
 ## What is true
 
@@ -26,7 +27,11 @@ user's ruling of 2026-10-11, `docs/business.md` *Task status*).
 Not every blocked exit writes it. These leave the file as it was:
 
 - `open_cycle` refused the task: no description, an unmigrated hive, an
-  unmet dependency, a malformed epic. `run-task` exits `EXIT_BLOCKED`.
+  unmet dependency, a malformed epic, and since T-031 a task that is itself
+  `epic`. `run-task` exits `EXIT_BLOCKED`.
+- The arquitecto's split was filed (`CycleOutcome.SPLIT`, `EXIT_SPLIT`,
+  T-031): the file reads `epic`. A split that could not be filed is a block
+  and is marked.
 - The project's branch diverged, or the run met another owner's lock.
 - A held cycle (`CycleOutcome.HELD`, `EXIT_HELD`).
 - `run-phase`: `run_single_phase` never marks.
