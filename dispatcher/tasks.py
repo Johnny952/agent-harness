@@ -5,7 +5,8 @@ module that writes them. Two of them are written here: the description — the
 ask, in sections, at `<hive root>/board/<task_id>/description.md` — and the
 task file itself — status, lock, handoffs — whose writers (`acquire_lock`,
 `refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_resolved_debt`,
-`file_split`, `mark_merged`, `mark_blocked`) all end in `_write_task_file`.
+`file_split`, `mark_merged`, `mark_blocked`, `close_epic`) all end in
+`_write_task_file`.
 `context_transfer` keeps
 the `TaskFile` shape, its reader and the serializer `write_task_file`, which
 nothing under `dispatcher/` but this module calls.
@@ -21,8 +22,10 @@ an entry point refuse the whole hive until `dispatch migrate` has been run.
 The epic format of `docs/plans/task-split.md` section 2 is written here too:
 `file_split` files a split's sub-tasks and turns their parent into an epic,
 `mark_merged` records a merge on the task and `unmet_dependencies` reads it.
-`mark_blocked` records a task that stopped blocked. Nothing calls those four
-yet.
+`mark_blocked` records a task that stopped blocked. `close_epic` closes an
+epic on its last merged sub-task and `epic_problems` checks one written by
+hand. The dispatcher calls all of them but `file_split`, which nothing calls
+yet (`docs/implementations/T-030.md`).
 """
 from __future__ import annotations
 
@@ -36,7 +39,7 @@ import yaml
 
 from dispatcher import context_transfer
 # By name: this module's own `handoff` is a task-file writer.
-from dispatcher.handoff import SubTask, split_problems
+from dispatcher.handoff import _SPLIT_MAX, _SPLIT_MIN, SubTask, split_problems
 
 # `_makedirs_readable`, `_write_atomic`, `_is_single_path_component`,
 # `_read_or_new` and `_FRONTMATTER_DELIM` are private to `context_transfer` and used here on
@@ -362,6 +365,26 @@ def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     _write_task_file(path, task)
 
 
+def _read_for_check(
+    hive_dir: str, task_id: object
+) -> tuple[context_transfer.TaskFile | None, str | None]:
+    """Another task's file, for a check that reports instead of raising.
+
+    The file, or None and the one line saying why there is none to read.
+    """
+    if not isinstance(task_id, str) or not context_transfer._is_single_path_component(task_id):
+        return None, f"{task_id!r} is not a task id"
+    try:
+        return (
+            context_transfer.read_task_file(context_transfer.task_file_path(hive_dir, task_id)),
+            None,
+        )
+    except FileNotFoundError:
+        return None, f"{task_id} has no task file"
+    except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError):
+        return None, f"{task_id}: its task file cannot be read"
+
+
 def unmet_dependencies(hive_dir: str, task: context_transfer.TaskFile) -> list[str]:
     """Why this task cannot start yet, one line per dependency. Empty means it can.
 
@@ -372,21 +395,97 @@ def unmet_dependencies(hive_dir: str, task: context_transfer.TaskFile) -> list[s
         return [f"depends_on is {task.depends_on!r}, not a list"]
     unmet = []
     for dep in task.depends_on:
-        if not isinstance(dep, str) or not context_transfer._is_single_path_component(dep):
-            unmet.append(f"{dep!r} is not a task id")
-            continue
-        try:
-            merged = context_transfer.read_task_file(
-                context_transfer.task_file_path(hive_dir, dep)
-            ).merged
-        except FileNotFoundError:
-            unmet.append(f"{dep} has no task file")
-        except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError):
-            unmet.append(f"{dep}: its task file cannot be read")
-        else:
-            if not merged:
-                unmet.append(f"{dep} is not merged")
+        dependency, why = _read_for_check(hive_dir, dep)
+        if dependency is None:
+            unmet.append(why)
+        elif not dependency.merged:
+            unmet.append(f"{dep} is not merged")
     return unmet
+
+
+def epic_problems(hive_dir: str, task: context_transfer.TaskFile) -> list[str]:
+    """What is wrong with the epic this task is part of, one line each.
+
+    Empty for a task with no `epic`, and for a child of a well-formed one.
+    `docs/plans/task-split.md` section 4, "A hand-written epic gets the
+    equivalent checks on its files": what `split_problems` and `file_split`
+    refuse in a split, read off the files an operator wrote instead. Every
+    problem is reported, not the first. Never writes.
+    """
+    if not task.epic:
+        return []
+    # The id is the one the child names, which is the file that was read: a
+    # hand-written parent's own `task_id` key is not what anything looks up.
+    parent_id = task.epic
+    parent, why = _read_for_check(hive_dir, parent_id)
+    if parent is None:
+        return [f"its epic {why}"]
+    problems = []
+    if parent.status != "epic":
+        problems.append(f"its epic {parent_id} has status {parent.status}, not epic")
+    if parent.epic:
+        problems.append(
+            f"its epic {parent_id} is part of epic {parent.epic}; "
+            "a task inside an epic cannot become an epic"
+        )
+    children = parent.split_into
+    if not isinstance(children, list):
+        return problems + [f"epic {parent_id}: split_into is {children!r}, not a list"]
+    if task.task_id not in children:
+        problems.append(f"epic {parent_id} does not name {task.task_id} in its split_into")
+    if not _SPLIT_MIN <= len(children) <= _SPLIT_MAX:
+        problems.append(
+            f"epic {parent_id}: an epic has {_SPLIT_MIN} to {_SPLIT_MAX} sub-tasks, "
+            f"this one has {len(children)}"
+        )
+    seen: list[object] = []
+    for child_id in children:
+        if child_id in seen:
+            problems.append(f"epic {parent_id}: split_into names {child_id} more than once")
+            continue
+        seen.append(child_id)
+        child, why = _read_for_check(hive_dir, child_id)
+        if child is None:
+            problems.append(f"epic {parent_id}: {why}")
+            continue
+        if child.epic != parent_id:
+            problems.append(f"{child_id}: its epic is {child.epic or 'not set'}, not {parent_id}")
+        if not isinstance(child.depends_on, list):
+            problems.append(f"{child_id}: depends_on is {child.depends_on!r}, not a list")
+            continue
+        for dep in child.depends_on:
+            if dep == child_id or dep not in children:
+                problems.append(f"{child_id}: depends_on names {dep}, which is not a sibling")
+    return problems
+
+
+def close_epic(hive_dir: str, task_id: str) -> str | None:
+    """Close the epic this task is part of, if it was the last one to merge.
+
+    `docs/plans/task-split.md` section 3, the epic check both merge paths run
+    after `mark_merged`. The parent is set to `status: done` when this task
+    has `epic`, the parent is `status: epic` and names it in `split_into`, and
+    every id there has a task file with a `merged` block; its lock, body and
+    other fields stay. Returns the parent's id when it closed it and None
+    when it wrote nothing: a parent already `done` is left alone, and a file
+    that is missing or will not read closes nothing.
+    """
+    task, _ = _read_for_check(hive_dir, task_id)
+    if task is None or not task.epic:
+        return None
+    parent, _ = _read_for_check(hive_dir, task.epic)
+    if parent is None or parent.status != "epic":
+        return None
+    children = parent.split_into
+    if not isinstance(children, list) or task_id not in children:
+        return None
+    for child_id in children:
+        child, _ = _read_for_check(hive_dir, child_id)
+        if child is None or not child.merged:
+            return None
+    parent.status = "done"
+    _write_task_file(context_transfer.task_file_path(hive_dir, task.epic), parent)
+    return task.epic
 
 
 def _with_epic_line(text: str, parent_id: str, surface: str) -> str:

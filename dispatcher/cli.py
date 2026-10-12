@@ -22,6 +22,7 @@ from dispatcher.dispatcher import (
     CycleOutcome,
     cleanup_container,
     container_for,
+    record_merge,
     run_single_phase,
     run_task_cycle,
 )
@@ -534,6 +535,15 @@ def main() -> None:
             print(outcome.detail, file=sys.stderr)
             raise SystemExit(1)
         print(outcome.detail)
+        # What a dependency waits for, and what closes an epic on its last
+        # sub-task (`docs/plans/task-split.md` section 3). Still exit 0 when
+        # the record could not be written: exit 1 here means the branch did
+        # not land, and it did.
+        recorded, problem = record_merge(cfg, args.task_id, outcome)
+        for line in recorded:
+            print(line)
+        if problem:
+            print(problem, file=sys.stderr)
         # The same thing the automatic merge does, for the same reason: what
         # the task learned is in the project's docs now, on the branch that
         # just landed, so the inbox copy has stopped earning its place in

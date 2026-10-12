@@ -92,13 +92,15 @@ cite the entry and move it up, or drop the row.
   left `pending`, and running it again is the operator's decision to retry.**
   Ruled by the user on 2026-10-11, on what T-028 inferred and filed as
   [`docs/debt/T-028-D3`](debt/T-028-D3.md); the ruling reached this repo through T-029's card and
-  is cited in the comment on `acquire_lock`. The rule is half
+  is cited in the comment on `acquire_lock`. The rule is
   built: `dispatcher/tasks.py` has `mark_blocked`, which sets the status and
   releases the lock, and `acquire_lock` moves a `blocked` task to
-  `in_progress` as it moves a `pending` one. Nothing calls `mark_blocked`
-  yet, so until the dispatcher does a blocked cycle still leaves its task
-  file `pending` or `in_progress`, with `CycleOutcome.BLOCKED`, a log line
-  and an exit code as its only record. Until T-028 a board card carried that
+  `in_progress` as it moves a `pending` one. Since T-030 `run_task_cycle`
+  calls `mark_blocked` when it stops blocked after a phase of the run took
+  the task's lock. A held cycle, another owner's lock, a task `open_cycle`
+  refused, a diverged base and `run-phase` mark nothing, so those still
+  leave only `CycleOutcome.BLOCKED` or HELD, a log line and an exit code
+  (`docs/implementations/T-030.md`). Until T-028 a board card carried that
   status, on a harness that had a board (`docs/decisions.md` ADR 59 removed
   the seam).
 

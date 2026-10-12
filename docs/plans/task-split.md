@@ -8,10 +8,16 @@ T-025 (`docs/implementations/T-025.md`): `_SPLIT_PROPERTY`, `SubTask`,
 epic format, inert — is built by T-029 (`docs/implementations/T-029.md`), in
 `dispatcher/tasks.py` and not `context_transfer`: `file_split`, `mark_merged`,
 `unmet_dependencies`, the `epic`, `split_into` and `merged` fields, and
-`mark_blocked`. Nothing calls them yet, and where that note differs from
+`mark_blocked`. Where that note differs from
 section 2's sketch (the description is a file, there is no card title), the
-note is what was built. Steps 3 and 4
-are not built, and no role's schema offers `split` until step 4. This design
+note is what was built. Step 3 — the gate and the merged record — is built by
+T-030 (`docs/implementations/T-030.md`): both merge paths call
+`record_merge`, which writes `merged` and closes an epic on its last merged
+sub-task (`tasks.close_epic`); `open_cycle` refuses a task with an unmerged
+dependency or a malformed hand-written epic (`tasks.epic_problems`) and marks
+nothing on it, where section 4 says "card blocked"; and a cycle that stops
+blocked marks its task `blocked`. Nothing calls `file_split` yet. Step 4
+is not built, and no role's schema offers `split` until it is. This design
 settles the decisions P4 leaves "for an ADR", so the work can be dispatched in
 one-surface tasks. The
 ADR lands in `docs/decisions.md` with the task that builds it; the text is

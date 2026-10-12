@@ -1725,7 +1725,45 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
         logger.warning("task %s: not merged: %s", task_id, outcome.detail)
         return False
     logger.info("task %s: %s", task_id, outcome.detail)
+    recorded, problem = record_merge(cfg, task_id, outcome)
+    for line in recorded:
+        logger.info("%s", line)
+    if problem:
+        logger.warning("%s", problem)
     return True
+
+
+def record_merge(
+    cfg: Config, task_id: str, outcome: docker_exec.MergeOutcome
+) -> tuple[list[str], str | None]:
+    """Write a merge that landed onto the task, and close its epic if it was the last.
+
+    `docs/plans/task-split.md` section 3, "Merged is recorded on the task":
+    the one function both merge paths call, the cycle's and `merge-task`'s,
+    and only with an outcome that was not refused. A merge writes the block.
+    A branch the target already had writes it only where the file has none,
+    so running `merge-task` again keeps the first record and repairs one that
+    was never written. The epic check runs either way.
+
+    Returns what it recorded, one line each, and what it could not, or None.
+    It never raises: the branch landed whatever happens here, and the
+    dependency gate is where a merge with no record is met again.
+    """
+    hive = cfg.hive_tasks_dir
+    recorded = []
+    try:
+        task = context_transfer.read_task_file(context_transfer.task_file_path(hive, task_id))
+        if outcome.merged or not task.merged:
+            tasks.mark_merged(hive, task_id, outcome.target)
+            recorded.append(f"task {task_id}: recorded as merged into {outcome.target}")
+        closed = tasks.close_epic(hive, task_id)
+        if closed:
+            recorded.append(f"epic {closed}: every sub-task is merged, so it is done")
+    except FileNotFoundError:
+        return recorded, f"task {task_id}: it has no task file, so the merge is not recorded"
+    except Exception as exc:
+        return recorded, f"task {task_id}: the merge could not be recorded: {exc}"
+    return recorded, None
 
 
 def _needs_mapping(cfg: Config, slug: str) -> bool:
@@ -1776,6 +1814,10 @@ class CycleContext:
     # take it: the run stops the same as any other stop, but it is held, not
     # failed, and says so in its exit code (ADR 52).
     held: bool = False
+    # Set once a phase of this run took the task's lock. Every phase lets go
+    # of it before `run_phase` returns, so at the end of a blocked cycle the
+    # file cannot say whether this run ever held it; this can.
+    took_lock: bool = False
 
 
 def open_cycle(
@@ -1787,7 +1829,9 @@ def open_cycle(
     """Get a run to the point where a phase can be dispatched.
 
     Returns None when it cannot get there, having already said why. That is a task nobody described, a description missing a
-    required section, and a hive `dispatch migrate` has not been run on.
+    required section, a hive `dispatch migrate` has not been run on, a task
+    with a dependency that is not merged, and a child of a malformed epic.
+    Nothing is marked on a task refused here: it stays as it was.
     """
     # The whole-hive rule (`docs/business.md` *Task descriptions*): one
     # unmigrated task file stops every cycle. `tasks.py`'s writer refuses such
@@ -1848,6 +1892,22 @@ def open_cycle(
     except tasks.DescriptionError as exc:
         logger.error("task %s: the task description %s", task_id, exc)
         return None
+    # The gate of `docs/plans/task-split.md` section 4: a dependency counts
+    # once it is merged, and a hand-written epic gets the checks a filed split
+    # got. Before the supplied description is written, so a refused run
+    # leaves nothing behind. A task with no file yet has nothing to gate; one
+    # that will not parse raises from the first phase's lock, as it always did.
+    try:
+        task = context_transfer.read_task_file(task_file)
+    except FileNotFoundError:
+        task = None
+    if task is not None:
+        reasons = tasks.unmet_dependencies(cfg.hive_tasks_dir, task) + tasks.epic_problems(
+            cfg.hive_tasks_dir, task
+        )
+        if reasons:
+            logger.error("task %s cannot start: %s", task_id, "; ".join(reasons))
+            return None
     if supplied:
         tasks.write_description(cfg.hive_tasks_dir, task_id, description)
 
@@ -1904,6 +1964,10 @@ def run_phase(
         logger.warning("task %s is locked by another owner: %s", ctx.task_id, exc)
         ctx.foreign_lock = True
         return None
+    if not result.no_account:
+        # The one return that proves `tasks.acquire_lock` succeeded: an
+        # account ran the phase, whatever became of it.
+        ctx.took_lock = True
     if not result.success:
         if fatal:
             # Said out loud because otherwise nothing says it: this return is
@@ -1979,6 +2043,29 @@ def close_cycle(ctx: CycleContext, completed: bool) -> None:
         # gone, and a status this task alone vouched for goes back
         # to being one phase's word.
         learnings.mark_orphaned(ctx.cfg.hive_tasks_dir, ctx.task_id)
+
+
+def _mark_blocked(ctx: CycleContext) -> None:
+    """Write `blocked` on the task of a cycle that stopped blocked, if it was this run's.
+
+    The user's ruling of 2026-10-11 (`docs/business.md` *Task status*). Only a
+    run that took the task's lock marks it, and never one that bounced off
+    another owner's. An owner on the file now is a run that took the task
+    since this one's last phase let go, and `tasks.mark_blocked` would release
+    its lock, so that is left alone too. No task file means nothing to mark.
+    It never raises: the cycle has ended, and a traceback here would replace
+    the BLOCKED exit with a crash.
+    """
+    if not ctx.took_lock or ctx.foreign_lock:
+        return
+    try:
+        if context_transfer.read_task_file(ctx.task_file).owner is not None:
+            return
+        tasks.mark_blocked(ctx.cfg.hive_tasks_dir, ctx.task_id)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        logger.warning("task %s: could not be marked blocked: %s", ctx.task_id, exc)
 
 
 def run_single_phase(
@@ -2112,7 +2199,13 @@ def run_task_cycle(
     # Every stop after a phase that returned None reads this: the phase knows
     # whether it was held, and the cycle only has to pass that on.
     def stopped() -> CycleOutcome:
-        return CycleOutcome.HELD if ctx.held else CycleOutcome.BLOCKED
+        return CycleOutcome.HELD if ctx.held else blocked()
+    # Every stop that leaves the task blocked after a phase of this run took
+    # its lock. `_mark_blocked` decides whether there is anything to write, so
+    # a foreign lock goes through here too and marks nothing.
+    def blocked() -> CycleOutcome:
+        _mark_blocked(ctx)
+        return CycleOutcome.BLOCKED
     # Set once the auditor has filed what this task learned.
     completed = False
 
@@ -2165,7 +2258,7 @@ def run_task_cycle(
                 "task %s: the arquitecto blocked before implementation: %s",
                 task_id, "; ".join(missing) or "no reason given",
             )
-            return CycleOutcome.BLOCKED
+            return blocked()
 
         approved = False
         # Counted separately from `round_num`: `max_revision_rounds: 0` makes
@@ -2225,7 +2318,7 @@ def run_task_cycle(
                 "task %s: blocked after %d of %d revision round(s) without an approval",
                 task_id, rounds_run, cfg.max_revision_rounds,
             )
-            return CycleOutcome.BLOCKED
+            return blocked()
 
         # Stamped before the phase that files them, so the auditor's prompt
         # can name the entries it owns and a later run can tell an entry that
