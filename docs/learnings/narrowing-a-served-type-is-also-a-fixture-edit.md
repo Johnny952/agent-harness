@@ -40,6 +40,17 @@ than chosen, which is also true of the helpers in `front/src/lib/format.ts` that
 lose their last caller when a field retires: `formatBytes` and `formatDuration`
 are kept callerless with the reason written on them, under the same ADR.
 
+## A test can hold a literal of the type too
+
+The fixtures are not the only literals. T-033 removed two fields from `Task`
+and found a third `Task` literal outside `mock/`: the `TASK` constant of
+`front/src/routes/-index.test.tsx`, annotated `const TASK: Task`. An object
+literal with a property its type does not declare fails `bun run typecheck`
+the same way a fixture row does, and no phase runs that gate. So before
+narrowing a type, grep `front/src` for the field names being removed, not
+only `front/src/lib/api/mock/`, and edit every hit in the same commit. Still
+unconfirmed: T-033 hit it once.
+
 ## Evidence
 
 T-013: `front/src/lib/api/mock/fixtures.ts:mockPhases` narrowed from 221 lines

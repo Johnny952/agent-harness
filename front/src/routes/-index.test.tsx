@@ -50,9 +50,7 @@ const TASK: Task = {
   depends_on: [],
   heartbeat: null,
   description: "the pointers in docs/ still land somewhere",
-  kanban_issue_id: null,
   resolved_debt: [],
-  card: null,
   lock_expired: null,
 };
 

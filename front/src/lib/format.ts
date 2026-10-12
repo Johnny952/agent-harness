@@ -101,10 +101,11 @@ export function formatBytes(n: number): string {
 
 /**
  * Kept with no caller, deliberately. Nothing `/api/tasks` serves has a role in it
- * — `docs/decisions.md` ADR 26 — but `in_progress:<role>` is the shape a *card's*
- * status has, which is the alternative that ADR records for the Board's role
- * lanes, so the parser costs nothing and is here if that route is taken. Widened
- * to `string` for the same reason: a card's status is not a `TaskStatus`.
+ * — `docs/decisions.md` ADR 26 — and `in_progress:<role>` was the shape a board
+ * card's status had until ADR 59 removed the board seam; nothing writes it now.
+ * The parser costs nothing and is here if a later record of the running role
+ * takes the same shape. Widened to `string` for the same reason: such a status
+ * is not a `TaskStatus`.
  */
 export function splitStatus(status: string): { lane: string; role: Role | null } {
   if (status.startsWith("in_progress:")) {
