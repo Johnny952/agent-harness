@@ -6169,3 +6169,332 @@ def test_a_single_phase_that_failed_does_not_mark_the_task_blocked(tmp_path, mon
 
     assert result is None
     assert _task(cfg).status == "pending"
+
+
+# --- the split, switched on ------------------------------------------------
+# `docs/plans/task-split.md` section 8 step 4, `docs/decisions.md` ADR 60.
+
+def _split_payload(subtasks=_SPLIT, status="complete") -> dict:
+    """The arquitecto's return carrying `subtasks` as its split."""
+    return {
+        "status": status,
+        "pending": ["a decision nobody made"] if status == "blocked" else [],
+        "split": [
+            {
+                "title": subtask.title, "surface": subtask.surface,
+                "description": subtask.description, "after": list(subtask.after),
+            }
+            for subtask in subtasks
+        ],
+    }
+
+
+def _splitting_cycle(cfg, monkeypatch, payload, task_id="task-1", description=_DESCRIPTION):
+    """Run a cycle whose arquitecto returns `payload`; the outcome and the roles dispatched."""
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _recording_dispatch_phase(calls, handoffs={"arquitecto": payload}),
+    )
+    outcome = dispatcher_mod.run_task_cycle(cfg, task_id, "myproj", description=description)
+    return outcome, [call["role"] for call in calls]
+
+
+def _split_ctx(cfg, task_id="task-1"):
+    return dispatcher_mod.CycleContext(
+        cfg=cfg, task_id=task_id, slug="myproj", description=_DESCRIPTION,
+        task_file=task_file_path(cfg.hive_tasks_dir, task_id),
+        scratch_dir=scratch_dir(cfg.hive_tasks_dir, task_id), harness="",
+    )
+
+
+def _with_status(cfg, status, task_id="task-1", **fields) -> None:
+    tasks.handoff(cfg.hive_tasks_dir, task_id, new_status="pending", body="## arquitecto")
+    path = task_file_path(cfg.hive_tasks_dir, task_id)
+    task = read_task_file(path)
+    task.status = status
+    for name, value in fields.items():
+        setattr(task, name, value)
+    write_task_file(path, task)
+
+
+def test_a_cycle_whose_arquitecto_split_files_the_epic_and_stops(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    closed = []
+    real_close = dispatcher_mod.close_cycle
+    monkeypatch.setattr(
+        dispatcher_mod, "close_cycle",
+        lambda ctx, completed: (closed.append(completed), real_close(ctx, completed))[1],
+    )
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        outcome, roles = _splitting_cycle(cfg, monkeypatch, _split_payload())
+
+    assert outcome is dispatcher_mod.CycleOutcome.SPLIT
+    assert roles == ["arquitecto"]
+    parent = _task(cfg)
+    # Not a block: the status is the `epic` that `file_split` wrote.
+    assert (parent.status, parent.owner) == ("epic", None)
+    assert parent.split_into == ["task-1-S1", "task-1-S2"]
+    first, second = _task(cfg, "task-1-S1"), _task(cfg, "task-1-S2")
+    assert (first.status, first.epic, first.depends_on) == ("pending", "task-1", [])
+    assert (second.status, second.epic, second.depends_on) == ("pending", "task-1", ["task-1-S1"])
+    assert "Part of epic task-1." in tasks.read_description(cfg.hive_tasks_dir, "task-1-S1")
+    assert "task task-1 is now an epic: task-1-S1, task-1-S2; run them in that order" in caplog.text
+    # The cleanup of a block, not of a finished task.
+    assert closed == [False]
+
+
+def test_a_blocked_arquitecto_that_also_split_is_blocked_and_files_nothing(
+    tmp_path, monkeypatch,
+) -> None:
+    """A block wins: it names a decision nobody made, and a split filed over
+    it would hand that hole to every sub-task."""
+    cfg = _make_config(tmp_path)
+
+    outcome, roles = _splitting_cycle(cfg, monkeypatch, _split_payload(status="blocked"))
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert roles == ["arquitecto"]
+    assert list_task_ids(cfg.hive_tasks_dir) == ["task-1"]
+    assert (_task(cfg).status, _task(cfg).split_into) == ("blocked", [])
+
+
+@pytest.mark.parametrize(
+    "subtasks,reason",
+    [
+        (_SPLIT[:1], "a split has 2 to 4 sub-tasks, this one has 1"),
+        (
+            [_SPLIT[0], handoff.SubTask("The screen", "front/", "## Goal\n\nA screen.\n", (1,))],
+            "sub-task 2: its description",
+        ),
+    ],
+    ids=["split_problems", "SplitError"],
+)
+def test_a_split_that_cannot_be_filed_blocks_before_the_implementador(
+    tmp_path, monkeypatch, caplog, subtasks, reason,
+) -> None:
+    cfg = _make_config(tmp_path)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        outcome, roles = _splitting_cycle(cfg, monkeypatch, _split_payload(subtasks))
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert roles == ["arquitecto"]
+    assert list_task_ids(cfg.hive_tasks_dir) == ["task-1"]
+    assert tasks.read_description(cfg.hive_tasks_dir, "task-1-S1") is None
+    assert (_task(cfg).status, _task(cfg).split_into) == ("blocked", [])
+    assert "task task-1: the split cannot be filed: " in caplog.text
+    assert reason in caplog.text
+
+
+def test_a_sub_task_that_splits_again_is_blocked_and_files_nothing(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        outcome, roles = _splitting_cycle(
+            cfg, monkeypatch, _split_payload(), task_id="task-0-S1", description=None
+        )
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert roles == ["arquitecto"]
+    assert sorted(list_task_ids(cfg.hive_tasks_dir)) == ["task-0", "task-0-S1", "task-0-S2"]
+    assert _task(cfg, "task-0-S1").status == "blocked"
+    assert "a task inside an epic cannot become an epic" in caplog.text
+
+
+def test_a_cycle_with_an_empty_split_goes_on_to_the_implementador(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+
+    outcome, roles = _splitting_cycle(cfg, monkeypatch, {"status": "complete", "split": []})
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
+
+
+@pytest.mark.parametrize("status", ["done", "epic"])
+def test_file_split_refuses_a_parent_that_is_done_or_an_epic(tmp_path, caplog, status) -> None:
+    cfg = _make_config(tmp_path)
+    _with_status(cfg, status)
+    before = _hive_bytes(cfg)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        outcome = dispatcher_mod._file_split(_split_ctx(cfg), _SPLIT)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _hive_bytes(cfg) == before
+    assert (
+        f"task task-1 is {status}; only a pending, in_progress or blocked task can be split"
+        in caplog.text
+    )
+
+
+def test_file_split_refuses_a_parent_a_live_run_still_holds(tmp_path, caplog) -> None:
+    """That run's next handoff would write `pending` over the `epic`."""
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="pending", body="## arquitecto")
+    acquire_lock(cfg.hive_tasks_dir, "task-1", "cuenta2")
+    before = _hive_bytes(cfg)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        outcome = dispatcher_mod._file_split(_split_ctx(cfg), _SPLIT)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _hive_bytes(cfg) == before
+    assert "task task-1 is locked by cuenta2" in caplog.text
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked", "in_progress"])
+def test_file_split_files_a_parent_no_run_holds(tmp_path, status) -> None:
+    """`in_progress` with no heartbeat is what a reaped lock leaves: the run
+    that died before filing, which `file-split` exists to recover."""
+    cfg = _make_config(tmp_path)
+    _with_status(cfg, status)
+
+    outcome = dispatcher_mod._file_split(_split_ctx(cfg), _SPLIT)
+
+    assert outcome is dispatcher_mod.CycleOutcome.SPLIT
+    assert (_task(cfg).status, _task(cfg).split_into) == ("epic", ["task-1-S1", "task-1-S2"])
+
+
+def test_file_split_on_a_task_with_no_file_is_blocked_and_creates_none(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        outcome = dispatcher_mod._file_split(_split_ctx(cfg), _SPLIT)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert list_task_ids(cfg.hive_tasks_dir) == []
+    assert "task task-1 has no task file" in caplog.text
+
+
+def test_run_task_cycle_does_not_dispatch_an_epic(tmp_path, monkeypatch, caplog) -> None:
+    """Refused in `open_cycle`, before an account or the lock, so T-030's mark
+    cannot turn the `epic` into `blocked`."""
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    before = _hive_bytes(cfg)
+    picked = []
+    monkeypatch.setattr(
+        dispatcher_mod, "pick_idle_account", lambda *args, **kwargs: picked.append(args)
+    )
+
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        outcome, roles = _splitting_cycle(cfg, monkeypatch, _split_payload(), task_id="task-0")
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert roles == [] and picked == []
+    assert _hive_bytes(cfg) == before
+    assert _task(cfg, "task-0").status == "epic"
+    assert (
+        "task task-0 is an epic, split into task-0-S1, task-0-S2: run its sub-tasks, not the epic"
+        in caplog.text
+    )
+
+
+def test_open_cycle_names_an_epic_with_no_sub_tasks_as_such(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+    _with_status(cfg, "epic")
+    tasks.write_description(cfg.hive_tasks_dir, "task-1", _DESCRIPTION)
+
+    logged = _refused_by_open_cycle(cfg, caplog)
+
+    assert "task task-1 is an epic, split into no sub-tasks" in logged
+
+
+def test_a_single_phase_on_an_epic_is_refused_and_keeps_it_an_epic(tmp_path, monkeypatch) -> None:
+    """`tasks.handoff` writes `pending` over any status, so `run-phase` must
+    not reach it."""
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    before = _hive_bytes(cfg)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-0", "myproj", "arquitecto", description=_DESCRIPTION
+    )
+
+    assert result is None and calls == []
+    assert _hive_bytes(cfg) == before
+
+
+def test_a_single_arquitecto_phase_that_split_files_nothing(tmp_path, monkeypatch) -> None:
+    """`run-phase` proposes; `file-split` files."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _recording_dispatch_phase([], handoffs={"arquitecto": _split_payload()}),
+    )
+
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", "arquitecto", description=_DESCRIPTION
+    )
+
+    assert handoff.split_of(result.handoff) == _SPLIT
+    assert list_task_ids(cfg.hive_tasks_dir) == ["task-1"]
+    assert (_task(cfg).status, _task(cfg).split_into) == ("pending", [])
+
+
+def _saved_split(cfg, payload) -> None:
+    """A task whose arquitecto phase landed with `payload`, as `run_phase` leaves it."""
+    tasks.write_description(cfg.hive_tasks_dir, "task-1", _DESCRIPTION)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="pending", body="## arquitecto")
+    save_handoff(cfg.hive_tasks_dir, "task-1", "arquitecto", payload)
+
+
+def test_file_saved_split_files_the_split_a_phase_proposed_and_only_once(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _saved_split(cfg, _split_payload())
+
+    def no_model(*args, **kwargs):
+        raise AssertionError("file-split runs no model")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", no_model)
+
+    assert dispatcher_mod.file_saved_split(cfg, "task-1", "myproj") is dispatcher_mod.CycleOutcome.SPLIT
+    assert (_task(cfg).status, _task(cfg).split_into) == ("epic", ["task-1-S1", "task-1-S2"])
+    assert _task(cfg, "task-1-S2").depends_on == ["task-1-S1"]
+
+    # The parent is an epic now, so filing again is refused, not repeated.
+    before = _hive_bytes(cfg)
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        again = dispatcher_mod.file_saved_split(cfg, "task-1", "myproj")
+    assert again is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _hive_bytes(cfg) == before
+    assert "task task-1 is epic" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    [
+        (None, "no saved arquitecto handoff at "),
+        (_split_payload(status="blocked"), "its arquitecto blocked, and a block wins over a split"),
+        ({"status": "complete", "split": []}, "its arquitecto handoff has no split"),
+        (_split_payload(_SPLIT[:1]), "the split cannot be filed: a split has 2 to 4 sub-tasks"),
+    ],
+    ids=["missing", "blocked", "empty", "invalid"],
+)
+def test_file_saved_split_refuses_what_it_cannot_file(tmp_path, caplog, payload, reason) -> None:
+    cfg = _make_config(tmp_path)
+    _saved_split(cfg, {"status": "complete"})
+    if payload is None:
+        os.remove(dispatcher_mod.context_transfer.handoff_path(cfg.hive_tasks_dir, "task-1", "arquitecto"))
+    else:
+        save_handoff(cfg.hive_tasks_dir, "task-1", "arquitecto", payload)
+    before = _hive_bytes(cfg)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        outcome = dispatcher_mod.file_saved_split(cfg, "task-1", "myproj")
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _hive_bytes(cfg) == before
+    assert _task(cfg).status == "pending"  # only a cycle marks a task blocked
+    assert reason in caplog.text

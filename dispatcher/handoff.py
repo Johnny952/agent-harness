@@ -195,10 +195,11 @@ _RESOLVED_DEBT_PROPERTY = {
 }
 
 #: The arquitecto's other way to end a task early: not "this cannot be done"
-#: but "this is more than one task". Defined here and in no role's extras yet,
-#: on purpose. Offering the field is the switch — a role that can return a
-#: split will — so it joins `_ROLE_EXTRAS` together with the dispatcher branch
-#: that files one (`docs/plans/task-split.md`, section 8, step 4).
+#: but "this is more than one task". Only the arquitecto's extras carry it.
+#: Offering the field is the switch — a role that can return a split will —
+#: so it joined `_ROLE_EXTRAS` together with the dispatcher branch that files
+#: one (`docs/plans/task-split.md`, section 8, step 4; `docs/decisions.md`
+#: ADR 60).
 _SPLIT_PROPERTY = {
     "split": {
         "type": "array",
@@ -232,7 +233,7 @@ _SPLIT_PROPERTY = {
 #: way an unknown role gets no skills rather than an error.
 _ROLE_EXTRAS: dict[str, dict] = {
     "cartografo": {},
-    "arquitecto": {},
+    "arquitecto": _SPLIT_PROPERTY,
     "implementador": _RESOLVED_DEBT_PROPERTY,
     "revisor": {**_VERDICT_PROPERTY, **_DEBT_RULINGS_PROPERTY},
     "auditor": {},

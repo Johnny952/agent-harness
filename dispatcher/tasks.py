@@ -24,8 +24,8 @@ The epic format of `docs/plans/task-split.md` section 2 is written here too:
 `mark_merged` records a merge on the task and `unmet_dependencies` reads it.
 `mark_blocked` records a task that stopped blocked. `close_epic` closes an
 epic on its last merged sub-task and `epic_problems` checks one written by
-hand. The dispatcher calls all of them but `file_split`, which nothing calls
-yet (`docs/implementations/T-030.md`).
+hand. The dispatcher calls all of them; `file_split` only through
+`dispatcher._file_split` (`docs/implementations/T-031.md`).
 """
 from __future__ import annotations
 

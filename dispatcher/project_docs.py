@@ -248,7 +248,21 @@ _ARQUITECTO = (
     "most often: if the task changes a screen and no plan or charter entry says what that screen "
     "shows, how it behaves with no data, with stale data or when the call fails, those are missing "
     "definitions and not details to fill in. Name each one concretely enough that one answer "
-    "unblocks it."
+    "unblocks it.\n\n"
+    "If the plan would change more than one surface — one api route with its tests and ADR, one "
+    "screen, one region of a screen, or one module's contract — do not plan it. Return a split "
+    "instead: in `split`, two to four sub-tasks in the order they run, each one surface, each with "
+    "a description complete enough to be its own task. That description is filed as the "
+    "sub-task's own task description, so write it in the sections yours has: `## Goal` and "
+    "`## Done when` are required, `## Surface`, `## Steps` and `## Out of scope` optional, and "
+    "nothing goes before the first heading. Say in it what it builds, what it reads from an "
+    "earlier sub-task and when it is done. In `after`, name the earlier entries that must be "
+    "merged before it starts. The contract one surface hands the next — a route's row shape, a "
+    "function's signature — is fixed by the sub-task that serves it, so put the server first. A "
+    "split writes nothing to the repo: no ADR, no doc. Leave `changed` empty and `status` "
+    "complete. A task that is already part of an epic cannot be split again; if it still spans "
+    "surfaces, block it and say which. Split for size, not for difficulty: a single surface that "
+    "is hard is still one task. With nothing to split, `split` is an empty list."
 )
 
 _IMPLEMENTADOR = (

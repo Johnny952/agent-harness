@@ -92,15 +92,17 @@ class DispatchResult:
 class CycleOutcome(enum.Enum):
     """How a `run-task` cycle ended, which is what its exit code says.
 
-    Three and not two because "it did not finish" covers two things the
-    operator does opposite things about: a task that is blocked needs a
-    person, and a task that is held for lack of an account needs only a
-    wait. The CLI maps these to exit codes (ADR 52).
+    Four and not two because "it did not finish" covers three things the
+    operator does different things about: a task that is blocked needs a
+    person, a task that is held for lack of an account needs only a wait,
+    and a task that was split needs its sub-tasks run in its place. The CLI
+    maps these to exit codes (ADR 52, ADR 60).
     """
 
     FINISHED = "finished"
     HELD = "held"
     BLOCKED = "blocked"
+    SPLIT = "split"
 
 
 class _HeartbeatLoop:
@@ -1829,9 +1831,9 @@ def open_cycle(
     """Get a run to the point where a phase can be dispatched.
 
     Returns None when it cannot get there, having already said why. That is a task nobody described, a description missing a
-    required section, a hive `dispatch migrate` has not been run on, a task
-    with a dependency that is not merged, and a child of a malformed epic.
-    Nothing is marked on a task refused here: it stays as it was.
+    required section, a hive `dispatch migrate` has not been run on, an epic,
+    a task with a dependency that is not merged, and a child of a malformed
+    epic. Nothing is marked on a task refused here: it stays as it was.
     """
     # The whole-hive rule (`docs/business.md` *Task descriptions*): one
     # unmigrated task file stops every cycle. `tasks.py`'s writer refuses such
@@ -1902,6 +1904,16 @@ def open_cycle(
     except FileNotFoundError:
         task = None
     if task is not None:
+        if task.status == "epic":
+            # An epic is run through its sub-tasks (`docs/decisions.md` ADR
+            # 60). Here and not in `run_task_cycle` alone, because `run-phase`
+            # comes through too and its handoff would write `pending` over
+            # the `epic`.
+            logger.error(
+                "task %s is an epic, split into %s: run its sub-tasks, not the epic",
+                task_id, _split_into(task),
+            )
+            return None
         reasons = tasks.unmet_dependencies(cfg.hive_tasks_dir, task) + tasks.epic_problems(
             cfg.hive_tasks_dir, task
         )
@@ -2068,6 +2080,96 @@ def _mark_blocked(ctx: CycleContext) -> None:
         logger.warning("task %s: could not be marked blocked: %s", ctx.task_id, exc)
 
 
+def _split_into(task: context_transfer.TaskFile) -> str:
+    """An epic's sub-task ids as a log line names them."""
+    ids = task.split_into
+    if not isinstance(ids, list) or not ids:
+        return "no sub-tasks"
+    return ", ".join(str(item) for item in ids)
+
+
+def _file_split(ctx: CycleContext, subtasks: list[handoff.SubTask]) -> CycleOutcome:
+    """File the arquitecto's split, or say why it cannot be filed.
+
+    `docs/decisions.md` ADR 60. SPLIT when the sub-tasks are on disk and the
+    task is their epic, BLOCKED otherwise, with nothing written. It marks
+    nothing either way: a cycle marks its own block, and `file-split` has no
+    cycle. A `done` or `epic` task is not split (`docs/business.md`,
+    *Unconfirmed — default chosen by T-031*), and neither is one a live run
+    still holds, since that run's next handoff would write `pending` over the
+    `epic` and filing again does not repair a parent.
+    """
+    cfg = ctx.cfg
+    problems = handoff.split_problems(subtasks)
+    try:
+        parent = context_transfer.read_task_file(ctx.task_file)
+    except FileNotFoundError:
+        parent = None  # `tasks.file_split` reports it.
+    if parent is not None:
+        if parent.status in ("done", "epic"):
+            problems.append(
+                f"task {ctx.task_id} is {parent.status}; only a pending, in_progress or "
+                "blocked task can be split"
+            )
+        elif tasks._lock_is_live(parent, cfg.heartbeat_ttl_seconds):
+            problems.append(
+                f"task {ctx.task_id} is locked by {parent.owner}; file the split once "
+                "that run has ended"
+            )
+    if not problems:
+        try:
+            ids = tasks.file_split(cfg.hive_tasks_dir, ctx.task_id, subtasks)
+        except tasks.SplitError as exc:
+            problems = list(exc.problems)
+    if problems:
+        logger.warning(
+            "task %s: the split cannot be filed: %s", ctx.task_id, "; ".join(problems)
+        )
+        return CycleOutcome.BLOCKED
+    logger.info(
+        "task %s is now an epic: %s; run them in that order", ctx.task_id, ", ".join(ids)
+    )
+    return CycleOutcome.SPLIT
+
+
+def file_saved_split(cfg: Config, task_id: str, slug: str) -> CycleOutcome:
+    """File the split in a task's saved arquitecto handoff, running no model.
+
+    The `file-split` verb: what `run-phase --role arquitecto` proposed, or what
+    a cycle that died before filing left behind. It opens no cycle, so nothing
+    is reaped, reconciled or marked, and a refusal leaves the task as it was.
+    """
+    hive = cfg.hive_tasks_dir
+    payload = context_transfer.read_handoff(hive, task_id, "arquitecto")
+    if payload is None:
+        logger.error(
+            "task %s: no saved arquitecto handoff at %s",
+            task_id, context_transfer.handoff_path(hive, task_id, "arquitecto"),
+        )
+        return CycleOutcome.BLOCKED
+    if handoff.blocked(payload):
+        logger.error(
+            "task %s: its arquitecto blocked, and a block wins over a split", task_id
+        )
+        return CycleOutcome.BLOCKED
+    subtasks = handoff.split_of(payload)
+    if not subtasks:
+        logger.error("task %s: its arquitecto handoff has no split", task_id)
+        return CycleOutcome.BLOCKED
+    ctx = CycleContext(
+        cfg=cfg,
+        task_id=task_id,
+        slug=slug,
+        description=tasks.read_description(hive, task_id) or "",
+        task_file=context_transfer.task_file_path(hive, task_id),
+        scratch_dir=context_transfer.scratch_dir(hive, task_id),
+        harness=learnings.harness_fingerprint(
+            cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES
+        ),
+    )
+    return _file_split(ctx, subtasks)
+
+
 def run_single_phase(
     cfg: Config,
     task_id: str,
@@ -2189,7 +2291,8 @@ def run_task_cycle(
     """Run a task from the arquitecto to the auditor, and say how it ended.
 
     HELD when a phase the task depends on stopped because no account could
-    take it, BLOCKED for every other stop, FINISHED when the auditor closed
+    take it, SPLIT when the arquitecto's split was filed and the task is now
+    an epic, BLOCKED for every other stop, FINISHED when the auditor closed
     it — merged or not, since a refused merge is reported by `merge-task` and
     leaves the task done.
     """
@@ -2259,6 +2362,13 @@ def run_task_cycle(
                 task_id, "; ".join(missing) or "no reason given",
             )
             return blocked()
+        subtasks = handoff.split_of(arquitecto.handoff)
+        if subtasks:
+            # The arquitecto's other early end (ADR 60): the task is more than
+            # one. A split that was filed leaves the task `epic` and is not a
+            # block; one that could not be filed is, and is marked like any.
+            outcome = _file_split(ctx, subtasks)
+            return blocked() if outcome is CycleOutcome.BLOCKED else outcome
 
         approved = False
         # Counted separately from `round_num`: `max_revision_rounds: 0` makes

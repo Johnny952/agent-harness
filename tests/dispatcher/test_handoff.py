@@ -95,17 +95,27 @@ def test_schema_stays_small_enough_to_send_on_every_call(role) -> None:
     assert len(json.dumps(handoff.schema_for(role), separators=(",", ":")).encode()) < 4096
 
 
-@pytest.mark.parametrize("role", ROLES)
-def test_no_role_is_offered_a_split_yet(role) -> None:
-    """Offering the field is the switch: a role that can return a split will,
-    and until the dispatcher branch that files one exists the cycle would run
-    the implementador on it anyway (`docs/plans/task-split.md` section 8)."""
-    assert "split" not in handoff.schema_for(role)["properties"]
+def test_the_arquitecto_is_offered_a_split_and_has_to_answer_it() -> None:
+    """Offering the field is the switch (`docs/decisions.md` ADR 60). Required
+    like every other field, so "nothing to split" is an empty list the
+    arquitecto wrote and not a key it left out."""
+    schema = handoff.schema_for("arquitecto")
+    assert schema["properties"]["split"] == handoff._SPLIT_PROPERTY["split"]
+    assert "split" in schema["required"]
+
+
+@pytest.mark.parametrize("role", [role for role in ROLES if role != "arquitecto"])
+def test_no_other_role_is_offered_a_split(role) -> None:
+    """Only the cycle's branch after the arquitecto reads one: a split from
+    any later phase would be printed into the task file and acted on by
+    nothing."""
+    schema = handoff.schema_for(role)
+    assert "split" not in schema["properties"]
+    assert "split" not in schema["required"]
 
 
 def test_the_split_property_is_closed_like_the_other_object_lists() -> None:
-    """`test_schema_is_closed_at_every_level` walks `schema_for`, which does
-    not carry this property yet, so it is checked here until it does."""
+    """Checked on the property itself, whichever roles carry it."""
     item = handoff._SPLIT_PROPERTY["split"]["items"]
     assert item["additionalProperties"] is False
     assert sorted(item["required"]) == sorted(item["properties"])

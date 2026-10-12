@@ -1,8 +1,8 @@
 # `task-split.md` still sketches sub-task files with a `description:` key; built as written they are unmigrated files
 
-**When it applies:** you are building `file_split` or `_file_split` (step 2
-onward of `docs/plans/task-split.md` section 8), or any other code that
-creates a task file together with its description.
+**When it applies:** you are writing code that creates a task file together
+with its description, changing `tasks.file_split`, or editing the split
+paragraph of `_ARQUITECTO` or `_SPLIT_PROPERTY`'s descriptions.
 
 **Status:** unconfirmed — read off the plan by T-026's implementador and
 revisor, before the code it warns about was written. T-029 built it as this
@@ -13,7 +13,15 @@ section 2 still carries the sketch, so the trap is still there for task 3's
 `_file_split` and for any other filer. The two open choices under *What to
 do* are decided: the entry's own description must carry the sections (a
 `SplitError` otherwise, nothing is wrapped), and the order is description
-first, task file second, parent last.
+first, task file second, parent last. Amended by T-031's auditor:
+`_file_split` is built, in `dispatcher/dispatcher.py`, and calls
+`tasks.file_split` rather than writing anything itself, so the trap is now
+for another filer. The sections are the model's to supply: `file_split` runs
+`parse_description` on every entry, and a split with one description lacking
+`## Goal` or `## Done when` is refused whole and the cycle blocks. Only the
+split paragraph of `_ARQUITECTO` in `dispatcher/project_docs.py` tells the
+arquitecto so; `_SPLIT_PROPERTY`'s own description does not. Keep that
+sentence when editing the paragraph.
 
 ## What is true
 

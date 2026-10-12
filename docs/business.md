@@ -180,20 +180,23 @@ cite the entry and move it up, or drop the row.
   operator should be able to see another project's unreviewed entries on this
   screen, which today they cannot, by the same filter.
 
-## Unconfirmed — inferred from the code by T-029
+## Unconfirmed — default chosen by T-031
 
-- **A finished or blocked task can become an epic.** `dispatcher/tasks.py`'s
-  `file_split` does not look at the parent's status: it refuses a parent that
-  is inside an epic or already split into other ids, and any other parent
-  with a task file, `done` and `blocked` included, becomes `epic`. Nothing
-  calls `file_split` yet, so this has not happened on a run, and the planned
-  caller only reaches it mid-cycle. `docs/plans/task-split.md` section 2
-  also lets an operator write an epic by hand and does not say which states
-  a parent may be in. A human, or task 3 of that plan's section 8, should
-  say whether only a task in its cycle may be split. The neighbouring case
-  is decided and not yet built: `acquire_lock` still gives the lock on an
-  `epic`, and that plan's section 2 (*Running the parent again*) and
-  section 7 have `run_task_cycle` refuse one before dispatching anything.
+- **A `pending`, `in_progress` or `blocked` task may become an epic; a `done`
+  or `epic` one may not.** T-029 inferred the open question: `file_split` in
+  `dispatcher/tasks.py` does not look at the parent's status, and no doc says
+  which states a parent may be in. T-031 chose a default and built it in the
+  one caller, `_file_split` in `dispatcher/dispatcher.py`, which both a
+  cycle and `dispatch file-split` go through (`docs/decisions.md` ADR 60).
+  `pending` is what a parent is right after its arquitecto's handoff;
+  `in_progress` and `blocked` are what a run that died, or a cycle that
+  blocked, leaves for `file-split` to recover. A parent whose lock is live is
+  refused too, whatever its status. `file_split` itself still does not look,
+  so a caller that reached it another way would not be held to this. The
+  rule is not confirmed: a human should say whether a `blocked` task may be
+  split, and whether a `done` one never may. An operator writing an epic by
+  hand is not held to it either: `tasks.epic_problems` asks only that the
+  parent be `epic`.
 
 ## Unconfirmed — inferred from the code by T-024
 
@@ -241,4 +244,6 @@ cite the entry and move it up, or drop the row.
   written `blocked`.** `_mark_blocked` does not look at the status it
   overwrites. Refusing to run an epic is task 4 of
   `docs/plans/task-split.md` section 8; until then the status of an epic run
-  by mistake is lost.
+  by mistake is lost. Narrowed by T-031: `open_cycle` now refuses an `epic`
+  before any phase (`docs/decisions.md` ADR 60), so only the `done` half of
+  this row is still open.

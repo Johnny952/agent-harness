@@ -980,6 +980,224 @@ def test_cli_run_task_exits_one_when_the_cycle_blocked(
     assert "blocked" in capsys.readouterr().err
 
 
+# --- the split (ADR 60) ---
+
+_SPLIT = [
+    SubTask(title="The api", surface="api/", description=_DESCRIPTION, after=()),
+    SubTask(title="The screen", surface="front/", description=_DESCRIPTION, after=(1,)),
+]
+_SPLIT_HANDOFF = {
+    "status": "complete",
+    "split": [
+        {"title": s.title, "surface": s.surface, "description": s.description, "after": list(s.after)}
+        for s in _SPLIT
+    ],
+}
+
+
+def _filed(tmp_path: Path) -> Path:
+    """A config whose task-1 is an epic of two sub-tasks."""
+    config_path = _described(tmp_path)
+    hive = str(tmp_path / "hive")
+    tasks.handoff(hive, "task-1", new_status="pending", body="## arquitecto")
+    tasks.file_split(hive, "task-1", _SPLIT)
+    return config_path
+
+
+def test_cli_run_task_exits_three_when_the_task_was_split(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Its own code: not 0, the task did not ship; not 1, nothing needs
+    repair; not 75, waiting changes nothing. The ids go to stdout, because
+    they are what the caller runs next."""
+    config_path = _filed(tmp_path)
+    _capture_cycle(monkeypatch, outcome=CycleOutcome.SPLIT)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, config_path)
+
+    assert excinfo.value.code == cli_mod.EXIT_SPLIT == 3
+    assert excinfo.value.code not in (cli_mod.EXIT_BLOCKED, cli_mod.EXIT_HELD)
+    assert (
+        "task task-1 is now an epic: task-1-S1, task-1-S2; run them in that order"
+        in capsys.readouterr().out
+    )
+
+
+def test_cli_run_task_split_with_an_unreadable_task_file_still_exits_three(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    _capture_cycle(monkeypatch, outcome=CycleOutcome.SPLIT)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, _write_config(tmp_path), "--description", _DESCRIPTION)
+
+    assert excinfo.value.code == cli_mod.EXIT_SPLIT
+    assert "task task-1 is now an epic: its sub-tasks; run them in that order" in capsys.readouterr().out
+
+
+def _run_arquitecto_phase(monkeypatch, tmp_path: Path, role: str = "arquitecto") -> None:
+    _run_command(
+        monkeypatch, _described(tmp_path),
+        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", role,
+    )
+
+
+def test_cli_run_phase_prints_the_split_the_arquitecto_proposed_and_files_nothing(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    _capture_single_phase(monkeypatch, result=DispatchResult(
+        success=True, session_id="s1", result_text="done", account="cuenta1",
+        handoff=_SPLIT_HANDOFF,
+    ))
+
+    _run_arquitecto_phase(monkeypatch, tmp_path)
+
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[1:] == [
+        "phase arquitecto proposes splitting task task-1 into 2 sub-tasks; nothing was filed:",
+        "  1. The api (api/)",
+        "  2. The screen (front/) — after 1",
+        "run `dispatch file-split --task-id task-1 --project myproj` to file them",
+    ]
+    assert "file-split would refuse it" not in captured.err
+    assert not (tmp_path / "hive" / "task-1-S1.md").exists()
+
+
+def test_cli_run_phase_says_when_file_split_would_refuse_the_proposal(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    _capture_single_phase(monkeypatch, result=DispatchResult(
+        success=True, session_id="s1", result_text="done", account="cuenta1",
+        handoff={"status": "complete", "split": _SPLIT_HANDOFF["split"][:1]},
+    ))
+
+    _run_arquitecto_phase(monkeypatch, tmp_path)
+
+    captured = capsys.readouterr()
+    assert "proposes splitting task task-1 into 1 sub-tasks" in captured.out
+    assert "file-split would refuse it: a split has 2 to 4 sub-tasks, this one has 1" in captured.err
+
+
+@pytest.mark.parametrize(
+    "role,payload",
+    [
+        ("arquitecto", {"status": "complete", "split": []}),
+        ("arquitecto", None),
+        ("arquitecto", dict(_SPLIT_HANDOFF, status="blocked")),
+        ("revisor", _SPLIT_HANDOFF),
+    ],
+    ids=["empty", "prose", "blocked", "another-role"],
+)
+def test_cli_run_phase_proposes_nothing_without_a_split_to_propose(
+    tmp_path: Path, monkeypatch, capsys, role, payload,
+) -> None:
+    _capture_single_phase(monkeypatch, result=DispatchResult(
+        success=True, session_id="s1", result_text="done", account="cuenta1", handoff=payload,
+    ))
+
+    _run_arquitecto_phase(monkeypatch, tmp_path, role=role)
+
+    captured = capsys.readouterr()
+    assert len(captured.out.splitlines()) == 1
+    assert "split" not in captured.out + captured.err
+
+
+def _capture_file_split(monkeypatch, outcome: CycleOutcome) -> dict:
+    captured: dict = {}
+
+    def fake_file_saved_split(cfg, task_id, slug):
+        captured.update(task_id=task_id, slug=slug)
+        return outcome
+
+    monkeypatch.setattr(cli_mod, "file_saved_split", fake_file_saved_split)
+    return captured
+
+
+def _file_split(monkeypatch, config_path: Path) -> None:
+    _run_command(
+        monkeypatch, config_path, "file-split", "--task-id", "task-1", "--project", "myproj"
+    )
+
+
+def test_cli_file_split_prints_the_sub_tasks_and_exits_zero(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Exit 0 and not 3: on this verb the filing is the success."""
+    config_path = _filed(tmp_path)
+    captured = _capture_file_split(monkeypatch, CycleOutcome.SPLIT)
+
+    _file_split(monkeypatch, config_path)
+
+    assert captured == {"task_id": "task-1", "slug": "myproj"}
+    assert (
+        "task task-1 is now an epic: task-1-S1, task-1-S2; run them in that order"
+        in capsys.readouterr().out
+    )
+
+
+def test_cli_file_split_exits_one_when_nothing_was_filed(tmp_path: Path, monkeypatch, capsys) -> None:
+    _capture_file_split(monkeypatch, CycleOutcome.BLOCKED)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _file_split(monkeypatch, _described(tmp_path))
+
+    assert excinfo.value.code == cli_mod.EXIT_BLOCKED
+    captured = capsys.readouterr()
+    assert "task task-1: the split was not filed" in captured.err
+    assert captured.out == ""
+
+
+def test_cli_file_split_files_from_the_saved_handoff_without_a_model(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The verb end to end, on the real `file_saved_split`."""
+    config_path = _described(tmp_path)
+    hive = str(tmp_path / "hive")
+    tasks.handoff(hive, "task-1", new_status="pending", body="## arquitecto")
+    dispatcher_mod.context_transfer.save_handoff(hive, "task-1", "arquitecto", _SPLIT_HANDOFF)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", None)
+
+    _file_split(monkeypatch, config_path)
+
+    assert "task-1-S1, task-1-S2" in capsys.readouterr().out
+    assert (tmp_path / "hive" / "task-1-S2.md").exists()
+    # A second run finds an epic and refuses.
+    with pytest.raises(SystemExit) as excinfo:
+        _file_split(monkeypatch, config_path)
+    assert excinfo.value.code == cli_mod.EXIT_BLOCKED
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, {"status": "complete", "split": []}, {"status": "complete", "split": _SPLIT_HANDOFF["split"][:1]}],
+    ids=["missing", "empty", "invalid"],
+)
+def test_cli_file_split_refuses_a_handoff_it_cannot_file(
+    tmp_path: Path, monkeypatch, capsys, payload,
+) -> None:
+    config_path = _described(tmp_path)
+    hive = str(tmp_path / "hive")
+    tasks.handoff(hive, "task-1", new_status="pending", body="## arquitecto")
+    if payload is not None:
+        dispatcher_mod.context_transfer.save_handoff(hive, "task-1", "arquitecto", payload)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _file_split(monkeypatch, config_path)
+
+    assert excinfo.value.code == cli_mod.EXIT_BLOCKED
+    assert not (tmp_path / "hive" / "task-1-S1.md").exists()
+
+
+def test_cli_file_split_refuses_a_hive_that_was_not_migrated(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _described(tmp_path)
+    _legacy(tmp_path)
+    captured = _capture_file_split(monkeypatch, CycleOutcome.SPLIT)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _file_split(monkeypatch, config_path)
+
+    assert excinfo.value.code == 2
+    assert captured == {}
+    assert "dispatch migrate" in capsys.readouterr().err
+
+
 def test_cli_run_phase_exits_with_the_held_code_when_no_account_took_it(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
