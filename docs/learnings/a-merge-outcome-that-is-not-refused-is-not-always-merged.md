@@ -26,7 +26,10 @@ and is recorded as merged the same way. `tasks.close_epic` runs on both.
 `record_merge` never raises and prints nothing. It returns the lines it
 recorded and the one problem, or None. `merge-task` prints the lines to
 stdout, among them `task <id>: recorded as merged into <branch>`, the
-problem to stderr, and still exits 0.
+problem to stderr, and still exits 0. The cycle's own merge does not print
+them: `_merge_task_branch` sends the same lines to the log, so a script
+finds `recorded as merged into` on stdout only after `merge-task` (added by
+T-032's auditor; the root `README.md` says so since that task).
 
 ## What to do
 

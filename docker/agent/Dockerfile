@@ -30,10 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # included. A venv rather than `pip install --break-system-packages`: the base
 # is Debian bookworm, whose system Python is PEP 668 externally-managed, and
 # apt cannot satisfy the floors pyproject.toml declares anyway (bookworm ships
-# Flask 2.2 against flask>=3.0, pytest 7.2 against pytest>=8.0) and has no
-# `mcp` at all — which dispatcher/vibe_kanban_client.py imports at module
-# level, so the suite does not even collect without it. Overriding PEP 668
-# would leave pip and dpkg both owning the same names; a venv owns its own.
+# Flask 2.2 against flask>=3.0, pytest 7.2 against pytest>=8.0). Overriding
+# PEP 668 would leave pip and dpkg both owning the same names; a venv owns
+# its own.
 #
 # The versions are pyproject.toml's, spelled out rather than installed from
 # it: the image must not depend on a checkout of the project it builds for.
@@ -50,7 +49,6 @@ RUN python3 -m venv "${VIRTUAL_ENV}" \
         "pyyaml>=6.0" \
         "flask>=3.0" \
         "requests>=2.31" \
-        "mcp>=1.0.0" \
         "pytest>=8.0"
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

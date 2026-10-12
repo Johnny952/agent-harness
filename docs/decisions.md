@@ -4189,7 +4189,8 @@ keeps `vibe_kanban_data` until someone removes it by hand. The console's
 types still declare `card` and `kanban_issue_id` on a task; no screen reads
 either, so they are stale annotations until a front task removes them. The
 `mcp` package is still installed by `pyproject.toml` and the agent image and
-nothing imports it. `docs/plans/board.md` *The shapes* and ADR 10, ADR 21 and
+nothing imports it (removed from both by T-032, 2026-10-12;
+`docs/debt/T-028-D2.md`). `docs/plans/board.md` *The shapes* and ADR 10, ADR 21 and
 ADR 23 quote the old task key set; they are records and stay as written. A
 later step that wants a board tool builds it on `dispatcher/tasks.py`, not on
 a client seam.
