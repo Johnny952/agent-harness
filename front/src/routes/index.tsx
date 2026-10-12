@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { GitBranch } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
+  Absent,
   Banner,
   BrokenBanner,
   EmptyState,
@@ -79,7 +80,9 @@ function BoardPage() {
   const filtered = useMemo(() => {
     return rows.filter((t) => {
       if (accountFilter !== "all" && t.owner !== accountFilter) return false;
-      if (q && !`${t.task_id} ${t.description}`.toLowerCase().includes(q.toLowerCase()))
+      // `description` is `null` for a task with no `description.md`, and a
+      // template literal would spell that as the text `null` and match it.
+      if (q && !`${t.task_id} ${t.description ?? ""}`.toLowerCase().includes(q.toLowerCase()))
         return false;
       return true;
     });
@@ -269,7 +272,8 @@ function Column({
 /**
  * Exported only so a test can mount it: the `depends_on` guard below is the
  * one malformed payload on this screen that renders instead of throwing, and
- * `-index.test.tsx` is where that difference is written down.
+ * `-index.test.tsx` is where that difference is written down. The absent arm
+ * of the description is tested through the same export.
  */
 export function TaskCard({
   task,
@@ -296,7 +300,9 @@ export function TaskCard({
         <HeartbeatDot heartbeat={task.heartbeat} lockExpired={task.lock_expired} now={now} />
       </div>
       {!dense && (
-        <p className="mt-1 line-clamp-2 text-[11px] text-foreground/90">{task.description}</p>
+        <p className="mt-1 line-clamp-2 text-[11px] text-foreground/90">
+          {task.description ?? <Absent label="no description" />}
+        </p>
       )}
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
         {task.owner ? (

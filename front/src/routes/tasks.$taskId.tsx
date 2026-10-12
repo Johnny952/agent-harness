@@ -94,12 +94,15 @@ function TaskDetailPage() {
   const taskLearnings = (learnings.data?.data ?? []).filter(
     (l) => l.task === taskId || l.carried_by === taskId,
   );
+  // `null` is a task with no `description.md`, and the header says so. No
+  // subtitle while `t` is `null`: nothing has read a task to say it of.
+  const subtitle = t ? (t.description ?? <Absent label="no description" />) : undefined;
 
   return (
     <AppShell>
       <PageHeader
         title={taskId}
-        subtitle={t?.description}
+        subtitle={subtitle}
         right={<RefreshedAt at={task.dataUpdatedAt} />}
       />
 

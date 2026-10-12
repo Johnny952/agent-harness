@@ -18,9 +18,13 @@
  * `TaskCard` is wrapped in a `<Link>`, so it needs a router in context. The one
  * below is built here, out of the single route a card links to, rather than taken
  * from `src/router.tsx`: mounting one card should not mount the console.
+ *
+ * The file also holds the description's absent arm, and the one render of the
+ * whole route here: the Board's search lives in `BoardPage` and no component
+ * takes it as a prop, so it is reached through `renderRoute`.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
   RouterContextProvider,
   createMemoryHistory,
@@ -28,7 +32,8 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
-import { TaskCard } from "./index";
+import { Route, TaskCard } from "./index";
+import { renderRoute } from "@/test/render-route";
 import type { Task } from "@/lib/api/types";
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
@@ -126,5 +131,47 @@ describe("a dependency list of the wrong shape", () => {
     expect(container.textContent).toContain("T-014");
     expect(container.textContent).toContain("the pointers in docs/ still land somewhere");
     expect(container.textContent).toContain("debt 2");
+  });
+});
+
+describe("a task the api served with no description", () => {
+  it("says so on the tile instead of leaving it blank", () => {
+    const { container } = render(
+      <RouterContextProvider router={cardRouter()}>
+        <TaskCard task={{ ...TASK, description: null }} now={NOW} dense={false} debtCount={0} />
+      </RouterContextProvider>,
+    );
+    expect(container.textContent).toContain("no description");
+    expect(container.textContent).not.toContain("null");
+  });
+});
+
+describe("the Board's search over a task with no description", () => {
+  const task = (task_id: string, description: string | null): Task => ({
+    ...TASK,
+    task_id,
+    description,
+  });
+
+  async function board() {
+    await renderRoute(Route, "/", {
+      "/api/tasks": { data: [task("T-101", null), task("T-102", "the pool screen")] },
+      "/api/accounts": { data: [] },
+      "/api/debt": { data: [] },
+    });
+    await screen.findByText("T-101");
+  }
+
+  it("does not match the text null", async () => {
+    await board();
+    fireEvent.change(screen.getByPlaceholderText(/^Filter tasks/), { target: { value: "null" } });
+    expect(await screen.findByText("No task matches these filters")).toBeTruthy();
+  });
+
+  it("still finds the task by its id, and says it has no description", async () => {
+    await board();
+    fireEvent.change(screen.getByPlaceholderText(/^Filter tasks/), { target: { value: "T-101" } });
+    expect(await screen.findByText("no description")).toBeTruthy();
+    expect(screen.queryByText("T-102")).toBeNull();
   });
 });
