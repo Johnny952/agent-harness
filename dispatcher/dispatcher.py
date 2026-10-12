@@ -2095,7 +2095,7 @@ def _file_split(ctx: CycleContext, subtasks: list[handoff.SubTask]) -> CycleOutc
     task is their epic, BLOCKED otherwise, with nothing written. It marks
     nothing either way: a cycle marks its own block, and `file-split` has no
     cycle. A `done` or `epic` task is not split (`docs/business.md`,
-    *Unconfirmed — default chosen by T-031*), and neither is one a live run
+    *Task status*), and neither is one a live run
     still holds, since that run's next handoff would write `pending` over the
     `epic` and filing again does not repair a parent.
     """

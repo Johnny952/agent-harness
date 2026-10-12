@@ -103,6 +103,18 @@ cite the entry and move it up, or drop the row.
   (`docs/implementations/T-030.md`). Until T-028 a board card carried that
   status, on a harness that had a board (`docs/decisions.md` ADR 59 removed
   the seam).
+- **A `pending`, `in_progress` or `blocked` task may become an epic; a `done`
+  or `epic` one may not, and neither may one whose lock is live.** Confirmed
+  by the user on 2026-10-12, ruling on the default T-031 chose for what T-029
+  inferred (`file_split` in `dispatcher/tasks.py` does not look at the
+  parent's status). The rule is built in the one caller, `_file_split` in
+  `dispatcher/dispatcher.py`, which both a cycle and `dispatch file-split` go
+  through (`docs/decisions.md` ADR 60). `pending` is what a parent is right
+  after its arquitecto's handoff; `in_progress` and `blocked` are what a run
+  that died, or a cycle that blocked, leaves for `file-split` to recover.
+  `file_split` itself still does not look, so a caller that reached it another
+  way would not be held to this, and an operator writing an epic by hand is
+  not either: `tasks.epic_problems` asks only that the parent be `epic`.
 
 ## Unconfirmed — inferred from the code by T-009
 
@@ -179,24 +191,6 @@ cite the entry and move it up, or drop the row.
   is listed here rather than as a defect; what no doc settles is whether an
   operator should be able to see another project's unreviewed entries on this
   screen, which today they cannot, by the same filter.
-
-## Unconfirmed — default chosen by T-031
-
-- **A `pending`, `in_progress` or `blocked` task may become an epic; a `done`
-  or `epic` one may not.** T-029 inferred the open question: `file_split` in
-  `dispatcher/tasks.py` does not look at the parent's status, and no doc says
-  which states a parent may be in. T-031 chose a default and built it in the
-  one caller, `_file_split` in `dispatcher/dispatcher.py`, which both a
-  cycle and `dispatch file-split` go through (`docs/decisions.md` ADR 60).
-  `pending` is what a parent is right after its arquitecto's handoff;
-  `in_progress` and `blocked` are what a run that died, or a cycle that
-  blocked, leaves for `file-split` to recover. A parent whose lock is live is
-  refused too, whatever its status. `file_split` itself still does not look,
-  so a caller that reached it another way would not be held to this. The
-  rule is not confirmed: a human should say whether a `blocked` task may be
-  split, and whether a `done` one never may. An operator writing an epic by
-  hand is not held to it either: `tasks.epic_problems` asks only that the
-  parent be `epic`.
 
 ## Unconfirmed — inferred from the code by T-024
 
