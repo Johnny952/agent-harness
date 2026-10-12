@@ -207,6 +207,24 @@ def test_the_arquitecto_is_pointed_at_the_index_and_owns_the_decisions() -> None
     assert "Never rewrite" in duties
 
 
+def test_the_arquitecto_is_told_when_and_how_to_split() -> None:
+    duties = project_docs.duties("arquitecto", "task-1")
+
+    assert "`split`" in duties
+    # `tasks.file_split` refuses an entry whose description lacks either, so
+    # an arquitecto that was not told would have every split blocked.
+    assert "`## Goal`" in duties and "`## Done when`" in duties
+    # ADR 59: there is no card to title or to file.
+    assert "card" not in duties.split("Return a split")[1]
+
+
+@pytest.mark.parametrize(
+    "role", ["implementador", "revisor", "auditor", project_docs.MAPPER_ROLE]
+)
+def test_no_other_role_is_told_about_a_split(role: str) -> None:
+    assert "split" not in project_docs.duties(role, "task-1")
+
+
 def test_the_implementador_writes_this_task_s_implementation_doc() -> None:
     duties = project_docs.duties("implementador", "task-42")
 

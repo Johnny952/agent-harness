@@ -10,6 +10,7 @@ from pathlib import Path
 from dispatcher import (
     context_transfer,
     docker_exec,
+    handoff,
     learnings,
     operator,
     project_docs,
@@ -22,6 +23,7 @@ from dispatcher.dispatcher import (
     CycleOutcome,
     cleanup_container,
     container_for,
+    file_saved_split,
     record_merge,
     run_single_phase,
     run_task_cycle,
@@ -43,6 +45,52 @@ EXIT_BLOCKED = 1
 #: sysexits.h's EX_TEMPFAIL, "try again later", which is exactly this
 #: (`docs/decisions.md` ADR 52).
 EXIT_HELD = 75
+#: A run that stopped because the arquitecto split the task and the split was
+#: filed: the task is an epic now and its sub-tasks are what runs. Not 0,
+#: because the task did not ship; not 1, because nothing needs repair; not 2,
+#: argparse's; not 75, because waiting changes nothing (`docs/decisions.md`
+#: ADR 60).
+EXIT_SPLIT = 3
+
+
+def _epic_line(cfg: Config, task_id: str) -> str:
+    """What `run-task` and `file-split` print once a split is filed.
+
+    The ids are the task file's `split_into`. A file that will not read still
+    gets the line, without them: the split is filed, and the log named them.
+    """
+    ids = "its sub-tasks"
+    try:
+        task = context_transfer.read_task_file(
+            context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+        )
+        if isinstance(task.split_into, list) and task.split_into:
+            ids = ", ".join(str(item) for item in task.split_into)
+    except Exception:
+        pass
+    return f"task {task_id} is now an epic: {ids}; run them in that order"
+
+
+def _print_proposed_split(args: argparse.Namespace, payload: dict | None) -> None:
+    """Say what a lone arquitecto phase proposed. `run-phase` files nothing."""
+    if handoff.blocked(payload):
+        return
+    subtasks = handoff.split_of(payload)
+    if not subtasks:
+        return
+    print(
+        f"phase arquitecto proposes splitting task {args.task_id} into "
+        f"{len(subtasks)} sub-tasks; nothing was filed:"
+    )
+    for line in handoff._split(payload):
+        print(f"  {line}")
+    print(
+        f"run `dispatch file-split --task-id {args.task_id} --project {args.project}` "
+        "to file them"
+    )
+    problems = handoff.split_problems(subtasks)
+    if problems:
+        print(f"file-split would refuse it: {'; '.join(problems)}", file=sys.stderr)
 
 
 #: How many task ids a refusal lists before it says "and N more".
@@ -300,6 +348,17 @@ def main() -> None:
         "both.",
     )
 
+    split_parser = sub.add_parser(
+        "file-split",
+        help="File the split in a task's saved arquitecto handoff: one <task-id>-S<n> "
+        "task per entry, and the task itself an epic. Runs no model. For a split "
+        "that `run-phase --role arquitecto` only proposed, or one a run died before "
+        "filing. Refuses a task with no saved handoff, no split or an invalid one, "
+        "and one that is done, already an epic or still locked by a live run.",
+    )
+    split_parser.add_argument("--task-id", required=True)
+    split_parser.add_argument("--project", required=True, help="Project slug")
+
     bootstrap_parser = sub.add_parser(
         "bootstrap-project",
         help="Create the per-project directory (projects_root/<slug>) on one account's container",
@@ -457,6 +516,22 @@ def main() -> None:
         if outcome is CycleOutcome.BLOCKED:
             print(f"task {args.task_id} is blocked; the log above says why", file=sys.stderr)
             raise SystemExit(EXIT_BLOCKED)
+        if outcome is CycleOutcome.SPLIT:
+            # stdout, unlike the two above: the ids are the result a caller
+            # reads to know what to run next.
+            print(_epic_line(cfg, args.task_id))
+            raise SystemExit(EXIT_SPLIT)
+    elif args.command == "file-split":
+        _require_migrated(cfg, parser)
+        outcome = file_saved_split(cfg, args.task_id, args.project)
+        if outcome is not CycleOutcome.SPLIT:
+            print(
+                f"task {args.task_id}: the split was not filed; the log above says why",
+                file=sys.stderr,
+            )
+            raise SystemExit(EXIT_BLOCKED)
+        # Exit 0, not EXIT_SPLIT: here the filing is what was asked for.
+        print(_epic_line(cfg, args.task_id))
     elif args.command == "run-phase":
         _require_migrated(cfg, parser)
         if args.round_num is not None and args.round_num < 1:
@@ -494,6 +569,8 @@ def main() -> None:
             )
             raise SystemExit(EXIT_HELD)
         print(f"phase {args.role} finished; {context_transfer.task_file_path(cfg.hive_tasks_dir, args.task_id)} has its handoff")
+        if args.role == "arquitecto":
+            _print_proposed_split(args, result.handoff)
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
         # config schema has no repo-source field, so cloning the actual
