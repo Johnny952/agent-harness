@@ -12,8 +12,13 @@ seam is removed. The first half of step 3 is built by T-029
 (`docs/implementations/T-029.md`): task 2 of `docs/plans/task-split.md`
 section 8, the epic format, in `dispatcher/tasks.py` (`file_split`,
 `mark_merged`, `unmet_dependencies`), and `mark_blocked`, the writer for a
-task that stopped blocked. Nothing calls them yet; task 3 of that section is
-next. The per-task lock of section 5 comes
+task that stopped blocked. The second half of step 3 is built by T-030
+(`docs/implementations/T-030.md`): task 3 of that section, which has the
+dispatcher call them. Both merge paths record `merged` on the task and close
+an epic on its last merged sub-task, `open_cycle` refuses a task with an
+unmerged dependency or a malformed hand-written epic, and a cycle that stops
+blocked marks its task `blocked`. Nothing calls `file_split` yet; that is
+task 4 of that section. The per-task lock of section 5 comes
 with the service (step 4). Every later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics

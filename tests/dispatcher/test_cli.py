@@ -12,6 +12,7 @@ from dispatcher import learnings, tasks
 from dispatcher.tasks import set_resolved_debt
 from dispatcher.dispatcher import CycleOutcome, DispatchResult
 from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
+from dispatcher.handoff import SubTask
 
 CONFIG_YAML = """
 accounts:
@@ -612,6 +613,78 @@ def test_cli_merge_task_says_what_it_kept_when_no_auditor_ever_ran(
     assert "## auditor" in out
     assert "inbox/task-8-db.md" in out
     assert "dropped" not in out
+
+
+def _merge_task(monkeypatch, config_path: Path, task_id: str = "task-1") -> None:
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", task_id, "--project", "myproj",
+    )
+
+
+def test_cli_merge_task_records_the_merge_on_the_task(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`docs/plans/task-split.md` section 3: the block a dependency waits for."""
+    config_path = _write_config(tmp_path)
+    card = _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "release", "merged agent/task/task-1 into release"))
+
+    _merge_task(monkeypatch, config_path)
+
+    task = dispatcher_mod.context_transfer.read_task_file(str(card))
+    assert task.merged["into"] == "release"
+    assert task.status == "done"
+    assert "task task-1: recorded as merged into release" in capsys.readouterr().out
+
+
+def test_cli_merge_task_that_was_refused_records_nothing(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    card = _card(tmp_path, "task-1")
+    before = card.read_bytes()
+    _fake_merge(monkeypatch, MergeOutcome(REFUSED, "main", "has uncommitted changes"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _merge_task(monkeypatch, config_path)
+
+    assert excinfo.value.code == 1
+    assert card.read_bytes() == before
+
+
+def test_cli_merge_task_closes_the_epic_on_its_last_child_and_not_before(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    hive = str(tmp_path / "hive")
+    _card(tmp_path, "task-0")
+    subtask = SubTask(title="t", surface="docs/", description=_DESCRIPTION, after=())
+    tasks.file_split(hive, "task-0", [subtask, subtask])
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged"))
+    parent = dispatcher_mod.context_transfer.task_file_path(hive, "task-0")
+
+    _merge_task(monkeypatch, config_path, "task-0-S1")
+    assert dispatcher_mod.context_transfer.read_task_file(parent).status == "epic"
+    assert "epic task-0" not in capsys.readouterr().out
+
+    _merge_task(monkeypatch, config_path, "task-0-S2")
+    assert dispatcher_mod.context_transfer.read_task_file(parent).status == "done"
+    assert "epic task-0: every sub-task is merged, so it is done" in capsys.readouterr().out
+
+
+def test_cli_merge_task_still_exits_zero_when_the_task_has_no_file(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The branch landed: exit 1 would say it had not. The line says what is
+    missing, and the dependency gate is where the operator meets it again."""
+    config_path = _write_config(tmp_path)
+    (tmp_path / "hive").mkdir()
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _merge_task(monkeypatch, config_path)
+
+    captured = capsys.readouterr()
+    assert "merged agent/task/task-1 into main" in captured.out
+    assert "task task-1: it has no task file, so the merge is not recorded" in captured.err
+    assert list((tmp_path / "hive").glob("*.md")) == []
 
 
 _DEBT_INDEX = (

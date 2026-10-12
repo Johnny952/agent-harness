@@ -33,9 +33,19 @@ Add the writer to `_WRITERS` in the same change, end it in
 `_write_task_file`, and put the unmigrated check first. If the writer takes
 more than one task id, check every id it may write.
 
+One exception, added by T-030's auditor: `_WRITERS` calls each writer on the
+file it rewrites, so a writer that rewrites another task's file does not fit
+the table. `close_epic` is called with the child and writes the parent; it
+stays out and has a test of its own,
+`test_close_epic_refuses_an_unmigrated_parent_like_every_writer`. It also
+refuses only at the write, after every other condition held, which is the
+order this entry warns against and is harmless there because nothing is
+written before it.
+
 ## Evidence
 
 T-029: `_WRITERS` in `tests/dispatcher/test_tasks.py`, which gained
 `file_split`, `mark_merged` and `mark_blocked`; `file_split` in
 `dispatcher/tasks.py`; `docs/implementations/T-029.md` *Ruled out*, second
-item.
+item. T-030: `close_epic` in `dispatcher/tasks.py` and its test above;
+`docs/implementations/T-030.md` *Tests*.

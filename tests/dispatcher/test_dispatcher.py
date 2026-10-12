@@ -5791,3 +5791,381 @@ def test_effort_for_escalation_wins_over_the_role_level(tmp_path) -> None:
     assert cfg.effort_for("implementador", round_num=2) == "low"
     assert cfg.effort_for("implementador", round_num=3) == "max"
     assert cfg.effort_for("cartografo") == "medium"
+
+
+# --- merged recorded, dependencies gated, epics closed, blocked marked ---------
+# `docs/plans/task-split.md` sections 3 and 4, `docs/implementations/T-030.md`.
+
+_SPLIT = [
+    handoff.SubTask(title="The api", surface="api/", description=_DESCRIPTION, after=()),
+    handoff.SubTask(title="The screen", surface="front/", description=_DESCRIPTION, after=(1,)),
+]
+
+
+def _task(cfg, task_id="task-1"):
+    return read_task_file(task_file_path(cfg.hive_tasks_dir, task_id))
+
+
+def _epic(cfg) -> None:
+    """`task-0` split into `task-0-S1` and `task-0-S2`, the second after the first."""
+    tasks.handoff(cfg.hive_tasks_dir, "task-0", new_status="pending", body="## arquitecto")
+    tasks.file_split(cfg.hive_tasks_dir, "task-0", _SPLIT)
+
+
+def _hive_bytes(cfg) -> dict:
+    root = Path(cfg.hive_tasks_dir).parent
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*")) if path.is_file() and "learnings" not in path.parts
+    }
+
+
+def test_a_cycle_that_merges_records_it_on_the_task(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    task = _task(cfg)
+    assert task.merged["into"] == "main"
+    assert task.status == "done"
+
+
+def test_a_cycle_whose_merge_was_refused_records_nothing(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    fake_git.outcome = dispatcher_mod.docker_exec.MergeOutcome(
+        dispatcher_mod.docker_exec.REFUSED, "main", "has uncommitted changes"
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert _task(cfg).merged is None
+
+
+def test_a_cycle_that_does_not_merge_records_nothing(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert _task(cfg).merged is None
+
+
+def test_merging_the_last_child_closes_the_epic_and_any_other_does_not(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    _epic(cfg)
+
+    assert dispatcher_mod.run_task_cycle(cfg, "task-0-S1", "myproj") is dispatcher_mod.CycleOutcome.FINISHED
+    assert _task(cfg, "task-0-S1").merged["into"] == "main"
+    assert _task(cfg, "task-0").status == "epic"
+
+    assert dispatcher_mod.run_task_cycle(cfg, "task-0-S2", "myproj") is dispatcher_mod.CycleOutcome.FINISHED
+    assert _task(cfg, "task-0").status == "done"
+
+
+def _merge(status, target="main"):
+    return dispatcher_mod.docker_exec.MergeOutcome(status, target, "detail")
+
+
+def test_record_merge_keeps_the_first_record_when_the_branch_was_already_in(tmp_path) -> None:
+    """Running `merge-task` again is how a record that was never written gets
+    written, and it must not move the date of one that was."""
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="done", body="## auditor")
+    up_to_date = _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
+
+    recorded, problem = dispatcher_mod.record_merge(cfg, "task-1", up_to_date)
+    assert (recorded, problem) == (["task task-1: recorded as merged into main"], None)
+    first = _task(cfg).merged
+
+    assert dispatcher_mod.record_merge(cfg, "task-1", up_to_date) == ([], None)
+    assert _task(cfg).merged == first
+    # A merge that happened is a new fact, and replaces it.
+    dispatcher_mod.record_merge(cfg, "task-1", _merge(dispatcher_mod.docker_exec.MERGED, "release"))
+    assert _task(cfg).merged["into"] == "release"
+
+
+def test_record_merge_repairs_an_epic_whose_close_never_happened(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S1", "main")
+    tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S2", "main")
+
+    recorded, problem = dispatcher_mod.record_merge(
+        cfg, "task-0-S2", _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
+    )
+
+    assert (recorded, problem) == (["epic task-0: every sub-task is merged, so it is done"], None)
+    assert _task(cfg, "task-0").status == "done"
+
+
+def test_record_merge_reports_what_it_could_not_write_and_does_not_raise(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    os.makedirs(cfg.hive_tasks_dir)
+    merged = _merge(dispatcher_mod.docker_exec.MERGED)
+
+    recorded, problem = dispatcher_mod.record_merge(cfg, "task-1", merged)
+    assert recorded == [] and "no task file" in problem
+    assert os.listdir(cfg.hive_tasks_dir) == []
+
+    Path(task_file_path(cfg.hive_tasks_dir, "task-1")).write_text(
+        "---\ntask_id: task-1\nstatus: done\ndescription: old\n---\n\n"
+    )
+    recorded, problem = dispatcher_mod.record_merge(cfg, "task-1", merged)
+    assert recorded == [] and tasks.MIGRATE_COMMAND in problem
+
+
+def _refused_by_open_cycle(cfg, caplog, task_id="task-1", description=None) -> str:
+    """Open a cycle that must be refused, and check nothing was written to the hive."""
+    before = _hive_bytes(cfg)
+    with caplog.at_level("ERROR", logger=dispatcher_mod.logger.name):
+        ctx = dispatcher_mod.open_cycle(cfg, task_id, "myproj", description=description)
+    assert ctx is None
+    assert _hive_bytes(cfg) == before
+    return caplog.text
+
+
+def _waiting_on(cfg, *deps) -> None:
+    tasks.handoff(
+        cfg.hive_tasks_dir, "task-1", new_status="pending", body="", depends_on=list(deps)
+    )
+
+
+def test_open_cycle_refuses_a_task_whose_dependency_has_no_file(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+    _waiting_on(cfg, "task-404")
+
+    logged = _refused_by_open_cycle(cfg, caplog, description=_DESCRIPTION)
+
+    assert "task task-1 cannot start: task-404 has no task file" in logged
+    # Refused before the supplied description was written.
+    assert tasks.read_description(cfg.hive_tasks_dir, "task-1") is None
+
+
+def test_open_cycle_refuses_a_dependency_that_is_done_and_not_merged(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-a", new_status="done", body="## auditor")
+    _waiting_on(cfg, "task-a", "task-404")
+
+    logged = _refused_by_open_cycle(cfg, caplog, description=_DESCRIPTION)
+
+    assert "task task-1 cannot start: task-a is not merged; task-404 has no task file" in logged
+
+
+def test_open_cycle_accepts_a_dependency_that_is_merged(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-a", new_status="done", body="## auditor")
+    tasks.mark_merged(cfg.hive_tasks_dir, "task-a", "main")
+    _waiting_on(cfg, "task-a")
+
+    assert dispatcher_mod.open_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION) is not None
+
+
+def test_run_task_cycle_is_blocked_by_an_unmet_dependency_and_marks_nothing(
+    tmp_path, monkeypatch,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _waiting_on(cfg, "task-404")
+    roles = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(roles)
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert roles == []
+    assert _task(cfg).status == "pending"
+
+
+def test_open_cycle_refuses_a_child_of_a_malformed_epic_with_the_reasons(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    assert dispatcher_mod.open_cycle(cfg, "task-0-S1", "myproj") is not None
+    # By hand: the parent stops being an epic and forgets one of its children.
+    path = task_file_path(cfg.hive_tasks_dir, "task-0")
+    parent = read_task_file(path)
+    parent.status, parent.split_into = "pending", ["task-0-S2", "task-0-S9"]
+    write_task_file(path, parent)
+
+    logged = _refused_by_open_cycle(cfg, caplog, task_id="task-0-S1")
+
+    assert "task task-0-S1 cannot start: " in logged
+    for reason in (
+        "its epic task-0 has status pending, not epic",
+        "epic task-0 does not name task-0-S1 in its split_into",
+        "epic task-0: task-0-S9 has no task file",
+        "task-0-S2: depends_on names task-0-S1, which is not a sibling",
+    ):
+        assert reason in logged
+
+
+def test_open_cycle_refuses_a_child_whose_epic_has_no_file(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    os.remove(task_file_path(cfg.hive_tasks_dir, "task-0"))
+
+    logged = _refused_by_open_cycle(cfg, caplog, task_id="task-0-S1")
+
+    assert "task task-0-S1 cannot start: its epic task-0 has no task file" in logged
+
+
+def test_a_cycle_that_ran_out_of_rounds_leaves_the_task_blocked(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    task = _task(cfg)
+    assert (task.status, task.owner, task.heartbeat) == ("blocked", None, None)
+    assert "## revisor" in task.body  # the trail stays
+
+
+def test_a_cycle_the_arquitecto_blocked_leaves_the_task_blocked(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _recording_dispatch_phase([], handoffs={"arquitecto": {"status": "blocked"}}),
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _task(cfg).status == "blocked"
+
+
+def test_a_phase_that_failed_after_one_that_landed_leaves_the_task_blocked(
+    tmp_path, monkeypatch,
+) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([], failing=("implementador",))
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _task(cfg).status == "blocked"
+
+
+def test_a_blocked_task_runs_again_and_can_finish(tmp_path, monkeypatch) -> None:
+    """Running it again is the operator's decision to retry."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _rejecting_dispatch_phase)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+    assert _task(cfg).status == "blocked"
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert _task(cfg).status == "done"
+
+
+def test_a_held_cycle_does_not_mark_the_task_blocked(tmp_path, monkeypatch) -> None:
+    """Held is a wait for an account, even after phases of this run took the lock."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for("implementador"))
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.HELD
+    assert _task(cfg).status == "pending"
+
+
+def test_a_cycle_that_bounced_off_another_owners_lock_does_not_mark_it_blocked(
+    tmp_path, monkeypatch,
+) -> None:
+    """Even when an earlier phase of this run did take the lock: marking would
+    release the lock of the run that holds the task now."""
+    cfg = _make_config(tmp_path)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        if role == "implementador":
+            acquire_lock(cfg.hive_tasks_dir, task_id, owner="otro")
+            raise LockHeldError(task_id, "otro")
+        return _approving_dispatch_phase(cfg_arg, task_id, slug, role, prompt)
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    task = _task(cfg)
+    assert (task.status, task.owner) == ("in_progress", "otro")
+
+
+def test_a_run_that_took_the_task_since_keeps_its_lock_when_this_one_blocks(
+    tmp_path, monkeypatch,
+) -> None:
+    """No phase of this run bounced, but the file has an owner at the end: a
+    second run took the task after this one's last phase let go of it."""
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        return _rejecting_dispatch_phase(cfg_arg, task_id, slug, role, prompt)
+
+    real_handoff = tasks.handoff
+
+    def handoff_then_taken(hive, task_id, **kwargs):
+        real_handoff(hive, task_id, **kwargs)
+        if "revisor" in kwargs["body"]:
+            acquire_lock(hive, task_id, owner="otro")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    monkeypatch.setattr(dispatcher_mod.tasks, "handoff", handoff_then_taken)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    task = _task(cfg)
+    assert (task.status, task.owner) == ("in_progress", "otro")
+
+
+def test_a_diverged_base_does_not_mark_the_task_blocked(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="pending", body="## arquitecto")
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "update_project_branch",
+        lambda *a, **kw: _update_outcome(dispatcher_mod.docker_exec.DIVERGED, "diverged"),
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert _task(cfg).status == "pending"
+
+
+def test_a_blocked_cycle_with_no_task_file_creates_none(tmp_path, monkeypatch) -> None:
+    """The first phase failed, so no handoff ever wrote the file."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([], failing=("arquitecto",))
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert not os.path.exists(task_file_path(cfg.hive_tasks_dir, "task-1"))
+
+
+def test_a_single_phase_that_failed_does_not_mark_the_task_blocked(tmp_path, monkeypatch) -> None:
+    """`run-phase` is the operator driving the task by hand; only a cycle marks."""
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="pending", body="## arquitecto")
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _recording_dispatch_phase([], failing=("implementador",))
+    )
+
+    result = dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", "implementador", description=_DESCRIPTION
+    )
+
+    assert result is None
+    assert _task(cfg).status == "pending"

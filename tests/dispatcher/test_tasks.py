@@ -896,3 +896,204 @@ def test_mark_blocked_sets_the_status_and_releases_the_lock_keeping_the_body(
     after = read_task_file(str(path))
     assert (after.status, after.owner, after.heartbeat) == ("blocked", None, None)
     assert (after.body, after.depends_on) == (before.body, before.depends_on)
+
+
+# -- close_epic, epic_problems --------------------------------------------------
+
+
+def _epic(hive: str) -> None:
+    """`task-1` split by `file_split` into `task-1-S1` and `task-1-S2`."""
+    _legacy(hive, "")
+    tasks.file_split(hive, "task-1", _SPLIT)
+
+
+def _edit(hive: str, task_id: str, **fields) -> None:
+    """Change a task file by hand, as an operator writing an epic would."""
+    path = task_file_path(hive, task_id)
+    task = read_task_file(path)
+    for name, value in fields.items():
+        setattr(task, name, value)
+    write_task_file(path, task)
+
+
+def test_close_epic_closes_the_parent_on_its_last_merged_child_and_not_before(
+    tmp_path: Path,
+) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    parent_before = read_task_file(task_file_path(hive, "task-1"))
+
+    tasks.mark_merged(hive, "task-1-S1", "main")
+    before = _tree(hive)
+    assert tasks.close_epic(hive, "task-1-S1") is None
+    assert _tree(hive) == before
+
+    tasks.mark_merged(hive, "task-1-S2", "main")
+    assert tasks.close_epic(hive, "task-1-S2") == "task-1"
+
+    parent = read_task_file(task_file_path(hive, "task-1"))
+    assert parent.status == "done"
+    parent.status = parent_before.status
+    assert parent == parent_before  # the lock, the body and the list stay
+    # Closed already: nothing is written a second time.
+    before = _tree(hive)
+    assert tasks.close_epic(hive, "task-1-S2") is None
+    assert _tree(hive) == before
+
+
+@pytest.mark.parametrize(
+    "arrange",
+    [
+        lambda hive: _edit(hive, "task-1-S2", epic=None),
+        lambda hive: _edit(hive, "task-1", split_into=["task-1-S1", "task-1-S3"]),
+        lambda hive: os.remove(task_file_path(hive, "task-1")),
+        lambda hive: os.remove(task_file_path(hive, "task-1-S1")),
+        lambda hive: Path(task_file_path(hive, "task-1")).write_text("TODO\n"),
+    ],
+    ids=["no-epic", "not-in-split-into", "no-parent", "a-sibling-missing", "parent-unreadable"],
+)
+def test_close_epic_writes_nothing_when_the_epic_is_not_this_tasks_to_close(
+    tmp_path: Path, arrange,
+) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    tasks.mark_merged(hive, "task-1-S1", "main")
+    tasks.mark_merged(hive, "task-1-S2", "main")
+    arrange(hive)
+    before = _tree(hive)
+
+    assert tasks.close_epic(hive, "task-1-S2") is None
+    assert tasks.close_epic(hive, "task-404") is None
+    assert _tree(hive) == before
+
+
+def test_close_epic_refuses_an_unmigrated_parent_like_every_writer(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    tasks.mark_merged(hive, "task-1-S1", "main")
+    tasks.mark_merged(hive, "task-1-S2", "main")
+    parent = Path(task_file_path(hive, "task-1"))
+    parent.write_text(parent.read_text().replace("---\n", "---\ndescription: old\n", 1))
+    before = _tree(hive)
+
+    with pytest.raises(tasks.UnmigratedTaskError):
+        tasks.close_epic(hive, "task-1-S2")
+
+    assert _tree(hive) == before
+
+
+def _problems(hive: str, task_id: str = "task-1-S2") -> list[str]:
+    before = _tree(hive)
+    problems = tasks.epic_problems(hive, read_task_file(task_file_path(hive, task_id)))
+    assert _tree(hive) == before  # a reader
+    return problems
+
+
+def test_epic_problems_finds_none_in_a_split_that_was_filed(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+
+    assert _problems(hive, "task-1-S1") == []
+    assert _problems(hive, "task-1-S2") == []
+    # And a task that is in no epic has none to check.
+    assert _problems(hive, "task-1") == []
+
+
+@pytest.mark.parametrize(
+    "arrange, expected",
+    [
+        (
+            lambda hive: os.remove(task_file_path(hive, "task-1")),
+            ["its epic task-1 has no task file"],
+        ),
+        (
+            lambda hive: Path(task_file_path(hive, "task-1")).write_text("TODO\n"),
+            ["its epic task-1: its task file cannot be read"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1-S2", epic="../x"),
+            ["its epic '../x' is not a task id"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1", status="done"),
+            ["its epic task-1 has status done, not epic"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1", epic="task-0"),
+            [
+                "its epic task-1 is part of epic task-0; "
+                "a task inside an epic cannot become an epic"
+            ],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1", split_into="task-1-S1"),
+            ["epic task-1: split_into is 'task-1-S1', not a list"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1", split_into=["task-1-S2"]),
+            [
+                "epic task-1: an epic has 2 to 4 sub-tasks, this one has 1",
+                # What it waits for is no longer one of the epic's.
+                "task-1-S2: depends_on names task-1-S1, which is not a sibling",
+            ],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1", split_into=["task-1-S1", "task-1-S1"]),
+            [
+                "epic task-1 does not name task-1-S2 in its split_into",
+                "epic task-1: split_into names task-1-S1 more than once",
+            ],
+        ),
+        (
+            lambda hive: _edit(
+                hive, "task-1", split_into=["task-1-S1", "task-1-S2", "task-1-S3", "../x"]
+            ),
+            ["epic task-1: task-1-S3 has no task file", "epic task-1: '../x' is not a task id"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1-S1", epic="task-7"),
+            ["task-1-S1: its epic is task-7, not task-1"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1-S1", epic=None),
+            ["task-1-S1: its epic is not set, not task-1"],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1-S2", depends_on=["task-1-S1", "task-0", "task-1-S2"]),
+            [
+                "task-1-S2: depends_on names task-0, which is not a sibling",
+                "task-1-S2: depends_on names task-1-S2, which is not a sibling",
+            ],
+        ),
+        (
+            lambda hive: _edit(hive, "task-1-S1", depends_on="task-1-S2"),
+            ["task-1-S1: depends_on is 'task-1-S2', not a list"],
+        ),
+    ],
+    ids=[
+        "no-parent", "parent-unreadable", "epic-not-an-id", "parent-not-an-epic",
+        "parent-inside-an-epic", "split-into-not-a-list", "too-few", "not-named-and-twice",
+        "child-missing-or-not-an-id", "child-of-another-epic", "child-of-no-epic",
+        "depends-on-a-stranger", "depends-on-not-a-list",
+    ],
+)
+def test_epic_problems_names_what_is_wrong_with_a_hand_written_epic(
+    tmp_path: Path, arrange, expected: list[str],
+) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    arrange(hive)
+
+    assert _problems(hive) == expected
+
+
+def test_epic_problems_reports_every_problem_at_once(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    _edit(hive, "task-1", status="pending", split_into=["task-1-S1"])
+
+    assert _problems(hive) == [
+        "its epic task-1 has status pending, not epic",
+        "epic task-1 does not name task-1-S2 in its split_into",
+        "epic task-1: an epic has 2 to 4 sub-tasks, this one has 1",
+    ]
