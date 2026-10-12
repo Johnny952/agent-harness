@@ -16,13 +16,19 @@ T-030 (`docs/implementations/T-030.md`): both merge paths call
 sub-task (`tasks.close_epic`); `open_cycle` refuses a task with an unmerged
 dependency or a malformed hand-written epic (`tasks.epic_problems`) and marks
 nothing on it, where section 4 says "card blocked"; and a cycle that stops
-blocked marks its task `blocked`. Nothing calls `file_split` yet. Step 4
-is not built, and no role's schema offers `split` until it is. This design
+blocked marks its task `blocked`. Step 4 — the switch — is built by T-031
+(`docs/implementations/T-031.md`, `docs/decisions.md` ADR 60): the
+arquitecto's schema offers `split`, a cycle files a valid one through
+`_file_split` and ends `CycleOutcome.SPLIT` (`run-task` exits 3), `run-phase`
+only prints one, `dispatch file-split` files one from the saved handoff, and
+`open_cycle` refuses a task that is `status: epic`. All four steps are built.
+Where that note and ADR 60 differ from sections 2, 3 and 7 (no card, the
+refusal in `open_cycle`, which parent may be split), they are what was built.
+This design
 settles the decisions P4 leaves "for an ADR", so the work can be dispatched in
 one-surface tasks. The
-ADR lands in `docs/decisions.md` with the task that builds it; the text is
-under *Proposed ADR*, to be brought in line with `board-service.md` first
-(below). Written 2026-10-10 by the operator's
+ADR landed as ADR 60, from the text
+under *Proposed ADR* with its cards removed. Written 2026-10-10 by the operator's
 session, out of cycle, from the code at `c7a643e`, and revised the same day
 with the user's answers to its first open questions: a split parent is an
 **epic** its sub-tasks are tagged with, a dependency counts once it is

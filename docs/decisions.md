@@ -4193,3 +4193,85 @@ nothing imports it. `docs/plans/board.md` *The shapes* and ADR 10, ADR 21 and
 ADR 23 quote the old task key set; they are records and stay as written. A
 later step that wants a board tool builds it on `dispatcher/tasks.py`, not on
 a client seam.
+
+## ADR 60 — epics: the arquitecto may split a task, and a dependency waits for its merge
+
+**Status:** accepted (T-031, 2026-10-12; task 4 of `docs/plans/task-split.md`
+section 8, which the user approved on 2026-10-11 with
+`docs/plans/token-economy.md` P4). Narrows ADR 52 and does not supersede it:
+`run-task` has a fourth exit code. The text is that plan's *Proposed ADR*
+with its cards and its `[epic]` card title removed, since ADR 59 left no
+card to title or move.
+
+**Context.** `docs/plans/token-economy.md` P4 sizes a task to one surface so
+its cycle fits one account's window, and makes the arquitecto a backstop for a
+task that spans more. Until now its only early exit was a block, so a task too
+big for one window ran the implementador anyway. The user also asked that the
+sub-tasks of a big task stay tagged with it, as an epic. The design is
+`docs/plans/task-split.md`; T-025, T-029 and T-030 built its first three
+tasks, inert, and this entry is the switch.
+
+**Decision.**
+
+- **The arquitecto's handoff has a required `split` array**
+  (`_SPLIT_PROPERTY` in `_ROLE_EXTRAS["arquitecto"]`, `dispatcher/handoff.py`),
+  empty unless the task spans more than one surface. No other role is offered
+  it. The signal is a non-empty list, not a new status.
+- **A block wins over a split, and a split stops the cycle before the
+  implementador.** `run_task_cycle` reads the block first. A non-empty
+  `handoff.split_of` then goes to `_file_split` in `dispatcher/dispatcher.py`,
+  which checks it (`handoff.split_problems`: two to four entries, `after`
+  naming earlier entries only), has `tasks.file_split` write one task per
+  entry as `<parent>-S<n>` with `depends_on`, `epic` and the entry's
+  description in its own `description.md`, and set the parent to
+  `status: epic` with `split_into`. The cycle returns `CycleOutcome.SPLIT`
+  and `run-task` exits 3 (`EXIT_SPLIT`), printing the ids in run order. Not 0,
+  because the task did not ship; not 1, because nothing is wrong.
+- **A split that cannot be filed blocks the task and files nothing.** That is
+  a split with problems, a description `tasks.parse_description` refuses, a
+  task that is itself inside an epic (one level deep), and a parent the next
+  rule refuses. The implementador is not dispatched: running it on a task its
+  arquitecto called too big is what this path exists to prevent. In a cycle
+  the task is then marked `blocked` as any blocked cycle's is. A split that
+  was filed is not a block: the task's status is `epic`.
+- **Which parent may be split.** A task whose file says `pending`,
+  `in_progress` or `blocked` may become an epic. One that is `done` or already
+  `epic` may not, and neither may one whose lock is live, since the phase
+  holding it would write its own status over `epic` at its handoff. This is a
+  default T-031 chose, not a ruling: `docs/business.md` carries it as
+  unconfirmed.
+- **`run-phase` proposes, `file-split` files.** `run-phase --role arquitecto`
+  prints a split it was handed and files nothing. `dispatch file-split
+  --task-id <id> --project <slug>` reads the saved
+  `<hive_tasks_dir>/<task_id>/handoffs/arquitecto.json` and calls the same
+  `_file_split`, running no model, opening no cycle and marking nothing. It
+  exits 0 when it filed and 1 when it refused: no saved handoff, a blocked
+  one, an empty split or one that cannot be filed. It is also the recovery
+  for a `run-task` that died between the handoff and the filing.
+- **An epic is not dispatched.** `open_cycle` refuses a task whose file says
+  `status: epic`, with one log line naming its `split_into`, before the
+  supplied description is written, before any account is picked and before
+  the lock is taken. So the refusal covers `run-task` and `run-phase`, the
+  file is left byte for byte, and it is not written `blocked`. To split a task
+  again, the operator deletes the sub-task files and sets the status back by
+  hand.
+- **Nothing is auto-dispatched.** The split writes files and stops. The
+  operator reads them, may edit or delete any, and runs each sub-task with
+  `run-task`; running it is the approval.
+- **What T-029 and T-030 already built belongs to this decision.** Both merge
+  paths write a `merged` block to the task file; `open_cycle` refuses a task
+  whose `depends_on` names one that is missing or not merged; merging an
+  epic's last sub-task closes the epic. The operator may write the same
+  files by hand, and `tasks.epic_problems` checks them.
+
+**Consequences.** A task too big for one window costs one arquitecto phase
+instead of a full cycle. Sub-task ids never collide with debt ids
+(`<task>-D<n>`). `depends_on` is enforced for every task, not only split ones,
+and against the merge, not `done`, so a sub-task waits for a person's approval
+of the one before it once `docs/plans/review.md` is built. A sub-task's
+description must parse as a task description, so the arquitecto is told to
+write `## Goal` and `## Done when` in each; one that does not is a block, at
+the cost of that one phase. An epic shows as `status: epic` in its task file
+and nowhere else until the console has an epic view. A script reading
+`run-task`'s exit code has a fourth value to handle; the root `README.md`
+does not list it yet (`docs/debt/T-028-D2.md`).

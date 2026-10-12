@@ -17,8 +17,10 @@ task that stopped blocked. The second half of step 3 is built by T-030
 dispatcher call them. Both merge paths record `merged` on the task and close
 an epic on its last merged sub-task, `open_cycle` refuses a task with an
 unmerged dependency or a malformed hand-written epic, and a cycle that stops
-blocked marks its task `blocked`. Nothing calls `file_split` yet; that is
-task 4 of that section. The per-task lock of section 5 comes
+blocked marks its task `blocked`. Task 4 of that section is built by T-031
+(`docs/implementations/T-031.md`, `docs/decisions.md` ADR 60): a cycle files
+an arquitecto's split through `file_split`, and so does `dispatch
+file-split`. The per-task lock of section 5 comes
 with the service (step 4). Every later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
