@@ -17,9 +17,6 @@ accounts is a documented non-goal for now (see the design spec).
 Smart Dispatcher  ──reads/writes──  per-account state (disk-persisted)
         │                            IDLE / BUSY / PRE_COOLDOWN / COOLING_DOWN
         │
-        ├──mirrors status──▶  Vibe Kanban (optional board, stdio MCP;
-        │                       control UI loopback-only)
-        │
         ▼ docker exec (claude -p ... --output-format json)
 Agent container (per Claude Pro account)
    └── docker:dind sidecar (sysbox-runc, DOCKER_HOST → sidecar)
@@ -121,19 +118,16 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   sidecar (`DOCKER_HOST` pointed at the sidecar, `sysbox-runc` runtime, no
   `--privileged`) so agents can build/run containers without touching the
   host Docker daemon.
-- **Vibe Kanban** — an optional task board, off unless `config.yaml`
-  carries a `vibe_kanban` block. The dispatcher opens one issue per task
-  and moves it as the cycle runs; nothing flows back, and a board call
-  that fails never fails the phase. Its MCP server is spawned as a
-  subprocess and speaks stdio, so nothing dials it over the network; the
-  web UI is bound to `127.0.0.1` only, never exposed off-host, and sits
-  behind a Compose profile. Its service is retired (see Known gaps), so the
-  board with nothing behind it is the one that works: a `local_board` block
-  names a directory and the dispatcher keeps one JSON card per issue in it.
-  One block or the other, never both.
+- **No board beside the task files** — the task files are the record of
+  what every task is doing, and the dispatcher mirrors them nowhere: the
+  Vibe Kanban client and the local JSON board were removed
+  (`docs/decisions.md` ADR 59). The console reads the task files through
+  the api. A `vibe_kanban`, `local_board` or `vibe_kanban_mcp_url` key in
+  `config.yaml` is a startup error that names the key.
 - **Context handoff** — `.hive/tasks/<task-id>.md`: YAML frontmatter
-  (`status`, `owner`, `depends_on`, `heartbeat`, and `kanban_issue_id`
-  when there's a board) plus a body that accumulates each phase's handoff;
+  (`status`, `owner`, `depends_on`, `heartbeat`, `resolved_debt`, and
+  `epic`, `split_into` or `merged` on a task that was split or merged)
+  plus a body that accumulates each phase's handoff;
   the operator's description lives in `board/<task-id>/description.md`
   beside the hive tasks dir. A phase returns that handoff as a
   schema (`--json-schema`, per role: what changed, what was verified, what's
@@ -162,8 +156,8 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   Used for cold-start role transitions; mid-role quota exhaustion instead
   resumes the same Claude session directly via `--resume`. Stale locks
   (heartbeat older than `heartbeat_ttl_seconds`) are reaped at the start of
-  each task cycle; a live lock held by another owner is refused, and the
-  task goes `blocked`. A task has one branch,
+  each task cycle; a live lock held by another owner is refused: the run
+  exits 1 and the task file is left as it was. A task has one branch,
   `agent/task/<task-id>`: the roles that leave something behind
   (arquitecto, implementador, the auditor, and the mapping phase when it
   runs) share one worktree checked out on it, and the dispatcher commits
@@ -244,7 +238,7 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   auditor alone files entries into the project's `docs/learnings/`, and the
   dispatcher moves them with no model in the loop — it stamps the entries a
   task is carrying before the auditor runs, moves them out of the inbox once
-  that branch actually merges *and* the task card shows the auditor ran,
+  that branch actually merges *and* the task file shows the auditor ran,
   into a `dropped/` sibling no prompt reads rather than to deletion
   (`docs/debt/T-012-D1.md`), and, when the cycle ends any other way,
   releases them unconfirmed for the next task rather than losing them
@@ -281,11 +275,12 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   container start) POST events to a collector (`observability/collector`,
   Flask + SQLite/WAL). A second service (`observability/api`) serves read-only
   JSON over the same state the dispatcher keeps on disk — task files, account
-  state, events, the debt index, board cards — behind Basic auth, on
+  state, events, the debt index — behind Basic auth, on
   `127.0.0.1:8789`: `GET /api/tasks`, `/api/tasks/<id>`, `/api/accounts`,
   `/api/events`, `/api/debt`. It is Phase 1 of
   [`docs/plans/board.md`](docs/plans/board.md); see `docs/decisions.md` ADR 3–5
-  for the envelope, the card it reports and the error half.
+  for the envelope and the error half, and ADR 59 for the board entry a
+  task row no longer carries.
   Phase 2 of the same plan was a third service, `observability/board` on
   `127.0.0.1:8790`: four server-rendered Flask/Jinja screens — the accounts strip
   over the tasks table, one task, the debt index, the event log — over those five
@@ -518,20 +513,19 @@ file sets it, because no service in either one reads it (`docs/decisions.md`
 ADR 24 for the name, ADR 32 for the retirement that freed it).
 `docs/decisions.md` ADR 9 says why `scripts/configure.sh` does not prompt for it.
 
-Two services in those files are deliberately kept out of that default
-set, each behind a Compose profile. Stage-0 verification found both by
-running the two-liner above:
+One service in those files is deliberately kept out of that default set,
+behind a Compose profile. Stage-0 verification found it by running the
+two-liner above:
 
 - `dispatcher` (`profiles: ["dispatcher"]`) is a template, not a service
   (`restart: "no"`, placeholder `--task-id`/`--project`). Ungated, a bare
   `up -d` fired it and ran a task. See step 5.
-- `vibe-kanban` (`profiles: ["kanban"]`) is the optional board's web UI.
-  Its image (`ghcr.io/bloopai/vibe-kanban:latest`) is denied on an
-  anonymous pull, and Compose pre-pulls every named image before starting
-  any service — so while it sat in the default set, that pull failure
-  took down the `up -d` for all four. Nothing in the harness dials this
-  service; see *The board, if you want one* in step 5. Bring it up with
-  `--profile kanban` once `image:` points at something you can pull.
+
+There was a second, `vibe-kanban` behind a `kanban` profile. The service,
+its profile and its volume declaration were removed with the board
+(`docs/decisions.md` ADR 59). Removing a declaration deletes no volume: a
+host that ran that profile keeps `vibe_kanban_data` until someone removes
+it by hand.
 
 ### 5. Run a task
 
@@ -585,19 +579,29 @@ docker compose -f docker/compose/docker-compose.yml --profile dispatcher \
 `bootstrap-project` only creates the directory; cloning the actual project
 repository into it is still a manual, one-time step.
 
-`run-task`'s exit code says how the cycle ended (`docs/decisions.md` ADR 52):
+`run-task`'s exit code says how the cycle ended (`docs/decisions.md` ADR 52,
+and ADR 60 for the split):
 
 | Code | The cycle | What to do |
 |---|---|---|
 | 0 | finished: the auditor closed the task, whether or not `merge_on_done` merged it | read the result |
 | 75 | held: no account could take a phase the task needs (all tried, cooling, or over their quota) | run the same command again once an account resets |
-| 1 | blocked: a phase failed or blocked, the rounds ran out, another run holds the lock, or the project branch diverged | read the log; a person decides |
+| 3 | split: the arquitecto split the task and the split was filed. The task file says `status: epic`, and stdout has `task <id> is now an epic: <ids>; run them in that order` | run each sub-task with `run-task`, in that order; nothing runs them for you |
+| 1 | blocked: a phase failed or blocked, the rounds ran out, a split could not be filed, another run holds the lock, or the project branch diverged. Also a task refused before it started: one with a `depends_on` task that is not merged, a child of a malformed epic (`task <id> cannot start: <reasons>` in the log for both), or one whose file says `status: epic` | read the log; a person decides |
 | 2 | a usage error, from argparse | fix the command line |
 
-75 is sysexits.h's `EX_TEMPFAIL`, "try again later". The card is blocked
-either way, so it is the code and the log, not the board, that tell held from
-blocked. A refused merge after a finished cycle is still 0: the task is done,
-and `merge-task`'s exit code is the one that reports a merge.
+75 is sysexits.h's `EX_TEMPFAIL`, "try again later". A refused merge after a
+finished cycle is still 0: the task is done, and `merge-task`'s exit code is
+the one that reports a merge.
+
+A cycle that stops blocked after one of its phases took the task's lock
+writes `status: blocked`, with no owner, to the task file: a phase that
+failed, the arquitecto's block, the rounds running out, the revisor's block,
+the auditor failing, a split that could not be filed. The other stops leave
+the file as it was: a held cycle, a task refused before it started, a
+diverged project branch, a lock another run holds, and a task with no file.
+So does `run-phase`. `blocked` in a task file therefore means a cycle ran
+and stopped, not every exit 1.
 
 Every worktree is checked out under `<project>/worktrees/`, inside the
 repository being worked on, so the first one the dispatcher creates also adds
@@ -642,9 +646,22 @@ date, not as a failure, so re-running it is harmless. No path through it
 touches, rewrites or deletes `agent/task/T-001`: the branch stays as the
 record of the work and as the way back if the merge turns out to be wrong.
 
+A merge that lands is recorded on the task file, as a `merged` block naming
+the branch and the time, and `merge-task` prints `task <id>: recorded as
+merged into <branch>`. That block is what another task's `depends_on` waits
+for: `done` is not enough. When the task was the last sub-task of an epic to
+merge, the epic's own file is set to `done` and the verb prints `epic <id>:
+every sub-task is merged, so it is done`. A re-run on a branch already
+merged writes the block only where the file has none, which is how a task
+merged before the record existed gets one. A record that could not be
+written is reported on stderr and the exit is still 0, because the branch
+did land (`docs/decisions.md` ADR 60).
+
 To have a cycle do this by itself the moment the auditor signs off, set
 `merge_on_done: true` in `config.yaml`. It defaults to `false`, because
-the merge is the one thing a run writes into the branch you work from. A
+the merge is the one thing a run writes into the branch you work from. The
+cycle's own merge records the same `merged` block and closes an epic the
+same way, in the log rather than on stdout. A
 refused merge there is logged and the task still ends `done` — the work is
 already committed on its own branch, and `merge-task` is the way back to
 it.
@@ -662,12 +679,21 @@ python -m dispatcher.cli --config config.yaml run-phase \
   --task-id T-001 --project my-project --role auditor --final
 ```
 
-Everything a phase needs around it still happens — the account and card
+Everything a phase needs around it still happens — the account and task
 locks, the worktree, the commit, the gates, and the handoff appended to the
 task file that the next phase reads. What does not happen is the cycle's own
 judgement: it reads no verdict, starts no further round and merges nothing.
 Those stay `run-task`'s, and the log says so rather than leaving it to be
-assumed; `merge-task` is still the way to offer the branch back.
+assumed; `merge-task` is still the way to offer the branch back. It refuses
+what `run-task` refuses before a phase starts, with exit 1 and the same log
+line: a task whose file says `status: epic`, an unmet dependency, a child of
+a malformed epic.
+
+It files no split either. When `run-phase --role arquitecto` comes back
+with one, the verb prints `phase arquitecto proposes splitting task <id>
+into <n> sub-tasks; nothing was filed:`, the sub-tasks, and the `file-split`
+command that would file them (see *The split, when the task is more than
+one* below), and still exits 0.
 
 `--round` is not cosmetic. It is what the phase is told it is on, what
 labels its section in the task file (`## revisor (round 2)`), and what
@@ -682,7 +708,7 @@ file.
 `--final` is the operator saying this phase closes the task — in the role
 set, the auditor. It buys exactly what the full cycle gives its last phase:
 the learnings carried in beforehand, the debt the earlier phases declared
-recorded and filed, `status: done` in the task file and on the board, and no
+recorded and filed, `status: done` in the task file, and no
 orphaning of the entries on the way out. The debt half is possible because
 every phase leaves its structured return under the task's scratch directory
 (`.hive/tasks/<task-id>/handoffs/<role>.json`): the prose appended to the
@@ -694,8 +720,9 @@ which of the two happened, because "no debt filed" means something very
 different when there was a record to file from. Without it the
 task stays `pending` and the entries this run wrote go back to being
 unowned, which is what every phase before the last one should do. A phase
-that did not land exits non-zero and blocks the card, so a hand-driven cycle
-stops rather than running the next phase over the top of it. The codes are
+that did not land exits non-zero, so a hand-driven cycle stops rather than
+running the next phase over the top of it; it does not write `status:
+blocked` to the task file, which only a `run-task` cycle does. The codes are
 `run-task`'s: 1 for a phase that failed, 75 for one that never ran because no
 account could take it, so a loop can wait out the second and stop on the
 first.
@@ -720,7 +747,7 @@ marked `primary` both of its own: `reserve_pct` on the session and the paced
 weekly ceiling read from its last probe's reset, so the numbers are read off
 the pool and that probe rather than off the config — how much of
 `quota_cooldown_seconds` a recorded
-refusal has left to run, and every task card that is in progress or owned,
+refusal has left to run, and every task file that is in progress or owned,
 with the age of its heartbeat and whether that is still a live lock against
 `heartbeat_ttl_seconds`. It writes nothing — deliberately, because the gate's
 own probe (`check_quota_ok`) parks accounts and records refusals as it goes,
@@ -736,12 +763,12 @@ account `BUSY` on a task whose dispatcher is gone. Nothing else could reach
 it — `list_idle_accounts` only returns `IDLE`, and the recheck that revives a
 parked account skips any state that is not `PRE_COOLDOWN`/`COOLING_DOWN` — so
 before this verb the only remedy was editing a root-owned JSON file by hand.
-It sets the account back to `IDLE` and clears the lock on whatever card it
+It sets the account back to `IDLE` and clears the lock on whatever task it
 holds, dropping `owner` and `heartbeat` and leaving `status` alone: whether
 the task is still in progress is the task's business, not the account's. It
-finds that card by the union of what the state file names and what the cards
-themselves say they are owned by, so a card the state file never knew about
-still comes back.
+finds that task by the union of what the state file names and what the task
+files themselves say they are owned by, so a task the state file never knew
+about still comes back.
 
 It refuses, printing why and exiting non-zero, in the two cases where
 releasing would be the wrong thing:
@@ -757,15 +784,15 @@ releasing would be the wrong thing:
   is the one thing that erases it, for when the refusal is known to be stale.
 
 An account that is already `IDLE` is a no-op and exits zero — but its
-orphaned card, if it has one, is still released, because that is the other
+orphaned task, if it has one, is still released, because that is the other
 half of the same crash. An account name the config does not have is a usage
 error naming the ones it does.
 
 Most of the time you will not have to run it. The picker reaps the same state
-on its own before every pick, on a TTL that reads the card's heartbeat rather
+on its own before every pick, on a TTL that reads the task's heartbeat rather
 than the clock: a phase still beating is left alone however long it runs, and
 one whose heartbeat is older than `heartbeat_ttl_seconds` gives its account
-back. An account holding no card — or a card nobody ever beat on — has no
+back. An account holding no task — or a task nobody ever beat on — has no
 heartbeat to read and is judged against `phase_timeout_seconds` instead, the
 longest a phase is allowed to live at all. Under both sits a floor: an
 account that went `BUSY` more recently than the TTL is never reaped, so a
@@ -799,8 +826,8 @@ that can end a task with no code written, and the one phase where that costs
 less than the alternative: it reads the plan, the charter and the indexes
 before anyone touches the worktree, so a decision the task was never given is
 visible there and nowhere earlier. `status: blocked` in its handoff ends the
-cycle at that point — the card goes `blocked`, and what it listed under
-`pending` is what a human has to answer to restart it. No other phase's
+cycle at that point — the task file goes `status: blocked`, and what it
+listed under `pending` is what a human has to answer to restart it. No other phase's
 `status` is read: it is rendered into the task file and the cycle runs on
 regardless, because a status is cheap for a role to set and every place that
 acts on one is a place a role can end a task from. The prompt draws the line
@@ -810,6 +837,32 @@ its to decide. Work a user sees is where this bites most often: a screen
 whose empty, stale and failed states nobody specified is not a detail the
 implementador fills in. It invents one, and the revisor then reviews the
 invention.
+
+**The split, when the task is more than one.** The arquitecto's other early
+end (`docs/decisions.md` ADR 60). A handoff whose `split` lists two to four
+sub-tasks says the task is more than one piece of work; a block in the same
+handoff wins over it. The dispatcher files one task per entry,
+`<task-id>-S<n>`, each with its own description, its `depends_on` and the
+`epic` it came from, sets the parent's file to `status: epic` with the ids
+under `split_into`, and stops before the implementador with exit 3. Nothing
+is dispatched for you: run the sub-tasks with `run-task`, in the order the
+printed line gives. A split that cannot be filed blocks the task instead,
+with `task <id>: the split cannot be filed: <problems>` in the log.
+
+A split that was only proposed, by `run-phase --role arquitecto` or by a
+run that died before filing, is filed by its own verb:
+
+```bash
+python -m dispatcher.cli --config config.yaml file-split \
+  --task-id T-001 --project my-project
+```
+
+It reads the task's saved arquitecto handoff and runs no model. When it
+files, it prints the same `task <id> is now an epic: <ids>; run them in that
+order` and exits 0. When it refuses, it prints `task <id>: the split was not
+filed; the log above says why` to stderr, exits 1 and leaves the task as it
+was: no saved handoff, a blocked one, no split or an invalid one, and a task
+that is `done`, already an epic or still locked by a live run.
 
 **The gates, before anyone pays for a review.** Between the implementador
 and the revisor the dispatcher checks the worktree itself, through
@@ -905,7 +958,7 @@ directories before the first phase; stamps the entries this task is carrying
 just before the auditor runs, so the auditor knows which rows are its to
 file into `docs/learnings/` on the task branch; takes them out of the inbox
 once that branch actually merges, automatically or via `merge-task`, and the
-task card carries the auditor's own section, because that section is what says
+task file carries the auditor's own section, because that section is what says
 the docs now hold them — into a `dropped/` sibling rather than to deletion,
 since no reader enumerates that directory, so the prompt cost the drop exists
 for is gone either way; and, when a cycle ends any other way — blocked,
@@ -915,8 +968,8 @@ that bounced off another dispatcher's lock touches nothing: those entries
 belong to a run still working.
 
 A `merge-task` whose cycle never reached an auditor moves nothing either. It
-keeps the entries in the inbox, prints how many it kept and that the card
-carries no auditor section, and exits zero: landing a branch the cycle did not
+keeps the entries in the inbox, prints how many it kept and that the task
+file carries no auditor section, and exits zero: landing a branch the cycle did not
 land is what that verb is for, and the cycle that died before its auditor is
 the one whose entries were never promoted anywhere
 (`docs/debt/T-012-D1.md`, `docs/decisions.md` ADR 33 and ADR 34).
@@ -981,60 +1034,19 @@ the container, the CLI, the worktree, the tooling. And the closing rule, in
 every role's prompt: a trap is "don't step on this"; work you chose not to
 finish is debt, and that goes in the handoff instead.
 
-**The board, if you want one.** A board is optional and unconfigured by
-default: with neither board block in `config.yaml` the dispatcher runs
-exactly as it does above and says nothing about a board. Add one — copy a
-commented block from `config.example.yaml` — and each `run-task` opens an
-issue for the task, then moves it as the cycle goes `in_progress:<role>` →
-`blocked`/`done`. `--kanban-issue-id <uuid>` points a task at an issue that
-already exists instead; ids are uuids either way, server-assigned by Vibe
-Kanban and minted by the local board, so `list_issues` is how you find one.
-The id lands in the task file's frontmatter as `kanban_issue_id`, which is
-what survives a restart. The board is a visibility aid and never dispatch
-state: every call to it is best-effort, and one that fails is logged rather
-than failing the phase.
+**There is no board to configure.** The dispatcher once mirrored each task
+to an optional board, Vibe Kanban or a directory of JSON files. That seam
+was removed (`docs/decisions.md` ADR 59): a task's state is its task file,
+and the console shows it through the api. A `vibe_kanban`, `local_board` or
+`vibe_kanban_mcp_url` key left in `config.yaml` is a startup error that
+names the key and that ADR, rather than a block silently ignored, and
+`run-task --kanban-issue-id` is a usage error.
 
-There are two blocks to choose between, `vibe_kanban` and `local_board`,
-and configuring both is a startup error naming which one to drop rather
-than a silent precedence rule (`docs/decisions.md` ADR 2).
-
-Two things to know before uncommenting the `vibe_kanban` block:
-
-- **Its MCP server speaks stdio, not HTTP.** The dispatcher spawns
-  `vibe_kanban.command` as a subprocess; there is no URL to point at. The
-  `vibe-kanban` compose service (`http://127.0.0.1:9100`, loopback-only,
-  `--profile kanban`) is the web UI for you, not something the dispatcher
-  reaches over the network. The shipped dispatcher image has no Node, so
-  a bare `npx vibe-kanban@0.1.44 mcp` will not run inside it: add Node to
-  `docker/dispatcher/Dockerfile`, or point `command` at a wrapper of your
-  own.
-- **`status_map` is a guess to correct, not a default to trust.**
-  `update_issue` only accepts a status name the project already has, and
-  no MCP tool lists a project's names, so the shipped `In Progress` /
-  `In Review` / `Done` are a starting point. An unmapped status is
-  skipped with a warning rather than sent. Creating or reading issues
-  also needs that server signed in to Vibe Kanban's cloud — see Known
-  gaps.
-
-**The board that is a directory.** `local_board:` with a `dir:` — say
-`/state/board`, on the `dispatcher_state` mount so the cards outlive the
-container — is the other block, and the one that works today: no service,
-no Node, no account. The dispatcher writes one JSON document per issue
-into that directory, atomically, and reads them back, so an `ls` is the
-whole board — nothing renders these cards: the Flask board that was to be
-Phase 2 of [`docs/plans/board.md`](docs/plans/board.md) is retired
-(`docs/decisions.md` ADR 32), and the console's lanes come from the api's
-tasks, not from here. It has no `status_map` and needs none: there is no column here
-to rename, so a card carries the dispatcher's own status verbatim,
-`in_progress:<role>` included — the one dimension a generic board flattens.
-Why each of those is the way it is: `docs/decisions.md` ADR 1.
-
-**What "issuing commands from the interface" means today:** nothing flows
-the other way. Creating or updating an issue on the board does not make
-anything run. The dispatcher is a one-shot CLI, not a daemon watching for
-new tasks, so `run-task` above still has to be invoked manually (or from
-your own automation/cron) per task-id. There is no push-button "run" in
-the UI yet.
+**What "issuing commands from the interface" means today:** nothing. No
+screen of the console makes anything run. The dispatcher is a one-shot CLI,
+not a daemon watching for new tasks, so `run-task` above still has to be
+invoked manually (or from your own automation/cron) per task-id. There is
+no push-button "run" in the UI yet.
 
 **The work a task chose not to do.** That is the other half of the closing
 rule above: a trap is "don't step on this", debt is work left undone, and
@@ -1062,44 +1074,32 @@ approval, and is logged as the contradiction it is. `blocks` is for a block
 wearing a debt costume, and ends the task `blocked` with no further round,
 because another round cannot supply a decision the task was never given.
 Anything the revisor did not rule on is accepted: a missed ruling costs one
-duplicate card, a dropped declaration costs the entry itself.
+row that should not be there, a dropped declaration costs the entry itself.
 
-Then the dispatcher files them — the dispatcher and not an agent, because an
-agent that can create cards can assign itself work, and an agent re-run for a
-second review round would create the same card twice. Each accepted
-declaration gets an id, `<task-id>-D<n>`, and one card, opened with
-`create_issue` *before* the auditor runs, so the row the auditor writes can
-already point at it. The card carries the whole declaration rather than a
-summary — a human triaging the board should not have to clone the repo to
-know what they are approving — plus the id of the entry, which stays the
-source of truth. `create_issue` takes no label argument, so the `debt` label
-rides in the title as a `[debt] ` prefix, where a board filter can still find
-it. A declaration that flattens to the same fingerprint as a row already in
-the index gets no id and no card; the index is read from the worktree this
+Then the dispatcher names them — the dispatcher and not an agent, because an
+agent that numbers its own entries numbers them again when it is re-run for a
+second review round. Each accepted declaration gets an id, `<task-id>-D<n>`,
+*before* the auditor runs, and the auditor's prompt carries the ids, so the
+row it writes already has its name. Nothing is opened anywhere else
+(`docs/decisions.md` ADR 59): the auditor writes `none` in the index's `card`
+column. A declaration that flattens to the same fingerprint as a row already
+in the index gets no id; the index is read from the worktree this
 task is being built in, so a re-run that already filed its entries sees them.
 The auditor then writes the rows and the entry files under `docs/debt/`,
 still the only phase that writes an index.
 
-A card in the backlog is a record, not work: moving it out of the backlog is
-how a human approves the work, and nothing dispatches it on its own. The way
-back in is `resolved_debt` — an implementador that resolved an entry the
-index already carries names its id there, and the dispatcher stores it in the
-task file rather than leaving it in the handoff, because the merge that
-closes the card can happen days later. Both the automatic merge and
-`merge-task` read it, and say what they closed.
+A row in the index is a record, not work: nothing dispatches it on its own,
+and a person decides when a task takes it on. The way back in is
+`resolved_debt` — an implementador that resolved an entry the index already
+carries names its id there, and the dispatcher stores it in the task file
+rather than leaving it in the handoff, and the api serves it from there. No
+merge reads it or closes anything.
 
-The two halves of "resolved" deliberately land in different places. The
-auditor marks the row resolved where it stands, on the task branch, with the
-task that resolved it and never by deleting it — a fix that gets reverted
-should still have its row — because it is the only writer of the indexes and
-the mark belongs in the commit that made it true. The dispatcher closes the
-card, and only after the merge: a branch that never lands leaves the board
-exactly as it was.
-
-A project with no `vibe_kanban` block loses only the cards. Every other step
-runs identically, the entries are filed the same way, and a merge says
-nothing about a board it was never given — the index is the source of truth,
-and the board is the aid.
+"Resolved" lands in one place. The auditor marks the row resolved where it
+stands, on the task branch, with the task that resolved it and never by
+deleting it — a fix that gets reverted should still have its row — because
+it is the only writer of the indexes and the mark belongs in the commit that
+made it true.
 
 Additional accounts are added by duplicating an `agent-*`/`dind-*` pair in
 `docker/compose/docker-compose.agents.yml` and the matching entry in
@@ -1150,8 +1150,7 @@ want them to outlive a resource deletion), import the split files instead
 of the merged one, as two separate Coolify Compose resources:
 
 1. `docker/compose/docker-compose.yml` (control plane: `collector`, `api`,
-   `board`, `registry-mirror`, plus `vibe-kanban` behind the `kanban`
-   profile).
+   `registry-mirror`, plus `dispatcher` behind the `dispatcher` profile).
 2. `docker/compose/docker-compose.agents.yml` (one `agent-<name>`/
    `dind-<name>` pair per account — scale this file, not individual
    services, when adding accounts).
@@ -1185,7 +1184,8 @@ them are ordered by priority, highest first.
 
 Stage-0 no-quota checks against the real stack ran on 2026-09-16; each
 Known-gaps bullet below cites the result rows that confirmed it. Stage-0
-covered stack plumbing and the Vibe Kanban MCP surface; the checks that
+covered stack plumbing and the Vibe Kanban MCP surface, whose client has
+since been removed (`docs/decisions.md` ADR 59); the checks that
 needed quota came later, on 2026-09-23 — a first end-to-end task (V3),
 with headless permissions and the `/usage` probe answered for free inside
 that same run (V1.2, V1.3), plus cross-account resume (V5.1) and a real
@@ -1234,39 +1234,18 @@ lines naming the refusal, the cool-down, the two recoveries and the
 account each phase ran on, and a resumed arquitecto that opened with
 `git status` and its own log and then re-verified instead of rewriting.
 What is left below is what a no-quota check couldn't settle, and the unit
-tests mock Claude Code, Docker, and Vibe Kanban, so they don't settle it
-either.
+tests mock Claude Code and Docker, so they don't settle it either.
 
 - **Unverified assumptions.** Worth a manual check before building on
   them. The check for each is in [`docs/ROADMAP.md`](docs/ROADMAP.md),
   along with others not listed here (dind isolation, the registry mirror
   and bind mounts — V0.7, not yet run, blocked by V0.1 (no `sysbox-runc`
   on the verification host)):
-  - Vibe Kanban's responses and status names: **not verifiable, and no
-    longer worth verifying.** `vibe_kanban_client.py` speaks the surface
-    measured live against `vibe-kanban@0.1.44` (stdio,
-    `create_issue`/`list_issues`/`get_issue`/`update_issue`, keyed on
-    `issue_id` — V2.1–V2.2), but no issue has ever been created or read
-    back and none can be: the 2026-09-25 re-run found the remote service
-    retired, not gated. `api.vibekanban.com` answers the same SPA shell
-    to `/`, `/api/organizations` and `/health`; `create_issue` fails with
-    `project_id is required` because projects are the feature
-    `vibe-kanban` PR #3387 sunset in 0.1.44; and 0.1.45, the build whose
-    notes promise local projects back, was unpublished from npm two hours
-    after release, leaving 0.1.44 as `latest`. So V2.3–V2.5 have nothing
-    to read an id, a status name or a description off, and V2.6 fails
-    outright — for everyone, not for this machine. The 33 tools the MCP
-    server still advertises are registered unconditionally; advertising
-    is not capability. What the client assumed stays assumed and stops
-    mattering: that ids are server-assigned uuids, and that
-    `update_issue.status` takes a fixed per-project set of names. The
-    seam it sits behind is what survives, and Phase 0 of
-    [`docs/plans/board.md`](docs/plans/board.md) has put a local
-    implementation behind it — `local_board` in `config.yaml`,
-    `LocalBoardClient`, `docs/decisions.md` ADR 1 — so the two prioritized
-    items that waited on `create_issue` no longer wait on this. What that
-    client does is covered by the suite and has not yet run in a real
-    dispatch; V2.6 is the check that would say otherwise. (V2.1–V2.6)
+  - Vibe Kanban's responses and status names: **nothing left to verify.**
+    The Vibe Kanban client and the local board that stood in for it were
+    both removed with the seam they sat behind (`docs/decisions.md`
+    ADR 59), so V2.1–V2.6 in [`docs/ROADMAP.md`](docs/ROADMAP.md) are the
+    record of something that no longer exists, and nothing waits on them.
 
 
 ### Prioritized
@@ -1560,11 +1539,10 @@ either.
      and a revisor that still judges their quality. And the docs gate stays
      limited to contracts: requiring docs on every change piles up docs
      nobody reads.
-   - *Declared debt, mirrored to Vibe Kanban.* The `debt/` index above
-     stays the source of truth. Agents read it filtered by its "where"
-     column, it's versioned with the code, and it doesn't depend on Vibe
-     Kanban, which in this design is a visibility aid and is optional in
-     `config.yaml` besides. The flow:
+   - *Declared debt.* The `debt/` index above is the source of truth.
+     Agents read it filtered by its "where" column, it's versioned with
+     the code, and nothing mirrors it: the board it was once to be copied
+     to was removed (`docs/decisions.md` ADR 59). The flow:
      1. The implementador declares debt in its structured return: whether
         it was introduced or found, what it is, why it stays, the cost of
         leaving it, and what would fix it. Found debt counts only in files
@@ -1579,18 +1557,13 @@ either.
      3. The auditor, as single writer, adds accepted entries to `debt/`.
         When a later spec decides the fix, the entry points to that
         section.
-     4. The dispatcher, not an agent, creates one card per accepted entry
-        with `VibeKanbanClient.create_issue`, which the dispatcher
-        already calls once per task cycle. The card is labeled `debt`, sits in the backlog, and is
-        never dispatched on its own. The entry and the card each record
-        the other's ID. Cards created by agents would be duplicated every
-        round, and an agent that can create tasks can assign itself work.
-     5. A human moving the card out of the backlog approves the work. The
-        task that resolves the debt says so in its return, and on merge
-        the dispatcher marks the entry resolved and closes the card.
-
-     To keep the board from flooding, only accepted debt gets a card, and
-     only after checking the index for a duplicate.
+     4. The dispatcher, not an agent, gives each accepted entry its id,
+        after checking the index for a duplicate, and names it to the
+        auditor. Ids assigned by agents would be assigned again every
+        round. An entry is never dispatched on its own.
+     5. A person decides when a task takes an entry on. The task that
+        resolves the debt says so in its return, and its auditor marks
+        the entry resolved in the index.
    - *Shared learnings that survive a dead phase.* The `learnings/` index
      above already gives a two-level read: agents read the whole index and
      open an entry only when its "when it applies" matches their task.
@@ -1640,8 +1613,7 @@ either.
 
    Its two prerequisites are now in place: agents are given the task
    description, and the dispatcher commits each writer phase, so docs a
-   role writes survive it. The debt cards still need an issue created on
-   a real board, which no run has yet confirmed (V2.6). Not designed:
+   role writes survive it. Not designed:
    the handoff schema, where skill files live (baked into `docker/agent/`
    at build time vs. mounted alongside `.hive`), how a role is told which
    skill applies (for skills that depend on the kind of task rather than
@@ -1833,23 +1805,15 @@ either.
      concurrently, since checkouts under `projects_root` are shared
      across agent containers. The reaper above could hold the lock (or
      skip the task) while an account is still `BUSY` with that task ID.
-   - A second run that hits a live lock marks the task `blocked` in Vibe
-     Kanban, overwriting the `in_progress:<role>` the first run is still
-     working under. Check the lock before writing `in_progress`, or report
-     a distinct status.
-   - A per-call timeout for Vibe Kanban: `VibeKanbanClient._call_async`
-     passes no `read_timeout_seconds` to `ClientSession`/`call_tool`, so a
-     server that accepts the connection and never answers stalls a
-     best-effort status update indefinitely.
    - Logging setup: nothing under `dispatcher/` or `docker/` configures
      logging at all, so the root logger sits at WARNING and all 12
      `logger.info` calls are dropped — the gates' account of what they
      skipped and why among them. V3's entire run log was five lines, and
-     a task that ends blocked says so nowhere: `_update_task_status` only
-     writes to the Kanban card, which with no board returns silently,
-     while the frontmatter still reads `status: pending` and the process
-     exits 0. What does reach stderr (a failed Kanban update, a lock held
-     by another owner, an unparseable `/usage`) arrives through logging's
+     a task that ended blocked said so nowhere. That last part no longer
+     holds: a blocked cycle exits 1 (`docs/decisions.md` ADR 52) and
+     writes `status: blocked` to the task file. What does reach stderr
+     (a lock held by another owner, an unparseable `/usage`) arrives
+     through logging's
      last-resort handler, without timestamps or context.
    - A short "continue where you left off" prompt when resuming after a
      rate limit, instead of re-sending the full role prompt.
@@ -1885,7 +1849,7 @@ either.
    a subagent doesn't keep it out of the parent's context. So a pack isn't
    installed by default; each phase gets only the one its task needs:
    - *Mechanism.* A task carries a profile (`web-frontend`, `e2e`, `3d`,
-     …): from a label a human puts on the Vibe Kanban card or, failing
+     …): from a label a human puts on the task or, failing
      that, from the arquitecto, which picks from a short catalog of
      profile names and one-line descriptions, never the skills
      themselves. The dispatcher records the profile in the `.hive` task
@@ -1929,8 +1893,7 @@ either.
        | prisma or `migrations/` | `migrations` |
 
        An LLM decides only the ambiguous cases, such as a monorepo, inside
-       item 1's mapping phase, and a human approves the result in Vibe
-       Kanban.
+       item 1's mapping phase, and a human approves the result.
      - The file stores a hash of the manifests it read. When dependencies
        change, detection reruns and the change is proposed to a human,
        never applied on its own.
@@ -1987,9 +1950,9 @@ either.
      - A one-off, opt-in design-system bootstrap task per project, like
        item 1's mapping phase. It writes `PRODUCT.md` and `DESIGN.md`
        (from the existing UI on an old project, from the brief on a new
-       one), marks inferred choices unconfirmed, and a human approves it
-       in Vibe Kanban. UI tasks `depends_on` that approval, not just on
-       the pipeline finishing.
+       one), marks inferred choices unconfirmed, and a human approves it.
+       UI tasks `depends_on` that approval, not just on the pipeline
+       finishing.
      - The `web-frontend` profile on the existing roles. The arquitecto
        specifies the UI (empty, loading, and error states; breakpoints;
        which `DESIGN.md` tokens and components). The implementador builds
@@ -2021,8 +1984,9 @@ either.
        parallel dispatch (item 9).
      - Epic decomposition: an arquitecto mode that proposes child tasks,
        each with `depends_on` and a profile, for a human to approve.
-       Whether a board accepts an issue created this way is unverified
-       (V2.6).
+       The split itself is built (`docs/decisions.md` ADR 60, and *The
+       split, when the task is more than one* above); the profile on
+       each child is not.
      - Bug fixing (reproduce before fixing), infra/DevOps, performance,
        and data migrations (a human gate before anything irreversible):
        profiles or task types, not roles.
@@ -2033,7 +1997,7 @@ either.
    (`docker/compose/docker-compose.agents.yml`), or whether the browser
    can run in the account's dind sidecar instead (e.g. the Playwright
    image) and still reach the dev server. Not designed: the
-   profile catalog, the `.ia-harness.yaml` schema, the Vibe Kanban label
+   profile catalog, the `.ia-harness.yaml` schema, the label
    convention, and where packs live (baked under `/opt/packs` vs.
    mounted).
 6. **Observability and hardening.** Acceptable for a single operator on
