@@ -130,7 +130,7 @@ export function DebtEmpty({ served, query }: { served: number; query: string }) 
  *
  * The task link lives on the group heading, which is the only place on this screen
  * that holds a task id: `task_id` is a split of the debt id (`T-011-D1` is task
- * `T-011`, ADR 17) and the `card` column is a *board* card id, not a task id.
+ * `T-011`, ADR 17) and the `card` column is the index's own `card` cell, not a task id.
  */
 function Partition({
   title,
@@ -201,10 +201,11 @@ function DebtTable({ rows }: { rows: DebtEntry[] }) {
             <td className="px-3 py-1.5">{d.what}</td>
             <td className="mono px-3 py-1.5 text-muted-foreground">{d.where}</td>
             <td className="px-3 py-1.5 text-muted-foreground">{d.fix}</td>
-            {/* Text, not a link: this is the id of a card on the Kanban board the
-                dispatcher writes to, and on a harness with none configured every
-                row's is the literal `none`. Linking it to /tasks/$taskId was a
-                guess that the two ids were the same thing. */}
+            {/* Text, not a link: this is the index's `card` column
+                (`docs/debt/README.md`), not a Kanban board card id, and since
+                ADR 59 every row's is the literal `none` because nothing mirrors
+                a row. It was never a task id, so linking it to /tasks/$taskId
+                was a guess. */}
             <td className="mono px-3 py-1.5">
               {d.card && d.card !== "none" ? d.card : <Absent label="no card" />}
             </td>

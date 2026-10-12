@@ -33,8 +33,8 @@ const iso = (secondsAgo: number) => new Date(now() - secondsAgo * 1000).toISOStr
 
 export function mockDebt(): DebtEntry[] {
   // Ids take the `T-0NN-Dn` shape the harness writes, because `task_id` is a split
-  // of the id and not a column (ADR 17), and `card` is a *board* card id — `none`
-  // on a harness with no board configured, which is this one.
+  // of the id and not a column (ADR 17), and `card` is the index's `card` column — written
+  // `none` since ADR 59 because nothing mirrors a row, not a Kanban board card id.
   return [
     {
       id: "T-008-D1",
@@ -97,9 +97,7 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: [],
       description: "Persist hook event ids across harness restarts",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: null,
     },
     {
@@ -109,9 +107,7 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: ["T-002"],
       description: "Clean up worktrees when a task is abandoned",
-      kanban_issue_id: null,
       resolved_debt: ["T-004-D1"],
-      card: null,
       lock_expired: null,
     },
     {
@@ -121,9 +117,7 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: [],
       description: "Add a dry-run flag to bootstrap-project",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: null,
     },
     {
@@ -133,9 +127,7 @@ export function mockTasks(): Task[] {
       heartbeat: iso(940),
       depends_on: ["T-004", "T-011"],
       description: "Surface provider rate-limit payloads into the event stream",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: true,
     },
     {
@@ -145,9 +137,7 @@ export function mockTasks(): Task[] {
       heartbeat: iso(41),
       depends_on: ["T-002"],
       description: "Per-role byte budgets moved into config",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: false,
     },
     {
@@ -160,9 +150,7 @@ export function mockTasks(): Task[] {
       heartbeat: iso(17),
       depends_on: [],
       description: "Pool priority: workers before primary",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: false,
     },
     {
@@ -172,9 +160,7 @@ export function mockTasks(): Task[] {
       heartbeat: iso(6),
       depends_on: ["T-012"],
       description: "Re-probe parked accounts every 60s",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: false,
     },
     {
@@ -184,9 +170,7 @@ export function mockTasks(): Task[] {
       heartbeat: iso(312),
       depends_on: [],
       description: "Gate: fail the phase when tests-in-diff is empty",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: true,
     },
     {
@@ -196,9 +180,7 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: ["T-008"],
       description: "Operator console: live tail transport hardening",
-      kanban_issue_id: null,
       resolved_debt: [],
-      card: null,
       lock_expired: null,
     },
   ];

@@ -27,7 +27,10 @@ export interface DebtEntry {
   what: string;
   where: string;
   fix: string;
-  /** A board card id, not a task id. On a harness with no board it is `none`. */
+  /**
+   * The index's `card` column (`docs/debt/README.md`), not a task id and not
+   * a Kanban board card id. Written `none` since ADR 59: nothing mirrors a row.
+   */
   card: string;
   /** Best-effort, from a `**resolved` prefix on the **what** cell. ADR 17. */
   resolved: boolean;
@@ -176,18 +179,11 @@ export interface Phase {
   handoff: HandoffPayload | null;
 }
 
-/** One card as the board reports it — `dispatcher/vibe_kanban_client.py`'s. */
-export interface KanbanIssue {
-  issue_id: string;
-  title: string;
-  status: string | null;
-  simple_id: string | null;
-}
-
 /**
- * The ten keys `/api/tasks` answers. `body` is not one of them — it is the detail
+ * The eight keys `/api/tasks` answers. `body` is not one of them — it is the detail
  * route's alone (`docs/decisions.md` ADR 21) — and neither is a debt list: that is
- * a filter over `/api/debt` by the task prefix of a debt id (ADR 17).
+ * a filter over `/api/debt` by the task prefix of a debt id (ADR 17). Nor is a
+ * card: the task file is the board's data and nothing mirrors it (ADR 59).
  */
 export interface Task {
   task_id: string;
@@ -196,14 +192,12 @@ export interface Task {
   depends_on: string[];
   heartbeat: string | null;
   description: string;
-  kanban_issue_id: string | null;
   resolved_debt: string[];
-  card: KanbanIssue | null;
   /** The api's judgement against its own expiry window; never re-derived here. */
   lock_expired: boolean | null;
 }
 
-/** `/api/tasks/<task_id>`: the list's ten keys plus the running record. ADR 21. */
+/** `/api/tasks/<task_id>`: the list's eight keys plus the running record. ADR 21. */
 export interface TaskDetail extends Task {
   body: string;
 }
