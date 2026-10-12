@@ -1779,7 +1779,8 @@ tests mock Claude Code and Docker, so they don't settle it either.
    "Run a task" above), so running around the clock still depends on
    external automation. Pieces that would make it hold up unattended:
    - A long-running loop that picks up ready tasks, honoring `depends_on`
-     (stored in the task file today but never checked).
+     (a run already refuses a task whose dependency is not merged; nothing
+     picks the next ready task).
    - Telling quota-blocked apart from failed: a task that finds no
      account available goes `blocked` and stays there. Quota-blocked
      tasks could be retried on a schedule instead of waiting for a human,
