@@ -18,7 +18,8 @@ None: the gate passes whatever the root `README.md` cites.
 `_broken_pointers` greps the docs `PRESENT_DOCS` names plus the records the
 task added to. `PRESENT_DOCS` names `docs/README.md` (`INDEX`), the charter,
 the architecture doc, the business doc, the learnings index and the debt
-directory; `is_record` only answers true for paths under `docs/`. The root
+directory (the debt index alone since `docs/decisions.md` ADR 62, T-038);
+`is_record` only answers true for paths under `docs/`. The root
 `README.md` is neither, so no citation in it is ever checked.
 
 ## Rule

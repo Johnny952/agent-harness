@@ -346,3 +346,14 @@ The revisor accepted it and it is filed as `T-037-D1`. The auditor took the
 fix in `docs/README.md` in the same task, so it is filed resolved, on the
 T-015, T-025 and T-035 precedent of a small doc fix. The revisor raised no
 proposal of its own, so there is no `T-037-D2`.
+
+T-038 resolved `T-036-D1`: `dispatcher/project_docs.py` now names the debt
+index among the present docs and the debt directory among the records
+(`docs/decisions.md` ADR 62), so this table is read whole on every task and
+each entry file, open or resolved, only for the lines a task adds to it.
+That ends the growth the row described: a file filed here no longer adds to
+the present docs' count, a row still does. No phase declared debt and the
+auditor was handed no id. The revisor raised one non-blocking note, that
+`docs/implementations/T-038.md` overstated how much of an entry file its row
+repeats; the auditor ruled it a wording fix in that note, made there, and
+not a row. So there is no `T-038-D1`.
