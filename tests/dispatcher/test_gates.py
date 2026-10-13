@@ -937,3 +937,105 @@ def test_without_a_fork_point_the_present_tense_docs_are_still_read(monkeypatch)
     assert "`docs/architecture.md`" in finding.detail
     assert _scope(worktree) == list(project_docs.PRESENT_DOCS)
     assert not worktree.ran(["git", "diff"])
+
+
+def _crowd(count: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`count` present-doc citations that all resolve: grep's lines, and the
+    paths they name.
+
+    Sized off `gates._POINTER_LIMIT` by every caller rather than against a
+    patched limit, so these tests are about what the limit bounds and still
+    hold when the number moves."""
+    paths = tuple(f"dispatcher/m{i}.py" for i in range(count))
+    return tuple(f"docs/README.md:`{path}`" for path in paths), paths
+
+
+def _asked(worktree: _Worktree) -> set[str]:
+    """Every path the gate handed `ls`, over however many calls it took."""
+    return {
+        path for command in worktree.commands
+        if command[:3] == ["ls", "-d", "--"] for path in command[3:]
+    }
+
+
+def test_a_broken_pointer_on_an_added_record_line_survives_a_full_limit(
+    monkeypatch,
+) -> None:
+    """The present docs alone can fill the limit, and the line a task added to a
+    record is the citation it owes an answer for (ADR 61). So it is checked
+    first, and nothing the present docs hold can push it out."""
+    pointers, present = _crowd(gates._POINTER_LIMIT + 5)
+    worktree = _Worktree(
+        diff=("docs/decisions.md",),
+        added={"docs/decisions.md": ("The rule lives in `dispatcher/nope.py`.",)},
+        pointers=pointers, present=present,
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "`docs/decisions.md` points at `dispatcher/nope.py`" in finding.detail
+
+
+def test_a_broken_pointer_in_a_fresh_record_survives_a_full_limit(monkeypatch) -> None:
+    """The same for a record this task wrote from scratch. grep is handed the
+    present docs first and the fresh record last, so its citations arrive after
+    all of theirs, which is exactly where a limit used to cut."""
+    pointers, present = _crowd(gates._POINTER_LIMIT + 5)
+    worktree = _Worktree(
+        untracked=("docs/implementations/T-036.md",),
+        pointers=(*pointers, "docs/implementations/T-036.md:`dispatcher/nope.py`"),
+        present=present,
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "docs/implementations/T-036.md" in _scope(worktree)
+    assert (
+        "`docs/implementations/T-036.md` points at `dispatcher/nope.py`"
+        in finding.detail
+    )
+
+
+def test_the_log_names_how_many_present_citations_went_unchecked(
+    monkeypatch, caplog,
+) -> None:
+    """The task's own two citations come out of the limit before the present
+    docs get any of it, so five over the limit leaves seven unchecked, and the
+    log says seven: a limit alone does not say how much of the tree nobody
+    looked at."""
+    pointers, present = _crowd(gates._POINTER_LIMIT + 5)
+    worktree = _Worktree(
+        diff=("docs/decisions.md",),
+        added={"docs/decisions.md": (
+            "See `dispatcher/gates.py` and `dispatcher/project_docs.py`.",
+        )},
+        pointers=pointers,
+        present=(*present, "dispatcher/gates.py", "dispatcher/project_docs.py"),
+    ).install(monkeypatch)
+
+    with caplog.at_level("INFO", logger=gates.__name__):
+        report = _run(worktree)
+
+    lines = [r.getMessage() for r in caplog.records if "unchecked" in r.getMessage()]
+    asked = _asked(worktree)
+    assert len(lines) == 1, lines
+    assert "7 present-doc citations went unchecked" in lines[0]
+    assert _findings(report, gates.POINTERS) == []
+    assert {"dispatcher/gates.py", "dispatcher/project_docs.py", present[0]} <= asked
+    assert present[-8] in asked
+    assert not asked & set(present[-7:])
+
+
+def test_a_limit_exactly_filled_logs_nothing(monkeypatch, caplog) -> None:
+    """A tree with exactly as many citations as the limit had every one of them
+    checked, and a line saying the rest went unchecked would be a lie about
+    it."""
+    pointers, present = _crowd(gates._POINTER_LIMIT)
+    worktree = _Worktree(pointers=pointers, present=present).install(monkeypatch)
+
+    with caplog.at_level("INFO", logger=gates.__name__):
+        report = _run(worktree)
+
+    assert report.findings == []
+    assert set(present) <= _asked(worktree)
+    assert not [r for r in caplog.records if "unchecked" in r.getMessage()]

@@ -4275,3 +4275,79 @@ the cost of that one phase. An epic shows as `status: epic` in its task file
 and nowhere else until the console has an epic view. A script reading
 `run-task`'s exit code has a fourth value to handle; the root `README.md`
 does not list it yet (`docs/debt/T-028-D2.md`).
+
+## ADR 61 — the pointers gate checks a task's own citations first and in full; the limit is 1000 and bounds the present docs
+
+**Status:** accepted (T-036, 2026-10-13). Supersedes one paragraph of ADR 35,
+*The limit stays at 400 and now says when it bites*, and nothing else in it:
+the scope, the diff, the fresh records, the two excuses and the note level all
+stand. ADR 35's heading is not struck, because the entry is still in force.
+
+**Context.** `_broken_pointers` in `dispatcher/gates.py` built one list: the
+present docs (`PRESENT_DOCS` in `dispatcher/project_docs.py`) first, then the
+records the task created, then the lines the task added to a record. It
+stopped at `_POINTER_LIMIT = 400` unique (doc, token) pairs, so whatever it
+dropped came off the end, and the end was the task's own citations. Those are
+the only citations a task owes an answer for, and the only breaks the gate has
+caught (ADR 35, *A record this task changed that the diff never saw is one this
+task created*).
+
+ADR 35 kept 400 because the present docs gave 151 pairs. Measured on this tree
+at T-036's base (`32d13e9`): **400 unique pairs, exactly**, over 337 candidate
+paths, from 3820 backticked spans and links. The method is the gate's own, run
+host-side in a throwaway test: the same `grep -r -H -o -E` with
+`_POINTER_PATTERN` over `PRESENT_DOCS`, each span through `pointer_token`,
+unique on (doc, token). `docs/README.md` gives 52, `docs/charter.md` 19,
+`docs/business.md` 18, the learnings index 36 and the debt directory 275 over
+33 files; the architecture doc `PRESENT_DOCS` names does not exist here. The
+debt directory was most of the growth and gains a file per filed debt.
+
+So the loop reached 400 on the last present-doc pair and broke there. On this
+tree, before this change, the gate checked none of a task's own citations: not
+a fresh implementation note, not a line added to this file. It also logged
+"the rest went unchecked" when no present-doc pair had been skipped, because
+the test was `>=` and the line named only the limit.
+
+**Decision.**
+
+*The task's own citations go first and none is dropped.* The pairs from fresh
+records and from the lines a task added to a record are put in the list before
+any present-doc pair, and no limit applies to them. One `grep` still reads the
+present docs and the fresh records together; its pairs are sorted afterwards
+by `project_docs.is_record`, which is true of a fresh record and false of
+every present doc.
+
+*The limit bounds the present docs only, and they get what the task's own left
+of it.* The present docs are given `_POINTER_LIMIT` minus the number of the
+task's own pairs, never less than zero. A present-doc pair past that is not
+checked. The gate goes on reading to count them, since the count costs no
+container call.
+
+*The limit is 1000.* At 400 the present docs fill it today and the next debt
+file would leave some unchecked, chosen by the order `grep -r` walks the debt
+directory, which ADR 35 called "not a gate". The cost is `ls` round trips:
+`_missing` asks in chunks of `_POINTER_CHUNK` (100) paths, and a pair has at
+most two candidate paths. 400 pairs is at most 8 round trips and 1000 is at
+most 20. Measured, this tree's 400 pairs are 337 paths and 4 round trips, the
+same as before this change, and at that ratio 1000 pairs are about 9. The
+limit is kept rather than removed because the gate runs on every project
+between two phases, and a docs tree nobody measured should not buy an unbounded
+number of `docker exec` calls.
+
+*The log line names how many went unchecked.* It is written only when at least
+one present-doc pair was skipped, and it carries that count, the limit and how
+many of the limit the task's own pairs took.
+
+**Consequences.** A broken pointer in a task's own note or added line is
+reported however large the present docs are. The finding lists the task's own
+breaks first, since the report keeps the list's order and shows the first
+eight. A task that cites more than 1000 paths of its own is checked in full and
+leaves the present docs unchecked for that run, with the log line saying so.
+Which present-doc pairs go unchecked past the limit is still `grep`'s walk
+order; the limit moves that out, it does not end it. The lasting answer is the
+scope, a resolved debt file read whole for ever, and that is
+`dispatcher/project_docs.py`'s to change, not this gate's. The wider check
+turned up no new finding: the 5 pairs whose paths are absent
+(`.lovable/project.json` twice, a `.data/` evidence file three times) all sat
+inside the first 400 and are excused as before. Tests are in
+`tests/dispatcher/test_gates.py`; the build is `docs/implementations/T-036.md`.
