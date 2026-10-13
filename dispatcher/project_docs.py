@@ -48,23 +48,29 @@ IMPLEMENTATIONS_DIR = f"{DOCS_DIR}/implementations"
 PLANS_DIR = f"{DOCS_DIR}/plans"
 
 #: The docs whose sentences are claims about the tree as it is now: an index of
-#: what exists, the rulings in force, the architecture, the business, the debt
-#: still open. A pointer in one of these is broken the moment what it names
-#: moves, and whoever moved it is the one who can fix it — so a gate reads
-#: these whole, every task, whether the task touched them or not.
+#: what exists, the rulings in force, the architecture, the business, which
+#: learnings and which debt exist right now. A pointer in one of these is broken
+#: the moment what it names moves, and whoever moved it is the one who can fix
+#: it — so a gate reads these whole, every task, whether the task touched them
+#: or not. The debt counts here through its index alone: the row is the present
+#: claim, and the entry file it links to is a filing (ADR 62).
 PRESENT_DOCS = (
-    INDEX, CHARTER, ARCHITECTURE, BUSINESS, LEARNINGS_INDEX, DEBT_DIR,
+    INDEX, CHARTER, ARCHITECTURE, BUSINESS, LEARNINGS_INDEX, DEBT_INDEX,
 )
 
 #: The docs that record what was true when they were written, and go stale by
 #: design: DECISIONS is appended to and never rewritten, an implementation note
 #: describes a branch that has already landed, a learning names the file it was
-#: learned in, a plan predicts work that has since landed or not (ADR 38). This
-#: project's own rule for a record that disagrees with the tree is to leave the
-#: sentence alone and record the disagreement somewhere newer
+#: learned in, a plan predicts work that has since landed or not (ADR 38), a
+#: debt entry's file was measured at the base of the task that filed it and
+#: stays on disk once the entry is resolved, open and resolved alike (ADR 62).
+#: This project's own rule for a record that disagrees with the tree is to
+#: leave the sentence alone and record the disagreement somewhere newer
 #: (`docs/learnings/a-plans-present-tense-claim-is-a-citation.md`), so the only
 #: lines in here anybody owes an answer for are the ones a task has just added.
-RECORD_DOCS = (DECISIONS, IMPLEMENTATIONS_DIR, LEARNINGS_DIR, PLANS_DIR)
+RECORD_DOCS = (
+    DECISIONS, IMPLEMENTATIONS_DIR, LEARNINGS_DIR, PLANS_DIR, DEBT_DIR,
+)
 
 
 def _named_by(path: str, group: tuple[str, ...]) -> bool:
@@ -83,9 +89,12 @@ def is_record(path: str) -> bool:
 
     PRESENT_DOCS wins where the two overlap: LEARNINGS_INDEX sits inside
     LEARNINGS_DIR and is the one file in there about the present, its rows
-    saying which learnings exist right now. False is not the opposite claim —
-    a path under DOCS_DIR that neither group names is a doc no role was told
-    to write, and nobody owes anything for it either way.
+    saying which learnings exist right now. DEBT_INDEX sits inside DEBT_DIR
+    the same way (ADR 62). The class is the path's alone, never the file's
+    contents, so an entry does not change class when it is resolved. False
+    is not the opposite claim — a path under DOCS_DIR that neither group
+    names is a doc no role was told to write, and nobody owes anything for
+    it either way.
     """
     return not _named_by(path, PRESENT_DOCS) and _named_by(path, RECORD_DOCS)
 

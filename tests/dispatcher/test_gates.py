@@ -776,8 +776,39 @@ def test_a_record_is_read_for_the_lines_this_task_added_not_the_ones_it_kept(
     scope = _scope(worktree)
 
     assert project_docs.CHARTER in scope
-    assert project_docs.DEBT_DIR in scope
+    assert project_docs.DEBT_INDEX in scope
     assert project_docs.DECISIONS not in scope
+
+
+def test_the_debt_index_is_read_whole_and_the_entry_files_are_not(monkeypatch) -> None:
+    """ADR 62: the index rows are the present claim about which debt is open;
+    an entry's file was measured at its own task's base. Reading the whole
+    directory every task is what made the present count grow with every
+    resolved entry (T-036-D1)."""
+    worktree = _Worktree().install(monkeypatch)
+
+    _run(worktree)
+    scope = _scope(worktree)
+
+    assert project_docs.DEBT_INDEX in scope
+    assert project_docs.DEBT_DIR not in scope
+
+
+def test_a_citation_a_task_added_to_a_debt_entry_file_is_still_checked(
+    monkeypatch,
+) -> None:
+    """The task resolving an entry writes its *How it was resolved* into the
+    file, and that line is this task's own claim: the record rule leaves it
+    checked, uncapped, exactly as for a line added to `docs/decisions.md`."""
+    worktree = _Worktree(
+        diff=("docs/debt/T-001-D1.md",),
+        added={"docs/debt/T-001-D1.md": ("Resolved in `dispatcher/nope.py`.",)},
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.POINTERS)
+
+    assert "docs/debt/T-001-D1.md" not in _scope(worktree)
+    assert "`docs/debt/T-001-D1.md` points at `dispatcher/nope.py`" in finding.detail
 
 
 def test_a_citation_a_task_added_to_a_record_is_checked(monkeypatch) -> None:
