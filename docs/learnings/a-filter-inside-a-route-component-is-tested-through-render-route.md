@@ -24,7 +24,9 @@ never sees the query, and the only test file beside the Board mounted
 `renderRoute(Route, path, served)` mounts one route in a memory-history
 router and stubs `fetch`, answering each request from `served` keyed by the
 request's **pathname**, so a query string does not miss. A seeded query
-cache was not chosen because the tail polls from an effect.
+cache was not chosen because the tail polls from an effect. Since T-035 it
+takes a fourth, optional argument for a route whose path has a parameter:
+`docs/learnings/render-route-opens-a-route-on-its-own-path.md`.
 `docs/learnings/a-route-can-export-the-component-its-branch-lives-in.md`
 still says in its *When it applies* that the suite has no harness for a
 route render; that was true when it was written and stopped being true on

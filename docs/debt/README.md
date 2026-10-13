@@ -324,4 +324,9 @@ in a filing note. The revisor raised no proposal of its own, so there is no
 
 T-035 resolved `T-034-D1`: the task page has a test file that reads its
 header, and `PageHeader` has a case with a node as `subtitle`. Its
-arquitecto and implementador declared no debt.
+arquitecto and implementador declared no debt, and the auditor was handed
+no id. Its revisor did raise a proposal of its own: `front/README.md`
+*Writing a test* showed `renderRoute` with three arguments and listed four
+`-` test files. The auditor ruled it resolved rather than filed, on the
+T-015 and T-025 precedent: the fix was one sentence and one file name in a
+doc, and both are now there. So there is no `T-035-D1`.
