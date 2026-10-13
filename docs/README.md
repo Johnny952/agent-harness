@@ -101,7 +101,7 @@ externally-managed.
 
 | Doc | When to open it |
 |---|---|
-| `README.md` (repo root) | The operator's manual: what the stack is, how to bring it up, the known gaps and the prioritized work. Long. Read the section you need, not the file. |
+| `README.md` (repo root) | The operator's manual: what the stack is, how to bring it up, and in *Future work* the known gaps still open and one status line per prioritized item pointing at where it now lives (since T-037). Long. Read the section you need, not the file. |
 | `docs/charter.md` | Before deciding anything the project may already have ruled on: which account is primary, what may spend quota, what a phase owes the docs. The only doc here a human writes and no role may edit — its entries are given, not arguments. |
 | `docs/ROADMAP.md` | The verification log. Every check that has been run against the real stack, its result and its evidence file. Open it before claiming something is or is not verified. |
 | `docs/plans/board.md` | The phased plan for the console, and the spec for each phase — still the specification of what the phases *are*, whoever builds them. Phases 0–3 were built in Flask and Jinja: the local board client, the read API, the read-only screens that replaced the old events dashboard, and the live tail. **Phases 2–3 have no implementation any more**: the console serves those screens and `observability/board/` was deleted (`docs/decisions.md` ADR 32). Phase 1, the read API, stays. Phases 4–6 are specified and unbuilt, and under `docs/charter.md` C-8 they are built in `front/` rather than in Jinja. |
@@ -127,6 +127,7 @@ externally-managed.
 | `docs/plans/research-role.md` | Before letting a phase read the web: an investigador that runs before the arquitecto only when a task asks, with WebSearch and WebFetch and no Bash, writing cited findings that later roles read as tagged external data, never instructions. Priority 3, proposed, not built. |
 | `docs/plans/skills-adoption.md` | Before adopting an outside skill: verdicts on run-skill-generator (taken, in mapping), fewer-permission-prompts, batch, loop and skill-doctor, and on replica-skill's roles: an E2E test skill and gate and a design skill taken, clone and marketing skills not. Priorities 2, 4 and 5, proposed, not built. |
 | `docs/plans/omniroute.md` | Before routing any role to a non-Claude model: OmniRoute as an optional gateway behind a compose profile, per role from `/models`, for API-key providers only and never the subscription logins, with its risks. Priority 7, an idea, not built. |
+| `docs/plans/backlog.md` | Before taking on open work that no plan covers: the prioritized items of the root `README.md` *Future work* that are still open, moved there word for word by T-037 on 2026-10-13, with `[…]` for omitted text. Nothing in it is designed or approved. |
 
 `docs/superpowers/` is vendored upstream material, not this project's
 documentation. Do not treat it as a contract and do not edit it; the pointer
