@@ -4,10 +4,14 @@
  * T-013 ends in it, and what it prints is the operator's only account of what
  * the api actually served. ADR 29, `docs/ui.md` *A value of the wrong shape is
  * named, not rendered and not dropped*.
+ *
+ * `PageHeader` has one case, for the one thing about it a caller can get
+ * wrong without the type checker saying so: `subtitle` takes a node, and the
+ * node is drawn. `docs/debt/T-034-D1.md`.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
-import { Malformed } from "./primitives";
+import { Absent, Malformed, PageHeader } from "./primitives";
 
 afterEach(cleanup);
 
@@ -39,5 +43,17 @@ describe("Malformed", () => {
   it("says only what arrived when it has no key", () => {
     const { container } = render(<Malformed got={7} want="text" />);
     expect(container.textContent).toBe("a number, not text");
+  });
+});
+
+describe("PageHeader", () => {
+  // The task page hands it `Absent` for a task with no description. A string
+  // is what every other screen passes, and a node has to render the same way.
+  it("draws a node handed to it as the subtitle, under the title", () => {
+    const { container } = render(
+      <PageHeader title="T-101" subtitle={<Absent label="no description" />} />,
+    );
+    expect(container.querySelector("h1")?.textContent).toBe("T-101");
+    expect(container.textContent).toBe("T-101no description");
   });
 });

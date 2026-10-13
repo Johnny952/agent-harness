@@ -59,12 +59,17 @@ function stubApi(served: Served) {
 /**
  * Render `route`'s component at `path`, with `served` answering its reads.
  *
+ * `path` is the route's own path. A route with a parameter is opened on a
+ * location that fills it in, which is `at`: `"/tasks/$taskId"` at
+ * `"/tasks/T-101"`. Left out, `at` is `path`, which is right for every
+ * route with no parameter.
+ *
  * `route` is the module's exported `Route`; only its `component` is taken, so the
  * generated tree it is attached to never loads. Resolves once the route has
  * mounted — the screen's first read may still be in flight, so wait on what it
  * draws (`findByText`) rather than on this.
  */
-export async function renderRoute(route: AnyRoute, path: string, served: Served) {
+export async function renderRoute(route: AnyRoute, path: string, served: Served, at = path) {
   const fetchMock = stubApi(served);
   // `retry: false`: a read the test did not serve should be the error state now,
   // not after the default three retries with backoff.
@@ -81,7 +86,7 @@ export async function renderRoute(route: AnyRoute, path: string, served: Served)
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([screenRoute]),
-    history: createMemoryHistory({ initialEntries: [path] }),
+    history: createMemoryHistory({ initialEntries: [at] }),
   });
 
   const result = render(
