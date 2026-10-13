@@ -116,7 +116,9 @@ export function mockTasks(): Task[] {
       owner: null,
       heartbeat: null,
       depends_on: [],
-      description: "Add a dry-run flag to bootstrap-project",
+      // A task filed with no `description.md`: the api serves `null`, and
+      // this row is the fixture of that edge (`docs/debt/T-033-D1.md`).
+      description: null,
       resolved_debt: [],
       lock_expired: null,
     },

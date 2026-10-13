@@ -191,7 +191,11 @@ export interface Task {
   owner: string | null;
   depends_on: string[];
   heartbeat: string | null;
-  description: string;
+  /**
+   * The text of the task's `description.md`, served verbatim. `null` when the
+   * task has none: a render says so with `Absent`, never with an empty cell.
+   */
+  description: string | null;
   resolved_debt: string[];
   /** The api's judgement against its own expiry window; never re-derived here. */
   lock_expired: boolean | null;

@@ -3,7 +3,10 @@
 **When it applies:** you want to assert something about a branch inside a
 `front/src/routes/` screen — which empty state it picks, which banner, which
 sentence — and the obvious route is a route render with a router and a
-`QueryClient`, which this suite has no harness for.
+`QueryClient`, which this suite has no harness for. Since 2026-10-10 it
+has one, `front/src/test/render-route.tsx`: for what no component takes as
+a prop, see
+`docs/learnings/a-filter-inside-a-route-component-is-tested-through-render-route.md`.
 
 **Status:** confirmed — `front/src/routes/index.tsx` has exported `TaskCard`
 beside its `Route` since T-012 and `front/src/routes/-index.test.tsx` renders

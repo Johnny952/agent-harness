@@ -198,7 +198,7 @@ export function PageHeader({
   right,
 }: {
   title: string;
-  subtitle?: string | undefined;
+  subtitle?: ReactNode | undefined;
   right?: ReactNode | undefined;
 }) {
   return (
