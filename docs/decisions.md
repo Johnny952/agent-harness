@@ -4299,8 +4299,8 @@ host-side in a throwaway test: the same `grep -r -H -o -E` with
 `_POINTER_PATTERN` over `PRESENT_DOCS`, each span through `pointer_token`,
 unique on (doc, token). `docs/README.md` gives 52, `docs/charter.md` 19,
 `docs/business.md` 18, the learnings index 36 and the debt directory 275 over
-33 files; `docs/architecture.md` does not exist here. The debt directory was
-most of the growth and gains a file per filed debt.
+33 files; the architecture doc `PRESENT_DOCS` names does not exist here. The
+debt directory was most of the growth and gains a file per filed debt.
 
 So the loop reached 400 on the last present-doc pair and broke there. On this
 tree, before this change, the gate checked none of a task's own citations: not

@@ -511,7 +511,11 @@ def _contracts_without_docs(changed: list[str]) -> list[Finding]:
 #: cite with is one of the two, and both are cheap for grep to find.
 _POINTER_PATTERN = r"`[^`]+`|\]\([^)]+\)"
 _POINTER_CHUNK = 100
-_POINTER_LIMIT = 400
+#: Bounds the present docs only. A task's own citations (a record it wrote
+#: from scratch, the lines it added to one) are checked first and never
+#: dropped; what they took comes out of this before the present docs get any
+#: of it (ADR 61).
+_POINTER_LIMIT = 1000
 _POINTER_REPORT_LIMIT = 8
 _HAS_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,6}$")
 _LS_MISSING = re.compile(r"^ls: (?:cannot access )?'?(.+?)'?: No such file")
@@ -772,24 +776,44 @@ def _broken_pointers(
     raw_pairs = _cited(
         container, workdir, [*project_docs.PRESENT_DOCS, *fresh],
     )
+    # One grep reads both, and what tells them apart afterwards is the layout:
+    # a fresh record is a record and no present doc is. The task's own go
+    # first because they are the ones it owes an answer for, and the limit
+    # used to cut from the end, which is where they were.
+    own = [pair for pair in raw_pairs if project_docs.is_record(pair[0])]
+    present = [pair for pair in raw_pairs if not project_docs.is_record(pair[0])]
     for doc, lines in added.items():
         if not project_docs.is_record(doc):
             continue
         for line in lines:
-            raw_pairs += [(doc, raw) for raw in _POINTER_RE.findall(line)]
+            own += [(doc, raw) for raw in _POINTER_RE.findall(line)]
 
     cited: dict[str, list[str]] = {}
-    for doc, raw in raw_pairs:
+    for doc, raw in own:
+        token = pointer_token(raw)
+        if token is not None:
+            cited.setdefault(f"{doc}\t{token}", _candidates(doc, token))
+    taken = len(cited)
+    # The count goes on past the limit, since counting costs no container
+    # call and "how many nobody looked at" is what the log line is for.
+    unchecked: set[str] = set()
+    for doc, raw in present:
         token = pointer_token(raw)
         if token is None:
             continue
-        cited.setdefault(f"{doc}\t{token}", _candidates(doc, token))
-        if len(cited) >= _POINTER_LIMIT:
-            logger.info(
-                "gates: stopped after %d citations, the rest went unchecked",
-                _POINTER_LIMIT,
-            )
-            break
+        key = f"{doc}\t{token}"
+        if key in cited:
+            continue
+        if len(cited) < _POINTER_LIMIT:
+            cited[key] = _candidates(doc, token)
+        else:
+            unchecked.add(key)
+    if unchecked:
+        logger.info(
+            "gates: %d present-doc citations went unchecked: the limit is %d "
+            "and this task's own took %d",
+            len(unchecked), _POINTER_LIMIT, taken,
+        )
 
     candidates = sorted({path for paths in cited.values() for path in paths})
     if not candidates:
