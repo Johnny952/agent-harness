@@ -196,8 +196,8 @@ tree constrain where that can be:
   reads every other file in that directory as a route, and the knob that
   excuses one is `routeFileIgnorePrefix`, which **defaults to `-`** and is set
   nowhere in this repo — so `-index.test.tsx`, `-learnings.test.tsx`,
-  `-debt.test.tsx` and `-tail.test.tsx` sit beside the routes they test and
-  cost nothing in `routeTree.gen.ts`. Export the renderer from its route
+  `-debt.test.tsx`, `-tail.test.tsx` and `-tasks.test.tsx` sit beside the
+  routes they test and cost nothing in `routeTree.gen.ts`. Export the renderer from its route
   module and render it plainly. For when a component moves to
   `src/components/console/` instead, and what `vite.config.ts` has to do with
   it (nothing): `docs/decisions.md` **ADR 45**, which narrows **ADR 30**.
@@ -213,7 +213,10 @@ count a route passes its empty state, say — render the route whole with
 [`src/test/render-route.tsx`](src/test/render-route.tsx): it stubs `fetch` with
 the `{data, warnings}` envelope per api path, answers 404 for any path not
 served, and mounts the route's component under a memory-history router of its
-own. Wait on what the screen draws (`findByText`), not on the call.
+own. Wait on what the screen draws (`findByText`), not on the call. A route
+whose path has a parameter takes its own path and, as a fourth argument, the
+location to open it on: `renderRoute(Route, "/tasks/$taskId", served,
+"/tasks/T-101")`, as `-tasks.test.tsx` does.
 `docs/debt/T-017-D1.md` *How it was resolved* says why the seam is `fetch` and
 not a seeded query cache.
 
