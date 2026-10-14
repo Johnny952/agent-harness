@@ -5140,3 +5140,12 @@ event, and the console shows less of what happened there. A secret that
 sits in the environment under a name the pattern misses is caught only if
 it has a known shape. The agent image must be rebuilt for the change to
 reach a container; until then they post unredacted.
+
+*Amended after the merge.* As merged, `_redact_text` and the walk in
+`redact` returned any string that began with `[REDACTED:` unchanged, so a
+tool output or prompt that opened with marker-like text carried the rest of
+its secrets through (`"[REDACTED:x] ghp_…"` posted the token). Both early
+returns are removed: every string goes through every rule. That is safe
+because the pair and assignment rules already refuse to match a value that
+is a marker, and no shape matches one, so redacting a marker again leaves it
+as it is. `test_text_starting_with_a_marker_is_still_redacted` covers it.

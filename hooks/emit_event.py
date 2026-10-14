@@ -111,8 +111,6 @@ def _names_secret_file(tool_input) -> bool:
 
 
 def _redact_text(text: str, env_secrets: list[str]) -> str:
-    if text.startswith("[REDACTED:"):
-        return text
     for value in env_secrets:
         text = text.replace(value, _marker("env-secret"))
     for rule, pattern in SHAPES:
@@ -152,8 +150,6 @@ def redact(event, env):
         if isinstance(node, list):
             return [walk(v, section, key) for v in node]
         if not isinstance(node, str):
-            return node
-        if node.startswith("[REDACTED:"):
             return node
         if secret_file and (
             (section == "tool_response" and key not in SECRET_FILE_KEPT_KEYS)

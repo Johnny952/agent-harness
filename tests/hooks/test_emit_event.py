@@ -347,3 +347,21 @@ def test_markers_carry_no_part_of_the_secret(monkeypatch) -> None:
     )
     prompt = body["payload"]["prompt"]
     assert prompt == "[REDACTED:github-token] [REDACTED:anthropic-key] [REDACTED:aws-access-key-id]"
+
+
+def test_text_starting_with_a_marker_is_still_redacted(monkeypatch) -> None:
+    # A string that opens with marker-like text gets no pass: the rest of
+    # it is redacted, and re-redacting a marker leaves it as it is.
+    body = _post_tool(
+        monkeypatch,
+        {"command": f"echo '[REDACTED:x] {GH}'"},
+        {"stdout": f"[REDACTED:x] {ANT}\nTOKEN=[REDACTED:secret-assignment]",
+         "stderr": "", "interrupted": False, "isImage": False},
+    )
+    text = json.dumps(body)
+    assert GH not in text
+    assert ANT not in text
+    assert body["payload"]["tool_response"]["stdout"] == (
+        "[REDACTED:x] [REDACTED:anthropic-key]\n"
+        "TOKEN=[REDACTED:secret-assignment]"
+    )
