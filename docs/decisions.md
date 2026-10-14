@@ -4399,3 +4399,40 @@ rule. The task that resolves the entry reads the file through its row, and the
 row's own where and fix cells stay checked. The count is in
 `docs/implementations/T-038.md`; the tests are in
 `tests/dispatcher/test_project_docs.py` and `tests/dispatcher/test_gates.py`.
+
+## ADR 63 — a landed piece of a README *Prioritized* item is a status line and a pointer, not a kept spec
+
+**Status:** accepted (T-040, 2026-10-14). Taken by T-037 on 2026-10-13 and
+recorded here after the fact; `docs/implementations/T-037.md` *Decisions*,
+item 2, is where it was first written.
+
+**Context.** The root `README.md` *Future work* had a convention of its own,
+stated in item 1's *Documenting is a method* bullet: the spec bullets under a
+*Prioritized* item "are never trimmed when a piece of it lands". Each item kept
+its whole design text however much of it was built. By T-037's base
+(`7cc44ca`) the section ran about 990 lines under an intro that called all of
+it "not designed or implemented", over pieces that were built, planned in
+`docs/plans/` or overtaken by an ADR. A reader could not tell from the README
+which text was still open. T-037 classified every piece against the tree and
+rewrote the section, but its card put this file out of scope, so the decision
+went into that task's own note and nowhere a later task looks for decisions.
+
+**Decision.** The convention is retired. Under each *Prioritized* item the
+README holds one line per piece: the piece, its class in bold (built, planned,
+superseded or open) and, unless it is open, a pointer to where it now lives —
+code, a plan, an ADR or `docs/ROADMAP.md`. The text of a piece that is still
+open, and written nowhere else, lives in `docs/plans/backlog.md`, moved word
+for word under the item's own number and title, and the list's lead points
+there for every open line. Text classified built, planned or superseded is
+copied nowhere; it stays in git (`git show 7cc44ca:README.md`). Item numbers
+and bold titles do not change, so a doc that cites "README item 2" still lands
+on a line that points onward.
+
+**Consequences.** A task that lands a piece of a *Prioritized* item changes
+that piece's README line, its class and its pointer, instead of leaving the
+spec in place beside the built thing. The README's *Future work* stays a status
+list, and `docs/plans/backlog.md` is where open work no plan covers is read.
+This ADR does not decide how a landed piece's text leaves the backlog. Docs
+that described the old section, listed in `docs/implementations/T-037.md`
+*References elsewhere to what moved*, are records or were left as they are;
+none states the convention as current.
