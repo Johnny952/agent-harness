@@ -4436,3 +4436,81 @@ This ADR does not decide how a landed piece's text leaves the backlog. Docs
 that described the old section, listed in `docs/implementations/T-037.md`
 *References elsewhere to what moved*, are records or were left as they are;
 none states the convention as current.
+
+## ADR 64 — a resumed call's tokens and turns are its own; `total_cost_usd` is the session's so far
+
+**Status:** accepted (T-041, 2026-10-14). **Narrows ADR 53 and ADR 54 and
+edits neither**: the log's seventeen keys, its write and the route's group
+shape stand. Answers `docs/debt/T-024-D2.md`.
+
+**Context.** ADR 53 writes one line per `claude` call, a `--resume` retry
+included, and records each field as the CLI gave it. Whether a resumed call's
+figures count that call or the whole session was unknown, so ADR 54 summed
+nothing and said what a per-attempt total would become under each answer. No
+probe was needed to settle it: two real retries are already in the logs. These
+are their attempts, read from `<hive_tasks_dir>/<task_id>/usage/calls.jsonl`
+(`in` `input_tokens`, `cr` `cache_read_input_tokens`, `cc`
+`cache_creation_input_tokens`, `out` `output_tokens`):
+
+| task, role, round | call | in | cr | cc | out | num_turns | total_cost_usd |
+|---|---|---|---|---|---|---|---|
+| T-030 revisor r1 | phase | 24 | 892485 | 127973 | 13396 | 41 | 1.470297 |
+| T-030 revisor r1 | shrink-retry | 4 | 127973 | 2639 | 1906 | 2 | 1.5551396 |
+| T-031 implementador r1 | phase | 8 | 97668 | 37282 | 2827 | 11 | 0.3743616 |
+| T-031 implementador r1 | gate-retry | 14 | 254190 | 11033 | 4261 | 14 | 0.5987396 |
+
+Each pair shares one `session_id`, both lines are `measured: true`, and every
+line's `raw_keys` holds `usage`, `num_turns` and `total_cost_usd`, so the
+fields were the CLI's and not nulls.
+
+**Decision.** Two answers, one per kind of field.
+
+**Tokens and `num_turns` are per call.** A running total never goes down.
+T-030's retry is below its phase on every token column and on `num_turns` (2
+after 41), and on `duration_ms` too (15091 after 151653); T-031's retry has a
+smaller `cache_creation_input_tokens` than its phase (11033 after 37282).
+Neither fits a session total. T-030's cache read, 127973, is exactly the phase's cache
+creation: the context that one resumed call read back, not a sum, which would
+be at least 892485. So the four token fields and `num_turns` of a line are that
+call's, and summing an attempt's lines is correct.
+
+**`total_cost_usd` is cumulative over the session.** T-030's retry is smaller
+than its phase on every token column, yet its `total_cost_usd` is larger
+(1.5551396 after 1.470297). No per-call price can do that, so the figure
+includes the phase's: the phase's 1.470297 plus about 0.0848 for the retry
+itself. The argument needs no price table, only that cost does not fall as
+tokens rise. T-031 fits the same reading (0.3743616, then 0.5987396, about
+0.2244 for the retry) but does not prove it alone, since its retry read more
+cache than its phase. So the cost of an attempt is its **last** line's
+`total_cost_usd`, the cost of one call in it is the difference from the line
+before it in the same session, and a sum of an attempt's cost lines is never
+correct.
+
+**Limits of the evidence.** Two retries, of two kinds, `shrink-retry` and
+`gate-retry`, each the only retry in its attempt. No `review-retry` and no
+attempt with two or more retries has been read. The CLI version is not on the
+line (ADR 53 records none), so "one version" is inferred from both attempts
+running on the same account on 2026-10-12, a few hours apart. `raw_keys` also
+lists `modelUsage`, which the line does not record, so nothing here says how
+the cost splits by model. If a later log contradicts this, with a token field
+that only reads as a session total or a `total_cost_usd` that falls within one
+session, this entry is what is wrong, and a new ADR narrows it.
+
+**What it means for ADR 54's per-attempt total.** Of the two outcomes ADR 54
+foresaw, each field takes the one its kind decided. Token fields and
+`num_turns` may be summed over an attempt's `calls`. Cost is the last call's
+`total_cost_usd`, never a sum. ADR 54's rule for nulls still holds: a null token
+field in any line of the attempt makes that token total null, and a null
+`total_cost_usd` on the last line makes the attempt's cost null, never taken
+from an earlier line. A failover attempt on another account is a new session
+and a new group, so a phase's cost is the sum of its attempts' last lines, and
+a task's is the sum of its phases'.
+
+**Consequences.** No code changes here. The route serves no total yet; adding
+one is a new key on the group under its own ADR, as ADR 54 says, and that task
+now knows what to compute. `docs/debt/T-024-D3.md`'s screen may print such a
+total once it is served. `T-024-D2` is resolved by this entry, and its file
+stays as a record. ADR 53's *Context* line that a retry's `usage` "is that one
+turn, not the phase's" holds, with one call in place of one turn, since a
+retry can take several turns (T-031's took 14). P4 is still not unblocked: a
+correct per-attempt cost from a few tasks is not a median.
