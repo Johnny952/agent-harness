@@ -39,6 +39,12 @@ def _output_tail(proc: subprocess.CompletedProcess, limit: int = 500) -> str:
     return " ".join(tail.split())
 
 
+#: How long past its own timeout a `claude` call may still hold the host: the
+#: in-container `timeout --kill-after=30` fits inside it, and the host-side
+#: backstop on `docker exec` fires at the end of it.
+HOST_BACKSTOP_SECONDS = 60
+
+
 def exec_claude(
     container: str,
     workdir: str,
@@ -126,7 +132,7 @@ def exec_claude(
         # host-side timeout passed to run_docker_exec below is only a backstop
         # in case `docker exec` itself hangs.
         command = ["timeout", "--kill-after=30", str(timeout_seconds), *command]
-    host_timeout = timeout_seconds + 60 if timeout_seconds is not None else None
+    host_timeout = timeout_seconds + HOST_BACKSTOP_SECONDS if timeout_seconds is not None else None
 
     try:
         proc = run_docker_exec(container, workdir, command, timeout=host_timeout)

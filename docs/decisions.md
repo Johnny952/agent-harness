@@ -4888,3 +4888,13 @@ Ctrl+C (`docs/plans/backlog.md` item 3) is untouched: that is a dead
 dispatcher's account, which this lock does not see. Anything that lists
 `state_dir` must keep reading accounts by their own `<name>.json`; the lock
 file is not JSON and is not an account.
+
+*Amended after the merge.* Point 4's last clause was wrong: the probe can
+last `_USAGE_PROBE_TIMEOUT_SECONDS` (120) plus the host backstop
+`docker_exec.HOST_BACKSTOP_SECONDS` (60), longer than
+`heartbeat_ttl_seconds` (120), so a claimed account could be reaped while
+still probing. The reaper's floor is now `heartbeat_ttl_seconds +
+_PROBE_WORST_CASE_SECONDS`, the sum of those two. The probe's cleanup also
+catches `BaseException`, so a Ctrl+C during the probe gives the account back
+instead of leaving it `BUSY`; that write is conditional on `BUSY`, like the
+others in point 5.

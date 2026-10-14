@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # needs the (potentially very long) configured phase timeout, so it gets its
 # own short fixed budget instead of cfg.phase_timeout_seconds.
 _USAGE_PROBE_TIMEOUT_SECONDS = 120
+#: The longest the probe can hold a claimed account: its own timeout plus the
+#: backstop every `claude` call gets on the host.
+_PROBE_WORST_CASE_SECONDS = _USAGE_PROBE_TIMEOUT_SECONDS + docker_exec.HOST_BACKSTOP_SECONDS
 
 
 def _phase_permission_flags(cfg: Config) -> dict:
@@ -173,7 +176,9 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
         # stamps BUSY before it takes its card, and the card it is about to
         # take may still carry the previous phase's heartbeat, so the TTL alone
         # would let one dispatcher reap another's phase inside that window.
-        if now - busy_since <= cfg.heartbeat_ttl_seconds:
+        # The claim now comes before the `/usage` probe, so the window opens
+        # with the probe's worst case (`docs/decisions.md` ADR 71).
+        if now - busy_since <= cfg.heartbeat_ttl_seconds + _PROBE_WORST_CASE_SECONDS:
             continue
         task_id = state_machine.get_current_task(cfg.state_dir, acc.name)
         task = None
@@ -1474,8 +1479,13 @@ def dispatch_phase(
             continue
         try:
             quota_ok = check_quota_ok(cfg, account)
-        except Exception:
-            state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
+        except BaseException:
+            # BaseException, so a Ctrl+C during the probe gives the account
+            # back too: no card carries a heartbeat yet, and the reaper would
+            # otherwise wait out the whole phase timeout to free it.
+            state_machine.set_state(
+                cfg.state_dir, account, AccountState.IDLE, only_from={AccountState.BUSY},
+            )
             raise
         if not quota_ok:
             # check_quota_ok parked the account (PRE_COOLDOWN/COOLING_DOWN).

@@ -11,9 +11,15 @@ import dispatcher.dispatcher as dispatcher_mod
 import dispatcher.state_machine as sm
 from dispatcher.config import AccountConfig
 from dispatcher.docker_exec import ClaudeResult
-from dispatcher.state_machine import AccountState, get_state
+from dispatcher.state_machine import AccountState, get_state, set_state
+from dispatcher.tasks import acquire_lock
 
-from tests.dispatcher.test_dispatcher import _make_config, fake_git  # noqa: F401
+from tests.dispatcher.test_dispatcher import (  # noqa: F401
+    _age_busy_since,
+    _age_heartbeat,
+    _make_config,
+    fake_git,
+)
 
 _HEALTHY = (
     "Current session: 10% used · resets later\n"
@@ -305,3 +311,39 @@ def test_recheck_does_not_undo_a_claim_made_during_the_probe(tmp_path, monkeypat
     assert recovered == []
     assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
     assert sm.get_current_task(cfg.state_dir, "cuenta1") == "T-other"
+
+
+def test_an_interrupted_probe_leaves_the_account_idle(tmp_path, monkeypatch, fake_git) -> None:
+    """Ctrl+C during the probe is not an `Exception`; the claim is still undone."""
+    cfg = _make_config(tmp_path)
+
+    def interrupted(cfg_, account):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dispatcher_mod, "check_quota_ok", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        dispatcher_mod.dispatch_phase(cfg, "T-A", "proj", "arquitecto", "p")
+
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+
+
+def test_the_reaper_floor_covers_a_probe_at_its_worst_case(tmp_path) -> None:
+    """A claim is taken before the probe, and the probe may last its own
+    timeout plus the host backstop; the card it will take still carries an old
+    heartbeat. The floor must outlast that, not just the heartbeat TTL."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", 999)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", cfg.heartbeat_ttl_seconds + 30)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+
+    _age_busy_since(
+        cfg, "cuenta1",
+        cfg.heartbeat_ttl_seconds + dispatcher_mod._PROBE_WORST_CASE_SECONDS + 1,
+    )
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
