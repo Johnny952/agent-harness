@@ -435,8 +435,10 @@ aprobación, y no cambian el alcance aprobado. Van de mayor a menor
 prioridad; en ese orden, el workflow paralelo de arriba cae entre la
 compactación a mitad de fase y los contenedores multiproveedor (ver la nota
 de prioridad más abajo). Antes que todo esto van los huecos conocidos de la
-implementación, que viven solo en `README.md` (*Future work*, *Known gaps*)
-porque son defectos del código, no trabajo de diseño.
+implementación, que se escribieron solo en `README.md` (*Future work*,
+*Known gaps*) porque son defectos del código, no trabajo de diseño. Ya están
+corregidos y su registro es `docs/ROADMAP.md` *Stage 1 — Fix the known gaps,
+then accept*; el único abierto (V0.7) sigue en *Known gaps* del README.
 
 Y antes de los huecos conocidos van las verificaciones de los flujos reales,
 con los contenedores levantados, que están en `docs/ROADMAP.md`. Los tests
@@ -677,11 +679,12 @@ Depende de que los agentes reciban la descripción de la tarea y de que el
 trabajo de cada rol se commitee. Lo primero está resuelto desde el
 2026-09-19: `run-task` toma `--description`/`--description-file`, lo guarda
 en el frontmatter del archivo de tarea y lo mete entero en el prompt de
-cada rol. Lo segundo sigue abierto (ver *Known gaps* en `README.md`). Las tarjetas de deuda dependen además de que
-el MCP de Vibe Kanban permita crear tareas, algo sin verificar. Sin
-diseñar: el esquema del handoff, dónde viven los archivos de skills
-(horneados en `docker/agent/` al construir la imagen vs. montados junto a
-`.hive`), cómo se le indica a un rol qué skill aplica (para las que
+cada rol. Lo segundo también, desde el 2026-09-19: `docs/ROADMAP.md`
+*Stage 1*, **Roles don't see each other's code**. Las tarjetas de deuda
+dependen además de que el MCP de Vibe Kanban permita crear tareas, algo sin
+verificar. Sin diseñar: el esquema del handoff, dónde viven los archivos de
+skills (horneados en `docker/agent/` al construir la imagen vs. montados
+junto a `.hive`), cómo se le indica a un rol qué skill aplica (para las que
 dependen del tipo de tarea y no del rol, ver el bloque de perfiles), el
 formato de las entradas del buzón y dónde vive el almacén de aprendizajes
 compartido entre proyectos.
@@ -1009,9 +1012,10 @@ Queda documentado, sin diseñar en detalle:
   - *Documentador:* no; rompería la regla del Auditor como único escritor
     de los índices.
   - *Integrador:* commitear, rebasear y abrir el PR es código determinista
-    del dispatcher (ver *Known gaps* en `README.md`). Una fase LLM solo
-    paga su cuota resolviendo conflictos de rebase, que crecen con el
-    workflow paralelo.
+    del dispatcher: el commit por fase está construido (`docs/ROADMAP.md`
+    *Stage 1*), y fusionar tras la revisión de una persona está planeado en
+    `docs/plans/review.md`. Una fase LLM solo paga su cuota resolviendo
+    conflictos de rebase, que crecen con el workflow paralelo.
   - *Descomposición de épicas:* un modo del Arquitecto que propone tareas
     hijas, cada una con `depends_on` y perfil, para que un humano las
     apruebe. *Sin verificar:* si el MCP de Vibe Kanban permite crear
@@ -1020,7 +1024,8 @@ Queda documentado, sin diseñar en detalle:
     y *migraciones de datos* (puerta humana antes de cualquier cosa
     irreversible): perfiles o tipos de tarea, no roles.
 
-Depende de las skills por rol y de los mismos *Known gaps*. *Sin
+Depende de las skills por rol y de los mismos huecos conocidos, ya corregidos
+(`docs/ROADMAP.md` *Stage 1*). *Sin
 verificar:* si un dev server más Chromium headless caben en el `mem_limit`
 de 4 GB del contenedor agente (`docker/compose/docker-compose.agents.yml`),
 o si el navegador puede correr en el sidecar dind de la cuenta (p. ej. la

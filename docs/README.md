@@ -129,9 +129,11 @@ externally-managed.
 | `docs/plans/omniroute.md` | Before routing any role to a non-Claude model: OmniRoute as an optional gateway behind a compose profile, per role from `/models`, for API-key providers only and never the subscription logins, with its risks. Priority 7, an idea, not built. |
 | `docs/plans/backlog.md` | Before taking on open work that no plan covers: the prioritized items of the root `README.md` *Future work* that are still open, moved there word for word by T-037 on 2026-10-13, with `[…]` for omitted text. Nothing in it is designed or approved. |
 
-`docs/superpowers/` is vendored upstream material, not this project's
-documentation. Do not treat it as a contract and do not edit it; the pointer
-gate greps all of `docs/` and will cite paths from in there, which is noise.
+`docs/superpowers/` holds this project's founding design spec and its first two
+plans, written before `docs/plans/` existed and kept as records. Do not treat
+them as a contract, and edit one only where your task names it, as T-039 did
+the spec's section 8 pointers; the pointers gate reads none of them
+(`docs/decisions.md` ADR 38, *`docs/superpowers/` stays out*).
 
 ## Working on the dispatcher while it runs you
 
