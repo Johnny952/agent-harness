@@ -236,11 +236,18 @@ def _load_role_model(raw: dict) -> dict[str, str]:
     block = raw.get("role_model") or {}
     if not isinstance(block, dict):
         raise ValueError("role_model must be a mapping of role to model ID")
-    unknown = sorted(set(block) - PHASE_ROLES)
+    if project_docs.MAPPER_ROLE in block:
+        raise ValueError(
+            f"role_model names {project_docs.MAPPER_ROLE}, but its model is set "
+            f"by mapping_model, which wins over role_model; remove it from "
+            f"role_model and set mapping_model instead"
+        )
+    accepted = PHASE_ROLES - {project_docs.MAPPER_ROLE}
+    unknown = sorted(set(block) - accepted)
     if unknown:
         raise ValueError(
             f"role_model names unknown roles {unknown}; "
-            f"roles are: {', '.join(sorted(PHASE_ROLES))}"
+            f"roles are: {', '.join(sorted(accepted))}"
         )
     for role, model in block.items():
         if not isinstance(model, str) or not model.strip():
