@@ -5056,3 +5056,87 @@ dropping back when a later review finds something new. The usage record
 (ADR 53, 68) does not carry the effort a phase ran at, so the fire line is
 where the escalated level is written down; adding effort to the usage record
 is its own change to that contract. Switching model on a signal is not built.
+
+## ADR 74 — the hook redacts secrets before the POST, by fixed rules, and fails closed
+
+**Status:** accepted (T-054, 2026-10-14). Builds the hook-payloads bullet of
+`docs/plans/backlog.md` item 6; the collector, the read api and the rows
+already in `events.db` are unchanged.
+
+**Context.** `hooks/emit_event.py` posted the whole Claude Code hook event as
+`payload`, and the collector stores it as it came: file contents, a `cat
+.env`, a command line carrying a token, a tool's reply. ADR 72 put a token on
+the collector; what an agent sends through it was still in clear. The hook
+is copied alone into the agent image (`docker/agent/Dockerfile`), so whatever
+redacts has to live in that one file, on the standard library.
+
+**Decision.**
+
+1. *Where.* `hooks/emit_event.py` redacts the event before the POST, with
+   every rule, pattern and list in one block of module constants in that
+   file, and a `redact(event, env)` that returns a new structure. There is
+   no setting that turns it off.
+2. *What is a secret name.* One pattern, used by rules 3, 6 and 7: a name
+   containing `token`, `secret`, `password`, `passwd`, `passphrase`,
+   `credential` or `apikey` (any case), or `key` as a word of the name —
+   not touching a letter on either side (`API_KEY`, `key`, `ssh-key`) or
+   camel-cased after a lower-case letter or digit (`apiKey`). `KEYBOARD` and
+   `monkey` are not secret names.
+3. *Environment values* (`env-secret`). The value of `COLLECTOR_TOKEN`, and
+   of every variable whose name is a secret name and whose value is at least
+   8 characters, is replaced wherever it appears in any string, longest
+   value first. Shorter values are skipped: `SOME_KEY=1` would otherwise
+   redact every `1` in every payload.
+4. *Shapes*, in this order: PEM private key blocks, from `-----BEGIN …
+   PRIVATE KEY-----` to its `END` line or, with no `END`, to the end of the
+   string (`private-key`); `sk-ant-…` (`anthropic-key`); `ghp_`, `gho_`,
+   `ghu_`, `ghs_`, `ghr_` and `github_pat_` tokens (`github-token`); AWS
+   access key ids `AKIA…`/`ASIA…` (`aws-access-key-id`); the credential after
+   `Bearer ` (`bearer-token`) and after `Authorization: Basic `
+   (`basic-auth`), keeping the scheme word.
+5. *Whole fields* (`secret-field`): a dict entry whose key is a secret name
+   and whose value is a string has the whole value replaced.
+6. *Pairs in text*: `"name": "value"` where `name` is a secret name
+   (`secret-field`), and `NAME=value` — unquoted up to a space or shell
+   separator, or a quoted string on one line, never `==` — where `NAME` is a
+   secret name (`secret-assignment`). The name and the `=`/`:` stay.
+7. *Secret files* (`secret-file`). When any string in `tool_input` names a
+   file whose base name is `.env`, `.env.*`, `.envrc`, contains `credential`,
+   ends `.pem` or `.key`, starts `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`,
+   is `.netrc`, `.pgpass`, `.npmrc` or `.pypirc`, or contains `secret` and
+   ends `.json`/`.yaml`/`.yml`/`.toml`/`.env`/`.txt`, then every string in
+   `tool_response` except under the keys `type`, `filePath`, `file_path`,
+   `path` and `cwd` is replaced whole, and so is every string in `tool_input`
+   under `content`, `old_string`, `new_string` or `new_source`. Whatever tool
+   it was, Read, Bash `cat`, Grep, Write or Edit.
+8. *The marker* is `[REDACTED:<rule>]`, the rule names above in brackets;
+   never a hash, a length or a prefix of the secret. A value already
+   redacted is not redacted again.
+9. *The shape is kept.* Keys, key order, lists and every non-string value
+   come out as they went in; only strings change, so an event with no
+   secret posts byte-identical to before.
+10. *Fails closed.* If `redact` raises anything, the hook posts the event
+    with `payload` `{"redaction": "[REDACTED:redaction-failed]"}` and the
+    same `event_type`, prints one stderr line naming the exception's type
+    and not its message, and does not fail the hook. The unredacted event is
+    never posted.
+
+**Left out, and why.** A secret in a shape no rule knows is posted as it
+came: another vendor's key (OpenAI, Slack, Google, Stripe), a JWT, a
+password in a URL (`https://user:pass@host`), an AWS secret access key
+standing alone (40 base64 characters look like any hash), a `--token value`
+flag with a space, a YAML `token: value` line in a file not named secret, a
+secret split across two events or encoded. The vendor shapes are the stack's
+own (Anthropic, GitHub, AWS); every extra free-text pattern costs false
+positives on ordinary output and none is matched by an anchor as safe as a
+prefix. No entropy heuristic: it is not deterministic in the sense this
+needs, a threshold picked by hand. The rows already in `events.db` are not
+rewritten.
+
+**Consequences.** Redaction over-reaches by design: `max_tokens=4096`,
+`sort_key=…` or `primary_key=True` in code an agent reads show a marker,
+a file named `credentials.py` or `.env.example` loses its content in the
+event, and the console shows less of what happened there. A secret that
+sits in the environment under a name the pattern misses is caught only if
+it has a known shape. The agent image must be rebuilt for the change to
+reach a container; until then they post unredacted.
