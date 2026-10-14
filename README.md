@@ -811,7 +811,9 @@ read-only `cartografo` that writes that index — `build:` and `test:` in its
 frontmatter, then the stack, the modules, and a table of the docs that
 already exist — plus `docs/architecture.md` and `docs/business.md`, and
 changes no code. It runs on `mapping_model` (sonnet by default, not
-`default_model`, and over any `role_model` entry for it) under `mapping_max_turns` turns, and is cut off there;
+`default_model`), the one key that sets its model: `role_model` refuses a
+`cartografo` entry at load (`docs/decisions.md` ADR 66). It runs under
+`mapping_max_turns` turns and is cut off there;
 whatever it wrote by then is committed, and the next task extends it. It is
 off by default because it spends quota on a phase that ships nothing —
 with it off the docs still grow, one task at a time, from the roles that do
@@ -1303,7 +1305,7 @@ number and title.
    - Effort only on escalation — **superseded**: `docs/decisions.md`
      ADR 57 sets an effort per role.
    - A per-role model map — **built**: `role_model` and `Config.model_for` in
-     `dispatcher/config.py`, `docs/decisions.md` ADR 65.
+     `dispatcher/config.py`, `docs/decisions.md` ADR 65 and ADR 66.
    - Escalating on signals other than the round count — **open**.
 5. **Task profiles: skill packs per kind of task, not new roles.**
    - The profile mechanism, a project's default profiles, and the pack
