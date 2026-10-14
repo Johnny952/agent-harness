@@ -4469,10 +4469,10 @@ fields were the CLI's and not nulls.
 T-030's retry is below its phase on every token column and on `num_turns` (2
 after 41), and on `duration_ms` too (15091 after 151653); T-031's retry has a
 smaller `cache_creation_input_tokens` than its phase (11033 after 37282).
-Neither fits a session total. T-030's cache read, 127973, is exactly the phase's cache
-creation: the context that one resumed call read back, not a sum, which would
-be at least 892485. So the four token fields and `num_turns` of a line are that
-call's, and summing an attempt's lines is correct.
+Neither fits a session total. T-030's cache read, 127973, is exactly the
+phase's cache creation: the context that one resumed call read back, not a
+sum, which would be at least 892485. So the four token fields and `num_turns`
+of a line are that call's, and summing an attempt's lines is correct.
 
 **`total_cost_usd` is cumulative over the session.** T-030's retry is smaller
 than its phase on every token column, yet its `total_cost_usd` is larger
