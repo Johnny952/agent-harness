@@ -80,6 +80,24 @@ export function formatClock(iso: string | null): string {
   return d.toISOString().slice(11, 19);
 }
 
+/** A token or turn count, grouped in thousands, never rounded (`docs/decisions.md` ADR 67). */
+export function formatCount(n: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 20 }).format(n);
+}
+
+/** A served dollar figure at four decimals, no rounding up to cents (ADR 67). */
+export function formatUsd(n: number): string {
+  return `$${n.toFixed(4)}`;
+}
+
+/** A served millisecond figure: ms, then seconds, then minutes and seconds (ADR 67). */
+export function formatMs(n: number): string {
+  if (n < 1000) return `${n} ms`;
+  if (n < 60000) return `${(n / 1000).toFixed(1)} s`;
+  const s = Math.round(n / 1000);
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
 /**
  * Kept with no caller for `formatDuration`'s reason. It formatted both ends of the
  * phase timeline's byte-budget bar, and T-013 removed the bar: `bytes_used` is the

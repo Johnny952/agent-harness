@@ -1,8 +1,8 @@
 /**
  * Typed API client. One function per endpoint.
  *
- * **Seven of them are real.** `listTasks`, `getTask`, `listAccounts`,
- * `listEvents`, `listDebt`, `listPhases` and `listLearnings` read
+ * **Eight of them are real.** `listTasks`, `getTask`, `listAccounts`,
+ * `listEvents`, `listDebt`, `listPhases`, `listLearnings` and `listUsage` read
  * `observability/api/` through the console's own
  * origin — `lib/api/forward.ts` is the server half that holds the bearer, so
  * nothing here carries a credential and every URL below is relative. They resolve
@@ -17,7 +17,7 @@
  * dock. A screen reading one of those says so on itself rather than looking
  * finished; `docs/ui.md` *A region with no route says which route, and when*.
  *
- * Relative URLs mean these seven may only be called from the browser: a relative
+ * Relative URLs mean these eight may only be called from the browser: a relative
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
  * `useEffect` today, and ADR 24 names moving one into a route loader as the case
  * that has to answer the base-URL question again.
@@ -33,6 +33,7 @@ import type {
   QueuedAction,
   Task,
   TaskDetail,
+  UsageGroup,
 } from "./types";
 import { mockActions, mockThreads } from "./mock/fixtures";
 
@@ -59,8 +60,8 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  */
 const actionBackendDown = false;
 
-/* ── The seven wired reads ────────────────────────────────────────────────
- * One boundary function, and every one of the seven goes through it: ADR 7's
+/* ── The eight wired reads ────────────────────────────────────────────────
+ * One boundary function, and every one of the eight goes through it: ADR 7's
  * "one boundary function per call", inherited by the console under ADR 16.
  */
 
@@ -225,6 +226,18 @@ export function listPhases(taskId?: string): Promise<ApiResult<Phase[]>> {
  */
 export function listLearnings(): Promise<ApiResult<LearningEntry[]>> {
   return readEnvelope<LearningEntry[]>("/api/learnings");
+}
+
+/**
+ * What one task's `claude` calls cost, grouped by attempt.
+ *
+ * `null` is a log that exists and could not be read, with the reason in
+ * `warnings`; `[]` is a task that made no call. No mapping, no sort and nothing
+ * summed: the groups and their figures are the api's (`docs/decisions.md` ADR 54,
+ * ADR 64).
+ */
+export function listUsage(taskId: string): Promise<ApiResult<UsageGroup[] | null>> {
+  return readEnvelope<UsageGroup[] | null>(`/api/tasks/${encodeURIComponent(taskId)}/usage`);
 }
 
 /* ── Still fixtures: tier 3, and the ones that never land ───────────────── */

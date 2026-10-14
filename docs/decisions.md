@@ -4589,3 +4589,47 @@ misconfiguration the load-time check was added to prevent.
 gets a load error where they had a no-op, and moves the value to
 `mapping_model`. `config.example.yaml` and the root `README.md` still describe
 ADR 65's set until the next sub-task of T-045 updates them.
+
+## ADR 67 — the usage region prints figures in fixed formats and the served call names verbatim
+
+**Status:** accepted (T-046, 2026-10-14). Decides the two choices
+`docs/plans/front.md` *The usage task: what a task's `claude` calls cost*
+binds to the Usage task. Narrows nothing: ADR 54 and ADR 64 stand, and the
+console still sums nothing.
+
+**Context.** The card leaves two things open: how a figure is formatted, and
+whether `call_kinds` and a line's `call` are relabelled on screen. It says
+both are one-screen choices unless a second screen shows spend, and only then
+belong in `docs/ui.md`. One screen shows spend, so they are recorded here
+and in `docs/implementations/T-046.md`, and `docs/ui.md` is not changed.
+
+**Decision.**
+
+- **Tokens and turns** print as whole numbers grouped by thousands with a
+  comma, in the `en-US` format whatever the browser's locale: `1,234,567`.
+  The locale is fixed so a test, a screenshot and an operator read the same
+  string. Nothing is abbreviated (`1.2M`): an abbreviation is rounding, and a
+  rounded token count cannot be checked against the log.
+- **Dollars** print as `$` and four decimals: `$0.0421`. Two decimals would
+  print a cached retry's sub-cent cost as `$0.00`, which reads as a recorded
+  zero (`docs/ui.md` *Absent, empty and broken are three different things*).
+- **`duration_ms`** prints as `N ms` under one second, seconds with one
+  decimal under a minute (`12.3 s`), and minutes and whole seconds above
+  (`4m 7s`, the shape `formatAge` already prints).
+- **`recorded_at`** prints through `formatClock`, the UTC clock time the phase
+  timeline uses for `saved_at`, with the served string as its `title`.
+- **A null field** is `Absent`; **a value that is not a finite number** where
+  a figure belongs is `Malformed` wanting a number. Neither is ever zero.
+- **`call_kinds` and `call` print the served string verbatim**, in monospace:
+  `phase`, `gate-retry`, `shrink-retry`, `review-retry`. The vocabulary is the
+  dispatcher's (`dispatcher/dispatcher.py`, the `recorder.record` calls), a
+  relabel table would be a second copy of that list in `front/` that drifts
+  when a kind is added, and an unknown kind would need the verbatim fallback
+  anyway. The strings are already readable.
+
+**Consequences.** The three formatters live in `front/src/lib/format.ts`
+beside `formatClock` and take a number already checked to be one; the guard
+is at the render, on `docs/ui.md` *A value of the wrong shape is named, not
+rendered and not dropped*. A second screen that shows spend moves these
+rules into `docs/ui.md` as one entry and cites this ADR as where they came
+from. A new call kind in the dispatcher needs no console change.

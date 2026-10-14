@@ -42,6 +42,14 @@ export const learningsQuery = queryOptions({
   refetchInterval: POLL_MS * 2,
 });
 
+/** An append-only log of finished calls: it moves slower than a phase does. */
+export const usageQuery = (taskId: string) =>
+  queryOptions({
+    queryKey: ["usage", taskId],
+    queryFn: () => api.listUsage(taskId),
+    refetchInterval: POLL_MS * 2,
+  });
+
 export const actionsQuery = queryOptions({
   queryKey: ["actions"],
   queryFn: () => api.listActions(),

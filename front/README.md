@@ -13,8 +13,9 @@ it duplicated against the real api; those four now do, so it was deleted on
 2026-10-04 (`docs/decisions.md` ADR 32). It is no longer the tie-breaking
 reference, and `git log` is where it went.
 
-**Seven reads are live.** The board, the task detail, the pool, the debt index,
-the live tail, the task detail's phase timeline and the learnings inbox read
+**Eight reads are live.** The board, the task detail, the pool, the debt index,
+the live tail, the task detail's phase timeline, the learnings inbox and the
+task detail's usage region read
 `observability/api/` through
 this console's own server half; every other screen still reads mock fixtures, and
 says so on itself where a region is waiting for a route. See *What is real and
@@ -100,7 +101,7 @@ the Node entry — a static build behind nginx cannot serve it.
   `src/lib/api/forward.ts` is the whitelist that presents it. `src/server.ts` calls
   the forward before SSR — that import is also the boot-time refusal, so do not
   make it lazy. `src/start.ts`'s CSRF middleware filters
-  `handlerType === "serverFn"`; the forward is not a server function and all seven
+  `handlerType === "serverFn"`; the forward is not a server function and all eight
   calls are reads, so its comment stays true. A write that ever goes this way
   re-opens that sentence.
 - **Query keys and intervals are central.** `src/lib/api/queries.ts` holds

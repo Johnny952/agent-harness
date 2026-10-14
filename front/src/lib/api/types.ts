@@ -180,6 +180,47 @@ export interface Phase {
 }
 
 /**
+ * One `claude` call of a task, as `/api/tasks/<id>/usage` serves it
+ * (`docs/decisions.md` ADR 53, ADR 54, ADR 64). An annotation of what a well-formed
+ * log line holds, guarded at the render rather than trusted
+ * (`docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md`).
+ * `total_cost_usd` is the session's cost *so far* and is never a call's own.
+ */
+export interface UsageLine {
+  task_id: string;
+  role: string;
+  round: number | null;
+  account: string;
+  call: string;
+  session_id: string | null;
+  recorded_at: string;
+  measured: boolean;
+  raw_keys: string[];
+  is_error: boolean | null;
+  num_turns: number | null;
+  duration_ms: number | null;
+  total_cost_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+}
+
+/** One dispatch attempt of one role: the api's group block (ADR 54), same caveat. */
+export interface UsageGroup {
+  task_id: string;
+  role: string;
+  round: number | null;
+  account: string;
+  calls: UsageLine[];
+  call_count: number;
+  call_kinds: string[];
+  measured_calls: number;
+  unmeasured_calls: number;
+  phase_call: UsageLine | null;
+}
+
+/**
  * The eight keys `/api/tasks` answers. `body` is not one of them — it is the detail
  * route's alone (`docs/decisions.md` ADR 21) — and neither is a debt list: that is
  * a filter over `/api/debt` by the task prefix of a debt id (ADR 17). Nor is a

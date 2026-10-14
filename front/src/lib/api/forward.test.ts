@@ -89,7 +89,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/threads"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/threads is not one of the seven routes the console forwards.",
+      error: "/api/threads is not one of the eight routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -123,6 +123,40 @@ describe("the whitelist", () => {
     const fetchMock = stubApi();
     await forwardApiRequest(get("/api/learnings?project=some-other-project"));
     expect(target(fetchMock)).toBe(`${BASE}/api/learnings?project=ia-harness`);
+  });
+});
+
+describe("the task usage route", () => {
+  it("forwards a bare id", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/T-014/usage"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/T-014/usage`);
+  });
+
+  it("copies no query parameter: the api takes none", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/T-014/usage?x=1"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/T-014/usage`);
+  });
+
+  it("is one segment under the task: a path below it is not this route", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/tasks/T-014/usage/x"));
+    expect(answer?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("404s an id it cannot read, without asking the api", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/tasks/%zz/usage"));
+    expect(answer?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("re-encodes an id rather than passing it through", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/..%2f..%2fadmin/usage"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/..%2F..%2Fadmin/usage`);
   });
 });
 
