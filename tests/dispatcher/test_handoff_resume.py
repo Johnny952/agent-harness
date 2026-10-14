@@ -10,7 +10,7 @@ import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import handoff
 from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import AccountState, get_state
-from tests.dispatcher.test_dispatcher import _make_config, fake_git  # noqa: F401 (autouse)
+from tests.dispatcher.test_dispatcher import _make_config, _split_ctx, fake_git  # noqa: F401 (autouse)
 
 _HANDOFF = {"status": "done"}
 
@@ -150,3 +150,34 @@ def test_dispatch_phase_succeeds_once_the_resume_brings_the_handoff(tmp_path, mo
     assert result.success is True
     assert prompts[-1] == handoff.continue_prompt() and len(prompts) == 2
     assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE
+
+
+def test_every_call_of_a_phase_runs_on_its_roles_model(tmp_path, monkeypatch):
+    """`role_model` reaches `--model` on the phase's first call and on the
+    resume that brings its handoff, so one phase never spans two models
+    (`docs/decisions.md` ADR 65)."""
+    cfg = _make_config(tmp_path, role_model={"implementador": "claude-sonnet-5-5"})
+    models = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(
+                session_id=None,
+                result_text=(
+                    "Current session: 10% used · resets later\n"
+                    "Current week (all models): 10% used · resets later"
+                ),
+                raw={},
+            )
+        models.append((resume_session_id, kwargs["model"]))
+        return _handed_off() if resume_session_id else _prose()
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=1)
+
+    assert models == [(None, "claude-sonnet-5-5"), ("sess-1", "claude-sonnet-5-5")]

@@ -4514,3 +4514,48 @@ stays as a record. ADR 53's *Context* line that a retry's `usage` "is that one
 turn, not the phase's" holds, with one call in place of one turn, since a
 retry can take several turns (T-031's took 14). P4 is still not unblocked: a
 correct per-attempt cost from a few tasks is not a median.
+
+## ADR 65 — every phase runs on the model the config names, per role
+
+**Status:** accepted (T-044, 2026-10-14). Lands refinement (1) of
+`docs/plans/backlog.md` item 4; mirrors ADR 57, which did the same for the
+effort, and edits neither ADR 57 nor the escalation.
+
+**Context.** Every phase but the cartografo ran on `default_model`, so the
+arquitecto's planning and the implementador's execution spent the same model.
+The backlog item asked for a per-role override and said to make the split
+data-driven first, from item 2's per-phase usage records. Those records exist
+(ADR 53, ADR 64), but a few tasks' worth of them is not a median, and the
+operator wants the split now: implementador and revisor on
+`claude-sonnet-5-5`, arquitecto and auditor on `claude-opus-5-5`, set in the
+operator's own `config.yaml`, not in this repo.
+
+**Decision.**
+
+- **`role_model`** maps a role to the model ID its phases run on. Its keys are
+  the phase roles (`config.PHASE_ROLES`), the same set `role_effort` takes. It
+  is optional: absent or empty, every phase runs as before.
+- **The precedence** is the phase's own model, then `role_model`, then
+  `default_model`. The only phase with its own model is the cartografo, whose
+  `mapping_model` is passed explicitly and still wins, so a `role_model` entry
+  for it is accepted and has no effect. `Config.model_for(role)` is the one
+  place the last two steps live, and `run_phase` is the one place it is read.
+- **One model per phase.** `dispatch_phase` passes the model it was given to
+  every call the phase makes — the first one, the handoff resumes (ADR 58),
+  the shrink retry, the gate and review retries — so a phase never spans two
+  models.
+- **The escalation is untouched.** Past `escalate_effort_after_round` a round
+  runs at `escalated_effort` (ADR 57) on the same model as the round before;
+  switching model on escalation is not part of this.
+- **Checked at load.** An unknown role is refused, naming the valid roles, so
+  a misspelt role cannot run on `default_model` without a word. A value that
+  is not a non-empty string is refused. Which model IDs exist is the CLI's to
+  say, not the config's.
+
+**Consequences.** The split is the operator's judgment, made ahead of item 2's
+usage records rather than derived from them; those records are what will say
+whether it holds, and changing it is a config edit. Which model *ran* is still
+recorded nowhere (the `model` row of the table in ADR 27 holds): `role_model`
+is the configured model, and serving it, or a Role models screen, is a later
+task's. Refinement (2) of the backlog item, escalating on signals other than
+the round count, stays open.

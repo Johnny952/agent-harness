@@ -1961,7 +1961,7 @@ def run_phase(
                 harness=ctx.harness,
                 round_num=round_num, max_turns=max_turns, note=note,
             ),
-            model=model or cfg.default_model,
+            model=model or cfg.model_for(role),
             effort=effort,
             round_num=round_num,
             max_turns=max_turns,

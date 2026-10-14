@@ -3336,6 +3336,68 @@ def test_run_task_cycle_maps_a_project_that_has_no_index_first(tmp_path, monkeyp
     assert calls[1]["max_turns"] is None
 
 
+def test_run_task_cycle_runs_each_role_on_the_model_the_config_names(tmp_path, monkeypatch) -> None:
+    """`role_model` reaches the `--model` each phase is dispatched with, and a
+    role it does not name keeps `default_model` (`docs/decisions.md` ADR 65)."""
+    cfg = _make_config(
+        tmp_path, default_model="claude-opus-5-5",
+        role_model={"implementador": "claude-sonnet-5-5", "revisor": "claude-sonnet-5-5"},
+    )
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert {c["role"] for c in calls} >= {"arquitecto", "implementador", "revisor", "auditor"}
+    for call in calls:
+        expected = (
+            "claude-sonnet-5-5" if call["role"] in ("implementador", "revisor")
+            else "claude-opus-5-5"
+        )
+        assert call["model"] == expected, call["role"]
+
+
+def test_the_mappers_own_model_wins_over_role_model(tmp_path, monkeypatch) -> None:
+    """The cartografo passes `mapping_model` explicitly, and an explicit model
+    is the first thing the precedence looks at."""
+    cfg = _make_config(
+        tmp_path, mapping_enabled=True, mapping_model="haiku",
+        role_model={project_docs.MAPPER_ROLE: "claude-sonnet-5-5", "arquitecto": "claude-sonnet-5-5"},
+    )
+    _fake_index(monkeypatch, exists=False)
+    calls = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _recording_dispatch_phase(calls))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert calls[0]["role"] == project_docs.MAPPER_ROLE
+    assert calls[0]["model"] == "haiku"
+    assert calls[1]["role"] == "arquitecto"
+    assert calls[1]["model"] == "claude-sonnet-5-5"
+
+
+def test_an_escalated_round_keeps_the_roles_model(tmp_path, monkeypatch) -> None:
+    """The escalation changes the effort, never the model."""
+    cfg = _make_config(
+        tmp_path, escalate_effort_after_round=1, escalated_effort="max",
+        role_model={"implementador": "claude-sonnet-5-5"},
+    )
+    seen = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, model=None, effort=None, **kwargs):
+        seen.append((model, effort))
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="ok", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=1)
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=2)
+
+    assert seen == [("claude-sonnet-5-5", cfg.effort_for("implementador")), ("claude-sonnet-5-5", "max")]
+
+
 def test_run_task_cycle_does_not_remap_a_project_that_has_an_index(tmp_path, monkeypatch) -> None:
     """The map is written once and extended by the roles that follow it."""
     cfg = _make_config(tmp_path, mapping_enabled=True)
@@ -5791,6 +5853,15 @@ def test_effort_for_escalation_wins_over_the_role_level(tmp_path) -> None:
     assert cfg.effort_for("implementador", round_num=2) == "low"
     assert cfg.effort_for("implementador", round_num=3) == "max"
     assert cfg.effort_for("cartografo") == "medium"
+
+
+def test_model_for_falls_back_to_the_default_model(tmp_path) -> None:
+    cfg = _make_config(
+        tmp_path, default_model="claude-opus-5-5",
+        role_model={"implementador": "claude-sonnet-5-5"},
+    )
+    assert cfg.model_for("implementador") == "claude-sonnet-5-5"
+    assert cfg.model_for("auditor") == "claude-opus-5-5"
 
 
 # --- merged recorded, dependencies gated, epics closed, blocked marked ---------
