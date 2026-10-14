@@ -946,6 +946,79 @@ def dirty_paths(container: str, workdir: str) -> list[str]:
     )
 
 
+def _under(path: str, roots: Sequence[str]) -> bool:
+    """Whether `path` is one of `roots` or sits below one of them."""
+    return any(
+        path == root.rstrip("/") or path.startswith(f"{root.rstrip('/')}/")
+        for root in roots
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeftBehind:
+    """What a scoped commit left in the worktree, uncommitted."""
+
+    outside: list[str]
+    excluded: list[str]
+
+    @property
+    def paths(self) -> list[str]:
+        return [*self.outside, *self.excluded]
+
+
+def left_behind(
+    container: str,
+    workdir: str,
+    excludes: Sequence[str] | None = None,
+) -> LeftBehind:
+    """The paths still dirty after a commit, split into excluded and outside.
+
+    Taken after the commit, so everything dirty is by definition what the
+    commit did not carry. Best-effort like `dirty_paths`.
+    """
+    roots = list(excludes or ())
+    excluded: list[str] = []
+    outside: list[str] = []
+    for path in dirty_paths(container, workdir):
+        (excluded if _under(path, roots) else outside).append(path)
+    return LeftBehind(outside=outside, excluded=excluded)
+
+
+def diff_of(container: str, workdir: str, paths: Sequence[str]) -> str:
+    """A `git apply`-able patch of exactly `paths`, untracked files included.
+
+    Raises RuntimeError when git cannot produce it: the caller records
+    best-effort and treats that as a warning.
+    """
+    if not paths:
+        return ""
+    tracked = run_docker_exec(
+        container, workdir,
+        ["git", "diff", "--binary", "HEAD", "--", *paths], env=_GIT_ENV,
+    )
+    if tracked.returncode != 0:
+        raise RuntimeError(f"git diff failed: {tracked.stderr}")
+    listing = run_docker_exec(
+        container, workdir,
+        ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *paths],
+        env=_GIT_ENV,
+    )
+    if listing.returncode != 0:
+        raise RuntimeError(f"git ls-files failed: {listing.stderr}")
+    chunks = [tracked.stdout]
+    for name in (n for n in listing.stdout.split("\0") if n):
+        proc = run_docker_exec(
+            container, workdir,
+            ["git", "diff", "--binary", "--no-index", "--", "/dev/null", name],
+            env=_GIT_ENV,
+        )
+        # `--no-index` exits 1 when the files differ, which is the whole point.
+        if proc.returncode not in (0, 1):
+            raise RuntimeError(f"git diff of {name} failed: {proc.stderr}")
+        chunks.append(proc.stdout)
+    return "".join(chunks)
+
+
 def _warn_changes_outside(container: str, workdir: str, scope: Sequence[str]) -> None:
     """Name what a scoped commit is about to leave behind, and leave it.
 

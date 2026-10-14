@@ -1538,6 +1538,7 @@ def dispatch_phase(
                     paths=project_docs.commit_scope(role),
                     excludes=project_docs.commit_excludes(),
                 )
+                _record_left_behind(cfg, container, workdir, task_id, role, round_num)
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives
             # restart) because of an exception between claiming it and
@@ -1706,6 +1707,65 @@ def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
         logger.info("task %s: removed review worktrees %s", task_id, ", ".join(removed))
 
 
+def _record_left_behind(
+    cfg: Config,
+    container: str,
+    workdir: str,
+    task_id: str,
+    role: str,
+    round_num: int | None,
+) -> None:
+    """Keep what a scoped commit left uncommitted, and never fail the phase.
+
+    The worktree goes at merge and the log scrolls, so the paths and their
+    diff are saved under the task's hive directory (ADR 70). Nothing is
+    committed here.
+    """
+    try:
+        left = docker_exec.left_behind(container, workdir, project_docs.commit_excludes())
+        if not left.paths:
+            context_transfer.clear_left_behind(cfg.hive_tasks_dir, task_id, role)
+            return
+        patch = docker_exec.diff_of(container, workdir, left.paths)
+        context_transfer.save_left_behind(
+            cfg.hive_tasks_dir, task_id, role, round_num,
+            left.outside, left.excluded, patch,
+        )
+    except Exception as exc:
+        logger.warning(
+            "task %s: could not record what the %s phase left uncommitted: %s; "
+            "the phase carries on",
+            task_id, role, exc,
+        )
+        return
+    for line in left_behind_report(cfg, task_id, role):
+        logger.warning("%s", line)
+
+
+def left_behind_report(cfg: Config, task_id: str, role: str | None = None) -> list[str]:
+    """One line per phase of this task that left paths out of its commit."""
+    lines: list[str] = []
+    for record in context_transfer.read_left_behind(cfg.hive_tasks_dir, task_id):
+        if role is not None and record.get("role") != role:
+            continue
+        outside = [str(p) for p in record.get("outside") or []]
+        excluded = [str(p) for p in record.get("excluded") or []]
+        clauses = []
+        if outside:
+            clauses.append(f"outside its scope: {', '.join(outside)}")
+        if excluded:
+            clauses.append(f"excluded: {', '.join(excluded)}")
+        rnd = record.get("round")
+        when = f" (round {rnd})" if rnd is not None else ""
+        lines.append(
+            f"task {task_id}: the {record.get('role')} phase{when} left "
+            f"{len(outside) + len(excluded)} path(s) uncommitted, NOT on the branch - "
+            f"{'; '.join(clauses)} - their diff is in {record.get('patch')}; "
+            "apply it by hand if it is wanted"
+        )
+    return lines
+
+
 def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     """Offer a finished task's branch to the branch the project sits on.
 
@@ -1723,6 +1783,8 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
         return False
     project_dir = f"{cfg.projects_root}/{slug}"
     owner = docker_exec.read_owner(container, project_dir)
+    for line in left_behind_report(cfg, task_id):
+        logger.warning("%s", line)
     try:
         outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
     except Exception as exc:

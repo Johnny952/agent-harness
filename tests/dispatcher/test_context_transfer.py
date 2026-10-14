@@ -833,6 +833,47 @@ def test_append_usage_does_not_show_up_as_a_handoff_or_a_task(tmp_path: Path) ->
     assert list_task_ids(hive_dir) == []
 
 
+def test_left_behind_round_trips_paths_and_patch_content(tmp_path: Path) -> None:
+    import dispatcher.context_transfer as ct
+
+    patch_path = ct.save_left_behind(
+        str(tmp_path), "task-1", "auditor", 2, ["tests/x.py"], ["docs/charter.md"], "PATCH\n",
+    )
+
+    assert Path(patch_path).read_text() == "PATCH\n"
+    [record] = ct.read_left_behind(str(tmp_path), "task-1")
+    assert record["role"] == "auditor" and record["round"] == 2
+    assert record["outside"] == ["tests/x.py"]
+    assert record["excluded"] == ["docs/charter.md"]
+    assert record["patch"] == patch_path
+
+
+def test_clear_left_behind_removes_both_files_and_tolerates_none(tmp_path: Path) -> None:
+    import dispatcher.context_transfer as ct
+
+    ct.clear_left_behind(str(tmp_path), "task-1", "auditor")
+    patch_path = ct.save_left_behind(str(tmp_path), "task-1", "auditor", 1, ["a"], [], "p")
+
+    ct.clear_left_behind(str(tmp_path), "task-1", "auditor")
+
+    assert not Path(patch_path).exists()
+    assert ct.read_left_behind(str(tmp_path), "task-1") == []
+
+
+def test_read_left_behind_skips_a_file_that_is_not_a_record(tmp_path: Path) -> None:
+    import dispatcher.context_transfer as ct
+
+    assert ct.read_left_behind(str(tmp_path), "task-1") == []
+    ct.save_left_behind(str(tmp_path), "task-1", "auditor", 1, ["a"], [], "p")
+    directory = Path(ct.left_behind_record_path(str(tmp_path), "task-1", "x")).parent
+    (directory / "bad.json").write_text("{not json")
+    (directory / "list.json").write_text("[1]")
+
+    records = ct.read_left_behind(str(tmp_path), "task-1")
+
+    assert [r["role"] for r in records] == ["auditor"]
+
+
 def _write_usage_bytes(hive_dir: str, task_id: str, data: bytes) -> None:
     path = usage_log_path(hive_dir, task_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)

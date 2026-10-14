@@ -24,6 +24,7 @@ from dispatcher.dispatcher import (
     cleanup_container,
     container_for,
     file_saved_split,
+    left_behind_report,
     record_merge,
     run_single_phase,
     run_task_cycle,
@@ -504,6 +505,8 @@ def main() -> None:
         _require_migrated(cfg, parser)
         description = _resolve_description(args, cfg, parser)
         outcome = run_task_cycle(cfg, args.task_id, args.project, description=description)
+        for line in left_behind_report(cfg, args.task_id):
+            print(line, file=sys.stderr)
         # Before ADR 52 every one of these exited 0, so a cycle that never got
         # an account looked, to whatever ran it, like one that shipped.
         if outcome is CycleOutcome.HELD:
@@ -553,6 +556,8 @@ def main() -> None:
             final=args.final,
             note=args.note,
         )
+        for line in left_behind_report(cfg, args.task_id, role=args.role):
+            print(line, file=sys.stderr)
         if result is None:
             # Same contract as merge-task and release-account: a phase that did
             # not land is an exit code, so the operator driving a cycle by hand
@@ -599,6 +604,15 @@ def main() -> None:
             parser.error("no accounts configured: nothing to run the merge in")
         project_dir = f"{cfg.projects_root}/{args.project}"
         owner = docker_exec.read_owner(container, project_dir)
+        left = left_behind_report(cfg, args.task_id)
+        for line in left:
+            print(line, file=sys.stderr)
+        if left:
+            print(
+                f"task {args.task_id}: merging anyway; those edits are not on the branch "
+                "and stay out of it",
+                file=sys.stderr,
+            )
         try:
             outcome = docker_exec.merge_task_branch(
                 container, cfg.projects_root, args.project, args.task_id
