@@ -146,6 +146,42 @@ def test_load_config_names_the_valid_roles_when_it_refuses_one(tmp_path: Path) -
         load_config(str(config_path))
 
 
+def test_load_config_refuses_a_model_for_the_cartografo_and_names_mapping_model(
+    tmp_path: Path,
+) -> None:
+    """The cartografo's phase is always given `mapping_model` explicitly, so a
+    `role_model` entry for it would be accepted and never read."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nrole_model:\n  cartografo: claude-sonnet-5-5\n")
+
+    with pytest.raises(ValueError, match="mapping_model"):
+        load_config(str(config_path))
+
+
+def test_load_config_reads_a_model_for_each_of_the_four_other_roles(tmp_path: Path) -> None:
+    roles = ["arquitecto", "auditor", "implementador", "revisor"]
+    block = "".join(f"  {role}: model-{role}\n" for role in roles)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nrole_model:\n" + block)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.role_model == {role: f"model-{role}" for role in roles}
+
+
+def test_the_unknown_role_message_lists_four_roles_and_not_the_cartografo(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nrole_model:\n  implementor: claude-sonnet-5-5\n")
+
+    with pytest.raises(ValueError) as excinfo:
+        load_config(str(config_path))
+
+    listed = str(excinfo.value).split("roles are: ")[1]
+    assert listed == "arquitecto, auditor, implementador, revisor"
+
+
 def test_a_phase_is_resumed_twice_for_its_handoff_by_default(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(CONFIG_YAML)

@@ -4559,3 +4559,33 @@ recorded nowhere (the `model` row of the table in ADR 27 holds): `role_model`
 is the configured model, and serving it, or a Role models screen, is a later
 task's. Refinement (2) of the backlog item, escalating on signals other than
 the round count, stays open.
+
+## ADR 66 — `role_model` refuses `cartografo` and points at `mapping_model`
+
+**Status:** accepted (T-045-S1, 2026-10-14). Amends ADR 65's accepted roles,
+which it leaves as written; edits nothing else in ADR 65.
+
+**Context.** ADR 65 let `role_model` take every phase role, the cartografo's
+included, and said an entry for it is accepted and has no effect: the
+cartografo's phase is always given `mapping_model` explicitly, and an explicit
+model wins over `role_model`. A config that sets `role_model.cartografo`
+therefore loads without a word and changes nothing, which is the silent
+misconfiguration the load-time check was added to prevent.
+
+**Decision.**
+
+- **`role_model`'s keys** are the phase roles less the mapper:
+  `PHASE_ROLES` minus `MAPPER_ROLE` — arquitecto, auditor, implementador,
+  revisor. `PHASE_ROLES` itself is unchanged.
+- **`cartografo` is refused at load** by `_load_role_model` in
+  `dispatcher/config.py` with a `ValueError` that names `role_model`, says the
+  cartografo's model is set by `mapping_model`, and names `mapping_model`.
+- **Any other unknown key** is refused as before, and the roles that message
+  lists are the four accepted ones, not `cartografo`.
+- **`role_effort` is untouched**: it still accepts `cartografo`, because the
+  cartografo's effort has no other setting.
+
+**Consequences.** An operator who had `role_model.cartografo` in a config now
+gets a load error where they had a no-op, and moves the value to
+`mapping_model`. `config.example.yaml` and the root `README.md` still describe
+ADR 65's set until the next sub-task of T-045 updates them.
