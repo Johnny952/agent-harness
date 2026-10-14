@@ -204,6 +204,10 @@ export interface UsageLine {
   output_tokens: number | null;
   cache_read_input_tokens: number | null;
   cache_creation_input_tokens: number | null;
+  /** ADR 68: what `--model` asked for; `null` = none passed (CLI default). Missing on lines written before ADR 68. */
+  model?: string | null;
+  /** ADR 68: sorted `modelUsage` key names; `null` = CLI reported none, `[]` = an empty `modelUsage`. Missing before ADR 68. */
+  models_used?: string[] | null;
 }
 
 /** One dispatch attempt of one role: the api's group block (ADR 54), same caveat. */

@@ -4685,3 +4685,52 @@ nothing back-fills it: a reader treats a missing key as absent, never as
 `null` meaning "asked for the default". The console shows neither yet;
 showing them is a separate front task. Summing or pricing per model is not
 decided here and waits, like every total, for its own key under its own ADR.
+
+## ADR 69 — the usage region prints `model` and `models_used` as served, and a missing key is its own reading
+
+**Status:** accepted (T-049, 2026-10-14). Narrows ADR 68's *Consequences*
+clause "The console shows neither yet" without editing it: the task detail's
+usage region now shows both. ADR 67's rules stand, and the console still sums
+and compares nothing.
+
+**Context.** ADR 68 put two keys on every usage line written after it, and
+none on the lines before. The region (ADR 67, `docs/plans/front.md` *The
+usage task*) printed neither. Four readings have to stay apart: a line from
+before ADR 68 (the key is missing), a call that asked for no model
+(`model: null`), a call whose CLI reported no `modelUsage` (`models_used:
+null`), and an empty `modelUsage` (`models_used: []`). `docs/ui.md` *Absent,
+empty and broken are three different things* makes `Absent` mean "the
+harness recorded nothing here"; a key missing from an old line is not that,
+because the harness had no such key to record, and `model: null` is not that
+either, because it is a recorded fact — nothing was asked for. The strings are
+one region's choice, so they are recorded here and `docs/ui.md` is not
+changed, on ADR 67's rule.
+
+**Decision.** One slot per key, labelled `model` and `models used`, drawn on
+every line behind the disclosure and in the *first call* block from
+`phase_call`'s own keys, whether or not the line was measured (ADR 68 writes
+`model` either way):
+
+| Served | `model` slot | `models used` slot |
+|---|---|---|
+| key missing | *written before models were logged* | the same |
+| `null` | *CLI default* | `Absent` (*not recorded*) |
+| a string / a list of strings | the string, monospace | each name, monospace, in served order |
+| `[]` | — | *empty list* |
+| anything else | `Malformed` wanting *a string or null* | `Malformed` wanting *a list or null* |
+
+A list holding a non-string keeps its other names and puts a `Malformed`
+wanting *a model name* in that item's place (`docs/ui.md` *A value of the
+wrong shape is named, not rendered and not dropped*). The two italic
+readings are muted text and not `Absent`, so none of the four can be taken
+for another. A missing key is tested as `undefined`: JSON carries no
+`undefined`, so it means the key was not on the line.
+
+The console does not re-sort `models_used`, does not flag a `model` missing
+from `models_used`, does not derive a group-level model from several lines,
+and does not guess a model from the role or the config.
+
+**Consequences.** `UsageLine` in `front/src/lib/api/types.ts` gains both keys
+as optional. No mock fixture holds a usage line (`listUsage` reads only the
+api), so no fixture changes. A second screen that shows models moves this
+table into `docs/ui.md` as one entry, as ADR 67 says of its formats.
