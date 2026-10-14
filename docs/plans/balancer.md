@@ -301,10 +301,12 @@ Left unbuilt rather than smuggled into a docs phase.
 ## Out of scope
 
 Parallel dispatch — two phases running at once on two accounts. That stays
-where it is, in the README's prioritized item 9, and its reasoning is unchanged:
-with Pro accounts the limit is quota, not throughput, so concurrency mostly
-spends the same budget faster and adds merge conflicts. This plan is about
-*sequencing under a human*, not concurrency.
+out of this plan: it is planned in `docs/plans/projects.md` *5. Parallel work:
+across projects now, within a project later*, the plan the README's
+prioritized item 9 now points at. This plan's reason for leaving it out is
+unchanged: with Pro accounts the limit is quota, not throughput, so
+concurrency mostly spends the same budget faster and adds merge conflicts.
+This plan is about *sequencing under a human*, not concurrency.
 
 ## Which account the conversational thread runs under
 
@@ -429,14 +431,15 @@ govern the thread that is building it.
 Asked whether the agents should get autocompact, the answer splits on the same
 line everything else here does. A role phase is a single non-interactive
 `claude -p` that returns one JSON blob and exits, so there is no long context
-to compact and nothing watching it if there were — `README.md` item 8 records
-that the dispatcher never observes context usage mid-call, and gates the
-expensive version of that feature on long phases being seen to fail, which no
-run has shown. Between phases the handoff already does the job the compactor
-would: each role starts cold and reads a bounded envelope. The one knob worth
-setting for the phases is the cheap one, `autoCompactWindow`, and the README's
-item 2 now says where it has to go, which is `hooks/install_settings.py`'s
-merge rather than the image.
+to compact and nothing watching it if there were — item 8 of
+`docs/plans/backlog.md` records that the dispatcher never observes context
+usage mid-call, and gates the expensive version of that feature on long phases
+being seen to fail, which no run has shown. Between phases the handoff already
+does the job the compactor would: each role starts cold and reads a bounded
+envelope. The one knob worth setting for the phases is the cheap one,
+`autoCompactWindow`, and item 2 of `docs/plans/backlog.md`, *Compaction
+window*, says where it has to go, which is `hooks/install_settings.py`'s merge
+rather than the image.
 
 The primary thread is the opposite case and it is the one this plan creates. It
 is long-lived by definition — it holds the conversation across tasks, which is
@@ -445,9 +448,10 @@ will ever approach a context limit, and it is the participant whose context is
 most expensive to lose, because unlike a phase it cannot be reconstructed from
 a handoff file. Two consequences for whoever builds Phase 5's chat channel.
 First, compaction has to be treated as a scheduled act between tasks, never
-mid-dispatch: `README.md` states the rule as *compact between tasks, never with
-a subagent running*, and a thread that compacts while it is holding subagent
-IDs loses exactly the identifiers the *Revive before respawn* rule depends on.
+mid-dispatch: *compact between tasks, never with a subagent running*, as the
+README's item 2 put it before T-037 (`git show 7cc44ca:README.md`), and a
+thread that compacts while it is holding subagent IDs loses exactly the
+identifiers the *Revive before respawn* rule depends on.
 Second, the thread's durable state must not live only in its context. Anything
 the primary needs to survive its own compaction — which accounts are parked,
 which tasks are in flight, which session ids it holds — belongs on disk in the

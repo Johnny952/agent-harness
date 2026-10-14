@@ -54,8 +54,11 @@ instead of as a number quietly meaning something else.
 The spellings assumed in the meantime, and their sources: `docs/ROADMAP.md`
 V1.1's *Record* step; its 2026-09-24 V5.1 Results row, which is CLI 2.1.273 and
 names `num_turns`, `total_cost_usd`, `api_error_status` and `stop_reason`; and
-the root `README.md` item 2, which names `usage` with input, output, cache read
-and cache creation. None of those is an observation of a live result.
+the root `README.md` item 2, *Record usage per phase*, which named `usage` with
+input, output, cache read and cache creation before T-037. That piece is built,
+so T-037 moved its text nowhere: the words are in `git show 7cc44ca:README.md`,
+and `docs/decisions.md` ADR 53 *Context* quotes them. None of those is an
+observation of a live result.
 
 ## Evidence
 
@@ -66,4 +69,5 @@ T-024's own notes about this absence. `docs/ROADMAP.md` V1.1 has no row in the
 Results log. T-024's card forbade a live probe, so the branch was written to
 cost nothing if the assumed spellings are wrong —
 `docs/implementations/T-024.md` *What no stored `raw` could tell us* is the long
-form.
+form. T-039 re-pointed the README citation in *Rule* after T-037 cut the
+README's *Future work* to a status list; that is no new observation.

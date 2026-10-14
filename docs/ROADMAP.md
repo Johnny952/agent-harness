@@ -2,8 +2,9 @@
 
 The order in which the work in `README.md` (*Future work*) gets taken on,
 and the checks against the real stack that come before it. This file
-decides the order only. What each item is, and why, stays in the README
-and the design spec
+decides the order only. What each item is, and why, is in the plan the
+item's status line in the README names, or, for a piece still open, in
+`docs/plans/backlog.md` under the item's number, and in the design spec
 (`docs/superpowers/specs/2026-09-13-ia-harness-design.md`, section 8).
 
 Nothing has run end to end against real containers yet. The unit tests
@@ -35,7 +36,8 @@ run alongside stage 1, but they must be done before stage 2 starts.
      spec if it changes the design.
   3. Record the decision it forces, e.g. which permission flag to use.
 - A check that passes removes its assumption from the README's
-  *Unverified assumptions* (or from the item that marks it "unverified").
+  *Unverified assumptions* (or from the `docs/plans/backlog.md` item that
+  marks it "unverified").
 - Work against a throwaway target repo, never a real project.
 - Record the CLI version with each result, and — for a check that touches
   the board — what `vibe_kanban.command` resolves to. The board is
@@ -1109,7 +1111,8 @@ logins.
      too, with a test parametrized over both compose files so neither can
      lose it, verified with `docker compose config --services`.
    - dind bind mounts (V0.7), if confirmed.
-2. Fix the README's *Known gaps*:
+2. Fix the known gaps the README listed then (its *Known gaps* now points
+   at this list as their record):
    - **Agents never see the task.** Fixed 2026-09-19 with a
      `--description`/`--description-file` flag on `run-task`, stored in
      the task file's frontmatter (not the body, which accumulates phase
@@ -1315,7 +1318,7 @@ logins.
      learning the harness has since disproved; and three of four
      handoffs blew their byte budget. The first two are closed by the
      two bullets below and measured by a fourth run the same day; the
-     other two are still in the README's *Known gaps*, and the budget
+     other two were then still in the README's *Known gaps*, and the budget
      one has a third run of data — `T-004` blew three of four again, a
      different three, with the arquitecto under and the implementador
      280 bytes over. No new tests of its own: both config fields landed
@@ -1915,8 +1918,11 @@ logins.
 
 ## Stage 2 — Prioritized future work
 
-Taken in the README's order. Before starting an item, run the gates it
-depends on. A gate that fails reshapes the item before any design work.
+Taken in the README's order. The README's *Prioritized* now holds one status
+line per piece: an open piece's text is in `docs/plans/backlog.md` under the
+same number, a planned one's in the plan its line names. Before starting an
+item, run the gates it depends on. A gate that fails reshapes the item before
+any design work.
 
 | Item (README *Prioritized*) | Run first | Notes |
 |---|---|---|

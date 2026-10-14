@@ -14,7 +14,8 @@ user on 2026-10-11, with `docs/plans/task-split.md` as its design, and is built
 in part: step 1 of that design's four, the handoff shape with nothing reading
 it, by T-025 (`docs/implementations/T-025.md`); P6 is still a proposal and not approved. Measured 2026-10-09 by the operator,
 out of cycle, on T-016's first round. It feeds the root README's *Prioritized*
-item 2 (Token economy) and item 5 (Task profiles), and does not replace either.
+item 2 (Token economy) and item 5 (Task profiles), and does not replace either;
+their open text is in `docs/plans/backlog.md` under the same numbers.
 Evidence: `.data/verify/token-usage-T-016-2026-10-09.txt` (aggregates only).
 
 ## Why this was measured
@@ -36,8 +37,9 @@ spend was real.
 - **No cache leak.** 98.6% of all input was a cache read. The only large cache
   write is the opening one, about 21k tokens of system prompt, tools and role
   prompt, and every later turn wrote only what it added. This fixed context
-  sits inside the 23–35K the README quotes from another setup. Both phases
-  ran on `claude-opus-5` with no subagents.
+  sits inside the 23–35K that the README's item 2 quoted from another setup
+  before T-037 (`git show 7cc44ca:README.md`). Both phases ran on
+  `claude-opus-5` with no subagents.
 - **Rereading the context is the cost.** How `/usage` weights token kinds is
   not published. As a proxy, the API's price ratios are used here: cache read
   0.1×, cache write 1.25×, output 5× input. On that proxy, cache reads are
@@ -79,9 +81,10 @@ one account. The pool rules (no fallback to the primary for the implementador,
 and a hold rather than a fallback while an account is PRE_COOLDOWN on a
 counter) then parked the cycle for about four and a half hours.
 
-Cost tracked iteration, not output, as the README's item 2 predicted. Round 1's
-two blocking findings were both doc-prose claims, so round 2 had to re-enter a
-context that was already at its maximum.
+Cost tracked iteration, not output, as the README's item 2 predicted before
+T-037 (`git show 7cc44ca:README.md`). Round 1's two blocking findings were
+both doc-prose claims, so round 2 had to re-enter a context that was already
+at its maximum.
 
 ## Proposals
 

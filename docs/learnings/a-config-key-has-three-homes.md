@@ -15,8 +15,9 @@ stale in turn.
    block at all, so what it says about the options is all an operator sees
    there.
 3. `README.md` (repo root) — the operator's manual: the component bullets, the
-   operator section, and the "Known gaps (fix first)" narrative that says
-   whether a feature is built or planned.
+   operator section, and the *Future work* status list, whose line for each
+   piece says whether it is built, planned or open (`README.md`
+   *Prioritized*).
 
 ## Why it bites
 
@@ -31,3 +32,8 @@ green suite.
 T-008: the arquitecto updated `config.example.yaml` only; the implementador had
 to add `README.md`; the revisor's finding 1 added `scripts/configure.sh`. See
 `docs/implementations/T-008.md` and `docs/decisions.md` ADR 2.
+
+Until T-037 the third home's last part was the "Known gaps (fix first)"
+narrative; T-037 cut *Future work* to a status list
+(`docs/implementations/T-037.md`), and T-039 re-named that part here without
+a new observation.
