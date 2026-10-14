@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Seven console paths map one-to-one onto
- * the seven api routes; anything else under `/api/` is a JSON 404 from the console
+ * **It is a whitelist and not a proxy.** Eight console paths map one-to-one onto
+ * the eight api routes; anything else under `/api/` is a JSON 404 from the console
  * and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -64,6 +64,14 @@ const PROJECT_SCOPED = new Set(["/api/debt", "/api/learnings"]);
  * this file would otherwise record.
  */
 const TASK_DETAIL = /^\/api\/tasks\/([^/]+)$/;
+
+/**
+ * The usage route of one task: its own match, tested before `TASK_DETAIL` and
+ * with the same one-segment id. It takes no query parameter, so none is copied
+ * (`docs/decisions.md` ADR 54); `/api/tasks/a/usage/b` and `/api/tasks/a/phases`
+ * are not this route.
+ */
+const TASK_USAGE = /^\/api\/tasks\/([^/]+)\/usage$/;
 
 type Resolution =
   { kind: "forward"; target: string } | { kind: "reject"; status: number; error: string };
@@ -129,6 +137,20 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
 function resolveTarget(url: URL): Resolution {
   const path = url.pathname;
 
+  const usage = TASK_USAGE.exec(path);
+  if (usage) {
+    let id: string;
+    try {
+      id = decodeURIComponent(usage[1]!);
+    } catch {
+      return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
+    }
+    return {
+      kind: "forward",
+      target: `${API_BASE_URL}/api/tasks/${encodeURIComponent(id)}/usage`,
+    };
+  }
+
   const detail = TASK_DETAIL.exec(path);
   if (detail) {
     const raw = detail[1]!;
@@ -136,7 +158,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the seven.
+      // `%zz` and friends. A path the console cannot read is not one of the eight.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -151,7 +173,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the seven routes the console forwards.`,
+      error: `${path} is not one of the eight routes the console forwards.`,
     };
   }
 

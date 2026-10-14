@@ -18,14 +18,17 @@ import {
 import { Markdown } from "@/components/console/markdown";
 import { PhaseList, PhasePill } from "@/components/console/payload";
 import { InPhaseTable, LearningStatus } from "@/components/console/learnings";
-import { debtQuery, learningsQuery, phasesQuery, taskQuery } from "@/lib/api/queries";
+import { debtQuery, learningsQuery, phasesQuery, taskQuery, usageQuery } from "@/lib/api/queries";
 import { ROLES } from "@/lib/api/types";
-import type { Phase, Task } from "@/lib/api/types";
+import type { ApiResult, Phase, Task, UsageGroup, UsageLine } from "@/lib/api/types";
 import {
   agoSeconds,
   asPathLine,
   formatAge,
   formatClock,
+  formatCount,
+  formatMs,
+  formatUsd,
   gateTone,
   roleColorVar,
 } from "@/lib/format";
@@ -57,6 +60,7 @@ function TaskDetailPage() {
   const debt = useQuery(debtQuery);
   const phases = useQuery(phasesQuery(taskId));
   const learnings = useQuery(learningsQuery);
+  const usage = useQuery(usageQuery(taskId));
 
   // Broken is a query that failed, and it never degrades into an empty state:
   // `docs/ui.md` *Absent, empty and broken are three different things*. A 404 and
@@ -82,6 +86,7 @@ function TaskDetailPage() {
     ...(debt.data?.warnings ?? []),
     ...(phases.data?.warnings ?? []),
     ...(learnings.data?.warnings ?? []),
+    ...(usage.data?.warnings ?? []),
   ];
   // Debt ids are shaped `T-011-D1`, and `task_id` is that split. ADR 17.
   const taskDebt = (debt.data?.data ?? []).filter((d) => d.task_id === taskId);
@@ -195,6 +200,11 @@ function TaskDetailPage() {
                 ))}
               </ul>
             )}
+          </section>
+
+          <section>
+            <h2 className="label-xs mb-2">what this task&apos;s calls cost</h2>
+            <UsageRegion taskId={taskId} usage={usage} />
           </section>
 
           <section className="panel px-3 py-3">
@@ -505,6 +515,328 @@ function PhaseRow({ phase, now }: { phase: Phase; now: number }) {
           </div>
         )}
       </div>
+    </li>
+  );
+}
+
+/* ── The usage region ─────────────────────────────────────────────────────
+ * `docs/plans/front.md` *The usage task*, ADR 54, ADR 64, ADR 67. Everything
+ * below reads served values as `unknown`: the types are annotations, and the
+ * log is a file a person may have edited. Nothing here sums, subtracts or
+ * compares a figure: a group's numbers are the api's, and the card's two
+ * counts (retries not included, lines carrying a `measured` that is neither
+ * true nor false) are counts of lines, not of money or tokens.
+ */
+
+type Rec = { [K in keyof UsageLine | keyof UsageGroup]?: unknown };
+const isRec = (v: unknown): v is Rec => typeof v === "object" && v !== null && !Array.isArray(v);
+
+function UsageRegion({
+  taskId,
+  usage,
+}: {
+  taskId: string;
+  usage: {
+    isLoading: boolean;
+    isError: boolean;
+    data?: ApiResult<UsageGroup[] | null> | undefined;
+  };
+}) {
+  if (usage.isLoading) return null;
+  if (usage.isError) {
+    return (
+      <ErrorState
+        title={`/api/tasks/${taskId}/usage did not answer`}
+        body="What this task's calls cost is unknown rather than absent. Everything else on this page comes from other reads and is unaffected."
+      />
+    );
+  }
+  const data: unknown = usage.data?.data;
+  if (data === null) {
+    const why = (usage.data?.warnings ?? []).join(" ");
+    return (
+      <ErrorState
+        title="The usage log could not be read"
+        body={why || "The log exists and the api could not read it; no reason was served."}
+      />
+    );
+  }
+  if (!Array.isArray(data)) {
+    return <Malformed label="usage" got={data} want="a list of attempts" />;
+  }
+  if (data.length === 0) {
+    return (
+      <EmptyState
+        title="No claude call of this task has been recorded"
+        body="The log is written once per call since T-024, so a task dispatched before that has none."
+      />
+    );
+  }
+
+  // Buckets by (role, round) in order of first appearance, `===` on both; a
+  // group whose role or round is of the wrong shape is a bucket of its own.
+  const buckets: { role: unknown; round: unknown; groups: unknown[]; solo: boolean }[] = [];
+  for (const g of data as unknown[]) {
+    const role = isRec(g) ? g.role : undefined;
+    const round = isRec(g) ? g.round : undefined;
+    const sound =
+      isRec(g) && typeof role === "string" && (round === null || typeof round === "number");
+    const found = sound
+      ? buckets.find((b) => !b.solo && b.role === role && b.round === round)
+      : undefined;
+    if (found) found.groups.push(g);
+    else buckets.push({ role, round, groups: [g], solo: !sound });
+  }
+
+  return (
+    <div className="space-y-3">
+      {buckets.map((b, i) => (
+        <div key={i} className="space-y-2">
+          <div className="flex items-center gap-2">
+            {typeof b.role !== "string" ? (
+              <Malformed label="role" got={b.role} want="a string" />
+            ) : (ROLES as readonly string[]).includes(b.role) ? (
+              <RoleBadge role={b.role as (typeof ROLES)[number]} />
+            ) : (
+              <Mono className="text-[11px]">{b.role}</Mono>
+            )}
+            {typeof b.round === "number" && <span className="label-xs">round {b.round}</span>}
+          </div>
+          <ul className="space-y-2">
+            {b.groups.map((g, j) => (
+              <UsageGroupRow
+                key={j}
+                group={g}
+                attempt={b.groups.length > 1 ? `attempt ${j + 1} of ${b.groups.length}` : null}
+                previous={j > 0 ? b.groups[j - 1] : undefined}
+              />
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const NO_RESULT = "no result: crashed or timed out";
+
+/** A served number through `format`, or what is wrong with it; never a computed one. */
+function Figure({
+  label,
+  value,
+  format,
+}: {
+  label: string;
+  value: unknown;
+  format: (n: number) => string;
+}) {
+  return (
+    <span className="text-[11px]">
+      <span className="label-xs mr-1">{label}</span>
+      {value === null || value === undefined ? (
+        <Absent />
+      ) : typeof value !== "number" || !Number.isFinite(value) ? (
+        <Malformed got={value} want="a number" />
+      ) : (
+        <Mono>{format(value)}</Mono>
+      )}
+    </span>
+  );
+}
+
+/** The figures of one line; `costLabel` heads the cost, which is never summed here. */
+function LineFigures({ line, costLabel }: { line: Rec; costLabel: string }) {
+  if (line.measured === false) {
+    return <span className="text-[11px] italic text-muted-foreground">{NO_RESULT}</span>;
+  }
+  return (
+    <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+      {typeof line.measured !== "boolean" && (
+        <Malformed label="measured" got={line.measured} want="true or false" />
+      )}
+      <Figure label="input tokens" value={line.input_tokens} format={formatCount} />
+      <Figure label="output tokens" value={line.output_tokens} format={formatCount} />
+      <Figure label="cache read" value={line.cache_read_input_tokens} format={formatCount} />
+      <Figure
+        label="cache creation"
+        value={line.cache_creation_input_tokens}
+        format={formatCount}
+      />
+      <Figure label="turns" value={line.num_turns} format={formatCount} />
+      <Figure label="duration" value={line.duration_ms} format={formatMs} />
+      <Figure label={costLabel} value={line.total_cost_usd} format={formatUsd} />
+      {line.is_error === true && (
+        <span className={cn("rounded-sm border px-1 text-[10px] uppercase", gateTone.warning)}>
+          is_error
+        </span>
+      )}
+    </span>
+  );
+}
+
+function UsageGroupRow({
+  group,
+  attempt,
+  previous,
+}: {
+  group: unknown;
+  attempt: string | null;
+  previous: unknown;
+}) {
+  if (!isRec(group)) {
+    return (
+      <li className="panel px-3 py-2">
+        <Malformed label="attempt" got={group} want="an object" />
+      </li>
+    );
+  }
+  const prev = isRec(previous) ? previous : null;
+  const failedOver =
+    prev !== null && typeof group.account === "string" && prev.account !== group.account;
+  const { call_count: callCount, measured_calls: measured, unmeasured_calls: unmeasured } = group;
+  // The card's two counts, of lines: retries not included, and lines whose
+  // `measured` is neither true nor false. Not figures, so not "computing".
+  const retries = typeof callCount === "number" ? callCount - 1 : 0;
+  const neither =
+    typeof callCount === "number" && typeof measured === "number" && typeof unmeasured === "number"
+      ? Math.max(0, callCount - measured - unmeasured)
+      : 0;
+  const calls = group.calls;
+  const phaseCall = group.phase_call;
+
+  return (
+    <li className="panel px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        {attempt && <span className="label-xs">{attempt}</span>}
+        {failedOver && (
+          <span className="rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
+            failover from {String(prev.account)}
+          </span>
+        )}
+        {typeof group.account === "string" ? (
+          <Mono>{group.account}</Mono>
+        ) : (
+          <Malformed label="account" got={group.account} want="a string" />
+        )}
+        {Array.isArray(group.call_kinds) ? (
+          group.call_kinds.map((k: unknown, i: number) =>
+            typeof k === "string" ? (
+              <Mono key={i} className="rounded-sm border border-border px-1 text-[10px]">
+                {k}
+              </Mono>
+            ) : (
+              <Malformed key={i} got={k} want="a string" />
+            ),
+          )
+        ) : (
+          <Malformed label="call_kinds" got={group.call_kinds} want="a list" />
+        )}
+        {typeof callCount === "number" ? (
+          <span>{callCount} calls</span>
+        ) : (
+          <Malformed label="call_count" got={callCount} want="a number" />
+        )}
+        {typeof unmeasured === "number" ? (
+          unmeasured > 0 && <span>{unmeasured} unmeasured</span>
+        ) : (
+          <Malformed label="unmeasured_calls" got={unmeasured} want="a number" />
+        )}
+        {neither > 0 && <span>{neither} lines carry a measured that is neither</span>}
+      </div>
+      {prev !== null && failedOver && <FailedOverEnding previous={prev} />}
+
+      <div className="mt-2 rounded-sm border border-border bg-surface-2 px-2 py-1.5">
+        {phaseCall === null ? (
+          <span className="text-[11px] italic text-muted-foreground">
+            no phase line in this attempt
+          </span>
+        ) : !isRec(phaseCall) ? (
+          <Malformed label="phase_call" got={phaseCall} want="an object" />
+        ) : (
+          <FirstCall line={phaseCall} retries={retries} />
+        )}
+      </div>
+
+      <div className="mt-2">
+        {Array.isArray(calls) ? (
+          <Collapsible title={`calls (${calls.length})`}>
+            <ul className="space-y-1.5">
+              {calls.map((c: unknown, i: number) => (
+                <CallLine key={i} line={c} />
+              ))}
+            </ul>
+          </Collapsible>
+        ) : (
+          <Malformed label="calls" got={calls} want="a list" />
+        )}
+      </div>
+    </li>
+  );
+}
+
+/** How the earlier attempt of a failover ended: its last line says why. */
+function FailedOverEnding({ previous }: { previous: Rec }) {
+  const calls = previous.calls;
+  const last = Array.isArray(calls) ? calls[calls.length - 1] : undefined;
+  if (!isRec(last)) return null;
+  return (
+    <p className="mt-1 text-[11px] text-muted-foreground">
+      {String(previous.account)} ended:{" "}
+      {last.measured === false
+        ? NO_RESULT
+        : last.is_error === true
+          ? "is_error on its last line"
+          : "its last line carries no error"}
+    </p>
+  );
+}
+
+function FirstCall({ line, retries }: { line: Rec; retries: number }) {
+  const label =
+    retries > 0
+      ? `first call; ${retries} ${retries === 1 ? "retry" : "retries"} not included`
+      : "first call";
+  return (
+    <div className="space-y-1">
+      <p className="label-xs">{label}</p>
+      <LineFigures line={line} costLabel="cost" />
+    </div>
+  );
+}
+
+function CallLine({ line }: { line: unknown }) {
+  if (!isRec(line)) {
+    return (
+      <li>
+        <Malformed got={line} want="an object" />
+      </li>
+    );
+  }
+  const at = line.recorded_at;
+  return (
+    <li className="space-y-0.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-2">
+        {typeof line.call === "string" ? (
+          <Mono>{line.call}</Mono>
+        ) : (
+          <Malformed label="call" got={line.call} want="a string" />
+        )}
+        {typeof at === "string" ? (
+          <span className="text-[10px] text-muted-foreground" title={at}>
+            {formatClock(at)}
+          </span>
+        ) : (
+          <Malformed label="recorded_at" got={at} want="a string" />
+        )}
+        {line.session_id === null || line.session_id === undefined ? (
+          <Absent label="no session id" />
+        ) : typeof line.session_id === "string" ? (
+          <Mono className="text-[10px] text-muted-foreground">{line.session_id}</Mono>
+        ) : (
+          <Malformed label="session_id" got={line.session_id} want="a string" />
+        )}
+      </div>
+      <LineFigures line={line} costLabel="session cost so far" />
     </li>
   );
 }

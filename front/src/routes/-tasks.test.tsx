@@ -7,14 +7,14 @@
  * description shows it, and a card the api could not read claims neither.
  * `docs/debt/T-034-D1.md`.
  *
- * The page asks for four paths and all four are served, because one left out
+ * The page asks for five paths and all five are served, because one left out
  * answers 404 and the page draws that region's error state:
  * `docs/implementations/T-035.md` *Every read the page makes*.
  *
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { Route } from "./tasks.$taskId";
 import { renderRoute } from "@/test/render-route";
 import type { TaskDetail } from "@/lib/api/types";
@@ -42,18 +42,64 @@ const TASK: TaskDetail = {
 };
 
 /** The page at `/tasks/T-101`, with `data` as what the api answered for it. */
-async function taskPage(data: TaskDetail | null, warnings: string[] = []) {
+async function taskPage(
+  data: TaskDetail | null,
+  warnings: string[] = [],
+  usage: { data: unknown; warnings?: string[] } = { data: [] },
+) {
   await renderRoute(
     Route,
     "/tasks/$taskId",
     {
       "/api/tasks/T-101": { data, warnings },
+      "/api/tasks/T-101/usage": usage,
       "/api/debt": { data: [] },
       "/api/phases": { data: [] },
       "/api/learnings": { data: [] },
     },
     "/tasks/T-101",
   );
+}
+
+/** One served usage line; the figures are `null` unless a test sets them. */
+function line(over: Record<string, unknown> = {}) {
+  return {
+    task_id: "T-101",
+    role: "implementador",
+    round: null,
+    account: "cuenta1",
+    call: "phase",
+    session_id: "s-1",
+    recorded_at: "2026-10-14T10:00:00Z",
+    measured: true,
+    raw_keys: [],
+    is_error: false,
+    num_turns: null,
+    duration_ms: null,
+    total_cost_usd: null,
+    input_tokens: null,
+    output_tokens: null,
+    cache_read_input_tokens: null,
+    cache_creation_input_tokens: null,
+    ...over,
+  };
+}
+
+/** One served attempt around `calls`; the first is its phase line unless told. */
+function group(calls: ReturnType<typeof line>[], over: Record<string, unknown> = {}) {
+  return {
+    task_id: "T-101",
+    role: "implementador",
+    round: null,
+    account: "cuenta1",
+    calls,
+    call_count: calls.length,
+    call_kinds: calls.map((c) => c.call),
+    measured_calls: calls.filter((c) => c.measured).length,
+    unmeasured_calls: calls.filter((c) => !c.measured).length,
+    phase_call: calls[0] ?? null,
+    ...over,
+  };
 }
 
 /** The block the page's title sits in: the task id and the subtitle under it. */
@@ -86,5 +132,70 @@ describe("the task page's header for a card the api could not read", () => {
     await screen.findByText("T-101 exists and could not be read");
     expect(header().textContent).toBe("T-101");
     expect(screen.queryByText("no description")).toBeNull();
+  });
+});
+
+const REGION = "what this task's calls cost";
+
+describe("the usage region's group", () => {
+  it("prints the first call, the retry count and the closed calls", async () => {
+    const first = line({ input_tokens: 12345, total_cost_usd: 0.0421 });
+    const retry = line({ call: "gate-retry", total_cost_usd: 0.05 });
+    await taskPage(TASK, [], { data: [group([first, retry])] });
+    await screen.findByText(REGION);
+    await screen.findByText("first call; 1 retry not included");
+    expect(screen.getByText("12,345")).toBeTruthy();
+    expect(screen.getByText("$0.0421")).toBeTruthy();
+    expect(screen.getByText("gate-retry")).toBeTruthy();
+    expect(screen.queryByText("session cost so far")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /calls \(2\)/ }));
+    expect(screen.getAllByText("session cost so far")).toHaveLength(2);
+    // Nothing is summed across the two lines.
+    expect(screen.queryByText("$0.0921")).toBeNull();
+  });
+});
+
+describe("the usage region's unmeasured line", () => {
+  it("says no result and does not draw a row of absents", async () => {
+    const lost = line({ call: "gate-retry", measured: false, is_error: null });
+    await taskPage(TASK, [], { data: [group([line(), lost])] });
+    await screen.findByText("1 unmeasured");
+    fireEvent.click(screen.getByRole("button", { name: /calls \(2\)/ }));
+    expect(screen.getByText("no result: crashed or timed out")).toBeTruthy();
+    // Only the measured first line's null figures are absent, never the lost one's.
+    expect(screen.getAllByText("not recorded").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("session cost so far")).toHaveLength(1);
+  });
+});
+
+describe("the usage region's null phase_call", () => {
+  it("names the missing phase line and claims no first call", async () => {
+    const retry = line({ call: "gate-retry" });
+    await taskPage(TASK, [], { data: [group([retry], { phase_call: null })] });
+    await screen.findByText("no phase line in this attempt");
+    expect(screen.queryByText(/first call/)).toBeNull();
+  });
+});
+
+describe("the usage region's states", () => {
+  it("is an error, not an empty state, for a log it could not read", async () => {
+    await taskPage(TASK, [], { data: null, warnings: ["T-101: unreadable usage log: boom"] });
+    await screen.findByText("The usage log could not be read");
+    expect(screen.getAllByText(/unreadable usage log: boom/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("No claude call of this task has been recorded")).toBeNull();
+  });
+
+  it("says a task with no call has none", async () => {
+    await taskPage(TASK);
+    await screen.findByText("No claude call of this task has been recorded");
+  });
+
+  it("labels a failover pair and names the account it came from", async () => {
+    const a = group([line({ is_error: true })], { account: "cuenta1" });
+    const b = group([line({ account: "cuenta2" })], { account: "cuenta2" });
+    await taskPage(TASK, [], { data: [a, b] });
+    await screen.findByText("attempt 1 of 2");
+    expect(screen.getByText("attempt 2 of 2")).toBeTruthy();
+    expect(screen.getByText("failover from cuenta1")).toBeTruthy();
   });
 });

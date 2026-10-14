@@ -620,6 +620,9 @@ Bound to the **Usage task**:
   screen**, for example *gate retry* for `gate-retry`, or print the served
   string.
 
+Built by T-046; both choices are decided in `docs/decisions.md` ADR 67 and
+the build is recorded in `docs/implementations/T-046.md`.
+
 ### Done when
 
 Task detail shows real phases, Learnings reads the real tree, and every screen
