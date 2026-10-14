@@ -177,6 +177,75 @@ describe("the usage region's null phase_call", () => {
   });
 });
 
+describe("the usage region's models", () => {
+  const OLD = "written before models were logged";
+
+  /** One slot's text; with the disclosure closed only the first-call block is drawn. */
+  function slot(label: string): string {
+    return screen.getByText(label, { exact: true }).parentElement!.textContent ?? "";
+  }
+
+  async function open(over: Record<string, unknown>) {
+    await taskPage(TASK, [], { data: [group([line(over)])] });
+    await screen.findByText("first call");
+  }
+
+  it("prints an explicit model and a models_used list on the line and in the first call", async () => {
+    await open({ model: "claude-opus-5-5", models_used: ["claude-haiku-5-5", "claude-opus-5-5"] });
+    expect(slot("model")).toContain("claude-opus-5-5");
+    expect(slot("models used")).toContain("claude-haiku-5-5");
+    expect(screen.getAllByText("claude-haiku-5-5")).toHaveLength(1);
+    expect(screen.getAllByText("claude-opus-5-5")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: /calls \(1\)/ }));
+    expect(screen.getAllByText("claude-haiku-5-5")).toHaveLength(2);
+    expect(screen.getAllByText("claude-opus-5-5")).toHaveLength(4);
+  });
+
+  it("reads model null as the CLI default", async () => {
+    await open({ model: null, models_used: null });
+    expect(slot("model")).toContain("CLI default");
+    expect(slot("model")).not.toContain("not recorded");
+    expect(slot("model")).not.toContain(OLD);
+  });
+
+  it("reads models_used null as absent", async () => {
+    await open({ model: "m", models_used: null });
+    expect(slot("models used")).toContain("not recorded");
+  });
+
+  it("reads models_used [] as an empty list", async () => {
+    await open({ model: "m", models_used: [] });
+    expect(slot("models used")).toContain("empty list");
+    expect(slot("models used")).not.toContain("not recorded");
+  });
+
+  it("reads missing keys as written before models were logged", async () => {
+    await open({});
+    for (const label of ["model", "models used"]) {
+      expect(slot(label)).toContain(OLD);
+      expect(slot(label)).not.toContain("CLI default");
+      expect(slot(label)).not.toContain("not recorded");
+    }
+  });
+
+  it("names a value of the wrong shape", async () => {
+    await open({ model: 42, models_used: "x" });
+    expect(slot("model")).toMatch(/not a string or null/);
+    expect(slot("models used")).toMatch(/not a list or null/);
+  });
+
+  it("keeps the names of a list holding a non-string", async () => {
+    await open({ model: "m", models_used: ["claude-opus-5-5", 7] });
+    expect(screen.getByText("claude-opus-5-5", { selector: "*" })).toBeTruthy();
+    expect(slot("models used")).toMatch(/not a model name/);
+  });
+
+  it("shows the model of an unmeasured line", async () => {
+    await open({ measured: false, is_error: null, model: "m-unmeasured" });
+    expect(screen.getByText("m-unmeasured")).toBeTruthy();
+  });
+});
+
 describe("the usage region's states", () => {
   it("is an error, not an empty state, for a log it could not read", async () => {
     await taskPage(TASK, [], { data: null, warnings: ["T-101: unreadable usage log: boom"] });

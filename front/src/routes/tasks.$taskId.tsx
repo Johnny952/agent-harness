@@ -644,6 +644,61 @@ function Figure({
   );
 }
 
+const NO_MODEL_KEY = "written before models were logged";
+
+function MutedText({ children }: { children: string }) {
+  return <span className="text-[11px] italic text-muted-foreground">{children}</span>;
+}
+
+/**
+ * `model` and `models_used` of one line as served (ADR 68, ADR 69): a missing key, `null` and
+ * `[]` read as three different things, and nothing is compared or derived.
+ */
+function ModelFields({ line }: { line: Rec }) {
+  const model = line.model;
+  const used = line.models_used;
+  return (
+    <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+      <span className="text-[11px]">
+        <span className="label-xs mr-1">model</span>
+        {model === undefined ? (
+          <MutedText>{NO_MODEL_KEY}</MutedText>
+        ) : model === null ? (
+          <MutedText>CLI default</MutedText>
+        ) : typeof model === "string" ? (
+          <Mono>{model}</Mono>
+        ) : (
+          <Malformed label="model" got={model} want="a string or null" />
+        )}
+      </span>
+      <span className="text-[11px]">
+        <span className="label-xs mr-1">models used</span>
+        {used === undefined ? (
+          <MutedText>{NO_MODEL_KEY}</MutedText>
+        ) : used === null ? (
+          <Absent />
+        ) : !Array.isArray(used) ? (
+          <Malformed label="models_used" got={used} want="a list or null" />
+        ) : used.length === 0 ? (
+          <span className="text-[11px] text-muted-foreground">empty list</span>
+        ) : (
+          <span className="inline-flex flex-wrap gap-1">
+            {used.map((m: unknown, i: number) =>
+              typeof m === "string" ? (
+                <Mono key={i} className="rounded-sm border border-border px-1 text-[10px]">
+                  {m}
+                </Mono>
+              ) : (
+                <Malformed key={i} got={m} want="a model name" />
+              ),
+            )}
+          </span>
+        )}
+      </span>
+    </span>
+  );
+}
+
 /** The figures of one line; `costLabel` heads the cost, which is never summed here. */
 function LineFigures({ line, costLabel }: { line: Rec; costLabel: string }) {
   if (line.measured === false) {
@@ -799,6 +854,7 @@ function FirstCall({ line, retries }: { line: Rec; retries: number }) {
   return (
     <div className="space-y-1">
       <p className="label-xs">{label}</p>
+      <ModelFields line={line} />
       <LineFigures line={line} costLabel="cost" />
     </div>
   );
@@ -836,6 +892,7 @@ function CallLine({ line }: { line: unknown }) {
           <Malformed label="session_id" got={line.session_id} want="a string" />
         )}
       </div>
+      <ModelFields line={line} />
       <LineFigures line={line} costLabel="session cost so far" />
     </li>
   );
