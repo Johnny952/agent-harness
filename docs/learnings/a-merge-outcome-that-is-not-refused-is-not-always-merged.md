@@ -4,9 +4,11 @@
 returned, adding something that must happen "when a task merges", or reading
 `merge-task`'s output in a script.
 
-**Status:** unconfirmed — proposed by T-030's arquitecto and implementador;
-checked by the auditor against `MergeOutcome` in `dispatcher/docker_exec.py`
-and `record_merge` in `dispatcher/dispatcher.py`.
+**Status:** confirmed 2026-10-14 against the running stack — seven
+`merge-task` runs by hand on branches already merged into `main` gave
+`UP_TO_DATE`, exit 0, a new `merged` block and `drop_promoted`; none ran
+`merge-task` on a task that already had a `merged` block, so "keeps the
+first record's `at`" still rests on T-030's test alone — see *Evidence*.
 
 ## What is true
 
@@ -46,3 +48,17 @@ of `main` in `dispatcher/cli.py`;
 `test_record_merge_keeps_the_first_record_when_the_branch_was_already_in` in
 `tests/dispatcher/test_dispatcher.py`; `docs/implementations/T-030.md`
 *Merge: one function both paths call*.
+
+The operator, by hand outside any cycle, 2026-10-13 and 2026-10-14:
+`merge-task` on T-035, T-036, T-037, T-039, T-040, T-041 and T-042, each
+branch merged into `main` on the host with `git merge --no-ff` beforehand
+and each task file with no `merged` block. Every run exited 0, printed
+`main already contains agent/task/<id>` and
+`task <id>: recorded as merged into main` on stdout, and left a `merged`
+block in the task file. T-035's run moved
+`inbox/T-035-render-route-opens-a-route-on-its-own-path.md` to `dropped/`
+and T-042's moved four filed inbox entries there: `drop_promoted` after an
+`UP_TO_DATE`. T-037's `status` stayed `pending`, since `tasks.mark_merged`
+writes the `merged` block and nothing else. Not exercised: a second
+`merge-task` on a task that already has a `merged` block, and a branch
+with no commits past its base.
