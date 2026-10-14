@@ -166,6 +166,7 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
             task_id = state_machine.get_current_task(cfg.state_dir, acc.name)
             state_machine.set_state(
                 cfg.state_dir, acc.name, AccountState.BUSY, current_task_id=task_id,
+                only_from={AccountState.BUSY},
             )
             continue
         # A floor under the heartbeat test, not a second opinion on it. A phase
@@ -201,8 +202,10 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
         logger.warning(
             "account %s is BUSY but %s; releasing it back to the pool", acc.name, why,
         )
-        state_machine.set_state(cfg.state_dir, acc.name, AccountState.IDLE)
-        reaped.append(acc.name)
+        if state_machine.set_state(
+            cfg.state_dir, acc.name, AccountState.IDLE, only_from={AccountState.BUSY},
+        ):
+            reaped.append(acc.name)
     return reaped
 
 
@@ -712,9 +715,13 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             logger.info("account %s came back from %s and is IDLE again", acc.name, state.value)
             # The cooldown is over and the numbers agree, so the old refusal
             # must not go on holding the account on the next pass.
-            state_machine.clear_rate_limit(cfg.state_dir, acc.name)
-            state_machine.set_state(cfg.state_dir, acc.name, AccountState.IDLE)
-            recovered.append(acc.name)
+            # Conditional: a claim made during the probe must not be undone.
+            if state_machine.set_state(
+                cfg.state_dir, acc.name, AccountState.IDLE,
+                only_from={AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN},
+                forget_rate_limit=True,
+            ):
+                recovered.append(acc.name)
     return recovered
 
 
@@ -1455,7 +1462,23 @@ def dispatch_phase(
             )
         tried.add(account)
 
-        if not check_quota_ok(cfg, account):
+        # Take the account before the probe, not after: the probe takes
+        # seconds, and a claim made after it would leave that whole window for
+        # another process to pick the same account (`docs/decisions.md`
+        # ADR 71). A loser moves on like a failed probe does.
+        if not state_machine.claim(cfg.state_dir, account, task_id):
+            logger.info(
+                "task %s: account %s was taken by another dispatcher; trying the next",
+                task_id, account,
+            )
+            continue
+        try:
+            quota_ok = check_quota_ok(cfg, account)
+        except Exception:
+            state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
+            raise
+        if not quota_ok:
+            # check_quota_ok parked the account (PRE_COOLDOWN/COOLING_DOWN).
             continue
 
         container = container_for(cfg, account)
@@ -1467,7 +1490,6 @@ def dispatch_phase(
             task_id, role, f" round {round_num}" if round_num is not None else "", account,
             f"resuming session {resume_session_id}" if resume_session_id else "in a new session",
         )
-        state_machine.set_state(cfg.state_dir, account, AccountState.BUSY, current_task_id=task_id)
         lock_acquired = False
         project_dir = f"{cfg.projects_root}/{slug}"
         # Read this before anything in the container touches the tree, while it
