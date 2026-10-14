@@ -177,7 +177,9 @@ approved: evaluate it when the work is taken on, not before.
 […]
 
 - […]
-- A single-instance guard (e.g. `flock` on `state_dir`) so overlapping
+- **Done 2026-10-14 by T-051** as a per-claim lock, not a single-instance
+  one: `docs/decisions.md` ADR 71. The original text follows.
+  A single-instance guard (e.g. `flock` on `state_dir`) so overlapping
   runs can't claim the same account. `acquire_lock` already refuses a
   live lock on the task, but two runs of different tasks still race on
   account state files.

@@ -1292,7 +1292,8 @@ number and title.
      in `dispatcher/dispatcher.py` brings an account back. Retrying at the
      CLI's own reset time is **planned**:
      [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*, D2.
-   - A single-instance guard — **open**.
+   - A single-instance guard — **built** as a lock on each account claim
+     rather than on the whole run (`docs/decisions.md` ADR 71).
    - A reaper for accounts left `BUSY` — **built**:
      `reap_stale_busy_accounts` in `dispatcher/dispatcher.py`, and
      `release_account` in `dispatcher/operator.py`.

@@ -4796,3 +4796,95 @@ until someone removes it. The record says what was dirty after which commit
 and makes no claim about authorship. A stale record of a role that never
 commits again stays until the task's scratch dir is gone; `round` and
 `saved_at` date it. No api route or console screen reads the record yet.
+
+## ADR 71 — an account is taken under one `flock` in `state_dir`, before the `/usage` probe, and every state-file write holds the same lock
+
+**Status:** accepted (T-051, 2026-10-14). Closes the single-instance guard
+of `docs/plans/backlog.md` item 3 by a narrower means than it names; the
+orphan phase after Ctrl+C under the same item stays open.
+
+**Context.** `dispatch_phase` in `dispatcher/dispatcher.py` picked an IDLE
+account with `pick_idle_account`, probed it with `check_quota_ok` (a
+`/usage` call that takes seconds), and only then wrote `BUSY` with
+`state_machine.set_state`. Every writer in `dispatcher/state_machine.py`
+is a read-modify-write of one JSON file finished by `_write_state`'s
+tempfile and `os.replace`, with no lock. Two dispatcher processes running
+two different tasks could both read one account IDLE, both probe it, both
+write `BUSY` and both send a phase into the same container.
+`tasks.acquire_lock` guards one task, not an account. The same unlocked
+read-modify-write let one writer erase what another had just added: a
+`set_state` that read the file before a concurrent `record_probe` wrote it
+drops that `last_probe`, and the same holds for `rate_limited_at`.
+
+**Decision.**
+
+1. *Where the lock lives.* One lock file per state directory,
+   `<state_dir>/.accounts.lock`, named by `state_machine.LOCK_NAME`. It is
+   taken with `fcntl.flock(LOCK_EX)` on a descriptor opened for that one
+   acquisition (`os.open` with `O_RDWR | O_CREAT`, mode 0644) and closed when
+   the acquisition ends, which is what releases it. The file is created on
+   first use and never deleted: unlinking a `flock` file lets two processes
+   lock two different inodes.
+2. *What it covers.* Every write to an account's state file: `set_state`,
+   `record_rate_limit`, `clear_rate_limit`, `record_probe` and the claim
+   below each hold it from their read to their `os.replace`. Nothing else is
+   done under it — no `docker exec`, no probe, no task file write — so it is
+   held for the length of one small file read and one write. Readers
+   (`get_state`, `get_last_probe`, the api, `status`) never take it:
+   `os.replace` already makes each read see a whole document, and the api
+   reads `state_dir` over a read-only mount. The lock is not reentrant (a
+   second `flock` on a new descriptor blocks even in the same process), so
+   each public writer takes it once and calls unlocked internals.
+3. *The claim.* `state_machine.claim(state_dir, account, task_id) -> bool`
+   writes `BUSY` with that `current_task_id` and a fresh `busy_since` only if
+   the account is IDLE (a missing file counts as IDLE), and returns whether
+   it did. It is `set_state` with `only_from={IDLE}`; `set_state` gains that
+   keyword, writes nothing and returns `False` when the account's state is
+   not in it, and returns `True` otherwise. Callers that ignore the return
+   keep today's behaviour.
+4. *Claim before the probe.* `dispatch_phase` claims the picked account
+   first and probes it second, and no longer writes `BUSY` after the probe.
+   A lost claim adds the account to `tried` and moves on to the next pick,
+   as a failed probe does. A probe that parks the account writes
+   `PRE_COOLDOWN` or `COOLING_DOWN` over the claim, the same end state as
+   when it parked an IDLE account; a probe that raises puts the account back
+   to IDLE before re-raising, as the phase's own `except` does. Claiming
+   first is what makes the probe's parking write safe: probing first would
+   let a loser's probe park an account the winner has already started a
+   phase on. The cost is that an account is `BUSY` for the seconds its
+   probe takes, which `_waitable_workers` already reads as "running a
+   phase", and the reaper's floor of `heartbeat_ttl_seconds` on
+   `busy_since` already covers.
+5. *Transitions decided across a probe are conditional.*
+   `_recheck_cooling_accounts` decides to recover an account from a probe
+   that ran outside the lock, so its write is
+   `set_state(IDLE, only_from={PRE_COOLDOWN, COOLING_DOWN},
+   forget_rate_limit=True)`: one locked write that recovers the account and
+   drops `rate_limited_at` only if it is still parked, so it cannot overwrite
+   a claim another process made meanwhile. `reap_stale_busy_accounts`
+   writes with `only_from={BUSY}`. The writes made by the process that holds
+   the account — the phase's release, its cooldown, its `except`, the
+   parking in `check_quota_ok` — and `release-account`, which is an
+   operator's override, stay unconditional.
+6. *Not a global lock.* No lock is held for a run, a cycle or a phase, so
+   two tasks on two IDLE accounts run their phases at the same time. A
+   single-instance guard would serialise every run behind one process for
+   the hours a phase lasts, to fix a race that needs only the moment of the
+   claim. One dispatcher per host is not what this project wants:
+   `docs/plans/projects.md` plans parallel work across projects.
+
+**Consequences.** The lock holds only between processes that see the same
+lock file: it relies on `state_dir` being one local filesystem shared by
+every dispatcher process (one host, or one bind mount). `flock` over NFS or a
+network share may not exclude, and two hosts with separate `state_dir`
+copies are two pools, as they were before. A dispatcher killed while holding
+the lock frees it, because the kernel drops a `flock` with its last
+descriptor. The reaper's conditional write narrows but does not close one
+window: a phase judged dead that ends, and an account re-claimed by another
+process, both between the reaper's read and its write, would be reaped; the
+reaper only fires past a stale heartbeat, so this needs a phase that
+finishes in the same milliseconds it was judged dead. The orphan phase after
+Ctrl+C (`docs/plans/backlog.md` item 3) is untouched: that is a dead
+dispatcher's account, which this lock does not see. Anything that lists
+`state_dir` must keep reading accounts by their own `<name>.json`; the lock
+file is not JSON and is not an account.
