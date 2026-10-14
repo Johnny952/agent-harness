@@ -133,6 +133,23 @@ class _FakeGit:
         self.status_checks.append((container, workdir))
         return list(self.dirty)
 
+    #: What `left_behind` finds after a commit, and the patch `diff_of` makes
+    #: of it. Empty is the ordinary case: nothing is recorded.
+    left_outside = ()
+    left_excluded = ()
+    patch = "diff --git a/x b/x\n"
+    diff_error = None
+
+    def left_behind(self, container, workdir, excludes=None):
+        return dispatcher_mod.docker_exec.LeftBehind(
+            outside=list(self.left_outside), excluded=list(self.left_excluded),
+        )
+
+    def diff_of(self, container, workdir, paths):
+        if self.diff_error is not None:
+            raise self.diff_error
+        return self.patch
+
     def read_owner(self, container, path):
         return self.owner
 
@@ -153,6 +170,8 @@ def fake_git(monkeypatch):
     fake = _FakeGit()
     monkeypatch.setattr(dispatcher_mod.docker_exec, "commit_worktree", fake.commit_worktree)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "dirty_paths", fake.dirty_paths)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "left_behind", fake.left_behind)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "diff_of", fake.diff_of)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "read_owner", fake.read_owner)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "restore_owner", fake.restore_owner)
     monkeypatch.setattr(
@@ -5615,7 +5634,7 @@ def test_usage_record_of_an_empty_result_says_it_has_no_usage(tmp_path) -> None:
     assert record["model"] == "claude-opus-5-5", "what was asked for is known even unmeasured"
     assert record["raw_keys"] == []
     assert record["session_id"] is None
-    # The dispatcher's own nine are still right: this line is what says a
+    # The dispatcher's own ten are still right: this line is what says a
     # phase ran at all.
     assert record["task_id"] == "T-024"
     assert record["role"] == "auditor"
@@ -5878,6 +5897,109 @@ def test_a_usage_log_that_cannot_be_written_does_not_cost_the_phase(
         "implementador" in r.getMessage() and "No space left on device" in r.getMessage()
         for r in caplog.records
     )
+
+
+def _left_behind_phase(tmp_path, monkeypatch, role="implementador"):
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+    ])
+    return cfg
+
+
+def test_an_out_of_scope_edit_is_recorded_with_its_content(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    cfg = _left_behind_phase(tmp_path, monkeypatch)
+    monkeypatch.setattr(_FakeGit, "left_outside", ("tests/x.py",))
+    monkeypatch.setattr(_FakeGit, "patch", "--- a/tests/x.py\n+++ b/tests/x.py\n-nine\n+ten\n")
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(
+            cfg, "task-1", "myproj", "implementador", "build the thing", round_num=2,
+        )
+
+    assert result.success is True
+    records = dispatcher_mod.context_transfer.read_left_behind(cfg.hive_tasks_dir, "task-1")
+    assert [(r["role"], r["round"], r["outside"], r["excluded"]) for r in records] == [
+        ("implementador", 2, ["tests/x.py"], [])
+    ]
+    with open(records[0]["patch"], encoding="utf-8") as fh:
+        assert "+ten" in fh.read()
+    assert "tests/x.py" in caplog.text and "NOT on the branch" in caplog.text
+
+
+def test_an_excluded_path_is_recorded(tmp_path, monkeypatch) -> None:
+    cfg = _left_behind_phase(tmp_path, monkeypatch)
+    monkeypatch.setattr(_FakeGit, "left_excluded", ("docs/charter.md",))
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    records = dispatcher_mod.context_transfer.read_left_behind(cfg.hive_tasks_dir, "task-1")
+    assert records[0]["excluded"] == ["docs/charter.md"]
+    assert records[0]["outside"] == []
+
+
+def test_a_clean_phase_records_nothing_and_clears_an_earlier_record(
+    tmp_path, monkeypatch,
+) -> None:
+    cfg = _left_behind_phase(tmp_path, monkeypatch)
+    dispatcher_mod.context_transfer.save_left_behind(
+        cfg.hive_tasks_dir, "task-1", "implementador", 1, ["old.py"], [], "old",
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert dispatcher_mod.context_transfer.read_left_behind(cfg.hive_tasks_dir, "task-1") == []
+
+
+def test_a_failure_to_record_what_was_left_behind_does_not_fail_the_phase(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    cfg = _left_behind_phase(tmp_path, monkeypatch)
+    monkeypatch.setattr(_FakeGit, "left_outside", ("tests/x.py",))
+    monkeypatch.setattr(_FakeGit, "diff_error", RuntimeError("git diff failed"))
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(
+            cfg, "task-1", "myproj", "implementador", "build the thing",
+        )
+
+    assert result.success is True
+    assert any(
+        "could not record" in r.getMessage() and "git diff failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_left_behind_report_names_phase_paths_and_patch(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    assert dispatcher_mod.left_behind_report(cfg, "task-1") == []
+    patch = dispatcher_mod.context_transfer.save_left_behind(
+        cfg.hive_tasks_dir, "task-1", "auditor", 2, ["tests/x.py"], ["docs/charter.md"], "p",
+    )
+
+    [line] = dispatcher_mod.left_behind_report(cfg, "task-1")
+
+    assert "auditor phase (round 2)" in line
+    assert "outside its scope: tests/x.py" in line
+    assert "excluded: docs/charter.md" in line
+    assert patch in line
+    assert dispatcher_mod.left_behind_report(cfg, "task-1", role="revisor") == []
+
+
+def test_the_automatic_merge_warns_about_what_was_left_behind(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    dispatcher_mod.context_transfer.save_left_behind(
+        cfg.hive_tasks_dir, "task-1", "auditor", 1, ["tests/x.py"], [], "p",
+    )
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod._merge_task_branch(cfg, "task-1", "myproj")
+
+    assert "tests/x.py" in caplog.text
 
 
 def test_run_task_cycle_passes_an_effort_on_every_phase(tmp_path, monkeypatch) -> None:

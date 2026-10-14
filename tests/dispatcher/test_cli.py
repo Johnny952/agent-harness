@@ -1218,6 +1218,72 @@ def test_cli_run_phase_exits_with_the_held_code_when_no_account_took_it(
     assert "held" in capsys.readouterr().err
 
 
+def _left_behind(tmp_path: Path, role: str = "auditor") -> str:
+    return dispatcher_mod.context_transfer.save_left_behind(
+        str(tmp_path / "hive"), "task-1", role, 2, ["tests/x.py"], ["docs/charter.md"], "p",
+    )
+
+
+def test_cli_run_task_names_what_a_phase_left_uncommitted(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _capture_cycle(monkeypatch)
+    patch = _left_behind(tmp_path)
+
+    _run(monkeypatch, config_path, "--description", _DESCRIPTION)
+
+    err = capsys.readouterr().err
+    assert "auditor phase (round 2)" in err
+    assert "tests/x.py" in err and "docs/charter.md" in err
+    assert patch in err
+
+
+def test_cli_run_phase_names_what_the_phase_left_uncommitted(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    _capture_single_phase(monkeypatch)
+    patch = _left_behind(tmp_path, role="auditor")
+    _left_behind(tmp_path, role="implementador")
+
+    _run_command(
+        monkeypatch, _described(tmp_path),
+        "run-phase", "--task-id", "task-1", "--project", "myproj", "--role", "auditor",
+    )
+
+    err = capsys.readouterr().err
+    assert patch in err
+    assert "implementador phase" not in err
+
+
+def test_cli_merge_task_says_so_before_merging_a_task_with_edits_left_behind(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    patch = _left_behind(tmp_path)
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _merge_task(monkeypatch, config_path)
+
+    captured = capsys.readouterr()
+    assert patch in captured.err
+    assert "merging anyway" in captured.err
+    assert "merged agent/task/task-1 into main" in captured.out
+
+
+def test_cli_merge_task_without_edits_left_behind_says_nothing_of_them(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _merge_task(monkeypatch, config_path)
+
+    assert "uncommitted" not in capsys.readouterr().err
+
+
 def _keygen(monkeypatch, config_path: Path, *extra: str) -> None:
     monkeypatch.setattr(sys, "argv", [
         "ia-harness-dispatcher", "--config", str(config_path), "project-keygen", *extra,

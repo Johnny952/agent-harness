@@ -214,6 +214,81 @@ def save_handoff(
     return path
 
 
+#: What a scoped commit left uncommitted, per role: `<role>.json` names the
+#: paths and `<role>.patch` keeps their content. Its own directory, for the
+#: reason `_HANDOFF_SUBDIR` gives.
+_LEFT_BEHIND_SUBDIR = "left-behind"
+
+
+def left_behind_record_path(hive_dir: str, task_id: str, role: str) -> str:
+    return os.path.join(scratch_dir(hive_dir, task_id), _LEFT_BEHIND_SUBDIR, f"{role}.json")
+
+
+def left_behind_patch_path(hive_dir: str, task_id: str, role: str) -> str:
+    return os.path.join(scratch_dir(hive_dir, task_id), _LEFT_BEHIND_SUBDIR, f"{role}.patch")
+
+
+def save_left_behind(
+    hive_dir: str,
+    task_id: str,
+    role: str,
+    round_num: int | None,
+    outside: list[str],
+    excluded: list[str],
+    patch: str,
+) -> str:
+    """Keep the paths a scoped commit left behind, and their diff. Raises OSError.
+
+    The patch goes first: a record never points at a patch that is not there.
+    Returns the patch path.
+    """
+    record_path = left_behind_record_path(hive_dir, task_id, role)
+    patch_path = left_behind_patch_path(hive_dir, task_id, role)
+    _makedirs_readable(hive_dir, os.path.dirname(record_path))
+    _write_atomic(patch_path, patch)
+    record = {
+        "role": role,
+        "round": round_num,
+        "saved_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "outside": list(outside),
+        "excluded": list(excluded),
+        "patch": patch_path,
+    }
+    _write_atomic(record_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    return patch_path
+
+
+def clear_left_behind(hive_dir: str, task_id: str, role: str) -> None:
+    """Drop a role's earlier record: a clean re-run must not leave a stale one."""
+    for path in (
+        left_behind_record_path(hive_dir, task_id, role),
+        left_behind_patch_path(hive_dir, task_id, role),
+    ):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def read_left_behind(hive_dir: str, task_id: str) -> list[dict]:
+    """Every role's record, sorted by file name; unreadable ones are skipped."""
+    directory = os.path.join(scratch_dir(hive_dir, task_id), _LEFT_BEHIND_SUBDIR)
+    if not os.path.isdir(directory):
+        return []
+    records: list[dict] = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            records.append(data)
+    return records
+
+
 def list_handoff_roles(hive_dir: str, task_id: str) -> list[str]:
     """The roles that left a record on this task, sorted, empty when none did.
 

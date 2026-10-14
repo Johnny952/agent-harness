@@ -1361,6 +1361,65 @@ def test_dirty_paths_answers_nothing_when_git_status_will_not_run(monkeypatch) -
     assert dirty_paths(_CONTAINER, "/wd") == []
 
 
+def test_left_behind_sorts_excluded_from_outside(monkeypatch) -> None:
+    def respond(args):
+        if args[:2] == ["git", "status"]:
+            return (0, " M tests/x.py\n M docs/charter.md\n?? docs/charter.md.d/a\n", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    left = docker_exec_mod.left_behind(_CONTAINER, "/wd", ["docs/charter.md"])
+
+    assert left.excluded == ["docs/charter.md"]
+    assert left.outside == ["docs/charter.md.d/a", "tests/x.py"]
+    assert left.paths == ["docs/charter.md.d/a", "tests/x.py", "docs/charter.md"]
+
+
+def test_left_behind_treats_a_path_under_an_exclude_as_excluded(monkeypatch) -> None:
+    def respond(args):
+        return (0, "?? docs/charter/new.md\n", "") if args[:2] == ["git", "status"] else (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    left = docker_exec_mod.left_behind(_CONTAINER, "/wd", ["docs/charter"])
+
+    assert left.excluded == ["docs/charter/new.md"]
+    assert left.outside == []
+
+
+def test_diff_of_joins_the_tracked_and_the_untracked_diff(monkeypatch) -> None:
+    seen = []
+
+    def respond(args):
+        seen.append(args)
+        if args[:2] == ["git", "diff"] and "--no-index" in args:
+            return (1, "NEW-FILE-DIFF\n", "")
+        if args[:2] == ["git", "diff"]:
+            return (0, "TRACKED-DIFF\n", "")
+        if args[:2] == ["git", "ls-files"]:
+            return (0, "notes/new.txt\0", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    patch = docker_exec_mod.diff_of(_CONTAINER, "/wd", ["tests/x.py", "notes"])
+
+    assert patch == "TRACKED-DIFF\nNEW-FILE-DIFF\n"
+    assert seen[0] == ["git", "diff", "--binary", "HEAD", "--", "tests/x.py", "notes"]
+    assert seen[-1][-2:] == ["/dev/null", "notes/new.txt"]
+
+
+def test_diff_of_raises_when_git_cannot_diff(monkeypatch) -> None:
+    def respond(args):
+        return (128, "", "fatal: bad revision\n")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with pytest.raises(RuntimeError, match="git diff failed"):
+        docker_exec_mod.diff_of(_CONTAINER, "/wd", ["tests/x.py"])
+
+
 def test_read_owner_returns_the_host_uid_and_gid(monkeypatch) -> None:
     calls = []
 
