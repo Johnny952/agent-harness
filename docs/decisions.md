@@ -4734,3 +4734,65 @@ and does not guess a model from the role or the config.
 as optional. No mock fixture holds a usage line (`listUsage` reads only the
 api), so no fixture changes. A second screen that shows models moves this
 table into `docs/ui.md` as one entry, as ADR 67 says of its formats.
+
+## ADR 70 — what a commit leaves in the worktree is kept in the hive as a list and a patch, and every end of run names it
+
+**Status:** accepted (T-050, 2026-10-14). Leaves `dispatcher/project_docs.py`
+`_COMMIT_SCOPES` and `commit_excludes` as they are, and keeps the two log
+warnings `dispatcher/docker_exec.py` `_warn_changes_outside` and
+`_warn_excluded_changes`.
+
+**Context.** `commit_worktree` holds the auditor's commit to `docs/` and
+every commit away from the excluded paths, and names what it did not commit
+only in a log warning. The worktree goes at merge and the edit with it. On
+T-047 the auditor fixed a test comment, said in its handoff that it kept the
+fix, and `main` never got it: the warning was the only trace. The scope is
+not the bug. It exists so the phase after the review cannot change the
+reviewed work unreviewed, and the excluded paths are ones no role may change
+at all; committing either would undo the rule. What is missing is a record
+that outlives the worktree and a sentence an operator reads without opening
+the log.
+
+**Decision.**
+
+1. *What is recorded.* After every commit the cycle makes for a writer role
+   (`_should_commit`), whatever `git status` still shows dirty in that
+   worktree is what the commit left behind. That one rule covers both
+   cases: after a scoped commit it is the out-of-scope edits plus the
+   excluded ones, after an unscoped commit it is the excluded ones only.
+   Each path is sorted into `outside` or `excluded` (an excluded path, or
+   one under it, is `excluded`; the rest is `outside`).
+2. *Where.* Two files per role under the task's scratch dir, in a
+   `left-behind` subdirectory beside `handoffs` and `usage`:
+   `<hive_tasks_dir>/<task_id>/left-behind/<role>.json` holds `role`,
+   `round`, `saved_at`, `outside`, `excluded` and `patch` (the absolute path
+   of the second file), and
+   `<hive_tasks_dir>/<task_id>/left-behind/<role>.patch` holds a
+   `git apply`-able diff of exactly those paths against the worktree's
+   `HEAD`: `git diff --binary HEAD` for tracked ones and a `--no-index`
+   diff from `/dev/null` for each untracked file. One pair per role,
+   overwritten by its next commit, like a handoff. A commit that leaves
+   nothing removes that role's pair, so a record always describes the last
+   commit of that role and a clean phase records nothing.
+3. *Never fails the phase.* Taking and writing the record is wrapped at the
+   call site in `dispatcher/dispatcher.py`; any exception is one warning
+   naming the task and role, and the phase carries on, as `_UsageRecorder`
+   does for the usage log (ADR 53).
+4. *Shown.* One line per record, on stderr, naming the task, the role and
+   round, the `outside` and `excluded` paths, the patch file, and that the
+   edit is not on the branch. `run-task` prints every record of the task
+   when the cycle returns, whatever its outcome; `run-phase` prints the
+   record of the role it ran; `merge-task` prints every record before it
+   merges, and merges anyway with its exit code unchanged. The cycle's own
+   merge (`merge_on_done`) logs the same lines as warnings before merging.
+5. *Not applied.* Nothing commits, applies or deletes the kept edit. An
+   operator who wants it reads the patch and applies it by hand on a branch
+   of their choosing.
+
+**Consequences.** The record is attributed to the phase whose commit left
+the path, not to the phase that wrote it: the writers share one worktree, so
+an implementador's excluded edit is recorded again by every later commit
+until someone removes it. The record says what was dirty after which commit
+and makes no claim about authorship. A stale record of a role that never
+commits again stays until the task's scratch dir is gone; `round` and
+`saved_at` date it. No api route or console screen reads the record yet.
