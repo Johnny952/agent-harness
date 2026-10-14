@@ -549,7 +549,8 @@ them, which is file order:
   fields, and `session_id`. `raw_keys` stays out. Each line's figures are its
   own. `total_cost_usd` is the exception: on every line it is headed *session
   cost so far*, never *cost*, because ADR 64 makes it the session's running
-  total.
+  total. Since ADR 68 a line also carries `model` and `models_used`; showing
+  them is a separate front task.
 
 **What the console never computes.** It adds no lines, takes no difference
 between two lines' `total_cost_usd` and adds nothing across groups. No phase,

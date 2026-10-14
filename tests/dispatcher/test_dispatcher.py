@@ -5516,6 +5516,11 @@ _FULL_RAW = {
         "cache_read_input_tokens": 480_000,
         "cache_creation_input_tokens": 31_000,
     },
+    # Out of order on purpose: `models_used` is sorted. Values are never read.
+    "modelUsage": {
+        "claude-sonnet-5-5": {"costUSD": 1.0},
+        "claude-haiku-5-5": {"costUSD": 0.84},
+    },
 }
 
 
@@ -5535,7 +5540,7 @@ def _usage_lines(cfg, task_id="task-1"):
 
 def test_usage_record_keeps_every_number_a_full_result_carried(tmp_path) -> None:
     record = dispatcher_mod._usage_record(
-        "T-024", "implementador", 2, "cuenta1", "phase",
+        "T-024", "implementador", 2, "cuenta1", "phase", "claude-sonnet-5-5",
         ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
         _USAGE_NOW,
     )
@@ -5546,15 +5551,17 @@ def test_usage_record_keeps_every_number_a_full_result_carried(tmp_path) -> None
         "round": 2,
         "account": "cuenta1",
         "call": "phase",
+        "model": "claude-sonnet-5-5",
         "session_id": "sess-1",
         "recorded_at": "2026-10-11T09:30:00+00:00",
         "measured": True,
         # Names only, never values: the first real run says on its own which
         # keys the CLI actually printed, without another probe.
         "raw_keys": [
-            "duration_ms", "is_error", "num_turns", "session_id",
+            "duration_ms", "is_error", "modelUsage", "num_turns", "session_id",
             "total_cost_usd", "usage",
         ],
+        "models_used": ["claude-haiku-5-5", "claude-sonnet-5-5"],
         "is_error": False,
         "num_turns": 37,
         "duration_ms": 412_000,
@@ -5574,11 +5581,13 @@ def test_usage_record_of_a_result_with_no_usage_block_is_null_and_not_zero(tmp_p
     every median built on this log."""
     raw = {"is_error": False, "num_turns": 4, "duration_ms": 9_100}
     record = dispatcher_mod._usage_record(
-        "T-024", "revisor", 1, "cuenta2", "phase",
+        "T-024", "revisor", 1, "cuenta2", "phase", None,
         ClaudeResult(session_id="sess-2", result_text="ok", raw=raw),
         _USAGE_NOW,
     )
 
+    assert record["model"] is None, "no model was passed, and none is filled in"
+    assert record["models_used"] is None
     assert record["measured"] is True, "the CLI did answer; one of its keys is missing"
     assert record["raw_keys"] == ["duration_ms", "is_error", "num_turns"]
     assert record["num_turns"] == 4 and record["duration_ms"] == 9_100
@@ -5596,12 +5605,14 @@ def test_usage_record_of_an_empty_result_says_it_has_no_usage(tmp_path) -> None:
     JSON and a JSON list. None of those cost nothing — they cost whatever ran
     before they broke, and the honest record of that is `measured: false`."""
     record = dispatcher_mod._usage_record(
-        "T-024", "auditor", None, "cuenta1", "phase",
+        "T-024", "auditor", None, "cuenta1", "phase", "claude-opus-5-5",
         ClaudeResult(session_id=None, result_text="claude timed out after 7200s", raw={}),
         _USAGE_NOW,
     )
 
     assert record["measured"] is False
+    assert record["models_used"] is None
+    assert record["model"] == "claude-opus-5-5", "what was asked for is known even unmeasured"
     assert record["raw_keys"] == []
     assert record["session_id"] is None
     # The dispatcher's own nine are still right: this line is what says a
@@ -5638,7 +5649,7 @@ def test_usage_record_refuses_a_value_that_is_not_a_number(raw) -> None:
     as a column that went all-null, never as a number that quietly means
     something else."""
     record = dispatcher_mod._usage_record(
-        "T-024", "implementador", 1, "cuenta1", "phase",
+        "T-024", "implementador", 1, "cuenta1", "phase", None,
         ClaudeResult(session_id="sess-1", result_text="", raw=raw),
         _USAGE_NOW,
     )
@@ -5650,6 +5661,47 @@ def test_usage_record_refuses_a_value_that_is_not_a_number(raw) -> None:
         "cache_read_input_tokens", "cache_creation_input_tokens",
     ):
         assert record[key] is None, key
+
+
+@pytest.mark.parametrize("model_usage", [["m"], "m", None, 3])
+def test_usage_record_models_used_is_null_for_a_model_usage_that_is_not_an_object(model_usage) -> None:
+    record = dispatcher_mod._usage_record(
+        "T-024", "implementador", 1, "cuenta1", "phase", None,
+        ClaudeResult(session_id="sess-1", result_text="", raw={"modelUsage": model_usage}),
+        _USAGE_NOW,
+    )
+
+    assert record["measured"] is True
+    assert record["models_used"] is None
+
+
+def test_a_retry_line_carries_the_model_the_phase_was_asked_for(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _FAT_HANDOFF}),
+        ClaudeResult(session_id="sess-1", result_text="", raw={"is_error": False, "structured_output": _LEAN_HANDOFF}),
+    ])
+
+    dispatcher_mod.dispatch_phase(
+        cfg, "task-1", "myproj", "revisor", "review the thing", model="claude-x",
+    )
+
+    lines = _usage_lines(cfg)
+    assert [line["call"] for line in lines] == ["phase", "shrink-retry"]
+    assert [line["model"] for line in lines] == ["claude-x", "claude-x"]
+
+
+def test_a_dispatch_with_no_model_records_null(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+    ])
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build it")
+
+    lines = _usage_lines(cfg)
+    assert len(lines) == 1
+    assert lines[0]["model"] is None
 
 
 def test_a_dispatched_phase_leaves_one_line_naming_its_account_and_round(
@@ -5722,10 +5774,13 @@ def test_a_failover_records_a_line_per_account_in_order(tmp_path, monkeypatch) -
         lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
     )
 
-    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+    result = dispatcher_mod.dispatch_phase(
+        cfg, "task-1", "myproj", "arquitecto", "do the thing", model="claude-x",
+    )
 
     assert result.account == "cuenta2"
     lines = _usage_lines(cfg)
+    assert [line["model"] for line in lines] == ["claude-x", "claude-x"]
     assert [(line["account"], line["call"]) for line in lines] == [
         ("cuenta1", "phase"), ("cuenta2", "phase"),
     ]

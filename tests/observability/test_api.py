@@ -1565,13 +1565,15 @@ def _call(
     measured: bool = True,
     tokens: int = 100,
 ) -> dict:
-    """One usage line with the seventeen keys `dispatcher._usage_record` writes."""
+    """One usage line with the nineteen keys `dispatcher._usage_record` writes."""
     return {
         "task_id": "T-1",
         "role": role,
         "round": round_num,
         "account": account,
         "call": call,
+        "model": "claude-opus-5-5",
+        "models_used": ["claude-opus-5-5"] if measured else None,
         "session_id": "s-1" if measured else None,
         "recorded_at": "2026-10-10T00:00:00+00:00",
         "measured": measured,

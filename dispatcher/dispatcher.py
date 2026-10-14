@@ -492,16 +492,19 @@ def _usage_record(
     round_num: int | None,
     account: str,
     call: str,
+    model: str | None,
     result: docker_exec.ClaudeResult,
     now: dt.datetime,
 ) -> dict:
-    """One `claude` call as the task's usage log keeps it (ADR 53).
+    """One `claude` call as the task's usage log keeps it (ADR 53, ADR 68).
 
-    Seventeen keys in two halves. The first nine are the dispatcher's own and
+    Nineteen keys in two halves. The first ten are the dispatcher's own and
     it always knows them; the rest keep the CLI's own spelling, so there is no
     translation table to maintain and a key the CLI renames shows up as a
     column that went all-null rather than as a number quietly meaning
-    something else.
+    something else. `model` is what the dispatcher asked for (`null` when it
+    passed none); `models_used` is the names the CLI's own `modelUsage` says
+    ran, never its values, and `null` when it is absent or not an object.
 
     Pure, and `now` is a parameter rather than a second clock read: the module
     has one seam (`_utc_now`) and the caller reads it, which is the shape
@@ -521,18 +524,21 @@ def _usage_record(
     if not isinstance(usage, dict):
         usage = {}
     is_error = raw.get("is_error")
+    model_usage = raw.get("modelUsage")
     return {
         "task_id": task_id,
         "role": role,
         "round": round_num,
         "account": account,
         "call": call,
+        "model": model if isinstance(model, str) else None,
         "session_id": result.session_id if isinstance(result.session_id, str) else None,
         "recorded_at": now.isoformat(),
         "measured": bool(raw),
         # Names only, never values: the first real run says on its own which
         # keys the CLI printed, without the live probe this task was refused.
         "raw_keys": sorted(raw),
+        "models_used": sorted(model_usage) if isinstance(model_usage, dict) else None,
         "is_error": is_error if isinstance(is_error, bool) else None,
         "num_turns": _number_or_none(raw.get("num_turns")),
         "duration_ms": _number_or_none(raw.get("duration_ms")),
@@ -546,12 +552,12 @@ def _usage_record(
 
 @dataclasses.dataclass(frozen=True)
 class _UsageRecorder:
-    """The five things a usage line needs that are fixed for one attempt.
+    """The six things a usage line needs that are fixed for one attempt.
 
     Built once the account is picked and handed to the retry helpers, so each
     call site records its own result as the call that produced it without
-    taking five more parameters to do it. Frozen because an attempt's account
-    and round do not change under it — a failover builds a new one.
+    taking six more parameters to do it. Frozen because an attempt's account,
+    round and model do not change under it — a failover builds a new one.
     """
 
     cfg: Config
@@ -559,6 +565,7 @@ class _UsageRecorder:
     role: str
     round_num: int | None
     account: str
+    model: str | None
 
     def record(self, call: str, result: docker_exec.ClaudeResult) -> None:
         """Write the line, and never let doing so touch the phase.
@@ -575,7 +582,7 @@ class _UsageRecorder:
                 self.task_id,
                 _usage_record(
                     self.task_id, self.role, self.round_num, self.account, call,
-                    result, _utc_now(),
+                    self.model, result, _utc_now(),
                 ),
             )
         except Exception as exc:
@@ -1454,7 +1461,7 @@ def dispatch_phase(
         container = container_for(cfg, account)
         # One per attempt, built once the account is known: a failover is a
         # different account paying for a different call, and gets its own.
-        recorder = _UsageRecorder(cfg, task_id, role, round_num, account)
+        recorder = _UsageRecorder(cfg, task_id, role, round_num, account, model)
         logger.info(
             "task %s: %s%s goes to account %s, %s",
             task_id, role, f" round {round_num}" if round_num is not None else "", account,
