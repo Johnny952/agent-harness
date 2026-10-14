@@ -1096,6 +1096,42 @@ def test_commit_worktree_returns_false_when_there_was_nothing_to_commit(monkeypa
     assert commit_worktree(_CONTAINER, "/wd", "msg", "name", "mail@example.invalid") is False
 
 
+def test_commit_worktree_returns_false_when_only_out_of_scope_files_changed(monkeypatch) -> None:
+    """T-047: the auditor edited only a test, nothing in `docs` was staged."""
+
+    def respond(args):
+        if "commit" in args:
+            return (
+                1,
+                "On branch agent/task/T-047\n"
+                "Changes not staged for commit:\n"
+                "\tmodified:   tests/dispatcher/test_dispatcher.py\n\n"
+                'no changes added to commit (use "git add" and/or "git commit -a")\n',
+                "",
+            )
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    assert commit_worktree(
+        _CONTAINER, "/wd", "msg", "name", "mail@example.invalid", paths=["docs"],
+    ) is False
+
+
+def test_commit_worktree_raises_when_a_scoped_commit_fails_for_another_reason(monkeypatch) -> None:
+    def respond(args):
+        if "commit" in args:
+            return (1, "", "error: gpg failed to sign the data\n")
+        return (0, "", "")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], respond))
+
+    with pytest.raises(RuntimeError, match="git commit failed"):
+        commit_worktree(
+            _CONTAINER, "/wd", "msg", "name", "mail@example.invalid", paths=["docs"],
+        )
+
+
 def test_commit_worktree_raises_when_the_commit_really_fails(monkeypatch) -> None:
     def respond(args):
         if "commit" in args:

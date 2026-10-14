@@ -988,7 +988,14 @@ def _warn_excluded_changes(container: str, workdir: str, excludes: Sequence[str]
 def _nothing_to_commit(stdout: str, stderr: str) -> bool:
     """git reports a clean tree on *stdout* with exit 1, not on stderr."""
     combined = f"{stdout}\n{stderr}"
-    return "nothing to commit" in combined or "nothing added to commit" in combined
+    return any(
+        marker in combined
+        for marker in (
+            "nothing to commit",
+            "nothing added to commit",
+            "no changes added to commit",
+        )
+    )
 
 
 def path_exists(container: str, path: str) -> bool:
