@@ -303,3 +303,29 @@ def test_the_auditor_s_duties_and_the_filing_note_agree_about_the_card_column() 
     assert "write `none` in the `card` column" in note
     assert "card" not in auditor.split("Debt works the other way round.")[1].split("\n\n")[0]
     assert "the dispatcher assigns the ids" in auditor
+
+
+def test_the_debt_index_is_a_present_doc_and_the_entry_files_are_records() -> None:
+    """ADR 62: the index row says which debt is open right now, so it is read
+    whole every task; an entry's file is a dated filing, measured at the base
+    of the task that filed it, so it is a record like a learning. The same
+    layout as LEARNINGS_INDEX inside LEARNINGS_DIR."""
+    assert project_docs.DEBT_INDEX in project_docs.PRESENT_DOCS
+    assert project_docs.DEBT_DIR not in project_docs.PRESENT_DOCS
+    assert project_docs.DEBT_DIR in project_docs.RECORD_DOCS
+
+
+@pytest.mark.parametrize("path, record", [
+    ("docs/debt/README.md", False),
+    ("docs/debt/T-036-D1.md", True),
+    ("docs/debt/T-034-D1.md", True),
+    ("docs/learnings/README.md", False),
+    ("docs/learnings/a-plans-present-tense-claim-is-a-citation.md", True),
+])
+def test_an_entry_file_is_a_record_whatever_its_status_and_the_index_is_not(
+    path: str, record: bool,
+) -> None:
+    """Open (T-036-D1 before this task) and resolved (T-034-D1) alike: the class
+    is the path's, never the file's contents, so it does not flip when an entry
+    is resolved and the gate never has to read a status to decide it."""
+    assert project_docs.is_record(path) is record

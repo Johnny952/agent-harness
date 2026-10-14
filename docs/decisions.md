@@ -4351,3 +4351,51 @@ turned up no new finding: the 5 pairs whose paths are absent
 (`.lovable/project.json` twice, a `.data/` evidence file three times) all sat
 inside the first 400 and are excused as before. Tests are in
 `tests/dispatcher/test_gates.py`; the build is `docs/implementations/T-036.md`.
+
+## ADR 62 — the debt index is a present doc; every debt entry file is a record
+
+**Status:** accepted (T-038, 2026-10-13).
+
+**Context.** ADR 35 put the whole debt directory in `PRESENT_DOCS`, so the
+pointers gate read every entry file whole on every task. An entry file stays on
+disk once its entry is resolved, so the present-doc pair count only grew: 275 of
+400 pairs at T-036's base, 285 of 413 at T-038's, about a dozen more per filed
+entry, against the 1000-pair limit of ADR 61. ADR 61 named the scope as the
+lasting answer and left it to `dispatcher/project_docs.py` (debt T-036-D1). Two
+shapes were on the card: a resolved entry's file becomes a record, or the index
+stays present and every entry file becomes a record.
+
+**Decision.** `PRESENT_DOCS` names `DEBT_INDEX` in place of `DEBT_DIR`, and
+`RECORD_DOCS` gains `DEBT_DIR`. `is_record` is unchanged: `PRESENT_DOCS` already
+wins the overlap, which is the layout ADR 35 gave the learnings index inside the
+learnings directory, now applied to the debt index inside the debt directory.
+An entry file is a record whether its entry is open or resolved. The file is a
+filing measured at the base of the task that filed it, and the index row is the
+present claim: what, where, fix, and the `Detail:` link to the file.
+
+The other shape was weighed and rejected. Making only resolved files records
+would make `is_record` depend on content: the gate would have to read a status
+from the row's `**Resolved` prefix or the file's first paragraph, decide what
+to do when the two disagree, and see a file change class over its life. Open
+entries would still feed the count. Grepping only the files of open entries is
+the same shape with the same costs.
+
+This narrows the list in ADR 35's paragraph *The layout decides the scope, and
+the layout is `dispatcher/project_docs.py`.* where it says "the debt directory",
+which now reads as the debt index. It also answers the sentence in ADR 61's
+Consequences that begins "The lasting answer is the scope". It strikes neither
+entry; no paragraph is superseded outright.
+
+**Consequences.** On this tree the present docs give 193 unique (doc, token)
+pairs instead of 413, and the debt part is the index's 65 alone. From now on the
+count grows with index rows only, not with the files behind them. The gate no
+longer reads the old lines of any entry file, open or resolved. It still reads
+the index rows whole, so a renamed or deleted entry file is caught through the
+row's `Detail:` link. It still reads every line a task adds to an entry file,
+uncapped, and an entry file a task creates before the gate runs. An entry file
+the auditor files after the gate is not read, the same as a learning. A broken
+pointer in an entry file's old lines is owed by no later task under the record
+rule. The task that resolves the entry reads the file through its row, and the
+row's own where and fix cells stay checked. The count is in
+`docs/implementations/T-038.md`; the tests are in
+`tests/dispatcher/test_project_docs.py` and `tests/dispatcher/test_gates.py`.
