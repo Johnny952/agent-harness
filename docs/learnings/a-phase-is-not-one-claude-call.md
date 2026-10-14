@@ -46,6 +46,10 @@ If you need a per-phase number, you are aggregating several lines, and
 [`docs/debt/T-024-D2`](../debt/T-024-D2.md) is the precondition: whether a
 `--resume` result's `usage` is per call or cumulative over the session was
 never probed, so whether that aggregate is a sum or a diff is still unknown.
+Answered 2026-10-14 by T-041 in `docs/decisions.md` **ADR 64**: sum the token
+fields and `num_turns`, and take cost from the attempt's last line, never a
+sum — see
+[a-resumed-calls-cost-is-the-sessions-running-total](a-resumed-calls-cost-is-the-sessions-running-total.md).
 
 ## Evidence
 
