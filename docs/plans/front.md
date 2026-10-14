@@ -3,7 +3,9 @@
 Status: **tier 1 is built on both sides and closed, and the Jinja board is
 retired; tier 2's two routes are built on both sides and its *Done when* is
 reached, with the configuration read behind Role models the one tier-2 piece
-left, the Role models task's to answer.** The api's tier-1 share landed with
+left, the Role models task's to answer.** Tier 2 also carries one screen over a
+route already built: the task detail's usage region, carded by T-042 under
+*The usage task* below. The api's tier-1 share landed with
 T-011; the console's —
 the five served reads in `front/src/lib/api/client.ts`, the server-side bearer
 forward, and the warning banner on every screen that lists rows — landed with
@@ -500,6 +502,124 @@ Bound to the **Phases task**:
   handoff per task and role; `Phase` in `types.ts` is a guess at the same thing.
   ADR 17's sort applies field by field and the task does it.
 
+### The usage task: what a task's `claude` calls cost
+
+Written by T-042, which resolves `docs/debt/T-024-D3.md`. The route is built:
+`GET /api/tasks/<task_id>/usage` serves a task's usage log as one group per
+attempt, with the lines verbatim (`docs/decisions.md` ADR 54). What is missing
+is the console half, the same split T-013 and T-016 had, and that half is this
+card. It is a tier-2 read because the api grew it over a `:ro` file with the
+reader in `dispatcher/`, the way it grew `/api/phases` and `/api/learnings`.
+It came after tier 2's *Done when* below was reached, so that paragraph does
+not count it, and the Role models configuration read is still the one tier-2
+*route* left. This card is the one tier-2 *screen* left.
+
+This is not the Tokens screen. That screen and the Tokens task in tier 3 are a
+container's provider login. Spend has no other card than this one
+(`docs/learnings/the-tokens-screen-is-logins-not-spend.md`).
+
+**Where it goes.** A region of the task detail, `/tasks/$taskId`, under the
+phase timeline. It is titled *what this task's calls cost*. It is not a screen
+of its own and not a column on the Board, for three reasons. The route is one
+task's resource, and ADR 54 gives it 404 for the same ids the detail route
+refuses. An attempt is a role and a round, which is what the timeline above it
+already lists, so an operator reads a phase's outcome and its cost one above
+the other. And a cost across tasks, on the Board or anywhere else, would be a
+sum over tasks that no route serves (below). It is a secondary read on a
+discrete block, so it follows `docs/ui.md` *Absent, empty and broken are three
+different things* the way the debt and learnings regions do.
+
+**What one group prints.** One row per group, in the order the route serves
+them, which is file order:
+
+- `role`, with the role's hue (`docs/ui.md` *One hue per role, everywhere a
+  role is named*), `round`, and `account`. The served values are printed
+  as-is, and a value of the wrong shape is a `Malformed`.
+- `call_kinds`, in their served order, and `call_count`.
+- `phase_call`'s measured fields: `input_tokens`, `output_tokens`,
+  `cache_read_input_tokens`, `cache_creation_input_tokens`, `num_turns`,
+  `duration_ms` and `total_cost_usd`, plus `is_error` as a pill when it is
+  `true`. The block is labelled *first call*, never *attempt*. When
+  `call_count` is above 1 the label says how many later calls it leaves out,
+  for example *first call; 2 retries not included*. Under ADR 64 these figures
+  are exact for the first call, because a session's first call has nothing to
+  accumulate. They are not the attempt's.
+- **Behind a disclosure**, closed by default, the group's `calls`: one line
+  per call, with `call`, `recorded_at` as an absolute time, the same measured
+  fields, and `session_id`. `raw_keys` stays out. Each line's figures are its
+  own. `total_cost_usd` is the exception: on every line it is headed *session
+  cost so far*, never *cost*, because ADR 64 makes it the session's running
+  total.
+
+**What the console never computes.** It adds no lines, takes no difference
+between two lines' `total_cost_usd` and adds nothing across groups. No phase,
+task or Board total is computed from these rows. Two of those numbers would be
+correct today. The sum of an attempt's token fields and `num_turns`, and the
+last line's `total_cost_usd` as the attempt's cost, both follow from ADR 64.
+The console still does not compute them, for the reason `docs/ui.md`
+*Staleness is served, never computed* gives about a lock. ADR 64 says it is
+what changes if a later log contradicts it. A console holding its own copy of
+that rule would keep the old answer after a new ADR changed the route's. So
+the screen **ships with per-line figures and does not wait for a total**.
+When a later task adds a total as a new key on the group, under its own ADR
+(ADR 54 and ADR 64 both say a total is added that way), the group row prints
+that key verbatim, labelled *attempt*, beside the *first call* block. A null
+total prints as `Absent` and not as zero. A phase's or a task's total is the
+same kind of key and arrives the same way.
+
+**A failover attempt.** It is a group of its own, because a new account is a
+new session. Groups that share a `role` and a `round` are drawn together under
+that phase, numbered *attempt 1 of 2*, *attempt 2 of 2* in file order. A later
+attempt whose `account` differs from the one before it is marked
+*failover from <account>*. The earlier attempt's last line says why the
+dispatcher moved on: an `is_error` pill, or *no result: crashed or timed out*
+when it was unmeasured. Grouping them only lays them out and adds
+nothing: a phase's cost across its attempts is a sum, and it waits for a key
+like the rest.
+
+**A group with unmeasured lines.** `measured: false` means the call returned
+no result object at all, because it crashed or timed out (ADR 53). Such a line
+reads *no result: crashed or timed out* where its figures would be. It never
+reads as zeros or as a row of `Absent`s, since a call that left no record is a
+different fact from a field the CLI left out. A measured line with a null field
+shows that field as `Absent`. The group row prints `unmeasured_calls` beside
+`call_count` when it is above zero. If `measured_calls` plus `unmeasured_calls`
+is less than `call_count`, it also says how many lines carry a `measured` that
+is neither, which ADR 54 calls the sign the format drifted. A group whose
+`phase_call` is `null` prints *no phase line in this attempt* in place of the
+*first call* block. That happens when the first group served was cut at
+`MAX_USAGE_CALLS` or its line was lost. A retry's line is never shown in its
+place.
+
+**States.** Loading is the page's one line (`docs/ui.md` *Loading is per page,
+not per region*). If the route fails, the region shows an `ErrorState` naming
+`/api/tasks/<task_id>/usage`, and the rest of the page is unaffected.
+`data: []` is an `EmptyState` about the harness: no `claude` call of this task
+has been recorded. The log is written per call since T-024, so a task
+dispatched before that has none. `data: null` with a warning means the log
+exists and could not be read (ADR 54). It is an `ErrorState` carrying the
+served warning, never the empty state, because `[]` would claim the task made
+no call. Rows with warnings, such as skipped lines or the clamp, are a partial
+and show both. No stale state applies: every line is a finished call and the
+log is append-only.
+
+**What it touches in `front/`.** A `listUsage` read in `client.ts` resolving
+to `ApiResult` (ADR 16, ADR 25). The route added to `forward.ts`'s closed
+whitelist; its detail regex takes no second segment, so this path needs its
+own match (ADR 24). A query key in `queries.ts`. Types in `types.ts` over the
+group and the line, read as annotations and guarded where they render
+(`docs/ui.md` *A value of the wrong shape is named, not rendered and not
+dropped*).
+
+Bound to the **Usage task**:
+
+- **How a figure is formatted.** How tokens are grouped, how many decimals a
+  dollar figure keeps and how `duration_ms` reads. These are one-screen choices
+  unless a second screen shows spend, and then they belong in `docs/ui.md`.
+- **Whether `call_kinds` and the per-line `call` share a vocabulary on
+  screen**, for example *gate retry* for `gate-retry`, or print the served
+  string.
+
 ### Done when
 
 Task detail shows real phases, Learnings reads the real tree, and every screen
@@ -614,6 +734,7 @@ taken — not now.
 | Where the model list comes from | Role models task | ADR |
 | ~~What a phase row is~~ — answered 2026-10-03 by ADR 27, which sorts all twenty-two fields; ADR 28 takes the lanes it cost | Phases task | ADR |
 | Whether a backlog has a source at all | Backlog task | ADR |
+| A served total per attempt, phase or task on `/api/tasks/<task_id>/usage` (ADR 54, ADR 64) | the task that adds the key; the Usage task only prints it | ADR |
 | Session logs: file on a `:ro` mount, or a tee | board Phase 5 | ADR |
 | Persisting `usage_pct` with a stamp (ADR 18) | a dispatcher task | ADR |
 | Approving from the console, against C-1 and C-4 | tier-3 opening task | charter |

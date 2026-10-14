@@ -33,10 +33,11 @@ credential. The Tokens screen's row is
 `docs/plans/front.md` are credential too: a tier-3 privileged read, gated on a
 docker socket and on a charter ruling about a secret leaving a container.
 
-Token *spend* has no screen and no card anywhere in `docs/`. Grep `cost` and
-`num_turns` over `front/src` and the only hits are comments. So a pointer at
-the Tokens card sends the next task to a privileged read and a human decision
-that have nothing to do with what a phase cost.
+Token *spend* has no screen and no card anywhere in `docs/` (since T-042, the
+card is `docs/plans/front.md` *The usage task*; there is still no screen).
+Grep `cost` and `num_turns` over `front/src` and the only hits are comments.
+So a pointer at the Tokens card sends the next task to a privileged read and
+a human decision that have nothing to do with what a phase cost.
 
 Quota *percentages* are a third thing again, and they do have a home: the Pool
 screen's usage gauge, served by `/api/accounts` (`docs/decisions.md` ADR 20,
@@ -44,7 +45,8 @@ ADR 48, ADR 49).
 
 ## Rule
 
-Write "no card owns this yet" rather than naming the Tokens card. If you need
+Write "no card owns this yet" rather than naming the Tokens card (since T-042,
+cite `docs/plans/front.md` *The usage task* instead for spend). If you need
 the distinction in prose, name the collision explicitly — ADR 53
 *Consequences*, `docs/plans/token-economy.md` **P5** and
 `docs/debt/T-024-D1.md` all do, so that the next reader does not re-make the
