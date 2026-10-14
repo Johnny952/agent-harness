@@ -777,6 +777,24 @@ def revisor_approved(result_text: str, payload: dict | None = None) -> bool:
     return bool(_VERDICT_RE.fullmatch(lines[-1]))
 
 
+def review_reasons(payload: dict | None) -> dict[str, str]:
+    """What a review sent the round back for, keyed by fingerprint.
+
+    The `findings` lines and the debt it rejected, both the revisor's own
+    words. Keyed by `debt.fingerprint` so a comparison between two reviews is
+    set intersection, not a reading of prose: the revisor is told to copy a
+    finding that still holds rather than reword it, and the fingerprint only
+    absorbs what a copy can drift on (case, punctuation, a number) — the
+    same normalization the debt index files by (`docs/decisions.md` ADR 73).
+    """
+    reasons: dict[str, str] = {}
+    for text in [*handoff.findings_of(payload), *debt.rejected(payload)]:
+        key = debt.fingerprint(text)
+        if key and key not in reasons:
+            reasons[key] = text
+    return reasons
+
+
 # Why a role is told this at all, when nothing in `dispatcher/` fetches during a
 # cycle: the role is the one with a shell in the worktree, and reaching for the
 # remote is a helpful-looking thing to do when a tree looks older than expected.
@@ -2012,15 +2030,17 @@ def run_phase(
     model: str | None = None,
     max_turns: int | None = None,
     note: str = "",
+    repeated_finding: bool = False,
 ) -> DispatchResult | None:
     """One role's turn, with everything that has to happen around it.
 
     The status block, the account and card locks, the worktree, the commit,
     the gates and the handoff the next phase reads — all of it per phase, none
     of it per cycle, which is what lets `run-phase` exist at all.
+    `repeated_finding` is the cycle's signal for `Config.effort_for`.
     """
     cfg = ctx.cfg
-    effort = cfg.effort_for(role, round_num)
+    effort = cfg.effort_for(role, round_num, repeated_finding=repeated_finding)
     try:
         result = dispatch_phase(
             cfg, ctx.task_id, ctx.slug, role,
@@ -2445,9 +2465,16 @@ def run_task_cycle(
         # place that reads this is the branch that runs when the loop did not
         # approve — including when it never ran.
         rounds_run = 0
+        # What the last review that sent a round back sent it back for, and
+        # whether the one after it repeated any of it (ADR 73). A round the
+        # gates blocked has no review, so it changes neither.
+        previous_reasons: dict[str, str] = {}
+        repeated_finding = False
         for round_num in range(1, cfg.max_revision_rounds + 1):
             rounds_run = round_num
-            implemented = run_phase(ctx, "implementador", round_num=round_num)
+            implemented = run_phase(
+                ctx, "implementador", round_num=round_num, repeated_finding=repeated_finding,
+            )
             if implemented is None:
                 return stopped()
             if implemented.gates is not None and implemented.gates.blocking:
@@ -2486,6 +2513,20 @@ def run_task_cycle(
                     "task %s: round %d came back APPROVED with %d debt declaration(s) rejected, "
                     "so it is not an approval: %s",
                     task_id, round_num, len(sent_back), "; ".join(sent_back),
+                )
+            reasons = review_reasons(revisor_result.handoff)
+            repeated = [text for key, text in reasons.items() if key in previous_reasons]
+            previous_reasons = reasons
+            if (
+                repeated
+                and cfg.escalate_effort_on_repeated_finding
+                and round_num < cfg.max_revision_rounds
+            ):
+                repeated_finding = True
+                logger.info(
+                    "task %s: round %d runs the implementador at effort %s, "
+                    "the revisor sent back the same finding(s) twice: %s",
+                    task_id, round_num + 1, cfg.escalated_effort, "; ".join(repeated),
                 )
 
         if not approved:

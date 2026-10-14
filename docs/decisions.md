@@ -4796,3 +4796,72 @@ until someone removes it. The record says what was dirty after which commit
 and makes no claim about authorship. A stale record of a role that never
 commits again stays until the task's scratch dir is gone; `round` and
 `saved_at` date it. No api route or console screen reads the record yet.
+
+## ADR 73 — a review that repeats the last one's finding escalates the next round's effort, compared on fingerprints and never on prose
+
+**Status:** accepted (T-053, 2026-10-14). Builds part of refinement (2) of
+`docs/plans/backlog.md` item 4; leaves the round-count rule of
+`Config.effort_for`, `max_revision_rounds` and the usage record (ADR 53, 68)
+as they are.
+
+**Context.** The only escalation signal is the round count:
+`escalate_effort_after_round` exceeded, the round runs at `escalated_effort`.
+The backlog named two other signals, the revisor repeating the same
+`CHANGES_REQUESTED` complaint and a result text coming back suspiciously
+short, and warned against a heuristic over freeform `result_text` that never
+fires as intended. The revisor's return had nothing to compare: its reasons
+were spread across `pending`, `risks` and prose, and `pending` also holds
+whatever else the next phase should know, so two reviews sharing a `pending`
+line says nothing about the round being sent back twice for one reason.
+`discarded_writes_prompt` already told a reviewing phase to put the change it
+wanted "under `findings`", a field no schema had.
+
+**Decision.**
+
+1. *The field.* The revisor's schema gains `findings`, a list of strings:
+   what sends this round back, one line each, empty when approving. Its
+   description tells the revisor that a finding an earlier review raised and
+   that still holds is copied verbatim. That description is the whole prompt
+   change; `_role_prompt` is untouched. `render` prints it first among the
+   lists, so the next round's implementador and revisor read the last
+   review's findings in the task file. `handoff.findings_of` reads it.
+2. *The comparison.* A review's reasons are its `findings` and the debt it
+   rejected (`debt.rejected`, a finding by `run_task_cycle`'s own rule),
+   each keyed by `debt.fingerprint`: lowercase, digits and hashes zeroed,
+   punctuation to spaces, the normalization the debt index files by. A
+   review repeats when its keys intersect those of the last review that sent
+   a round back. Equality on a fingerprint is all: no similarity score, no
+   stemming, no model asked. The verbatim instruction is what makes that
+   enough; a reworded finding does not match, and that is a missed
+   escalation the round count still catches, never a wrong one.
+3. *What it does.* With `escalate_effort_on_repeated_finding: true`, a review
+   that sends the round back and repeats makes every later implementador
+   round of the cycle run at `escalated_effort` (`Config.effort_for` with
+   `repeated_finding`, passed by `run_phase`). The revisor's own effort stays
+   on the round-count rule: it is the implementador that keeps failing to
+   fix the thing. The round-count rule is checked first and unchanged, so
+   the signal can only escalate sooner. A round the gates blocked has no
+   review and changes neither the last reasons nor the flag.
+4. *Said once.* When it fires the cycle logs one info line naming the task,
+   the round about to run, the effort it will run at and the repeated
+   finding(s). Nothing fires on the last round, which has no next one.
+5. *Off by default.* A config without the key is the round-count rule
+   alone, exactly as before. With the defaults (escalate after round 2 of 3)
+   the round count already escalates the only round the signal could, so it
+   starts to matter once `escalate_effort_after_round` is raised.
+
+**Not built: a suspiciously short result.** There is no threshold to compare
+against. The length of a result text varies by role, by task and by how much
+went to files under `paths` rather than into the return; with a schema the
+`result` can be a CLI placeholder of fixed length whatever the work, and a
+short structured return is what the byte budget asks for. Any cut-off would
+be a number picked by hand that fires on a good terse phase and misses a bad
+long one, the heuristic the backlog warned about. It stays open there.
+
+**Consequences.** The signal is as good as the revisor's copying: a revisor
+that rephrases a finding it still holds never fires it. Once fired the flag
+stays for the rest of the cycle, like the round-count rule, rather than
+dropping back when a later review finds something new. The usage record
+(ADR 53, 68) does not carry the effort a phase ran at, so the fire line is
+where the escalated level is written down; adding effort to the usage record
+is its own change to that contract. Switching model on a signal is not built.

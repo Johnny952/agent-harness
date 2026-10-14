@@ -142,10 +142,25 @@ class Config:
     #: end a turn on a progress report, and under `-p` that ends the phase
     #: (`docs/plans/models-5-5.md`, *Decisions*, 3). 0 fails it at once.
     max_handoff_resumes: int = 2
+    #: Escalate the next implementador round as soon as the revisor sends a
+    #: round back for a finding it already sent the previous review back for
+    #: (`docs/decisions.md` ADR 73), instead of only on the round count. Off
+    #: by default, which is exactly the round-count rule alone. On, the
+    #: round-count rule still applies: this can only escalate sooner.
+    escalate_effort_on_repeated_finding: bool = False
 
-    def effort_for(self, role: str, round_num: int | None = None) -> str:
-        """The `--effort` a phase of `role` runs at, in `round_num` if any."""
+    def effort_for(
+        self, role: str, round_num: int | None = None, repeated_finding: bool = False,
+    ) -> str:
+        """The `--effort` a phase of `role` runs at, in `round_num` if any.
+
+        `repeated_finding` is the cycle saying the last review repeated a
+        finding of the one before it; it counts only with
+        `escalate_effort_on_repeated_finding` on.
+        """
         if round_num is not None and round_num > self.escalate_effort_after_round:
+            return self.escalated_effort
+        if repeated_finding and self.escalate_effort_on_repeated_finding:
             return self.escalated_effort
         return self.role_effort.get(role, self.default_effort)
 
@@ -437,6 +452,9 @@ def load_config(path: str) -> Config:
         max_revision_rounds=raw.get("max_revision_rounds", 3),
         escalate_effort_after_round=raw.get("escalate_effort_after_round", 2),
         escalated_effort=_check_effort("escalated_effort", raw.get("escalated_effort", "high")),
+        escalate_effort_on_repeated_finding=bool(
+            raw.get("escalate_effort_on_repeated_finding", False)
+        ),
         default_effort=_check_effort("default_effort", raw.get("default_effort", "medium")),
         role_effort=_load_role_effort(raw),
         role_model=_load_role_model(raw),
