@@ -383,7 +383,12 @@ run arbitrary code from cloned repos on the same network:
   The collector's `POST`/`GET /events` have no auth, so anything on
   `ia_harness_net`, agent containers included, can read or forge
   events. A shared token would close that.
-- Hook payloads include tool inputs and outputs (file contents, env
+- **Done 2026-10-14 by T-054** (`docs/decisions.md` ADR 74):
+  `hooks/emit_event.py` redacts the event before the POST with fixed rules
+  (the container's secret env values, vendor key shapes, secret-named
+  pairs, the content of secret-named files) and fails closed; what stays
+  exposed is a secret in a shape no rule knows. The original text follows.
+  Hook payloads include tool inputs and outputs (file contents, env
   files, tokens) and land in SQLite as-is. Redact them in
   `hooks/emit_event.py`.
 - […] The collector and the read API also run
