@@ -571,8 +571,9 @@ same kind of key and arrives the same way.
 new session. Groups that share a `role` and a `round` are drawn together under
 that phase, numbered *attempt 1 of 2*, *attempt 2 of 2* in file order. A later
 attempt whose `account` differs from the one before it is marked
-*failover from <account>*. The earlier attempt's `is_error` pill tells the
-operator why the dispatcher moved on. Grouping them only lays them out and adds
+*failover from <account>*. The earlier attempt's last line says why the
+dispatcher moved on: an `is_error` pill, or *no result: crashed or timed out*
+when it was unmeasured. Grouping them only lays them out and adds
 nothing: a phase's cost across its attempts is a sum, and it waits for a key
 like the rest.
 
