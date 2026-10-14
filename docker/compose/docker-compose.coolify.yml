@@ -46,6 +46,12 @@
 #     string, the same value here and wherever front/ runs. Without it the api
 #     still starts and still serves a human's basic auth, and the console's
 #     every region shows its Error state saying so.
+#   - COLLECTOR_READ_TOKEN, COLLECTOR_WRITE_TOKEN_CUENTA1 and
+#     COLLECTOR_WRITE_TOKEN_CUENTA2 (docs/decisions.md ADR 72): three distinct
+#     long random strings. Unlike API_TOKEN these are not optional — the
+#     collector refuses to start without them. The read token is what an
+#     operator sends to `GET /events`; each write token goes to its agent and
+#     the collector only.
 #   - Per-account Claude Pro OAuth login, done once per agent container after
 #     it's up (`docker exec -it agent-cuenta1 claude login` or equivalent) —
 #     inherently a manual, interactive step no compose file can automate.
@@ -61,6 +67,11 @@ services:
       - observability_data:/data
     environment:
       - COLLECTOR_DB_PATH=/data/events.db
+      # docs/decisions.md ADR 72, mirrored from docker-compose.yml: both
+      # required, the read token given to no other service, and one
+      # `<source_app>=<token>` entry per agent below.
+      - COLLECTOR_READ_TOKEN=${COLLECTOR_READ_TOKEN}
+      - COLLECTOR_WRITE_TOKENS=agent-cuenta1=${COLLECTOR_WRITE_TOKEN_CUENTA1},agent-cuenta2=${COLLECTOR_WRITE_TOKEN_CUENTA2}
     networks:
       - ia_harness_net
 
@@ -153,6 +164,8 @@ services:
       - DOCKER_HOST=tcp://dind-cuenta1:2375
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta1
+      # This agent's write token and no other (ADR 72); never the read token.
+      - COLLECTOR_TOKEN=${COLLECTOR_WRITE_TOKEN_CUENTA1}
     volumes:
       # See the header comment above: claude_shared is the shared allowlist,
       # claude_creds_cuenta1 is this account's own config home.
@@ -194,6 +207,7 @@ services:
       - DOCKER_HOST=tcp://dind-cuenta2:2375
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta2
+      - COLLECTOR_TOKEN=${COLLECTOR_WRITE_TOKEN_CUENTA2}
     volumes:
       # See agent-cuenta1 above.
       - claude_shared:/root/.claude

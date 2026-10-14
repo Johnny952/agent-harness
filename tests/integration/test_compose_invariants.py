@@ -440,3 +440,142 @@ def test_the_dispatcher_mounts_the_deploy_keys_writable_at_the_agents_path() -> 
     dispatcher = _load("docker-compose.yml")["services"]["dispatcher"]
     mounts = [v for v in _short_volumes(dispatcher) if ":/run/secrets/projects" in v]
     assert mounts == ["../../.data/credentials/projects:/run/secrets/projects"]
+
+
+# --- the collector's tokens (docs/decisions.md ADR 72) ----------------------
+#
+# Asserted per *deployment*, not per file: the split path is two files that run
+# as one stack, and the read token being absent from docker-compose.agents.yml
+# proves nothing if docker-compose.yml handed it to a service defined there.
+# Every service of every file in a deployment is read as one mapping.
+
+DEPLOYMENTS = {
+    "split": ("docker-compose.yml", "docker-compose.agents.yml"),
+    "coolify": ("docker-compose.coolify.yml",),
+}
+
+#: `${NAME}`, `${NAME:-x}`, `${NAME:?x}`... as (name, the rest), so a default
+#: can be told apart from the bare form. `_substitutions_of` above matches whole
+#: values, which the collector's map — two substitutions in one value — is not.
+_SUBSTITUTION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}")
+
+
+def _deployment_services(deployment: str) -> dict:
+    services: dict = {}
+    for name in DEPLOYMENTS[deployment]:
+        for service, body in _load(name)["services"].items():
+            assert service not in services, f"{service} is defined twice in {deployment}"
+            services[service] = body
+    return services
+
+
+def _variables_read_by(service: dict) -> dict[str, set[str]]:
+    """Each `.env` variable a service's environment substitutes, with every
+    suffix it is spelt with (`""` for the bare form)."""
+    found: dict[str, set[str]] = {}
+    for value in _environment(service).values():
+        for name, suffix in _SUBSTITUTION.findall(value):
+            found.setdefault(name, set()).add(suffix)
+    return found
+
+
+def _write_token_variables(services: dict) -> set[str]:
+    return {
+        name
+        for service in services.values()
+        for name in _variables_read_by(service)
+        if name.startswith("COLLECTOR_WRITE_TOKEN_")
+    }
+
+
+def _write_token_map(collector: dict) -> dict[str, str]:
+    """`COLLECTOR_WRITE_TOKENS` as `{source_app: the substitution it holds}`,
+    split the way observability/collector/server.py splits it."""
+    raw = _environment(collector)["COLLECTOR_WRITE_TOKENS"]
+    entries = [entry.strip().partition("=") for entry in raw.split(",") if entry.strip()]
+    return {source_app.strip(): token.strip() for source_app, _, token in entries}
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_no_agent_service_gets_the_read_token(deployment: str) -> None:
+    """The point of splitting read from write: code in an agent container can
+    read its own environment, so the token that reads every agent's events
+    must not be in any of them. Checked on keys as well as values, so an agent
+    that took the variable under another name still fails."""
+    services = _deployment_services(deployment)
+    agents = [name for name in services if name.startswith("agent-")]
+    assert agents
+
+    for name in agents:
+        env = _environment(services[name])
+        assert "COLLECTOR_READ_TOKEN" not in env, name
+        assert not any("COLLECTOR_READ_TOKEN" in value for value in env.values()), name
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_only_the_collector_gets_the_read_token(deployment: str) -> None:
+    services = _deployment_services(deployment)
+
+    readers = {
+        name
+        for name, service in services.items()
+        if "COLLECTOR_READ_TOKEN" in _variables_read_by(service)
+    }
+
+    assert readers == {"collector"}
+    assert _environment(services["collector"])["COLLECTOR_READ_TOKEN"] == "${COLLECTOR_READ_TOKEN}"
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_each_agent_sends_the_write_token_bound_to_its_source_app(deployment: str) -> None:
+    """Every agent sends `COLLECTOR_TOKEN`, and the collector's map binds the
+    variable behind it to that agent's `SOURCE_APP`. A mismatch here is an agent
+    whose events land under another agent's name, or are refused outright."""
+    services = _deployment_services(deployment)
+    bound = _write_token_map(services["collector"])
+    agents = [name for name in services if name.startswith("agent-")]
+    assert agents
+
+    for name in agents:
+        env = _environment(services[name])
+        source_app = env.get("SOURCE_APP")
+        token = env.get("COLLECTOR_TOKEN", "")
+        assert _SUBSTITUTION.fullmatch(token), (
+            f"{name} must take COLLECTOR_TOKEN from .env, found {token!r}"
+        )
+        assert bound.get(source_app) == token, (
+            f"the collector binds {source_app} to {bound.get(source_app)!r}"
+            f" but {name} sends {token!r}"
+        )
+    # And nothing in the map that is not an agent of this deployment.
+    assert set(bound) == {_environment(services[name]).get("SOURCE_APP") for name in agents}
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_a_write_token_reaches_only_its_agent_and_the_collector(deployment: str) -> None:
+    services = _deployment_services(deployment)
+    variables = _write_token_variables(services)
+    assert variables
+
+    for variable in variables:
+        holders = {
+            name for name, service in services.items() if variable in _variables_read_by(service)
+        }
+        agents = {name for name in holders if name.startswith("agent-")}
+        assert len(agents) == 1, f"{variable} reaches {sorted(agents)}"
+        assert holders == agents | {"collector"}, f"{variable} reaches {sorted(holders)}"
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_the_collector_tokens_are_spelt_bare_with_no_default(deployment: str) -> None:
+    """Required, like the two DASHBOARD_ credentials above: a default baked in
+    here is a token every clone of the repo knows, and an empty one is a
+    collector that refuses to start for a reason compose could have printed
+    first."""
+    services = _deployment_services(deployment)
+    names = {"COLLECTOR_READ_TOKEN"} | _write_token_variables(services)
+
+    for service_name, service in services.items():
+        for name, suffixes in _variables_read_by(service).items():
+            if name in names:
+                assert suffixes == {""}, f"{service_name} spells ${{{name}}} with {suffixes}"

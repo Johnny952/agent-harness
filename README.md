@@ -340,7 +340,8 @@ git clone <this-repo> ia-harness && cd ia-harness
 
 Generate `config.yaml` (and, optionally, `docker/compose/.env` with the hashed
 credentials the api checks, plus the `API_TOKEN` the console authenticates to
-the api with) using the interactive wizard — pure `bash` +
+the api with, the collector's `COLLECTOR_READ_TOKEN`, and one
+`COLLECTOR_WRITE_TOKEN_<ACCOUNT>` per account) using the interactive wizard — pure `bash` +
 coreutils, so it needs nothing beyond a POSIX shell and `sha256sum`:
 
 ```bash
@@ -497,6 +498,15 @@ were written for is gone — renaming them means editing a `.env` that exists on
 every running host to buy a spelling. An `.env` written before `API_TOKEN`
 existed still starts everything: the api rejects every bearer and keeps
 serving a human's password, and the console says so in each region's Error state.
+The collector is stricter (`docs/decisions.md` ADR 72): it reads
+`COLLECTOR_READ_TOKEN` and `COLLECTOR_WRITE_TOKEN_CUENTA1`/`_CUENTA2` from the
+same `.env` and refuses to start, naming the variable, without them — so an
+`.env` written before they existed needs `scripts/configure.sh` rerun or the
+keys added by hand (three distinct long random strings). The read token is the
+operator's for `GET /events` (`curl -H "Authorization: Bearer $COLLECTOR_READ_TOKEN"
+127.0.0.1:8787/events`) and goes to no other service; each write token goes to
+its agent as `COLLECTOR_TOKEN` and to the collector, which stores the agent it
+is bound to whatever the event body claims.
 This step brings up three **persistent** control-plane services (`collector`,
 `api`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account.
@@ -1136,7 +1146,9 @@ included:
 - **`config.yaml` must exist before first deploy.** It holds no secrets
   (just paths, thresholds, and account names — see `config.example.yaml`),
   so a Coolify pre-deployment command is safe: `test -f config.yaml || cp config.example.yaml config.yaml`.
-  Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, and `API_TOKEN` if the
+  Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, `COLLECTOR_READ_TOKEN`,
+  `COLLECTOR_WRITE_TOKEN_CUENTA1` and `COLLECTOR_WRITE_TOKEN_CUENTA2` (required:
+  the collector will not start without them), and `API_TOKEN` if the
   console is to reach the api, through Coolify's own environment-variables UI on
   the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
   compose the same way.
@@ -1330,7 +1342,8 @@ number and title.
    - *Other roles*, a security reviewer pack, and bug fixing, infra,
      performance and migrations as profiles — **open**.
 6. **Observability and hardening.**
-   - The collector's `/events` have no auth — **open**.
+   - Auth on the collector's `/events` — **built**: `docs/decisions.md`
+     ADR 72, a read token for the operator and a write token per agent.
    - Redacting hook payloads — **open**.
    - A salted password digest — **planned**:
      `docs/plans/server-deployment.md` *1. Sign-in is a real login, with

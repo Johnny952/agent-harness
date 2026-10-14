@@ -363,7 +363,13 @@ mounted).
 Acceptable for a single operator on
 loopback plus Tailscale, but worth tightening, since agent containers
 run arbitrary code from cloned repos on the same network:
-- The collector's `POST`/`GET /events` have no auth, so anything on
+- **Done 2026-10-14 by T-052** (`docs/decisions.md` ADR 72): not one
+  shared token but two kinds. `GET /events` takes the operator's
+  `COLLECTOR_READ_TOKEN`, given to no agent; `POST /events` takes a
+  per-agent write token bound to that agent's source_app, which the
+  collector stores whatever the body says. The collector refuses to start
+  without either. The original text follows.
+  The collector's `POST`/`GET /events` have no auth, so anything on
   `ia_harness_net`, agent containers included, can read or forge
   events. A shared token would close that.
 - Hook payloads include tool inputs and outputs (file contents, env

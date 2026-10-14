@@ -4796,3 +4796,92 @@ until someone removes it. The record says what was dirty after which commit
 and makes no claim about authorship. A stale record of a role that never
 commits again stays until the task's scratch dir is gone; `round` and
 `saved_at` date it. No api route or console screen reads the record yet.
+
+## ADR 72 — the collector reads with the operator's token and takes writes with a token per agent, bound to its source_app
+
+**Status:** accepted (T-052, 2026-10-14).
+
+**Context.** The collector's `POST /events` and `GET /events` had no auth.
+Anything on `ia_harness_net` could read every agent's events or forge one
+under any `source_app`, and the agent containers on that network run
+arbitrary code from cloned repos. The backlog item proposed one shared
+token. One token does not fit, though: the agents must hold a credential to
+post, and whatever an agent container holds, repo code running in it can
+read. If that one token also read, every agent could read what the other
+agents did. It also leaves `source_app` as a claim in the body that any
+holder can set to anything.
+
+**Decision.**
+
+1. *Read and write are split.* `GET /events` takes `COLLECTOR_READ_TOKEN` as
+   a bearer, checked with `observability/auth.py` `check_token`. That token
+   is the operator's alone. In every compose file it is given to the
+   collector and to no other service. A write token is refused on `GET`, and
+   the read token is refused on `POST`.
+2. *One write token per agent, bound to its source_app.* The collector reads
+   the binding from one explicit map,
+   `COLLECTOR_WRITE_TOKENS=<source_app>=<token>,...`. The map is assembled in
+   compose from one `.env` key per account, `COLLECTOR_WRITE_TOKEN_<NAME>`:
+   the account name uppercased, with `-` written as `_`. The stock map is
+   `agent-cuenta1=${COLLECTOR_WRITE_TOKEN_CUENTA1},agent-cuenta2=${COLLECTOR_WRITE_TOKEN_CUENTA2}`.
+   Each agent gets its own variable as `COLLECTOR_TOKEN`.
+   - Entries split on the first `=`, so a token may contain one.
+   - Whitespace around entries is stripped.
+   - A trailing comma is allowed.
+3. *The token decides the source_app.* The collector authenticates `POST`
+   before it reads the body, and a missing or unknown token is a 401. It
+   stores the source_app the token is bound to and ignores any `source_app`
+   in the body. A leaked write token can only forge events as the agent it
+   already belonged to. The lookup compares every entry in constant time and
+   does not stop at the first match.
+4. *No silent open mode.* `main()` refuses to start, exits 2, and names the
+   variable in each of these cases:
+   - the read token is unset, empty or whitespace;
+   - the map is unset or empty;
+   - an entry is malformed;
+   - an entry's token is empty, which is what compose writes when `.env`
+     lacks that account's key; the message names the source_app;
+   - a source_app appears twice;
+   - two agents share a token;
+   - a write token equals the read token.
+5. *The hook stays best-effort.* `hooks/emit_event.py` sends
+   `Authorization: Bearer $COLLECTOR_TOKEN` when the variable is set. A
+   refused post is one stderr line naming the HTTP status, and the hook never
+   fails because of it.
+6. *Compose spells every one of these bare, as `${VAR}`.* There is no default,
+   for the same reason as the `DASHBOARD_` credentials: a default baked into
+   the file would be a token every clone knows. `scripts/configure.sh`
+   generates the read token and one write token per account with `gen_token`.
+   `tests/integration/test_compose_invariants.py` checks each deployment, the
+   split files together and the Coolify file alone. It asserts:
+   - no agent gets the read token;
+   - each write variable reaches its own agent and the collector, and no
+     other service;
+   - each agent's `COLLECTOR_TOKEN` is the variable that the map binds to
+     its `SOURCE_APP`.
+
+*Ruled out:*
+- *One shared token*, for the reasons in Context.
+- *Scanning the environment for `COLLECTOR_WRITE_TOKEN_*` and deriving the
+  source_app from the suffix.* That mapping is implicit: a renamed or
+  missing account would be undetectable, because a missing variable is
+  simply absent, and the binding would live in a naming convention instead
+  of beside `SOURCE_APP` in compose.
+- *Mounting the tokens as files.* The other credentials already live in
+  `.env`, and an agent container can read a mounted file as easily as its
+  environment.
+
+**Consequences.**
+- An existing host's `.env` lacks the three keys. After this change the
+  collector refuses to start until `scripts/configure.sh` is rerun or the
+  keys are added by hand.
+- Adding an account now means three edits beside its agent/dind pair: its
+  `.env` key, its `COLLECTOR_TOKEN`, and its entry in the collector's map.
+  The compose invariants fail if any one of them is missing.
+- Rotating a token means editing `.env` and recreating the collector and
+  that agent.
+- The read api reads `events.db` directly and is unaffected.
+- The dispatcher has a `collector_url` but never calls the collector, so it
+  gets no token.
+- Payload redaction, TLS, rate limiting and network segmentation are still
+  open. A token travels in clear over `ia_harness_net` and over loopback.
