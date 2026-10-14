@@ -186,6 +186,15 @@ gen_token() {
     fi
 }
 
+write_token_var() {
+    # The `.env` key holding one account's collector write token
+    # (docs/decisions.md ADR 72): the account name uppercased, `-` as `_`, so
+    # cuenta1 is COLLECTOR_WRITE_TOKEN_CUENTA1 -- the name the compose files
+    # hand to agent-cuenta1 as COLLECTOR_TOKEN and bind to it in the collector's
+    # COLLECTOR_WRITE_TOKENS.
+    printf 'COLLECTOR_WRITE_TOKEN_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"
+}
+
 echo "ia-harness interactive configuration"
 echo
 
@@ -216,7 +225,7 @@ sorted_input=$(printf '%s\n' "${ACCOUNT_NAMES[@]}" | sort | paste -sd, -)
 sorted_default=$(printf '%s\n' cuenta1 cuenta2 | sort | paste -sd, -)
 if [ "$sorted_input" != "$sorted_default" ]; then
     echo
-    echo "Note: $COMPOSE_AGENTS_FILE ships with pairs for cuenta1, cuenta2 only. This script does not edit that file -- duplicate/remove the agent-<name>/dind-<name> service pairs there to match, and pass the matching account names to scripts/setup_volumes.sh."
+    echo "Note: $COMPOSE_AGENTS_FILE ships with pairs for cuenta1, cuenta2 only. This script does not edit that file -- duplicate/remove the agent-<name>/dind-<name> service pairs there to match, give each agent COLLECTOR_TOKEN=\${COLLECTOR_WRITE_TOKEN_<NAME>} and the collector's COLLECTOR_WRITE_TOKENS in docker-compose.yml its agent-<name>=\${COLLECTOR_WRITE_TOKEN_<NAME>} entry, and pass the matching account names to scripts/setup_volumes.sh."
     echo
 fi
 
@@ -313,6 +322,18 @@ if [ "$setup_credentials" = "y" ]; then
             echo "# the password above. The console reads the same value from its"
             echo "# own environment; rotate it by changing both and restarting."
             echo "API_TOKEN=$API_TOKEN"
+            # The collector's tokens (docs/decisions.md ADR 72). Required, unlike
+            # API_TOKEN: the collector refuses to start without them. Generated
+            # here with the rest because a hand-picked token is a guessable one.
+            echo "# The operator's token for GET /events on the collector"
+            echo "# (127.0.0.1:8787). Given to the collector and no other service."
+            echo "COLLECTOR_READ_TOKEN=$(gen_token)"
+            echo "# One write token per account: given to that agent as"
+            echo "# COLLECTOR_TOKEN and to the collector, which stores the account"
+            echo "# it is bound to. An agent's token cannot read, nor post as another."
+            for name in "${ACCOUNT_NAMES[@]}"; do
+                echo "$(write_token_var "$name")=$(gen_token)"
+            done
         } > "$ENV_OUT"
         echo "Wrote $ENV_OUT"
     fi

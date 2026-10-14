@@ -13,6 +13,17 @@ services:
       - observability_data:/data
     environment:
       - COLLECTOR_DB_PATH=/data/events.db
+      # docs/decisions.md ADR 72. Both required, bare `${VAR}` with no
+      # default: the collector refuses to start without either rather than
+      # serve the network unauthenticated. The read token is the operator's
+      # alone and is given to no other service here or in
+      # docker-compose.agents.yml.
+      - COLLECTOR_READ_TOKEN=${COLLECTOR_READ_TOKEN}
+      # One `<source_app>=<token>` entry per agent, the source_app spelt as
+      # that agent's SOURCE_APP in docker-compose.agents.yml. The collector
+      # stores the source_app its token is bound to, whatever the body says.
+      # A new account adds its entry here and its token to that agent alone.
+      - COLLECTOR_WRITE_TOKENS=agent-cuenta1=${COLLECTOR_WRITE_TOKEN_CUENTA1},agent-cuenta2=${COLLECTOR_WRITE_TOKEN_CUENTA2}
     networks:
       - ia_harness_net
 

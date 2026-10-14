@@ -19,6 +19,11 @@ services:
       # settings.json by the agent image entrypoint.
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta1
+      # This agent's write token (docs/decisions.md ADR 72), sent by the hook
+      # as a bearer. The collector binds it to agent-cuenta1 in
+      # COLLECTOR_WRITE_TOKENS (docker-compose.yml), so it cannot post as any
+      # other agent, and it cannot read: no agent is given COLLECTOR_READ_TOKEN.
+      - COLLECTOR_TOKEN=${COLLECTOR_WRITE_TOKEN_CUENTA1}
     volumes:
       # Names every account shares (session history, skills/agents/commands/
       # plugins, settings.json) — symlinked into CLAUDE_CONFIG_DIR by the
@@ -91,6 +96,7 @@ services:
       - DOCKER_HOST=tcp://dind-cuenta2:2375
       - COLLECTOR_URL=http://collector:8787
       - SOURCE_APP=agent-cuenta2
+      - COLLECTOR_TOKEN=${COLLECTOR_WRITE_TOKEN_CUENTA2}
     volumes:
       # See agent-cuenta1 above: claude_shared is the read/write-shared
       # allowlist, claude_creds_cuenta2 is this account's own config home.
