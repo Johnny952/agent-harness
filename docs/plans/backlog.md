@@ -196,6 +196,13 @@ approved: evaluate it when the work is taken on, not before.
 
 ### 4. **Per-role model selection and richer effort escalation.**
 
+**Status:** refinement (1), the per-role model override, is **built**:
+`role_model` and `Config.model_for` in `dispatcher/config.py`,
+`docs/decisions.md` ADR 65. Its split is the operator's judgment, made ahead
+of item 2's usage records rather than from them, and the config schema the
+text below calls not designed is the one that ADR records. Refinement (2) is
+**open**. The text is kept as it was moved.
+
 […] Two
 refinements were discussed but not implemented: (1) a per-role model
 override, e.g. opus for arquitecto and auditor (planning/judgment

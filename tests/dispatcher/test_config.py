@@ -38,6 +38,8 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.escalated_effort == "high"
     assert cfg.default_effort == "medium"
     assert cfg.role_effort == {}
+    assert cfg.role_model == {}
+    assert cfg.model_for("implementador") == "claude-opus-5-5"
     assert cfg.phase_timeout_seconds == 7200
 
 
@@ -89,6 +91,58 @@ def test_load_config_refuses_a_bad_effort(tmp_path: Path, extra: str) -> None:
     config_path.write_text(CONFIG_YAML + "\n" + extra)
 
     with pytest.raises(ValueError, match="effort"):
+        load_config(str(config_path))
+
+
+def test_load_config_reads_the_model_per_role(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML + "\nrole_model:\n  implementador: claude-sonnet-5-5\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.role_model == {"implementador": "claude-sonnet-5-5"}
+    assert cfg.model_for("implementador") == "claude-sonnet-5-5"
+    assert cfg.model_for("revisor") == cfg.default_model
+
+
+def test_load_config_reads_an_empty_model_map_as_unset(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nrole_model:\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.role_model == {}
+    assert cfg.model_for("auditor") == cfg.default_model
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "role_model:\n  implementor: claude-sonnet-5-5\n",
+        "role_model:\n  revisor: 3\n",
+        "role_model:\n  revisor: \"\"\n",
+        "role_model:\n  revisor: \"  \"\n",
+        "role_model: claude-sonnet-5-5\n",
+    ],
+)
+def test_load_config_refuses_a_bad_role_model(tmp_path: Path, extra: str) -> None:
+    """A misspelt role would otherwise run on the default model without a
+    word, and a value that is not a model ID would reach the CLI after the lock
+    and the worktree are claimed."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\n" + extra)
+
+    with pytest.raises(ValueError, match="role_model"):
+        load_config(str(config_path))
+
+
+def test_load_config_names_the_valid_roles_when_it_refuses_one(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nrole_model:\n  implementor: claude-sonnet-5-5\n")
+
+    with pytest.raises(ValueError, match="implementador"):
         load_config(str(config_path))
 
 

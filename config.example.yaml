@@ -93,10 +93,21 @@ state_dir: /state
 collector_url: http://collector:8787
 
 # Model passed as `claude --model <default_model>` for every role
-# (arquitecto/implementador/revisor/auditor). Optional; defaults to
-# claude-opus-5-5. A full ID rather than an alias, so the model a run used is
-# the one written here; it needs an agent image whose CLI knows it (2.1.296+).
+# (arquitecto/implementador/revisor/auditor) that role_model below does not
+# name. Optional; defaults to claude-opus-5-5. A full ID rather than an alias,
+# so the model a run used is the one written here; it needs an agent image
+# whose CLI knows it (2.1.296+).
 default_model: claude-opus-5-5
+
+# A model per role over default_model, on every call that role's phase makes,
+# its handoff resumes included. Roles: arquitecto, implementador, revisor,
+# auditor, cartografo. An unknown role, or a value that is not a non-empty
+# model ID, is refused at load. Precedence: a model the phase itself is given
+# (the cartografo's mapping_model, below) wins, then role_model, then
+# default_model. The effort escalation changes the effort, never the model.
+# Optional; defaults to none.
+# role_model:
+#   implementador: claude-sonnet-5-5
 
 # Permission mode passed as `claude --permission-mode <mode>` on every call
 # that runs a role's own work. Without it the CLI runs `-p` with nobody able

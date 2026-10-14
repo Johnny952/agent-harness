@@ -52,7 +52,8 @@ PERMISSION_MODES = frozenset(
 #: Checked at load time like the permission mode, for the same reason.
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
-#: The roles a phase can run as, which are the keys `role_effort` may name.
+#: The roles a phase can run as, which are the keys `role_effort` and
+#: `role_model` may name.
 PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
 
 
@@ -131,6 +132,11 @@ class Config:
     #: A level per role over `default_effort`, such as `{"revisor": "high"}`.
     #: The escalation after `escalate_effort_after_round` still wins over both.
     role_effort: dict[str, str] = dataclasses.field(default_factory=dict)
+    #: A model per role over `default_model`, such as
+    #: `{"implementador": "claude-sonnet-5-5"}` (`docs/decisions.md` ADR 65).
+    #: A model the phase call names itself, the cartografo's `mapping_model`,
+    #: still wins over both. The effort escalation does not touch it.
+    role_model: dict[str, str] = dataclasses.field(default_factory=dict)
     #: How many times a phase that ended without its handoff is resumed with
     #: one "continue" line before it counts as failed. Unattended, a model can
     #: end a turn on a progress report, and under `-p` that ends the phase
@@ -142,6 +148,10 @@ class Config:
         if round_num is not None and round_num > self.escalate_effort_after_round:
             return self.escalated_effort
         return self.role_effort.get(role, self.default_effort)
+
+    def model_for(self, role: str) -> str:
+        """The `--model` a phase of `role` runs on, every call of it included."""
+        return self.role_model.get(role, self.default_model)
 
 
 def _refuse_board_keys(raw: dict) -> None:
@@ -217,6 +227,25 @@ def _load_role_effort(raw: dict) -> dict[str, str]:
             f"roles are: {', '.join(sorted(PHASE_ROLES))}"
         )
     return {role: _check_effort(f"role_effort.{role}", level) for role, level in block.items()}
+
+
+def _load_role_model(raw: dict) -> dict[str, str]:
+    """`role_model`, checked like `role_effort` and for the same reason: a
+    misspelt role would run on `default_model` without a word. The model ID
+    itself is only checked for being one; which IDs exist is the CLI's to say."""
+    block = raw.get("role_model") or {}
+    if not isinstance(block, dict):
+        raise ValueError("role_model must be a mapping of role to model ID")
+    unknown = sorted(set(block) - PHASE_ROLES)
+    if unknown:
+        raise ValueError(
+            f"role_model names unknown roles {unknown}; "
+            f"roles are: {', '.join(sorted(PHASE_ROLES))}"
+        )
+    for role, model in block.items():
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"role_model.{role} must be a non-empty model ID")
+    return dict(block)
 
 
 def _load_allowed_tools(raw: dict) -> list[str]:
@@ -403,6 +432,7 @@ def load_config(path: str) -> Config:
         escalated_effort=_check_effort("escalated_effort", raw.get("escalated_effort", "high")),
         default_effort=_check_effort("default_effort", raw.get("default_effort", "medium")),
         role_effort=_load_role_effort(raw),
+        role_model=_load_role_model(raw),
         max_handoff_resumes=_load_max_handoff_resumes(raw),
         phase_timeout_seconds=phase_timeout_seconds,
         # Off by default: merging is the one thing a run does to the branch the
