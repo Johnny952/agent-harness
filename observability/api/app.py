@@ -135,8 +135,8 @@ MAX_LEARNINGS = 500
 #: clamp is the news. The newest lines are the ones kept, because the attempt a
 #: reader came for is the last one; the first group served may then lack its
 #: `phase` line, and the warning says so. It bounds a count and not bytes, on
-#: `MAX_PHASES`' model, which is enough while a line is sixteen scalars plus
-#: `raw_keys`. `docs/decisions.md` ADR 54.
+#: `MAX_PHASES`' model, which is enough while a line is seventeen scalars plus
+#: `raw_keys` and `models_used`. `docs/decisions.md` ADR 54, ADR 68.
 MAX_USAGE_CALLS = 1000
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and

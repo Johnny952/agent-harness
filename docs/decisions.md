@@ -4633,3 +4633,55 @@ is at the render, on `docs/ui.md` *A value of the wrong shape is named, not
 rendered and not dropped*. A second screen that shows spend moves these
 rules into `docs/ui.md` as one entry and cites this ADR as where they came
 from. A new call kind in the dispatcher needs no console change.
+
+## ADR 68 — a usage line names the model it asked for and the models the CLI says ran
+
+**Status:** accepted (T-047, 2026-10-14). Narrows ADR 53: its key set grows
+by two, and nothing else in it changes. Takes up the opening ADR 53 left in
+its *Consequences* ("a later task may add them as what was *requested*") and
+ADR 65's "which model *ran* is still recorded nowhere". Edits neither ADR 54
+nor ADR 64.
+
+**Context.** Since ADR 65 each role runs on the model `Config.model_for` or
+`mapping_model` names, and `dispatch_phase` passes it as `--model` to every
+call of the phase. The usage log keeps no model, so nothing shows whether the
+per-role split was applied or what each model cost. Real lines show
+`modelUsage` in `raw_keys`: the CLI's result object carries an object keyed
+by the model names that served the call.
+
+**Decision.** Every line gains two keys, on every call kind — `phase`,
+`handoff-resume`, `shrink-retry`, `gate-retry`, `review-retry` — and on every
+account a failover tries:
+
+- **`model`**: the `model` `dispatch_phase` was given and passed to
+  `exec_claude`, as a string, or `null` when none was passed and the CLI chose
+  its own default. It is the dispatcher's own fact, fixed for an attempt, so
+  `_UsageRecorder` holds it beside the account and round, and it joins the
+  dispatcher's half of the line, which is now ten keys. It is written whether
+  or not the call was measured.
+- **`models_used`**: the sorted key names of `raw["modelUsage"]`, names only
+  and never its values, or `null` when `raw` has no `modelUsage` or it is not
+  an object. An unmeasured line (`raw` empty) is therefore `null`. It keeps
+  the CLI's own spelling on ADR 53's rule, and assumes nothing about the
+  object's inner shape beyond "its keys are model names".
+
+The line is nineteen keys: seventeen scalars plus `raw_keys` and
+`models_used`, each a list of names or, for `models_used`, `null`.
+
+**Why both and not one.** They answer different questions. `model` is what
+was *asked for* — the weaker fact ADR 53 said such a key would be, and the one
+that shows whether `role_model` was applied, which only the dispatcher knows.
+`models_used` is what the CLI *reports ran*, which can differ: a CLI default
+when `model` is `null`, a fallback, or a call served by more than one model
+(the CLI's subagents run on their own). Either alone would let a reader take
+one for the other. Neither is guessed: no default model is filled into
+`model`, nothing is inferred from the role, and an absent or malformed
+`modelUsage` is `null`, not `[]`.
+
+**Consequences.** ADR 54's reader and `GET /api/tasks/<task_id>/usage` serve
+the two keys unchanged, because lines travel verbatim; the api changes only a
+comment that counted the keys. A line written before this has neither key, and
+nothing back-fills it: a reader treats a missing key as absent, never as
+`null` meaning "asked for the default". The console shows neither yet;
+showing them is a separate front task. Summing or pricing per model is not
+decided here and waits, like every total, for its own key under its own ADR.
