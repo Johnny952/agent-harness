@@ -1230,7 +1230,8 @@ number and title.
    - *Documenting is a method*, this repo's own conventions — **built**:
      `docs/README.md` and `docs/charter.md`. One of them, that the bullets
      under a *Prioritized* item are never trimmed, is **superseded** by
-     this list (`docs/implementations/T-037.md` *Decisions*).
+     this list (`docs/implementations/T-037.md` *Decisions*,
+     `docs/decisions.md` ADR 63).
    - *Limits go on what travels*, the byte caps on what a phase is handed —
      **built**: `_BUDGET_BYTES` in `dispatcher/handoff.py`, `MAX_ROWS` and
      `_CELL_CHARS` in `dispatcher/learnings.py`.
