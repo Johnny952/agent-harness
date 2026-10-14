@@ -116,7 +116,11 @@ def test_account_reports_read_the_state_without_touching_it(tmp_path):
     # the whole difference from check_quota_ok, which parks as it answers.
     assert reports[1].state is AccountState.IDLE
     assert get_state(cfg.state_dir, "cuenta2") is AccountState.IDLE
-    assert sorted(p.name for p in (tmp_path / "state").iterdir()) == ["cuenta1.json"]
+    # The lock file `set_state` took is the only other thing in the directory
+    # (`docs/decisions.md` ADR 71); reading wrote nothing of its own.
+    assert sorted(p.name for p in (tmp_path / "state").iterdir()) == [
+        ".accounts.lock", "cuenta1.json",
+    ]
 
 
 def test_cooldown_remaining_counts_down_and_then_stops(tmp_path):

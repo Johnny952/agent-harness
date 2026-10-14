@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import enum
+import fcntl
 import json
 import os
 import tempfile
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from dispatcher.config import AccountConfig
@@ -53,20 +56,78 @@ def _write_state(state_dir: str, account_name: str, data: dict) -> None:
     os.replace(tmp.name, path)
 
 
+#: The lock file taking an account and every read-modify-write of a state file
+#: go through (`docs/decisions.md` ADR 71). It does not end in `.json`, and
+#: accounts are read from their own `<name>.json`, so nothing lists it as one.
+LOCK_NAME = ".accounts.lock"
+
+
+@contextlib.contextmanager
+def _locked(state_dir: str):
+    """Hold the inter-process lock on `state_dir`'s account state files.
+
+    A new descriptor per acquisition: `flock` belongs to the open file
+    description, so two threads exclude each other the way two processes do.
+    Not reentrant — never call a public writer while holding it. Held only
+    around a read-modify-write, never across a phase.
+    """
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    fd = os.open(os.path.join(state_dir, LOCK_NAME), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def claim(state_dir: str, account_name: str, task_id: str) -> bool:
+    """Take an IDLE account for `task_id`; False if someone else holds it."""
+    return set_state(
+        state_dir, account_name, AccountState.BUSY,
+        current_task_id=task_id, only_from={AccountState.IDLE},
+    )
+
+
 def set_state(
     state_dir: str,
     account_name: str,
     state: AccountState,
     current_task_id: str | None = None,
-) -> None:
+    *,
+    only_from: Iterable[AccountState] | None = None,
+    forget_rate_limit: bool = False,
+) -> bool:
+    """Write the state; with `only_from`, only if the account is in one of them.
+
+    Returns whether it wrote. The check and the write share one lock hold.
+    """
+    with _locked(state_dir):
+        return _set_state_locked(
+            state_dir, account_name, state, current_task_id,
+            only_from, forget_rate_limit,
+        )
+
+
+def _set_state_locked(
+    state_dir: str,
+    account_name: str,
+    state: AccountState,
+    current_task_id: str | None,
+    only_from: Iterable[AccountState] | None,
+    forget_rate_limit: bool,
+) -> bool:
     # The write replaces the whole document, so anything persisted next to the
     # state has to be carried across by hand. `rate_limited_at` is the first
     # such field, and it has to outlive every transition: an account is refused,
     # parked and re-probed in three separate writes, and the refusal is only
     # worth anything if it is still there on the third.
     existing = _read_state(state_dir, account_name) or {}
+    if only_from is not None:
+        current = AccountState(existing["state"]) if "state" in existing else AccountState.IDLE
+        if current not in set(only_from):
+            return False
     data = {"state": state.value, "current_task_id": current_task_id}
-    if existing.get("rate_limited_at") is not None:
+    if existing.get("rate_limited_at") is not None and not forget_rate_limit:
         data["rate_limited_at"] = existing["rate_limited_at"]
     # `last_probe` is carried for the same reason and by the same rule: it is a
     # fact about the account, not about the transition, and the gate writes it
@@ -82,6 +143,7 @@ def set_state(
     if state == AccountState.BUSY:
         data["busy_since"] = time.time()
     _write_state(state_dir, account_name, data)
+    return True
 
 
 def record_rate_limit(state_dir: str, account_name: str, at: float | None = None) -> None:
@@ -94,11 +156,12 @@ def record_rate_limit(state_dir: str, account_name: str, at: float | None = None
     disk. The one moment that truth is observable is the 429 itself, and this
     is where it is kept so the probe can be overruled by it later.
     """
-    data = _read_state(state_dir, account_name) or {
-        "state": AccountState.IDLE.value, "current_task_id": None,
-    }
-    data["rate_limited_at"] = time.time() if at is None else at
-    _write_state(state_dir, account_name, data)
+    with _locked(state_dir):
+        data = _read_state(state_dir, account_name) or {
+            "state": AccountState.IDLE.value, "current_task_id": None,
+        }
+        data["rate_limited_at"] = time.time() if at is None else at
+        _write_state(state_dir, account_name, data)
 
 
 def get_rate_limited_at(state_dir: str, account_name: str) -> float | None:
@@ -115,11 +178,12 @@ def clear_rate_limit(state_dir: str, account_name: str) -> None:
     Only a real turn is evidence of that — a clean `/usage` is not, for the
     same reason the refusal had to be recorded in the first place.
     """
-    data = _read_state(state_dir, account_name)
-    if data is None or data.get("rate_limited_at") is None:
-        return
-    del data["rate_limited_at"]
-    _write_state(state_dir, account_name, data)
+    with _locked(state_dir):
+        data = _read_state(state_dir, account_name)
+        if data is None or data.get("rate_limited_at") is None:
+            return
+        del data["rate_limited_at"]
+        _write_state(state_dir, account_name, data)
 
 
 #: The keys every persisted probe carries. `get_last_probe` checks for them so a
@@ -140,11 +204,12 @@ def record_probe(state_dir: str, account_name: str, probe: dict) -> None:
     every other writer here carries it across a rewrite — `set_state` by
     hand, the rate-limit pair because they rewrite the document they read.
     """
-    data = _read_state(state_dir, account_name) or {
-        "state": AccountState.IDLE.value, "current_task_id": None,
-    }
-    data["last_probe"] = probe
-    _write_state(state_dir, account_name, data)
+    with _locked(state_dir):
+        data = _read_state(state_dir, account_name) or {
+            "state": AccountState.IDLE.value, "current_task_id": None,
+        }
+        data["last_probe"] = probe
+        _write_state(state_dir, account_name, data)
 
 
 def get_last_probe(state_dir: str, account_name: str) -> dict | None:
