@@ -180,6 +180,21 @@ _DEBT_RULINGS_PROPERTY = {
     },
 }
 
+#: What sends the round back, as lines the dispatcher can compare between
+#: reviews. A finding the next review still holds is copied, not reworded, so
+#: "the same reason as last time" is string equality on a fingerprint rather
+#: than a judgement about prose (`docs/decisions.md` ADR 73).
+_FINDINGS_PROPERTY = {
+    "findings": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "What sends this round back, one line each. Empty when approving. "
+            "One an earlier review raised that still holds: copy its line verbatim."
+        ),
+    },
+}
+
 #: The other half of the debt flow, and the implementador's own: the entries
 #: this task made go away. It is a claim by the phase that did the work, the
 #: same way the verdict is a claim by the phase that reviewed it.
@@ -235,7 +250,7 @@ _ROLE_EXTRAS: dict[str, dict] = {
     "cartografo": {},
     "arquitecto": _SPLIT_PROPERTY,
     "implementador": _RESOLVED_DEBT_PROPERTY,
-    "revisor": {**_VERDICT_PROPERTY, **_DEBT_RULINGS_PROPERTY},
+    "revisor": {**_VERDICT_PROPERTY, **_FINDINGS_PROPERTY, **_DEBT_RULINGS_PROPERTY},
     "auditor": {},
 }
 
@@ -507,6 +522,13 @@ def pending(payload: dict | None) -> list[str]:
     return _lines(payload, "pending")
 
 
+def findings_of(payload: dict | None) -> list[str]:
+    """What the revisor said sends the round back, one line each."""
+    if not payload:
+        return []
+    return _lines(payload, "findings")
+
+
 @dataclass(frozen=True)
 class SubTask:
     """One entry of a split, as the arquitecto stated it.
@@ -639,6 +661,7 @@ def _pairs(payload: dict, key: str, first: str, second: str) -> list[str]:
 
 
 _SECTIONS = (
+    ("findings", "Findings"),
     ("changed", "Changed"),
     ("verified", "Verified"),
     ("pending", "Pending"),

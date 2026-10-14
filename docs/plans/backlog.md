@@ -203,7 +203,16 @@ approved: evaluate it when the work is taken on, not before.
 `docs/decisions.md` ADR 65. Its split is the operator's judgment, made ahead
 of item 2's usage records rather than from them, and the config schema the
 text below calls not designed is the one that ADR records. Refinement (2) is
-**open**. The text is kept as it was moved.
+**built in part**: the repeated complaint is a signal, opt-in under
+`escalate_effort_on_repeated_finding` and off by default, that runs the next
+implementador round at `escalated_effort` when a review sends a round back for
+a finding the previous review sent one back for. It reads no freeform
+`result_text`: the revisor's schema gained a `findings` list, a finding that
+still holds is copied verbatim, and the comparison is set intersection on
+`debt.fingerprint` of those lines and the debt it rejected (`docs/decisions.md`
+ADR 73). The other half is still **open**: no signal reads a result text
+"suspiciously short", for the reasons that ADR records, and switching model
+on a signal is not built. The text is kept as it was moved.
 
 […] Two
 refinements were discussed but not implemented: (1) a per-role model

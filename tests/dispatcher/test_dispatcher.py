@@ -2719,6 +2719,117 @@ def test_run_task_cycle_escalates_effort_after_configured_round(tmp_path, monkey
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
 
 
+# --- effort escalation on a repeated finding (ADR 73) ------------------------
+
+
+def _findings_cycle(tmp_path, monkeypatch, findings_by_round, **overrides):
+    """A cycle whose revisor sends rounds 1 and 2 back and approves round 3.
+
+    `findings_by_round` maps a round to the `findings` its review returns.
+    The round-count rule is pushed out of the way by default
+    (`escalate_effort_after_round: 5`) so only the signal can escalate.
+    Returns each implementador round's effort, by round.
+    """
+    settings = {"max_revision_rounds": 3, "escalate_effort_after_round": 5, "escalated_effort": "high"}
+    settings.update(overrides)
+    cfg = _make_config(tmp_path, **settings)
+    efforts = {}
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        current = next((n for n in (1, 2, 3) if f"round {n}" in prompt), None)
+        if role == "implementador":
+            efforts[current] = effort
+        if role == "revisor":
+            verdict = "APPROVED" if current == 3 else "CHANGES_REQUESTED"
+            return dispatcher_mod.DispatchResult(
+                success=True, session_id=None, result_text="ok", account="cuenta1",
+                handoff={"status": "complete", "verdict": verdict, "findings": findings_by_round.get(current, [])},
+            )
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    return efforts
+
+
+def test_run_task_cycle_escalates_round_3_when_the_same_finding_comes_back(tmp_path, monkeypatch, caplog) -> None:
+    same = ["`tasks.claim` never releases the lock on an error."]
+    with caplog.at_level("INFO"):
+        efforts = _findings_cycle(
+            tmp_path, monkeypatch,
+            # Copied verbatim, give or take what the fingerprint absorbs.
+            {1: same, 2: ["`Tasks.claim` never releases the lock on an error"]},
+            escalate_effort_on_repeated_finding=True,
+        )
+
+    assert efforts == {1: "medium", 2: "medium", 3: "high"}
+    fired = [r.getMessage() for r in caplog.records if "same finding(s) twice" in r.getMessage()]
+    assert len(fired) == 1
+    assert "task-1" in fired[0] and "round 3" in fired[0] and "effort high" in fired[0]
+    assert "never releases the lock" in fired[0]
+
+
+def test_run_task_cycle_does_not_escalate_a_repeated_finding_with_the_key_off(tmp_path, monkeypatch, caplog) -> None:
+    same = ["`tasks.claim` never releases the lock on an error."]
+    with caplog.at_level("INFO"):
+        efforts = _findings_cycle(tmp_path, monkeypatch, {1: same, 2: same})
+
+    assert efforts == {1: "medium", 2: "medium", 3: "medium"}
+    assert not [r for r in caplog.records if "same finding(s) twice" in r.getMessage()]
+
+
+def test_run_task_cycle_does_not_escalate_on_different_findings(tmp_path, monkeypatch) -> None:
+    efforts = _findings_cycle(
+        tmp_path, monkeypatch,
+        {1: ["`tasks.claim` never releases the lock on an error."],
+         2: ["The new route has no test for a missing task."]},
+        escalate_effort_on_repeated_finding=True,
+    )
+
+    assert efforts == {1: "medium", 2: "medium", 3: "medium"}
+
+
+def test_run_task_cycle_counts_rejected_debt_as_a_finding(tmp_path, monkeypatch) -> None:
+    """A debt the revisor rejects is a finding (see `run_task_cycle`), so
+    rejecting the same one twice is the same reason twice."""
+    cfg = _make_config(
+        tmp_path, max_revision_rounds=3, escalate_effort_after_round=5,
+        escalated_effort="high", escalate_effort_on_repeated_finding=True,
+    )
+    efforts = {}
+    ruling = {"debt": "No test for the retry path", "ruling": "rejected", "why": "It is in scope."}
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        current = next((n for n in (1, 2, 3) if f"round {n}" in prompt), None)
+        if role == "implementador":
+            efforts[current] = effort
+        if role == "revisor":
+            verdict = "APPROVED" if current == 3 else "CHANGES_REQUESTED"
+            rulings = [] if current == 3 else [ruling]
+            return dispatcher_mod.DispatchResult(
+                success=True, session_id=None, result_text="ok", account="cuenta1",
+                handoff={"status": "complete", "verdict": verdict, "findings": [], "debt_rulings": rulings},
+            )
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert efforts == {1: "medium", 2: "medium", 3: "high"}
+
+
+def test_run_task_cycle_round_count_still_escalates_with_the_signal_on(tmp_path, monkeypatch) -> None:
+    efforts = _findings_cycle(
+        tmp_path, monkeypatch,
+        {1: ["`tasks.claim` never releases the lock on an error."],
+         2: ["The new route has no test for a missing task."]},
+        escalate_effort_after_round=2, escalate_effort_on_repeated_finding=True,
+    )
+
+    assert efforts == {1: "medium", 2: "medium", 3: "high"}
+
+
 def test_run_task_cycle_blocks_when_revision_rounds_exhausted(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path, max_revision_rounds=2)
     calls = []
@@ -6030,6 +6141,27 @@ def test_effort_for_escalation_wins_over_the_role_level(tmp_path) -> None:
     assert cfg.effort_for("implementador", round_num=2) == "low"
     assert cfg.effort_for("implementador", round_num=3) == "max"
     assert cfg.effort_for("cartografo") == "medium"
+
+
+def test_effort_for_without_the_signal_is_the_round_count_rule_for_every_role(tmp_path) -> None:
+    """No signal, or the signal with the key off, changes nothing (ADR 73)."""
+    roles = ("cartografo", "arquitecto", "implementador", "revisor", "auditor")
+    settings = dict(
+        escalate_effort_after_round=2, escalated_effort="max",
+        default_effort="medium", role_effort={"implementador": "low", "auditor": "high"},
+    )
+    today = _make_config(tmp_path, **settings)
+    on = _make_config(tmp_path, escalate_effort_on_repeated_finding=True, **settings)
+    for role in roles:
+        for round_num in (None, 1, 2, 3, 4):
+            expected = (
+                "max" if round_num is not None and round_num > 2
+                else {"implementador": "low", "auditor": "high"}.get(role, "medium")
+            )
+            assert today.effort_for(role, round_num) == expected
+            assert today.effort_for(role, round_num, repeated_finding=True) == expected
+            assert on.effort_for(role, round_num) == expected
+            assert on.effort_for(role, round_num, repeated_finding=True) == "max"
 
 
 def test_model_for_falls_back_to_the_default_model(tmp_path) -> None:

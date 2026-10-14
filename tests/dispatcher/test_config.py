@@ -36,6 +36,7 @@ def test_load_config(tmp_path: Path) -> None:
     assert cfg.max_revision_rounds == 3
     assert cfg.escalate_effort_after_round == 2
     assert cfg.escalated_effort == "high"
+    assert cfg.escalate_effort_on_repeated_finding is False
     assert cfg.default_effort == "medium"
     assert cfg.role_effort == {}
     assert cfg.role_model == {}
@@ -59,6 +60,15 @@ def test_load_config_overrides_revision_loop_defaults(tmp_path: Path) -> None:
     assert cfg.escalate_effort_after_round == 1
     assert cfg.escalated_effort == "max"
     assert cfg.phase_timeout_seconds == 3600
+
+
+def test_load_config_reads_the_repeated_finding_signal(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nescalate_effort_on_repeated_finding: true\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.escalate_effort_on_repeated_finding is True
 
 
 def test_load_config_reads_the_effort_per_role(tmp_path: Path) -> None:

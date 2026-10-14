@@ -201,6 +201,18 @@ escalate_effort_after_round: 2
 # invocation. Optional; defaults to high.
 escalated_effort: high
 
+# Escalate sooner when the revisor sends a round back for a finding it already
+# sent the previous review back for: the next implementador round then runs at
+# `escalated_effort` whatever the round count says. "The same finding" is a
+# line of the revisor's `findings` (or a debt it rejected) that matches one of
+# the last review's after normalizing case, punctuation and numbers, not a
+# judgement about prose (docs/decisions.md ADR 73). The round-count rule above
+# still applies, so this can only escalate sooner; with its defaults (round 3
+# of 3) it already escalates the only round this could, and the signal starts
+# to matter once escalate_effort_after_round is raised. Optional; defaults to
+# false, which is the round-count rule alone.
+escalate_effort_on_repeated_finding: false
+
 # A phase that ends without its structured handoff (a turn closed on a
 # progress report, say) is resumed with one short "continue" line, up to this
 # many times, before it counts as a failed phase. Each resume is a model call

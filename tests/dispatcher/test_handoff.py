@@ -52,6 +52,26 @@ def test_only_the_revisor_gets_a_verdict_field() -> None:
     assert handoff.schema_for("revisor")["properties"]["verdict"]["enum"] == ["APPROVED", "CHANGES_REQUESTED"]
 
 
+def test_only_the_revisor_gets_a_findings_field() -> None:
+    """The lines the cycle compares between two reviews (ADR 73)."""
+    findings = handoff.schema_for("revisor")["properties"]["findings"]
+    assert findings["type"] == "array" and findings["items"] == {"type": "string"}
+    assert "verbatim" in findings["description"]
+    for role in ("arquitecto", "implementador", "auditor"):
+        assert "findings" not in handoff.schema_for(role)["properties"]
+
+
+def test_findings_of_reads_the_lines_and_tolerates_a_missing_field() -> None:
+    assert handoff.findings_of({"findings": [" The route has no test. ", "", 3]}) == ["The route has no test.", "3"]
+    assert handoff.findings_of({"status": "complete"}) == []
+    assert handoff.findings_of(None) == []
+
+
+def test_render_puts_the_findings_where_the_next_round_reads_them() -> None:
+    rendered = handoff.render({"status": "complete", "verdict": "CHANGES_REQUESTED", "findings": ["The route has no test."]})
+    assert "**Findings**\n- The route has no test." in rendered
+
+
 def test_every_role_carries_the_fields_the_next_phase_reads() -> None:
     for role in ROLES:
         properties = handoff.schema_for(role)["properties"]
