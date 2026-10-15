@@ -708,6 +708,9 @@ Bound to the **Role models write**, if it happens here:
   behind the same queue by accident. The operator asked for it on 2026-10-15
   and it is item 0 of [`backlog.md`](backlog.md), which lists the keys and the
   decisions that come before it.
+  **Decided** 2026-10-15 by `docs/decisions.md` ADR 75. It is not a route on
+  the api: there is an overrides file and a `config-writer` service of its
+  own. The build is [`console-config.md`](console-config.md).
 
 Bound to **no task yet**:
 

@@ -5150,6 +5150,374 @@ because the pair and assignment rules already refuse to match a value that
 is a marker, and no shape matches one, so redacting a marker again leaves it
 as it is. `test_text_starting_with_a_marker_is_still_redacted` covers it.
 
+
+## ADR 75 — the console edits the dispatcher's settings through an overrides file, written by a writer service of its own
+
+**Status:** accepted (T-055, 2026-10-15). Design only; nothing is built. It
+decides `docs/plans/backlog.md` item 0 and the *Role models write* bullet of
+`docs/plans/front.md` tier 3. The build is `docs/plans/console-config.md`. It
+leaves ADR 19's write-free api and tier 3's queue as they are.
+
+**Context.** The operator wants to read and change the dispatcher's settings
+from the console instead of editing `config.yaml` on the host. Item 0 holds
+the operator's answers of 2026-10-15 and three proposals the operator agreed
+to; this entry starts from them and does not reopen them:
+
+- `config.yaml` stays as written and holds the defaults. The console writes
+  only a separate overrides file, which `load_config` merges and validates.
+  A reset is deleting a key.
+- The writer is a small separate service with its own credential, not a
+  write route on `observability/api/app.py`.
+- Credentials and the login are a second task, through tier 3's queue.
+
+Item 0 also fixes four constraints. The save is validated by the same
+`load_config` the dispatcher runs. It is atomic, with the previous version
+kept. It is attributed and logged. It takes effect on the next dispatcher
+invocation.
+
+Three facts of the tree shape the details:
+
+- `dispatcher/cli.py` calls `load_config` once per verb, at the start, and a
+  verb runs in a fresh `docker compose run`.
+- `create_app` in `observability/api/app.py` loads the config once, at boot.
+- Every mount of `config.yaml` is a single-file bind mount, `:ro`.
+
+**One part of the proposals cannot hold as worded.** "Write access to that
+file alone" cannot be a single-file bind mount. `os.replace` onto a path
+that is itself a bind-mount point fails inside the container (`EBUSY`), so
+the writer could not rename into it. A rename on the host would leave every
+other container's single-file mount on the old inode, so the dispatcher
+would go on reading the old file. The writer's one read-write mount is
+therefore a **directory that holds the overrides file and nothing but its
+own companions**: the previous version, the change log and the lock. It holds
+no other setting, no credential, no state and no task file. That keeps what
+the proposal was for: the writer can change the overrides and nothing else.
+
+**Decision.**
+
+1. *The overrides file.*
+   - **Name and place.** `overrides.yaml`, in a directory `config.d` beside
+     `config.yaml`. On the host that is `<repo>/config.d/overrides.yaml`,
+     git-ignored like `/config.yaml`. In every container that mounts it, it
+     is `/app/config.d/overrides.yaml`, next to `/app/config.yaml`.
+     - The writer mounts the directory read-write.
+     - The dispatcher and the api mount it `:ro`.
+     - No agent container mounts it.
+   - **How `load_config` finds it.** It derives the path from the path it was
+     given: `config.d/overrides.yaml` in the same directory as the config
+     file. So no new flag, environment variable or key is needed, and
+     `--config /app/config.yaml` finds `/app/config.d/overrides.yaml`.
+     `load_config` also takes an optional `overrides_path` keyword. The
+     writer uses it to validate a candidate file before the candidate
+     becomes the real one.
+   - **Absent or empty.** A missing file, or one that is empty or holds only
+     comments, means no overrides. The result is exactly today's.
+   - **Format.** YAML, read with `yaml.safe_load`, the loader `config.yaml`
+     already uses. The top level is a mapping from a top-level config key to
+     its value. A database is overkill, as the operator guessed, and YAML
+     lets the operator read the file on the host. The writer writes it with
+     `yaml.safe_dump(sort_keys=True)` under a fixed two-line comment header
+     that says which service wrote it and that deleting a key resets it.
+   - **The merge rule: one rule for every key, nothing deep.** An override
+     replaces the whole value of the top-level key it names. Then the
+     merged mapping goes through every check `load_config` already makes.
+     - *Nested maps* (`role_model`, `role_effort`) are replaced whole, not
+       merged per role. To take one role out of a map `config.yaml` sets,
+       the override carries the map without that role; `{}` empties the
+       map. The console always reads and saves the whole map, so the rule
+       is never felt as a surprise there. Its cost: a role that `config.yaml`
+       later adds to an overridden map is hidden while the override stands.
+       The read route marks every overridden key, which is how that stays
+       visible. A deep merge was ruled out because it has no way to *remove*
+       a role without a tombstone value, and a tombstone is a second rule.
+     - *Lists* (`fallback_roles`) are replaced whole. Nothing appends.
+   - **Removing a key.** An override cannot make a key absent from the
+     merged result. It can only give a key a value. Absence keeps the
+     meaning `load_config` gives it in `config.yaml`, such as no
+     `primary_account` meaning a flat pool. A `null` override is refused,
+     never read as "delete": reset is deleting the key from the overrides
+     file.
+   - **Which keys may appear.** `dispatcher/config.py` gains one table of
+     every key `load_config` reads, with its class from part 5. The writer
+     and `load_config` both read that table. An overrides file naming a key
+     that is not *editable* is refused by `load_config` itself, whoever
+     wrote the file.
+   - **Strict types.** An override's value is type-checked by its key's kind:
+     a boolean must be a YAML boolean, an integer must not be a boolean, a
+     model ID must be a non-empty string. Then the merged mapping is
+     validated as a whole. Today some keys are coerced rather than checked
+     (`bool(raw.get("merge_on_done"))`, `max_revision_rounds` read unchecked), and
+     those coercions stay for `config.yaml`, so no config that loads today
+     starts failing. Only an override is held to the stricter check.
+2. *Validation.*
+   - **The writer refuses a bad save.** A save is accepted only if
+     `load_config` accepts `config.yaml` merged with the candidate overrides
+     file. Otherwise the save is refused with `load_config`'s message and
+     nothing on disk changes.
+   - **Repair is always possible.** The rule is about the result of the save,
+     not the file as it stands. So when the file on disk is already bad, a
+     save that repairs it is accepted, a reset of the offending key included.
+   - **A bad file on disk anyway.** This can happen through a hand edit, a
+     `config.yaml` change that breaks an override that was valid (an
+     override naming a primary account the base no longer has), or a write
+     from outside the writer. `load_config` raises a `ValueError`, as for
+     any invalid config, and the verb exits before it probes, claims an
+     account, takes a lock or makes a worktree. The message names
+     `/app/config.d/overrides.yaml` and says to reset the key from the
+     console or delete it from the file.
+   - **No fallback.** The dispatcher never falls back to `config.yaml`
+     alone. Running on settings the operator did not choose, such as an old
+     quota threshold, is the silent change every loader in `config.py`
+     refuses. The same holds for an overrides file that does not parse or
+     is not a mapping.
+   - **The api.** It loads the config at boot, so a bad file stops it at its
+     next restart, as a bad `config.yaml` does today.
+3. *The write.* All of it under an exclusive `flock` on the lock file in the
+   directory, so two saves never interleave.
+   - **Optimistic concurrency.** The writer reads the current file and its
+     *revision*: the sha256 of its bytes, or `null` when there is no file. A
+     save carries the revision it was based on. If that is not the current
+     one, the save is refused with a conflict and nothing is written.
+   - **The candidate.** The new mapping is written to a temp file in the same
+     directory, with mode 0644 so the dispatcher and the api can read it,
+     and validated with `load_config(..., overrides_path=<temp>)`.
+   - **The previous version.** The current file is copied to
+     `overrides.yaml.prev` by temp file and `os.replace`. That is one
+     previous version on disk. The change log below holds every older value.
+   - **The swap.** `os.replace` moves the temp file onto `overrides.yaml`.
+     That is atomic, so a dispatcher starting at that moment reads the old
+     file or the new one, never half of one. This is the
+     `atomic-writes-copy-state-machine` recipe from `docs/learnings/`.
+   - **The change log.** One JSON line is appended with `O_APPEND` to
+     `changes.jsonl` in the same directory: `at` (UTC ISO 8601), `actor`,
+     `via`, `key`, `op` (`set` or `reset`), `old` and `new` (the key's
+     override before and after, `null` meaning not overridden),
+     `revision_before` and `revision_after`. No value in it can be a secret,
+     because no credential key is editable (part 5).
+   - **If the log cannot be written,** the writer puts the previous version
+     back with `os.replace` and answers 500, so no change stands without its
+     log line. A crash between the swap and the append is the one window
+     where a change can stand unlogged. `revision_before` on the next line
+     shows the gap.
+   - **Attribution.** `via` is the credential that authenticated the save,
+     which is always `console` today. `actor` is the person the console says
+     made the save. Until the login of `docs/plans/server-deployment.md`
+     exists, the console has no signed-in person, and `actor` is the fixed
+     string `operator`. After it, `actor` is the signed-in user, and only an
+     `owner` may save (server-deployment *Decisions*, 2): a `reviewer` sees
+     the screen without controls. Attribution is therefore as good as the
+     console's own login, and the ADR says so rather than implying more.
+4. *The writer service.*
+   - **Language: Python, on Flask.** The constraint that decides it is that
+     the save is validated by the same `load_config`, which is Python. A
+     writer in any other language would need a second validator, and the
+     two would drift. Flask is what the collector and the api already run.
+   - **Where it lives.** A top-level package `config_writer`, with an
+     `app.py`, a `Dockerfile` and its tests under `tests/config_writer`. It
+     imports `dispatcher.config` and `observability/auth.py`, and nothing
+     else of the harness. Not under `observability/`, because it is not
+     observability, and that directory's api is the one tier 3 keeps
+     write-free. `pyproject.toml`'s `include` gains `config_writer*`.
+   - **Its own container, not a process in an existing one.**
+     - *Not in the api's container.* The api's write-freeness is a property
+       of its container: every mount `:ro`, asserted by
+       `tests/integration/test_compose_invariants.py`. A second process
+       there would need a read-write mount, and the api's process would get
+       it too.
+     - *Not in the dispatcher's container.* The dispatcher runs one verb and
+       exits, so there is no long-lived process to share. It also holds the
+       docker socket, and a web process beside the socket is what C-8 and
+       tier 3's floor forbid.
+     - So a separate container with no socket and no other writable mount is
+       the only shape in which "write access to that directory alone" is
+       true.
+   - **The compose service.** `config-writer`, in `docker-compose.yml` and in
+     `docker-compose.coolify.yml`, because the Coolify file is a whole deploy
+     path (`docs/learnings/a-new-service-lands-in-two-compose-files.md`).
+     - *Mounts:* `../../config.yaml:/app/config.yaml:ro` and
+       `../../config.d:/app/config.d`, which is its only read-write mount.
+       Nothing else: no docker socket, no `.hive`, no `dispatcher_state`, no
+       projects, no credentials.
+     - *The other services:* the dispatcher and the api each gain
+       `../../config.d:/app/config.d:ro`.
+     - *Port:* `127.0.0.1:8790:8790`, beside the api's 8789.
+     - *Network:* a network of its own, `config_writer_net`, and **not**
+       `ia_harness_net`. The agent containers run arbitrary code from cloned
+       repos on `ia_harness_net` (ADR 72), and a service that changes quota
+       policy should not be one hop from them.
+   - **Its credential.** `CONFIG_WRITER_TOKEN`, a bearer checked with
+     `observability/auth.py` `check_token`.
+     - *Who holds it:* the writer and the console's server half, and no
+       other service.
+     - *How it is made:* it is spelled bare as `${CONFIG_WRITER_TOKEN}` in
+       compose, and `scripts/configure.sh` generates it with `gen_token`.
+     - *Missing:* the writer refuses to start if it is unset, empty or
+       whitespace, and exits 2 naming it. That is ADR 72's "no silent open
+       mode".
+     - *No Basic auth:* no human calls this service directly.
+   - **Its routes.** It speaks the api's envelope, `{"data", "warnings"}`.
+     - `GET /settings`. Its `data` carries:
+       - the base mapping, the overrides mapping and the revision;
+       - one row per key of part 5's table: key, class, reason, effective
+         value, and `source` (`config.yaml`, `override` or `default`);
+       - the role names `role_model`, `role_effort` and `fallback_roles` may
+         name;
+       - the last 20 lines of the change log;
+       - `error`: `load_config`'s message when the merged config fails,
+         otherwise `null`.
+
+       A failing merge is still a 200, so the console can show what is
+       wrong and offer the reset that repairs it.
+     - `PUT /settings/<key>`, with body `{"value", "revision"}`, sets an
+       override.
+     - `DELETE /settings/<key>`, with body `{"revision"}`, resets one.
+     - Both take an `X-Actor` header, the person from part 3.
+     - Refusals: 400 for an unknown or non-editable key or a malformed body,
+       409 for a stale revision, 422 for a save `load_config` refuses, with
+       its message.
+     - The writer loads the config **per request**, unlike the api. Its job
+       includes repairing a file that does not load, so it must not refuse
+       to start over one.
+   - **How the console reaches it.** Through the console's server half, the
+     way it reaches the api (ADR 15, ADR 24). `front/src/server.ts` gets a
+     second interception for `/settings` and `/settings/<key>`, forwarding
+     `GET`, `PUT` and `DELETE` with `Authorization: Bearer
+     <CONFIG_WRITER_TOKEN>` to `CONFIG_WRITER_URL`, which defaults to
+     `http://127.0.0.1:8790`. Neither name takes a `VITE_` prefix. The api's
+     GET-only `FORWARDED` whitelist does not change. Unlike `API_TOKEN`, the
+     writer token is optional for the console: the console starts without it
+     and the settings screen shows its error state naming the variable, so a
+     host with no writer loses one screen and not the console.
+5. *The editable-key table.* These are all the keys `load_config` reads. The
+   three classes are *editable*, *read-only* in the console, and
+   *credential*, meaning the credential belongs to the second task. Path,
+   container and credential keys are never *editable*. A read-only or
+   credential key is still shown on the screen, without a control.
+
+   | Key | Class | Reason |
+   |---|---|---|
+   | `accounts` | read-only | Names containers. Adding an account is `docs/plans/server-deployment.md`'s, with a container template. |
+   | `primary_account` | editable | C-3 amended makes the primary a setting a person changes from the console. It must name a configured account. |
+   | `quota_threshold_pct` | editable | Quota policy the owner sets. `reserve_pct` is checked against it on the merged result. |
+   | `reserve_pct` | editable | Quota policy. It must not exceed the threshold, and the merged check catches that. |
+   | `pace_primary_week` | editable | A boolean policy switch (ADR 48). |
+   | `quota_cooldown_seconds` | editable | A timeout that is already validated as a positive integer. |
+   | `fallback_roles` | editable | Which phases the primary takes. It is a list, replaced whole. |
+   | `default_model` | editable | Item 0 names it. The override must be a non-empty string. |
+   | `role_model` | editable | Item 0 names it. It is a map, replaced whole, and validated against the roles. |
+   | `mapping_model` | editable | Like `default_model`, for the cartografo (ADR 66). |
+   | `default_effort` | editable | It is one of `EFFORT_LEVELS`, checked. |
+   | `role_effort` | editable | It is a map, replaced whole, and validated against the roles and the levels. |
+   | `escalated_effort` | editable | It is one of `EFFORT_LEVELS`, checked. |
+   | `escalate_effort_after_round` | editable | A round count. The override must be a non-negative integer. |
+   | `escalate_effort_on_repeated_finding` | editable | A boolean switch (ADR 73). |
+   | `max_revision_rounds` | editable | It bounds a cycle's spend. The override must be a positive integer. |
+   | `max_handoff_resumes` | editable | The cap C-4 amended puts in the config. It is already validated. |
+   | `phase_timeout_seconds` | editable | A timeout that is already validated. |
+   | `gates_test_timeout_seconds` | editable | A timeout that is already validated. |
+   | `mapping_max_turns` | editable | A cap that is already validated. |
+   | `merge_on_done` | editable | Item 0 names it. It is a boolean, and the override must be one. |
+   | `gates_enabled` | editable | Item 0 names it. It is a boolean. |
+   | `mapping_enabled` | editable | Item 0 names it. It is a boolean. |
+   | `heartbeat_ttl_seconds` | read-only | Two dispatchers running at once must agree on it, or one reaps the other's live lock. `load_config` does not validate it. |
+   | `heartbeat_interval_seconds` | read-only | It pairs with the TTL above, for the same reason. |
+   | `projects_root` | read-only | A path inside the containers, fixed by the compose mounts. |
+   | `hive_tasks_dir` | read-only | A path, the same as above. |
+   | `state_dir` | read-only | A path, the same as above. |
+   | `collector_url` | read-only | A service address on the compose network. |
+   | `permission_mode` | read-only | It widens or narrows what every phase may do. The api's boot-time harness fingerprint (ADR 41 part 8) reads it. |
+   | `allowed_tools` | read-only | A standing grant to every phase. `docs/plans/command-requests.md` is where grants are given. |
+   | `update_project_before_task` | read-only | Turning it on needs a credential or deploy key on the host that the console cannot see. That is the second task's ground. |
+   | `git_credentials_path` | credential | A path. Renewing the GitHub token at that path is the second task. The key itself is never edited. |
+   | `project_keys_dir` | credential | A path to the deploy keys (ADR 56). It is the same as above. |
+   | `vibe_kanban`, `local_board`, `vibe_kanban_mcp_url` | read-only | They are read only to be refused (ADR 59), and an override naming one is refused as well. |
+
+   Count by row: 22 *editable*, 11 *read-only* (10 settings and 1 row for
+   the 3 refused keys), and 2 *credential*. Every key item 0 lists is
+   *editable* except the accounts. "The timeouts" in item 0 is read as the
+   four timeouts and caps that are already validated. The two heartbeat
+   keys are left out, for the reason in their rows.
+6. *When a change takes effect.*
+   - **The unit is one invocation.** A verb loads the config once, at its
+     start, and keeps that `Config` until it exits. A change applies to the
+     **next invocation** that loads it: the next `run-task` or `run-phase`,
+     a `run-task` that a held run (exit 75, ADR 52) re-invokes, and
+     `merge-task` and `status` too.
+   - **A task that is running keeps the settings it started with** for every
+     phase, revision round and resume left in that invocation. That
+     includes `max_revision_rounds`, the efforts, the models and
+     `merge_on_done` at its end. Nothing signals a running dispatcher, and
+     nothing re-reads the config inside a cycle. A cycle whose budget,
+     model or round limit could change halfway would be a run no person
+     authorized in that shape (C-4).
+   - **So the settings are per invocation, not per task.** A task run in two
+     invocations can run its later phases on the newer settings. Each usage
+     line records the model of its call (ADR 68). The effort is not recorded
+     (ADR 73, *Consequences*).
+   - **The api.** It reads the overrides at its **next restart**, because
+     `create_app` loads once (`docs/learnings/a-cfg-derived-row-field-is-frozen-at-boot.md`).
+     Until then the Pool screen's served thresholds can lag a saved
+     `quota_threshold_pct` or `reserve_pct`. The settings screen says so.
+     It reads its own values from the writer, which loads per request.
+
+**Ruled out.**
+
+- *A write route on the api.* The operator's first thought, but it ends
+  ADR 19's write-free api and tier 3's floor.
+- *Editing `config.yaml` in place.* It loses the comments, makes reset
+  impossible to tell from a value, and puts the defaults and the operator's
+  choices in one file.
+- *A database.* It is overkill, as the operator said, and the dispatcher
+  would need a client for it.
+- *Deep merge with tombstones,* for the reason in part 1.
+- *A single-file mount,* for the reason in Context.
+- *Re-reading the config between phases,* for the reason in part 6.
+
+**Boundary of the second task, the credentials and the login.** It is the
+Tokens task of `docs/plans/front.md`. It goes through tier 3's queue and a
+worker, and never through a docker socket in a web process:
+
+- renewing the GitHub token at `git_credentials_path`;
+- the deploy keys under `project_keys_dir`;
+- the Claude login: `claude auth login` run in an account's container, its
+  URL shown in the console, and the code pasted back.
+
+It writes credential files and reaches containers. This writer does
+neither, and it never holds a credential. Nothing in this entry decides
+that task's queue, worker or screens. Whether `update_project_before_task`
+becomes *editable* is that task's to decide, once the console can see that
+a credential exists.
+
+**Charter.** No ruling is needed and none is written.
+
+- *C-4.* It governs starting a run, and a save starts nothing. Changing a
+  quota threshold is a person's act, the same act as editing `config.yaml`
+  on the host today. The operator answered item 0's question 1 yes on
+  2026-10-15.
+- *C-3 amended.* It already says the primary is changed from the console.
+- *C-12 amended.* A save is not a verdict, so the owner-only rule in part 3
+  comes from `docs/plans/server-deployment.md` *Decisions*, 2, not from
+  C-12.
+- *What would need a ruling.* If someone wants a reviewer to save settings,
+  or wants a save to start or stop a run, that is a charter question, not
+  this ADR's.
+
+**Consequences.**
+
+- An operator who edits `config.yaml` by hand and also overrides the same
+  key from the console sees the override win. The screen shows the source of
+  every value.
+- A `config.yaml` edit can break an override that was valid. The dispatcher
+  then refuses every verb until the override is reset. That is the price of
+  having no fallback.
+- `config.example.yaml`, `scripts/configure.sh` and the root `README.md`
+  must each document `config.d` and `CONFIG_WRITER_TOKEN`
+  (`docs/learnings/a-config-key-has-three-homes.md`). No `Config` field is
+  added.
+- A stack started before the build has no `config.d` directory. Docker
+  creates it empty on the first `up`, owned by root, which the writer (root
+  in its container) can write and the others can read.
+
 ## ADR 76 — an expired login parks the account as AUTH_EXPIRED, which only the operator's re-login and `release` clear
 
 **Status:** accepted (operator session, 2026-10-15). The dispatcher and the
