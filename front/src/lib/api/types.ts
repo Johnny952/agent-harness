@@ -251,8 +251,8 @@ export interface TaskDetail extends Task {
   body: string;
 }
 
-/** The four `dispatcher/state_machine.py` writes. */
-export type AccountState = "IDLE" | "BUSY" | "PRE_COOLDOWN" | "COOLING_DOWN";
+/** The five `dispatcher/state_machine.py` writes; `AUTH_EXPIRED` is ADR 76's. */
+export type AccountState = "IDLE" | "BUSY" | "PRE_COOLDOWN" | "COOLING_DOWN" | "AUTH_EXPIRED";
 
 /**
  * The ceiling one probe's week was held to, as the dispatcher's gate recorded it

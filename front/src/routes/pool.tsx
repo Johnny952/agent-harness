@@ -303,6 +303,9 @@ export function AccountCard({
   // ceiling the primary parked on. The console reads the state rather than
   // re-deciding it; `last_probe` (ADR 49) is only what it can say about why.
   const parked = account.state === "PRE_COOLDOWN";
+  // ADR 76: a refused login does not end by waiting, so unlike the parked note
+  // this one names the operator's fix instead of promising a self-heal.
+  const authExpired = account.state === "AUTH_EXPIRED";
   const probe = account.last_probe;
   const over = probe ? overWindows(probe) : [];
 
@@ -311,6 +314,7 @@ export function AccountCard({
     BUSY: "text-info border-info/50 bg-info/10",
     PRE_COOLDOWN: "text-warning border-warning/50 bg-warning/10",
     COOLING_DOWN: "text-destructive border-destructive/60 bg-destructive/10",
+    AUTH_EXPIRED: "text-destructive border-destructive/60 bg-destructive/10",
   };
 
   return (
@@ -359,6 +363,12 @@ export function AccountCard({
                 ? `Parked over its session's ${account.reserve_pct}% reserve or its week's paced ceiling — no probe recorded to say which.`
                 : `Parked over the local ${account.quota_threshold_pct}% threshold.`}{" "}
           This self-heals — a re-probe runs every 60s, no action needed.
+        </p>
+      )}
+      {authExpired && (
+        <p className="mt-2 rounded-sm border border-destructive/60 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+          Login expired. Out of the pool until the container is logged in again and the account
+          released: <Mono>release {account.name}</Mono>.
         </p>
       )}
       {refused && (

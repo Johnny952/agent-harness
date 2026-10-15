@@ -128,6 +128,16 @@ describe("no probe recorded", () => {
   });
 });
 
+describe("an account whose login expired", () => {
+  it("names the operator's fix rather than a self-heal", () => {
+    const text = cardText(account(false, null, { state: "AUTH_EXPIRED" }));
+    expect(text).toContain("AUTH_EXPIRED");
+    expect(text).toContain("Login expired.");
+    expect(text).toContain("release ");
+    expect(text).not.toContain("self-heals");
+  });
+});
+
 describe("a refused account", () => {
   // The api serves `rate_limited_at` as `dispatcher/state_machine.py:
   // record_rate_limit` stores it: epoch seconds, from `time.time()`. Handed to
