@@ -540,3 +540,54 @@ def test_a_released_account_is_pickable_again(tmp_path):
     operator_mod.release_account(cfg, "cuenta1")
 
     assert list_idle_accounts(cfg.state_dir, cfg.accounts) == ["cuenta1", "cuenta2"]
+
+
+def _auth_expired_result():
+    return ClaudeResult(
+        session_id=None,
+        result_text="Failed to authenticate: OAuth session expired and could not be refreshed",
+        raw={"is_error": True},
+    )
+
+
+def test_probe_reports_an_expired_login_and_writes_nothing(tmp_path, monkeypatch):
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        operator_mod.docker_exec,
+        "exec_claude",
+        _FakeExec({"agent-cuenta1": _auth_expired_result(), "agent-cuenta2": _usage_result(_CLEAN_USAGE)}),
+    )
+
+    reports = operator_mod.account_reports(cfg, probe=True)
+    by_name = {r.name: r for r in reports}
+
+    assert by_name["cuenta1"].probe_auth_expired is True
+    assert by_name["cuenta1"].probe_error is None
+    # Reporting is not parking, for a login as for a quota.
+    assert get_state(cfg.state_dir, "cuenta1") is AccountState.IDLE
+    text = operator_mod.format_status(cfg, reports, [])
+    assert "login has EXPIRED" in text
+    assert "docker exec -it agent-cuenta1 claude" in text
+
+
+def test_status_names_a_parked_expired_login_and_how_to_fix_it(tmp_path):
+    cfg = _make_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta2", AccountState.AUTH_EXPIRED)
+
+    text = operator_mod.format_status(cfg, operator_mod.account_reports(cfg), [])
+
+    line = next(l for l in text.splitlines() if "cuenta2" in l)
+    assert "AUTH_EXPIRED" in line
+    assert "login expired" in line and "release" in line
+
+
+def test_release_brings_an_expired_login_back_and_says_what_it_took_on_trust(tmp_path):
+    cfg = _make_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.AUTH_EXPIRED)
+
+    outcome = operator_mod.release_account(cfg, "cuenta1")
+
+    assert outcome.refused is False
+    assert get_state(cfg.state_dir, "cuenta1") is AccountState.IDLE
+    assert "AUTH_EXPIRED -> IDLE" in outcome.detail
+    assert "expired login" in outcome.detail

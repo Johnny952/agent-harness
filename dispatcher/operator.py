@@ -32,6 +32,7 @@ from dispatcher.state_machine import AccountState
 from dispatcher.dispatcher import (
     _USAGE_PROBE_TIMEOUT_SECONDS,
     _threshold_for,
+    is_auth_error,
     is_rate_limit_error,
 )
 
@@ -53,6 +54,9 @@ class AccountReport:
     usage: quota.UsageInfo | None = None
     probe_error: str | None = None
     probe_refused: bool = False
+    #: The probe was refused because the container's login is no longer
+    #: valid. Reported, not recorded, for the same reason as `probe_refused`.
+    probe_auth_expired: bool = False
     #: The account `primary_account` names: held to `reserve_pct` on its
     #: session, to the weekly ceiling paced against its own reset on its week
     #: (`docs/decisions.md` ADR 48), and tried last. Reported because the
@@ -203,6 +207,9 @@ def _probe_into(cfg: Config, report: AccountReport) -> None:
         # creating one.
         report.probe_refused = True
         return
+    if is_auth_error(result):
+        report.probe_auth_expired = True
+        return
     try:
         report.usage = quota.parse_usage_output(result.result_text)
     except Exception as exc:
@@ -309,6 +316,14 @@ def release_account(
         lines.append(f"forgot the refusal recorded {_duration(now - rate_limited_at)} ago")
     state_machine.set_state(cfg.state_dir, name, AccountState.IDLE)
     lines.insert(0, f"{name}: {state.value} -> IDLE ({account.container})")
+    if state is AccountState.AUTH_EXPIRED:
+        # Nothing here can check the login without spending a call on it, so
+        # the release is the operator's word that it was renewed; the next
+        # phase that is refused parks the account again.
+        lines.append(
+            "it was parked on an expired login: if that login was not renewed, "
+            "the next phase sent there is refused and parks it again."
+        )
     if rate_limited_at is not None and not clear_rate_limit:
         lines.append(
             "the recorded refusal was kept: it is history now, but a re-park will "
@@ -371,8 +386,17 @@ def format_status(
             notes.append(f"refused, {_duration(acc.cooldown_remaining)} of cooldown left")
         elif acc.rate_limited_at is not None:
             notes.append("refused once, cooldown elapsed")
+        if acc.state is AccountState.AUTH_EXPIRED and not acc.probe_auth_expired:
+            notes.append(
+                f"login expired: docker exec -it {acc.container} claude, /login, then release"
+            )
         if acc.probe_refused:
             notes.append("probe REFUSED by the service")
+        elif acc.probe_auth_expired:
+            notes.append(
+                f"probe says the login has EXPIRED: docker exec -it {acc.container} claude, "
+                "/login, then release"
+            )
         elif acc.usage is not None:
             # The primary answers to its reserve, so printing the worker
             # threshold next to it would misreport when it is about to park —
@@ -414,7 +438,10 @@ def format_status(
     if not tasks:
         out.append("  (none in progress)")
 
-    if any(not a.probe_refused and a.usage is None and a.probe_error is None for a in accounts):
+    if any(
+        not a.probe_refused and not a.probe_auth_expired and a.usage is None and a.probe_error is None
+        for a in accounts
+    ):
         out.append("")
         out.append("state only; --probe also asks each container's /usage (nothing is written).")
     return "\n".join(out)

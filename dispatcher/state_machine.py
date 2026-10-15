@@ -18,6 +18,11 @@ class AccountState(str, enum.Enum):
     BUSY = "BUSY"
     PRE_COOLDOWN = "PRE_COOLDOWN"
     COOLING_DOWN = "COOLING_DOWN"
+    #: The service rejected the account's login (`docs/decisions.md` ADR 76).
+    #: Unlike the two quota states this one does not end by waiting: only the
+    #: operator logging the container in again fixes it, so nothing re-probes
+    #: it and only `release` brings it back.
+    AUTH_EXPIRED = "AUTH_EXPIRED"
 
 
 def _state_path(state_dir: str, account_name: str) -> str:

@@ -630,6 +630,13 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
         state_machine.record_rate_limit(cfg.state_dir, account)
         state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
         return False
+    # Same reasoning, and it has to come before the parse for the same
+    # reason: a rejected login is something a probe can actually report, and
+    # waving it through unverified hands the phase to an account that cannot
+    # run it.
+    if is_auth_error(result):
+        _park_auth_expired(cfg, account, "the quota probe")
+        return False
     try:
         usage = quota.parse_usage_output(result.result_text)
     except Exception as exc:
@@ -741,6 +748,47 @@ def is_rate_limit_error(result: docker_exec.ClaudeResult) -> bool:
         return True
     text = (result.result_text or "").lower()
     return any(term in text for term in ("rate limit", "rate_limit", "usage limit", "hit your limit"))
+
+
+#: What the CLI says when the account's login is no longer accepted. The first
+#: two are verbatim from T-055's implementador on 2026-10-15 ("Failed to
+#: authenticate: OAuth session expired and could not be refreshed"); the rest
+#: are other wordings of the same fact, not yet seen here, kept because each
+#: names the login and so cannot match a rate limit or a failure of the work.
+_AUTH_ERROR_TERMS = (
+    "failed to authenticate",
+    "oauth session expired",
+    "oauth token has expired",
+    "invalid api key",
+    "please run /login",
+    "authentication_error",
+)
+
+
+def is_auth_error(result: docker_exec.ClaudeResult) -> bool:
+    """Whether the service refused this call because the login is not valid.
+
+    Read the way `is_rate_limit_error` reads a refusal: only an error result,
+    and the HTTP status first when the CLI reports one. 403 is left out on
+    purpose — a forbidden call can be a permission on one resource, and
+    parking an account on it would take a healthy login out of the pool.
+    """
+    if not result.raw.get("is_error"):
+        return False
+    if result.raw.get("api_error_status") in (401, "401"):
+        return True
+    text = (result.result_text or "").lower()
+    return any(term in text for term in _AUTH_ERROR_TERMS)
+
+
+def _park_auth_expired(cfg: Config, account: str, where: str) -> None:
+    logger.error(
+        "account %s was refused by the service at %s because its login is no longer valid; "
+        "it goes AUTH_EXPIRED and stays out of the pool until the operator logs it in again "
+        "(docker exec -it %s claude, then /login) and runs `release %s`",
+        account, where, container_for(cfg, account), account,
+    )
+    state_machine.set_state(cfg.state_dir, account, AccountState.AUTH_EXPIRED)
 
 
 def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
@@ -1506,7 +1554,8 @@ def dispatch_phase(
             )
             raise
         if not quota_ok:
-            # check_quota_ok parked the account (PRE_COOLDOWN/COOLING_DOWN).
+            # check_quota_ok parked the account (PRE_COOLDOWN, COOLING_DOWN
+            # or AUTH_EXPIRED).
             continue
 
         container = container_for(cfg, account)
@@ -1615,6 +1664,16 @@ def dispatch_phase(
             # account, or the next recheck recovers it on stale local numbers.
             state_machine.record_rate_limit(cfg.state_dir, account)
             state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
+            tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
+            resume_session_id = result.session_id or resume_session_id
+            continue
+
+        if is_auth_error(result):
+            # Handed on like a rate limit, with the session: the phase did not
+            # fail, the account could not run it, and another login can resume
+            # the same work. Not COOLING_DOWN, which the recheck would undo on
+            # local counters that say nothing about a login.
+            _park_auth_expired(cfg, account, f"the {role} phase of task {task_id}")
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id
             continue

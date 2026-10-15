@@ -6878,3 +6878,119 @@ def test_file_saved_split_refuses_what_it_cannot_file(tmp_path, caplog, payload,
     assert _hive_bytes(cfg) == before
     assert _task(cfg).status == "pending"  # only a cycle marks a task blocked
     assert reason in caplog.text
+
+
+_AUTH_EXPIRED_TEXT = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+def test_is_auth_error_true_on_the_cli_message_seen_on_t055() -> None:
+    result = ClaudeResult(session_id=None, result_text=_AUTH_EXPIRED_TEXT, raw={"is_error": True})
+    assert dispatcher_mod.is_auth_error(result) is True
+
+
+def test_is_auth_error_true_on_401_status_with_unrelated_text() -> None:
+    result = ClaudeResult(session_id=None, result_text="something went wrong", raw={"is_error": True, "api_error_status": 401})
+    assert dispatcher_mod.is_auth_error(result) is True
+
+
+def test_is_auth_error_false_when_not_an_error() -> None:
+    result = ClaudeResult(session_id=None, result_text=_AUTH_EXPIRED_TEXT, raw={"is_error": False})
+    assert dispatcher_mod.is_auth_error(result) is False
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        ClaudeResult(session_id=None, result_text="usage limit reached", raw={"is_error": True, "api_error_status": 429}),
+        ClaudeResult(session_id=None, result_text="Context limit reached", raw={"is_error": True}),
+        ClaudeResult(session_id=None, result_text="forbidden", raw={"is_error": True, "api_error_status": 403}),
+    ],
+)
+def test_is_auth_error_false_on_a_refusal_that_is_not_about_the_login(result) -> None:
+    assert dispatcher_mod.is_auth_error(result) is False
+
+
+def test_check_quota_ok_parks_an_account_whose_login_has_expired(tmp_path, monkeypatch, caplog) -> None:
+    """Before this, the probe's error text fell into the unreadable-report
+    fail-open and the account was waved through to a phase it could not run
+    (T-055, 2026-10-15)."""
+    cfg = _make_config(tmp_path)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(session_id=None, result_text=_AUTH_EXPIRED_TEXT, raw={"is_error": True})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        ok = dispatcher_mod.check_quota_ok(cfg, "cuenta1")
+
+    assert ok is False
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.AUTH_EXPIRED
+    # Not a rate limit: nothing about the quota was learned.
+    assert get_rate_limited_at(cfg.state_dir, "cuenta1") is None
+    assert "docker exec -it agent-cuenta1 claude" in caplog.text
+
+
+def test_dispatch_phase_hands_a_phase_refused_on_login_to_the_next_account(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+    )
+    resumed = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        if container == "agent-cuenta1":
+            return ClaudeResult(session_id="sess-a", result_text=_AUTH_EXPIRED_TEXT, raw={"is_error": True})
+        resumed.append(resume_session_id)
+        return ClaudeResult(session_id="sess-a", result_text="phase done", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.success is True
+    assert result.account == "cuenta2"
+    assert resumed == ["sess-a"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.AUTH_EXPIRED
+    assert get_state(cfg.state_dir, "cuenta2") == AccountState.IDLE
+
+
+def test_an_expired_login_is_never_re_probed_back_into_the_pool(tmp_path, monkeypatch) -> None:
+    """/usage reads local counters and would say the account is healthy; only
+    the operator's re-login and `release` bring it back."""
+    cfg = _make_config(tmp_path)
+    set_state(cfg.state_dir, "cuenta1", AccountState.AUTH_EXPIRED)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        raise AssertionError("an AUTH_EXPIRED account should not be probed")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.AUTH_EXPIRED
+    assert dispatcher_mod.pick_idle_account(cfg) is None
+
+
+def test_an_expired_worker_does_not_hold_the_primary_back(tmp_path) -> None:
+    """A worker on a counter comes back by itself and is worth waiting for; a
+    worker on an expired login does not, so the fallback goes ahead."""
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1", is_primary=True),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+        primary_account="cuenta1",
+    )
+    set_state(cfg.state_dir, "cuenta2", AccountState.AUTH_EXPIRED)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="revisor") == "cuenta1"

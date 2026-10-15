@@ -5149,3 +5149,65 @@ returns are removed: every string goes through every rule. That is safe
 because the pair and assignment rules already refuse to match a value that
 is a marker, and no shape matches one, so redacting a marker again leaves it
 as it is. `test_text_starting_with_a_marker_is_still_redacted` covers it.
+
+## ADR 76 — an expired login parks the account as AUTH_EXPIRED, which only the operator's re-login and `release` clear
+
+**Status:** accepted (operator session, 2026-10-15). The dispatcher and the
+operator verbs only; the api already serves the state as it is and the
+console learns the new value in a task of its own. Numbered 76 because
+T-055's branch holds ADR 75.
+
+**Context.** On T-055 the implementador phase on cuenta1 came back with
+`Failed to authenticate: OAuth session expired and could not be refreshed`.
+Nothing in the dispatcher knew that shape. The quota probe before it had
+already returned a `/usage` report with no session or week lines, which the
+unreadable-report rule waves through, so the account was picked; the phase
+then failed as an ordinary error, and the account went back to IDLE to be
+picked again. An expired login is not a counter: it does not reset with
+time, `/usage` (local statistics) can look healthy through it, and only the
+operator can renew it, interactively, in the container.
+
+**Decision.**
+
+1. *Recognised.* `is_auth_error(result)` is true when the result is an
+   error (`raw["is_error"]`) and either `api_error_status` is 401 or the
+   text carries one of a fixed list of the CLI's login phrases (`failed to
+   authenticate`, `oauth session expired`, `oauth token has expired`,
+   `invalid api key`, `please run /login`, `authentication_error`). 403 is
+   left out: it is a permission refusal, not a login one. A result that is
+   not an error never matches, whatever it says.
+2. *Where.* Both places a container answers: the quota probe in
+   `check_quota_ok`, and the phase in `dispatch_phase`. The rate-limit check
+   runs first in each, so a refusal that is both stays a rate limit.
+3. *A state of its own.* The account is set to `AUTH_EXPIRED`, with an
+   ERROR log naming the account and the fix (`docker exec -it <container>
+   claude`, `/login`, then `release`). No rate-limit stamp is written:
+   nothing about the quota was learned.
+4. *A phase refused on its login fails over.* `dispatch_phase` releases the
+   task's lock and tries the next account, resuming the same session the
+   way a rate-limit failover does. Nothing is committed for the refused
+   attempt.
+5. *Never re-probed, never waited for.* `_recheck_cooling_accounts` looks at
+   PRE_COOLDOWN and COOLING_DOWN only, and `_waitable_workers` counts only
+   accounts on a counter; AUTH_EXPIRED is neither, so a re-probe cannot
+   bring it back on a healthy-looking `/usage`, and a worker parked on its
+   login does not hold the primary's fallback back. `release` is the one
+   way out, as for any manual park.
+6. *Visible.* `status` notes the fix on an AUTH_EXPIRED account; `status
+   --probe` reports a probe that hits an expired login (reported, not
+   recorded, like every probe result there); `release` from AUTH_EXPIRED
+   says the next phase sent there parks it again if the login was not
+   renewed.
+
+**Left out.** Detecting the expiry before a phase, by a probe that needs the
+login (the `/usage` probe does not, reliably); renewing the login from the
+dispatcher or the console, which is the credentials task of ADR 75's plan;
+the console's rendering of the new state, a front task of its own
+(`front/src/lib/api/types.ts`'s `AccountState` and the pool screen's colour
+map).
+
+**Consequences.** One more state the operator clears by hand, on purpose. An
+expired account costs one refused attempt, not a loop. A new wording of the
+CLI's login error that hits none of the phrases and carries no 401 falls
+back to the old behaviour, an ordinary failed phase; the list is extended
+when one is seen.
