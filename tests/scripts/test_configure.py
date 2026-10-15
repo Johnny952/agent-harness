@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "configure.sh"
 SHIPPED_AGENTS = REPO_ROOT / "docker" / "compose" / "docker-compose.agents.yml"
 SHIPPED_BASE = REPO_ROOT / "docker" / "compose" / "docker-compose.yml"
+SHIPPED_COOLIFY = REPO_ROOT / "docker" / "compose" / "docker-compose.coolify.yml"
 
 TOKEN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -49,6 +50,8 @@ def _run(tmp_path: Path, stdin: str) -> subprocess.CompletedProcess[str]:
             str(tmp_path / ".env"),
             "--agents-out",
             str(tmp_path / "docker-compose.agents.yml"),
+            "--coolify-out",
+            str(tmp_path / "docker-compose.coolify.yml"),
         ],
         input=stdin,
         capture_output=True,
@@ -63,6 +66,27 @@ def _render(*names: str) -> str:
     script stops after its definitions."""
     result = subprocess.run(
         ["bash", "-c", 'source "$1"; shift; render_agents_compose "$@"', "_", str(SCRIPT), *names],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    return result.stdout
+
+
+def _render_coolify(*names: str) -> str:
+    """The Coolify file for a pool, rendered from the shipped one the way the
+    wizard renders it."""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; shift; render_coolify_compose "$@"',
+            "_",
+            str(SCRIPT),
+            str(SHIPPED_COOLIFY),
+            *names,
+        ],
         capture_output=True,
         text=True,
         timeout=30,
@@ -136,7 +160,7 @@ def _compose_dir_for(tmp_path: Path, names: list[str]) -> Path:
     )
     assert count == 1, "docker-compose.yml's COLLECTOR_WRITE_TOKENS line changed shape"
     (compose_dir / "docker-compose.yml").write_text(base)
-    shutil.copy(REPO_ROOT / "docker" / "compose" / "docker-compose.coolify.yml", compose_dir)
+    (compose_dir / "docker-compose.coolify.yml").write_text(_render_coolify(*names))
     return compose_dir
 
 
@@ -161,6 +185,68 @@ def test_a_rendered_pool_holds_the_compose_invariants(tmp_path, monkeypatch, nam
         invariants.test_the_collector_tokens_are_spelt_bare_with_no_default,
     ):
         check("split")
+        check("coolify")
+    invariants.test_every_agent_service_isolates_its_config_home("docker-compose.coolify.yml")
+    invariants.test_dispatcher_is_gated_behind_its_own_profile("docker-compose.coolify.yml")
+
+
+@pytest.mark.parametrize("names", [["solo"], ["a", "b-c", "d_e"]], ids=["one", "three"])
+def test_a_rendered_coolify_pool_holds_the_agents_file_invariants(
+    tmp_path, monkeypatch, names
+) -> None:
+    """The checks the invariants module holds only docker-compose.agents.yml to
+    -- the hive mount, sysbox sidecars, collector env -- run on the Coolify
+    render's agents, by handing it to them under that name. Not the read-only
+    deploy keys: the shipped Coolify file mounts no /run/secrets/projects at
+    all, a gap of its own and not the renderer's."""
+    compose_dir = tmp_path / "compose"
+    compose_dir.mkdir()
+    (compose_dir / "docker-compose.agents.yml").write_text(_render_coolify(*names))
+    shutil.copy(SHIPPED_BASE, compose_dir)
+    monkeypatch.setattr(invariants, "COMPOSE_DIR", compose_dir)
+
+    invariants.test_every_agent_service_mounts_the_shared_hive_directory()
+    invariants.test_every_dind_sidecar_uses_sysbox_runc_and_nothing_is_privileged()
+    invariants.test_every_agent_service_has_collector_url_and_source_app()
+
+
+def test_the_default_pool_renders_the_shipped_coolify_file() -> None:
+    """Byte for byte: the render copies the shipped file's head, comments
+    included, so the only freedom it has is in the agent pairs."""
+    ok = _render_coolify("cuenta1", "cuenta2") == SHIPPED_COOLIFY.read_text()
+    assert ok, "render_coolify_compose cuenta1 cuenta2 no longer reproduces docker-compose.coolify.yml"
+
+
+def test_a_rendered_coolify_pool_has_its_pairs_volumes_and_token_map() -> None:
+    compose = yaml.safe_load(_render_coolify("a", "b-c", "d_e"))
+    shipped = yaml.safe_load(SHIPPED_COOLIFY.read_text())
+
+    pool = ["agent-a", "dind-a", "agent-b-c", "dind-b-c", "agent-d_e", "dind-d_e"]
+    head = [name for name in shipped["services"] if not name.startswith(("agent-", "dind-"))]
+    assert list(compose["services"]) == head + pool
+    for name in head:
+        if name != "collector":
+            assert compose["services"][name] == shipped["services"][name], name
+    token_map = (
+        "COLLECTOR_WRITE_TOKENS=agent-a=${COLLECTOR_WRITE_TOKEN_A},"
+        "agent-b-c=${COLLECTOR_WRITE_TOKEN_B_C},agent-d_e=${COLLECTOR_WRITE_TOKEN_D_E}"
+    )
+    assert token_map in compose["services"]["collector"]["environment"]
+    assert set(compose["volumes"]) == {
+        "observability_data",
+        "registry_mirror_data",
+        "claude_shared",
+        "claude_creds_a",
+        "claude_creds_b-c",
+        "claude_creds_d_e",
+        "dind_a_data",
+        "dind_b-c_data",
+        "dind_d_e_data",
+    }
+    assert compose["networks"] == shipped["networks"]
+    agent = compose["services"]["agent-b-c"]
+    assert agent["build"] == shipped["services"]["agent-cuenta1"]["build"]
+    assert "COLLECTOR_TOKEN=${COLLECTOR_WRITE_TOKEN_B_C}" in agent["environment"]
 
 
 def test_a_rendered_pool_has_one_pair_and_its_volumes_per_account() -> None:
@@ -195,6 +281,8 @@ def test_one_account_writes_its_config_agents_file_and_tokens(tmp_path) -> None:
     assert _accounts(tmp_path) == ["solo"]
     ok = (tmp_path / "docker-compose.agents.yml").read_text() == _render("solo")
     assert ok
+    ok = (tmp_path / "docker-compose.coolify.yml").read_text() == _render_coolify("solo")
+    assert ok
     _assert_tokens(_env(tmp_path), ["solo"])
     assert "scripts/setup_volumes.sh solo\n" in result.stdout
     assert "does not edit that file" not in result.stdout
@@ -220,6 +308,7 @@ def test_the_default_pool_leaves_the_agents_file_alone(tmp_path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "docker-compose.agents.yml").exists()
+    assert not (tmp_path / "docker-compose.coolify.yml").exists()
     assert "left it untouched" in result.stdout
     assert _accounts(tmp_path) == ["cuenta1", "cuenta2"]
     _assert_tokens(_env(tmp_path), ["cuenta1", "cuenta2"])
@@ -235,6 +324,7 @@ def test_an_existing_agents_file_is_kept_unless_the_operator_says_overwrite(tmp_
 
     (tmp_path / ".env").unlink()
     (tmp_path / "config.yaml").unlink()
+    (tmp_path / "docker-compose.coolify.yml").unlink()
     result = _run(tmp_path, _answers("solo", overwrite_agents="y"))
     assert result.returncode == 0, result.stderr
     ok = agents.read_text() == _render("solo")

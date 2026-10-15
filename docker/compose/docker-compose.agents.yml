@@ -1,7 +1,9 @@
 # docker/compose/docker-compose.agents.yml
-# One agent+sidecar block per Claude Pro account. Duplicate the pair for
-# additional accounts — no dispatcher code changes required (design spec,
-# "Decisiones de alcance": N accounts without structural changes).
+# One agent+sidecar block per Claude Pro account, shipped for cuenta1 and
+# cuenta2. Run scripts/configure.sh to change the pool rather than editing
+# this by hand -- it renders the pairs for the accounts it writes into
+# config.yaml. No dispatcher code changes required (design spec, "Decisiones
+# de alcance": N accounts without structural changes).
 #
 # Bring up docker-compose.yml first: it creates `ia_harness_net`, which this
 # file joins as an external network so agents and sidecars can resolve

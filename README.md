@@ -1140,11 +1140,12 @@ it is the only writer of the indexes and the mark belongs in the commit that
 made it true.
 
 Accounts are added or removed by rerunning `scripts/configure.sh` with the
-new list: it rewrites `config.yaml`'s `accounts`, the agents compose file and
-the `.env` tokens together, so the three cannot disagree. Editing them by hand
-still works (duplicate an `agent-*`/`dind-*` pair, add the `accounts` entry,
-add a `COLLECTOR_WRITE_TOKEN_<NAME>` and its `COLLECTOR_WRITE_TOKENS` entry) —
-no dispatcher code changes are required either way.
+new list: it rewrites `config.yaml`'s `accounts`, the agents compose file,
+the Coolify compose file and the `.env` tokens together, so they cannot
+disagree. Editing them by hand still works (duplicate an `agent-*`/`dind-*`
+pair, add the `accounts` entry, add a `COLLECTOR_WRITE_TOKEN_<NAME>` and its
+`COLLECTOR_WRITE_TOKENS` entry) — no dispatcher code changes are required
+either way.
 
 ### Deploying with Coolify
 
@@ -1152,11 +1153,14 @@ no dispatcher code changes are required either way.
 merges both compose files into one self-building resource — point Coolify's
 **Docker Compose** resource type at it and it builds *every* image itself
 (agent and dind-sidecar included, via `build:` stanzas that the split files
-don't have), so none of steps 2–3 above need to run by hand first. It
+don't have), so none of steps 2–3 above need to run by hand first. Its
+agent pairs are rendered by `scripts/configure.sh` for the pool it writes
+into `config.yaml` (`--coolify-out PATH` to put it elsewhere); the shipped
+file is the cuenta1/cuenta2 pool. It
 differs from the split files in three ways, all in the interest of a clean
 one-click import:
 
-- `claude_shared`/`claude_creds_cuenta1`/`claude_creds_cuenta2` are plain
+- `claude_shared` and each `claude_creds_<account>` are plain
   named volumes instead of `external: true`, so Coolify creates them itself
   on first deploy — `scripts/setup_volumes.sh` isn't needed. The tradeoff:
   if you ever remove this resource in Coolify with its "delete volumes"
@@ -1174,16 +1178,20 @@ included:
 
 - **`config.yaml` must exist before first deploy.** It holds no secrets
   (just paths, thresholds, and account names — see `config.example.yaml`),
-  so a Coolify pre-deployment command is safe: `test -f config.yaml || cp config.example.yaml config.yaml`.
+  so a Coolify pre-deployment command is safe for the shipped cuenta1/cuenta2
+pool: `test -f config.yaml || cp config.example.yaml config.yaml`. For
+another pool, place the `config.yaml` from the `scripts/configure.sh` run
+that rendered this file instead (it is gitignored, so it does not travel
+with the repo).
   Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, `COLLECTOR_READ_TOKEN`,
-  `COLLECTOR_WRITE_TOKEN_CUENTA1` and `COLLECTOR_WRITE_TOKEN_CUENTA2` (required:
-  the collector will not start without them), and `API_TOKEN` if the
+  one `COLLECTOR_WRITE_TOKEN_<ACCOUNT>` per account (required: the collector
+  will not start without them), and `API_TOKEN` if the
   console is to reach the api, through Coolify's own environment-variables UI on
   the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
   compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based
   step done once per agent container after it's up (e.g.
-  `docker exec -it agent-cuenta1 claude`, then `/login`). No import can do
+  `docker exec -it agent-<account> claude`, then `/login`). No import can do
   this for you.
 
 **Alternative: two Compose resources.** If you're already managing the

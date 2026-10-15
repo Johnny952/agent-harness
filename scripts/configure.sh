@@ -9,13 +9,15 @@
 # is built.
 #
 #   scripts/configure.sh [--advanced] [--config-out PATH] [--env-out PATH]
-#                        [--agents-out PATH]
+#                        [--agents-out PATH] [--coolify-out PATH]
 #
 # The agents file is rendered from the account list, one agent-<name> and
 # dind-<name> pair per account, so a pool of one or of five comes up with
 # `docker compose -f docker-compose.agents.yml up -d` and no hand-editing. The
 # list the repo ships with (cuenta1,cuenta2) leaves the file alone: it is
 # already that pool, and its comments are the ones a reader should get.
+# docker/compose/docker-compose.coolify.yml, the one-resource Coolify deploy,
+# is rendered from the same list on the same terms.
 #
 # Some config.yaml fields aren't really free-form: projects_root,
 # hive_tasks_dir and state_dir must match the volume mounts in
@@ -335,6 +337,126 @@ EOF
     done
 }
 
+render_coolify_compose() {
+    # render_coolify_compose SOURCE NAME... -> prints docker-compose.coolify.yml
+    # for that pool. Everything above the first agent pair (header, collector,
+    # api, registry-mirror, dispatcher) is SOURCE's own, kept as it is but for
+    # the collector's COLLECTOR_WRITE_TOKENS line, which is rebuilt to bind
+    # exactly these agents; the agent pairs and the volumes are rendered here.
+    # Unlike the agents file, the map stays a list of ${...} references: a
+    # Coolify resource takes its variables from Coolify's own UI, one per
+    # account, not from the .env this script writes. tests/scripts/
+    # test_configure.py holds the two-account render equal to the shipped
+    # file and runs the compose invariants on a one-account render.
+    source_file=$1
+    shift
+    first=$1
+    token_map=""
+    for name in "$@"; do
+        token_map="${token_map:+$token_map,}agent-$name=\${$(write_token_var "$name")}"
+    done
+    awk -v map="$token_map" '
+        /^  agent-/ { exit }
+        /^      - COLLECTOR_WRITE_TOKENS=/ { print "      - COLLECTOR_WRITE_TOKENS=" map; next }
+        { print }
+    ' "$source_file"
+    for name in "$@"; do
+        token_var=$(write_token_var "$name")
+        if [ "$name" = "$first" ]; then
+            cat <<EOF
+  agent-$name:
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    container_name: agent-$name
+    restart: unless-stopped
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_HOST=tcp://dind-$name:2375
+      - COLLECTOR_URL=http://collector:8787
+      - SOURCE_APP=agent-$name
+      # This agent's write token and no other (ADR 72); never the read token.
+      - COLLECTOR_TOKEN=\${$token_var}
+    volumes:
+      # See the header comment above: claude_shared is the shared allowlist,
+      # claude_creds_$name is this account's own config home.
+      - claude_shared:/root/.claude
+      - claude_creds_$name:/root/.claude-account
+      - ../../.data/projects:/data/projects
+      - ../../.hive:/data/.hive
+    depends_on:
+      - dind-$name
+    networks:
+      - ia_harness_net
+
+EOF
+        else
+            cat <<EOF
+  agent-$name:
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    container_name: agent-$name
+    restart: unless-stopped
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_HOST=tcp://dind-$name:2375
+      - COLLECTOR_URL=http://collector:8787
+      - SOURCE_APP=agent-$name
+      - COLLECTOR_TOKEN=\${$token_var}
+    volumes:
+      # See agent-$first above.
+      - claude_shared:/root/.claude
+      - claude_creds_$name:/root/.claude-account
+      - ../../.data/projects:/data/projects
+      - ../../.hive:/data/.hive
+    depends_on:
+      - dind-$name
+    networks:
+      - ia_harness_net
+
+EOF
+        fi
+        cat <<EOF
+  dind-$name:
+    build:
+      context: ../dind-sidecar
+      dockerfile: Dockerfile
+    container_name: dind-$name
+    restart: unless-stopped
+    runtime: sysbox-runc
+    cpus: "2"
+    mem_limit: "4g"
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--registry-mirror=http://registry-mirror:5000"]
+    volumes:
+      - dind_${name}_data:/var/lib/docker
+    networks:
+      - ia_harness_net
+
+EOF
+    done
+    cat <<EOF
+networks:
+  ia_harness_net:
+    name: ia_harness_net
+
+volumes:
+  observability_data:
+  registry_mirror_data:
+  claude_shared:
+EOF
+    for name in "$@"; do
+        echo "  claude_creds_$name:"
+    done
+    for name in "$@"; do
+        echo "  dind_${name}_data:"
+    done
+}
+
 # Sourced (tests/scripts/test_configure.py does, to render a pool without
 # running the wizard), the file stops here with its functions defined.
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
@@ -345,6 +467,8 @@ ADVANCED=0
 CONFIG_OUT="$REPO_ROOT/config.yaml"
 ENV_OUT="$REPO_ROOT/docker/compose/.env"
 AGENTS_OUT="$REPO_ROOT/docker/compose/docker-compose.agents.yml"
+COOLIFY_SOURCE="$REPO_ROOT/docker/compose/docker-compose.coolify.yml"
+COOLIFY_OUT="$COOLIFY_SOURCE"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -362,6 +486,10 @@ while [ $# -gt 0 ]; do
             ;;
         --agents-out)
             AGENTS_OUT="$2"
+            shift 2
+            ;;
+        --coolify-out)
+            COOLIFY_OUT="$2"
             shift 2
             ;;
         -h|--help)
@@ -469,21 +597,25 @@ fi
 # it again would only trade its comments for the generated ones.
 sorted_input=$(printf '%s\n' "${ACCOUNT_NAMES[@]}" | sort | paste -sd, -)
 sorted_default=$(printf '%s\n' cuenta1 cuenta2 | sort | paste -sd, -)
+write_pool_file() {
+    # write_pool_file PATH RENDERED -> RENDERED into PATH, through
+    # confirm_overwrite when PATH exists. Rendered before the write, because
+    # the Coolify file is rendered from the file it may be about to replace.
+    if [ -e "$1" ] && ! confirm_overwrite "$1"; then
+        echo "Left $1 untouched. Its agent pairs no longer match config.yaml's accounts."
+        return 0
+    fi
+    mkdir -p "$(dirname "$1")"
+    printf '%s\n' "$2" > "$1"
+    echo "Wrote $1"
+}
+
 if [ "$sorted_input" = "$sorted_default" ]; then
     echo "$AGENTS_OUT already holds the cuenta1/cuenta2 pairs; left it untouched."
+    echo "$COOLIFY_OUT already holds the cuenta1/cuenta2 pairs; left it untouched."
 else
-    write_agents=1
-    if [ -e "$AGENTS_OUT" ]; then
-        if ! confirm_overwrite "$AGENTS_OUT"; then
-            write_agents=0
-            echo "Left $AGENTS_OUT untouched. Its agent pairs no longer match config.yaml's accounts."
-        fi
-    fi
-    if [ "$write_agents" -eq 1 ]; then
-        mkdir -p "$(dirname "$AGENTS_OUT")"
-        render_agents_compose "${ACCOUNT_NAMES[@]}" > "$AGENTS_OUT"
-        echo "Wrote $AGENTS_OUT"
-    fi
+    write_pool_file "$AGENTS_OUT" "$(render_agents_compose "${ACCOUNT_NAMES[@]}")"
+    write_pool_file "$COOLIFY_OUT" "$(render_coolify_compose "$COOLIFY_SOURCE" "${ACCOUNT_NAMES[@]}")"
 fi
 
 echo
@@ -571,4 +703,6 @@ echo "  docker build -f docker/dind-sidecar/Dockerfile -t ia-harness-dind-sideca
 echo "  docker compose -f docker/compose/docker-compose.yml up -d"
 echo "  # Brings up the agents file this script generated (or left as shipped):"
 echo "  # one agent-<name>/dind-<name> pair per account above."
-echo "  docker compose -f docker/compose/docker-compose.agents.yml up -d"
+echo "  docker compose -f $AGENTS_OUT up -d"
+echo "  # Or, deploying with Coolify instead: import $COOLIFY_OUT as one"
+echo "  # resource and set the .env values above in its environment-variables UI."
