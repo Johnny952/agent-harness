@@ -703,7 +703,9 @@ Bound to the **Role models write**, if it happens here:
 
 - **Whether the console may edit `config.yaml` at all**, which is a different
   privilege from enqueueing a dispatcher verb and should not be smuggled in
-  behind the same queue by accident.
+  behind the same queue by accident. The operator asked for it on 2026-10-15
+  and it is item 0 of [`backlog.md`](backlog.md), which lists the keys and the
+  decisions that come before it.
 
 Bound to **no task yet**:
 

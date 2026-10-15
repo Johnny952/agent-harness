@@ -1228,6 +1228,10 @@ had. Each line names a piece and says whether it is **built**, **planned**,
 [`docs/plans/backlog.md`](docs/plans/backlog.md), under the item's own
 number and title.
 
+0. **Editing `config.yaml` from the console** — **open**, added 2026-10-15
+   and placed first; numbered 0 so the items below keep their numbers. Bound
+   to the tier-3 *Role models write* in
+   [`docs/plans/front.md`](docs/plans/front.md).
 1. **Project memory: role skills, per-project docs, and a pointer-based
    handoff.**
    - *Role skills (method)*, from superpowers, thermos and ponytail —

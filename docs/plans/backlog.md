@@ -12,6 +12,50 @@ approved: evaluate it when the work is taken on, not before.
 
 ## Prioritized
 
+### 0. **Editing `config.yaml` from the console.**
+
+Added on 2026-10-15 at the operator's request and placed first by them. It is
+numbered 0 so the items below keep the numbers other documents cite. Unlike
+the rest of this file it was not moved from the README; like the rest, nothing
+in it is designed or approved.
+
+**The want.** Read and change the dispatcher's settings from the front instead
+of editing `config.yaml` on the host: the accounts and `primary_account`,
+`quota_threshold_pct`, `reserve_pct`, `pace_primary_week`, `fallback_roles`,
+`default_model` and `role_model`, `default_effort`, `role_effort`,
+`escalated_effort`, `escalate_effort_after_round`,
+`escalate_effort_on_repeated_finding`, `max_revision_rounds`, `merge_on_done`,
+`gates_enabled`, `mapping_enabled`, and the timeouts.
+
+**Where it stands.** It is on no roadmap. `docs/plans/front.md` names it only
+as a deferred decision bound to the tier-3 *Role models write* — "whether the
+console may edit `config.yaml` at all" — with an ADR as its kind, and the
+tier-2 Role models screen only reads the file. Today every mount of
+`config.yaml` is `:ro` and the api writes nothing.
+
+**What has to be decided first, in this order.**
+
+1. *Whether the console may write it at all.* Editing the config is a
+   different privilege from enqueueing a dispatcher verb: it changes how much
+   of every account's quota the harness may spend (C-4), not one run. The
+   ruling decides whether that is an ADR or a charter question.
+2. *Where the writer lives.* It is tier 3's open "where the write service
+   lives", so this item either opens tier 3 or waits for it. The api stays
+   write-free and no docker socket goes into a web process (tier 3's floor).
+3. *Which keys are editable.* Some are safe to turn from a form (effort,
+   models, `escalate_effort_on_repeated_finding`); some are not, because they
+   name paths, credentials or containers (`git_credentials_path`,
+   `project_keys_dir`, the account containers). A key not on the list is
+   read-only in the console.
+
+**Constraints any design keeps.** The write is validated by the same
+`load_config` the dispatcher uses, so the console cannot save a file the
+dispatcher refuses; it is atomic (write and rename) with the previous version
+kept; it is attributed and logged; and it takes effect on the next dispatcher
+invocation, which already re-reads the file because each verb is a fresh
+`docker compose run`. A form that edits a copy the dispatcher never reads is
+not this item.
+
 ### 1. **Project memory: role skills, per-project docs, and a pointer-based handoff.**
 
 […]
