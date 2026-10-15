@@ -350,6 +350,22 @@ scripts/configure.sh
 
 It defaults the paths/URLs that must match the compose files' volume mounts
 and internal service DNS, and only asks about them under `--advanced`.
+
+The first question is the account list, and everything else follows from it.
+One account is a complete pool: the dispatcher hands every role to it, and
+`fallback_roles` only rules on falling back from a worker, so it does not
+apply. Any list but the shipped `cuenta1,cuenta2` also writes
+`docker/compose/docker-compose.agents.yml` (or the path given with
+`--agents-out`) with one `agent-<name>`/`dind-<name>` pair per account, its
+`claude_creds_<name>` and `dind_<name>_data` volumes, and the shared
+`claude_shared` volume and `ia_harness_net` network; an existing file is only
+replaced after you say so. The generated file is what
+`docker compose -f docker/compose/docker-compose.agents.yml up -d` brings up in
+step 4, and `scripts/setup_volumes.sh` in step 3 takes the same list. For the
+shipped list the file is left as it is, since it already holds those two pairs.
+Names that differ only by `-` versus `_` (`a-b` and `a_b`) are refused: they
+would share one `COLLECTOR_WRITE_TOKEN_A_B` key in `.env`.
+
 Prefer editing by hand? Copy the template instead:
 
 ```bash
@@ -395,6 +411,10 @@ can't delete it. Remove such leftovers from inside a container
 ```bash
 scripts/setup_volumes.sh cuenta1 cuenta2
 ```
+
+Pass the same account list you gave `scripts/configure.sh` (it prints the
+exact command in its next steps): a single account is
+`scripts/setup_volumes.sh <name>`.
 
 Creates the shared `claude_shared` volume and one `claude_creds_<account>`
 volume per account — both declared `external: true` in
@@ -499,10 +519,16 @@ every running host to buy a spelling. An `.env` written before `API_TOKEN`
 existed still starts everything: the api rejects every bearer and keeps
 serving a human's password, and the console says so in each region's Error state.
 The collector is stricter (`docs/decisions.md` ADR 72): it reads
-`COLLECTOR_READ_TOKEN` and `COLLECTOR_WRITE_TOKEN_CUENTA1`/`_CUENTA2` from the
-same `.env` and refuses to start, naming the variable, without them — so an
-`.env` written before they existed needs `scripts/configure.sh` rerun or the
-keys added by hand (three distinct long random strings). The read token is the
+`COLLECTOR_READ_TOKEN` and its map of write tokens from the same `.env` and
+refuses to start, naming the variable, without them. `scripts/configure.sh`
+writes that map as `COLLECTOR_WRITE_TOKENS=agent-<name>=<token>,...`, one entry
+per account with the same value as that account's
+`COLLECTOR_WRITE_TOKEN_<NAME>`, so the collector follows whatever pool you
+configured. An `.env` without `COLLECTOR_WRITE_TOKENS` still works for the
+shipped pool: the compose file falls back to building the map from
+`COLLECTOR_WRITE_TOKEN_CUENTA1`/`_CUENTA2`. An `.env` written before the
+collector tokens existed at all needs `scripts/configure.sh` rerun or the keys
+added by hand (distinct long random strings). The read token is the
 operator's for `GET /events` (`curl -H "Authorization: Bearer $COLLECTOR_READ_TOKEN"
 127.0.0.1:8787/events`) and goes to no other service; each write token goes to
 its agent as `COLLECTOR_TOKEN` and to the collector, which stores the agent it
@@ -1113,9 +1139,12 @@ deleting it — a fix that gets reverted should still have its row — because
 it is the only writer of the indexes and the mark belongs in the commit that
 made it true.
 
-Additional accounts are added by duplicating an `agent-*`/`dind-*` pair in
-`docker/compose/docker-compose.agents.yml` and the matching entry in
-`config.yaml`'s `accounts` list — no dispatcher code changes required.
+Accounts are added or removed by rerunning `scripts/configure.sh` with the
+new list: it rewrites `config.yaml`'s `accounts`, the agents compose file and
+the `.env` tokens together, so the three cannot disagree. Editing them by hand
+still works (duplicate an `agent-*`/`dind-*` pair, add the `accounts` entry,
+add a `COLLECTOR_WRITE_TOKEN_<NAME>` and its `COLLECTOR_WRITE_TOKENS` entry) —
+no dispatcher code changes are required either way.
 
 ### Deploying with Coolify
 

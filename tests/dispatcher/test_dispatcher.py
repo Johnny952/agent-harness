@@ -4971,6 +4971,132 @@ def test_the_primary_parks_at_its_reserve_rather_than_the_worker_threshold(tmp_p
     assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
 
 
+# --- a one-account pool ------------------------------------------------------
+#
+# What scripts/configure.sh sets up when the operator names a single account,
+# with or without making it the primary. Nothing in the picker is special to
+# it -- `has_workers` is what turns the fallback rules off -- so these pin the
+# behaviour down for every role rather than trusting the one-liner to stay
+# one.
+
+#: Every phase the dispatcher hands an account to.
+_EVERY_ROLE = ["arquitecto", "implementador", "revisor", "auditor", "cartografo"]
+
+
+def test_the_role_list_here_is_every_phase_role() -> None:
+    """The parametrised tests below are only "every role" while this holds."""
+    from dispatcher.config import PHASE_ROLES
+
+    assert sorted(_EVERY_ROLE) == sorted(PHASE_ROLES)
+
+
+def _make_solo_config(tmp_path, *, primary: bool, **overrides):
+    """One account, named primary or not, with a fallback_roles that would
+    refuse most phases if it were consulted."""
+    defaults = dict(
+        accounts=[AccountConfig(name="solo", container="agent-solo", is_primary=primary)],
+        primary_account="solo" if primary else None,
+        reserve_pct=60,
+        quota_threshold_pct=90,
+        fallback_roles=["revisor"],
+    )
+    defaults.update(overrides)
+    return _make_config(tmp_path, **defaults)
+
+
+@pytest.mark.parametrize("primary", [True, False], ids=["primary", "no-primary"])
+@pytest.mark.parametrize("role", _EVERY_ROLE)
+def test_a_one_account_pool_hands_every_role_to_its_account(tmp_path, primary, role) -> None:
+    cfg = _make_solo_config(tmp_path, primary=primary)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role=role) == "solo"
+
+
+@pytest.mark.parametrize("primary", [True, False], ids=["primary", "no-primary"])
+def test_fallback_roles_does_not_gate_a_one_account_pool(tmp_path, caplog, primary) -> None:
+    """Even an empty list, which on a two-account pool keeps the primary out of
+    everything: with no worker there is no fallback for it to rule on."""
+    cfg = _make_solo_config(tmp_path, primary=primary, fallback_roles=[])
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        picks = [dispatcher_mod.pick_idle_account(cfg, role=role) for role in _EVERY_ROLE]
+
+    assert picks == ["solo"] * len(_EVERY_ROLE)
+    assert not any("fallback" in r.getMessage() for r in caplog.records)
+
+
+def test_a_one_account_pool_that_is_parked_has_nothing_to_hand_out(tmp_path) -> None:
+    cfg = _make_solo_config(tmp_path, primary=True)
+    set_state(cfg.state_dir, "solo", AccountState.PRE_COOLDOWN)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="revisor") is None
+
+
+def _solo_probe(monkeypatch, session_pct):
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                f"Current session: {session_pct}% used · resets later\n"
+                "Current week (all models): 20% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+
+
+@pytest.mark.parametrize(
+    "primary, session_pct, parks",
+    [
+        # The primary is the operator's console even when it is the whole
+        # pool, so it keeps its reserve: 70% is past 60.
+        (True, 59, False),
+        (True, 70, True),
+        # Not named primary, it is a worker and answers to the threshold.
+        (False, 70, False),
+        (False, 95, True),
+    ],
+    ids=["primary-under-reserve", "primary-over-reserve", "worker-under-threshold", "worker-over-threshold"],
+)
+def test_a_one_account_pool_parks_at_the_ceiling_its_role_in_the_pool_sets(
+    tmp_path, monkeypatch, primary, session_pct, parks,
+) -> None:
+    cfg = _make_solo_config(tmp_path, primary=primary)
+    _solo_probe(monkeypatch, session_pct)
+
+    assert dispatcher_mod._threshold_for(cfg, "solo") == (60 if primary else 90)
+    assert dispatcher_mod.check_quota_ok(cfg, "solo") is not parks
+    expected = AccountState.PRE_COOLDOWN if parks else AccountState.IDLE
+    assert get_state(cfg.state_dir, "solo") == expected
+
+
+@pytest.mark.parametrize("primary", [True, False], ids=["primary", "no-primary"])
+def test_a_one_account_pool_runs_a_whole_cycle(tmp_path, monkeypatch, primary) -> None:
+    """Each phase of the cycle asks the real picker for its account, under its
+    own role, and runs on the one it gets: the cycle finishes on one account
+    with a fallback_roles that names only the revisor."""
+    cfg = _make_solo_config(tmp_path, primary=primary)
+    calls = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        account = dispatcher_mod.pick_idle_account(cfg_arg, role=role)
+        calls.append((role, account))
+        text = "VERDICT: APPROVED" if role == "revisor" else "ok"
+        return dispatcher_mod.DispatchResult(
+            success=account is not None, session_id=None, result_text=text, account=account,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert calls == [
+        ("arquitecto", "solo"), ("implementador", "solo"), ("revisor", "solo"), ("auditor", "solo"),
+    ]
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+
+
 # --- the primary's paced weekly ceiling (ADR 48) -----------------------------
 #
 # Every probe below is recorded text and every clock is supplied, so none of

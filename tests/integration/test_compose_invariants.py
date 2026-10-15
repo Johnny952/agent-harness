@@ -457,7 +457,43 @@ DEPLOYMENTS = {
 #: `${NAME}`, `${NAME:-x}`, `${NAME:?x}`... as (name, the rest), so a default
 #: can be told apart from the bare form. `_substitutions_of` above matches whole
 #: values, which the collector's map — two substitutions in one value — is not.
+#: Used whole (`fullmatch`) only on values with no nesting; `_substitutions`
+#: below is what walks a value whose default holds substitutions of its own.
 _SUBSTITUTION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}")
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _substitutions(value: str) -> list[tuple[str, str, int, int]]:
+    """Every `${NAME...}` in a value as (name, the rest, start, end), nested
+    ones included. The collector's `COLLECTOR_WRITE_TOKENS` defaults to the
+    per-account map, `${COLLECTOR_WRITE_TOKENS:-agent-a=${A},...}`, so a regex
+    that stops at the first `}` would cut the outer one short and miss every
+    variable after the first: braces are counted instead, and each default is
+    walked in turn."""
+    found: list[tuple[str, str, int, int]] = []
+    i = 0
+    while (start := value.find("${", i)) != -1:
+        match = _NAME.match(value, start + 2)
+        if not match:
+            i = start + 2
+            continue
+        depth, j = 1, match.end()
+        while j < len(value) and depth:
+            if value.startswith("${", j):
+                depth, j = depth + 1, j + 2
+                continue
+            depth -= value[j] == "}"
+            j += 1
+        if depth:
+            break
+        rest = value[match.end():j - 1]
+        found.append((match.group(), rest, start, j))
+        found.extend(
+            (name, suffix, match.end() + s0, match.end() + e0)
+            for name, suffix, s0, e0 in _substitutions(rest)
+        )
+        i = j
+    return found
 
 
 def _deployment_services(deployment: str) -> dict:
@@ -474,7 +510,7 @@ def _variables_read_by(service: dict) -> dict[str, set[str]]:
     suffix it is spelt with (`""` for the bare form)."""
     found: dict[str, set[str]] = {}
     for value in _environment(service).values():
-        for name, suffix in _SUBSTITUTION.findall(value):
+        for name, suffix, _, _ in _substitutions(value):
             found.setdefault(name, set()).add(suffix)
     return found
 
@@ -490,8 +526,16 @@ def _write_token_variables(services: dict) -> set[str]:
 
 def _write_token_map(collector: dict) -> dict[str, str]:
     """`COLLECTOR_WRITE_TOKENS` as `{source_app: the substitution it holds}`,
-    split the way observability/collector/server.py splits it."""
+    split the way observability/collector/server.py splits it.
+
+    A value that is one `${COLLECTOR_WRITE_TOKENS:-...}` is read through to
+    its default: scripts/configure.sh writes the whole map into .env, and the
+    default is what a .env without that line resolves to — the per-account
+    variables, which is what these tests hold the agents to."""
     raw = _environment(collector)["COLLECTOR_WRITE_TOKENS"]
+    outer = _substitutions(raw)
+    if outer and outer[0][0] == "COLLECTOR_WRITE_TOKENS" and (outer[0][2], outer[0][3]) == (0, len(raw)):
+        raw = outer[0][1].removeprefix(":-")
     entries = [entry.strip().partition("=") for entry in raw.split(",") if entry.strip()]
     return {source_app.strip(): token.strip() for source_app, _, token in entries}
 
