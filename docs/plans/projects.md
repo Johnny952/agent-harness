@@ -163,6 +163,10 @@ had before this, which `dispatch migrate` writes once
   the roadmap: a project lock in the dispatcher that holds across a crash, as
   the task lock does, and the Conflict state and the integrador of
   `review.md`, for two diffs on one base.
+  *Narrowed 2026-10-15:* `docs/plans/autonomy.md` (*Decisions*, 6) designs
+  this as a write window serialized per *Surface*, with the cartografo and
+  the arquitecto free to run at once; it applies to a queue started with
+  `--parallel` above 1, and until it is built this rule holds.
 - **What "running" means.** A project is busy from its cycle's first phase
   until the task is *Awaiting review*, and again for a revision round. Two
   tasks awaiting review on one project can still diverge from the base, as

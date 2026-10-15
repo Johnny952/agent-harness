@@ -141,6 +141,24 @@ it again is a new run that needs a person. This does not cover a phase that
 ended blocked, failed a gate or ran out of quota, nor the main thread, where a
 person answers (`docs/plans/models-5-5.md`, *Decisions*, 3).
 
+**Amended:** 2026-10-15, in conversation with the main thread, at the user's
+word: a *queue* the owner authorizes in one act authorizes every task on it.
+It is *Start epic* (C-12, *Amended*) widened to any list of tasks, and given
+from the conversation as well as from the console:
+
+- *What is shown first.* Before the owner confirms, the queue lists each task
+  by id and title, the roles its cycle will run, and the queue's spending
+  limit. That limit is the ceiling of the authorization: reaching it stops the
+  queue and waits for a person, measured from the usage log, never estimated.
+- *What it covers.* The tasks listed when it was confirmed, each one cycle, in
+  the order and with the parallelism the queue was confirmed with
+  (`docs/plans/autonomy.md`). A task added afterwards is not covered.
+- *What it does not cover.* A task that ends blocked, red at a gate, past its
+  own budget or out of quota is not retried by the queue: re-running it is a
+  new run that needs a person. The queue goes on with the tasks that do not
+  depend on it. A spec an agent drafted is not a task until the owner has
+  approved it, and an agent's draft never puts itself on a queue.
+
 ---
 
 ### C-5 — No role pushes
@@ -172,6 +190,12 @@ What stays: no role runs `git push` or holds the credential, which stays on
 the dispatcher's side; the base is never pushed without a verdict; and no pull
 request is opened on GitHub, because the review is the console's. The pushed
 branch is a record, not a place to review.
+
+**Amended:** 2026-10-15, in conversation with the main thread, at the user's
+word: the base may also be pushed by the dispatcher on an *automatic approve*,
+under C-12 (*Amended* 2026-10-15) and only within its conditions. Everything
+else above stands: no role pushes, never with force, and the credential stays
+on the dispatcher's side.
 
 ---
 
@@ -408,3 +432,32 @@ word, on three points:
     permission, for that role in that project only, never global and never
     over the denylist. *Deny* hands the refusal back to the phase and
     authorizes only the resume that carries it.
+
+**Amended:** 2026-10-15, in conversation with the main thread, at the user's
+word: the owner may give *approve* in advance, per project, and the dispatcher
+then merges a task and pushes the base with no one looking at the diff. It is
+a standing verdict, and narrow:
+
+- *Off by default, per project.* Only the owner turns it on, in that project's
+  configuration, and may turn it off at any time. It is never global.
+- *Only a task that needed nothing from a person.* It applies when every one
+  of these holds; if any fails, the task waits for the owner's *approve* as
+  before:
+  - every gate is green, the revisor approved with no open finding, and the
+    auditor raised nothing;
+  - the base merges into the task branch with no conflict, so no integrador
+    ran, and the test gate is green on the merged result;
+  - the diff stays inside the task's declared *Surface*, and touches neither
+    this file, nor credentials, nor the compose or deploy files, nor any other
+    path the project marks protected;
+  - the task's cycle was authorized by a person (a verdict, a queue or the
+    conversation): an automatic approve never authorizes a run, it only ends
+    one.
+- *It leaves a trace.* Each automatic approve writes a comment on the task
+  naming the conditions it checked and the merge commit, and notifies the
+  owner (`docs/plans/notifications.md`).
+- *It is undone forward.* A wrong automatic merge is fixed by a revert commit
+  on the base, never by rewriting it (C-9).
+
+*Request changes*, *resolve conflict* and every verdict that spends quota are
+never given in advance by this switch.

@@ -87,6 +87,17 @@ with its own credential and write access to that file alone, not a write
 route on the api; and credentials and the login are a second task (the
 Tokens task, through the queue), apart from the settings.
 
+### 11. **Autonomy: the automatic approve, the queue, drafted specs, parallel work.**
+
+**Status:** designed 2026-10-15 by the main thread at the user's word, not
+built. The design and its ten build tasks, in three priorities, are in
+`docs/plans/autonomy.md`; the charter rulings are C-4, C-5 and C-12 as
+amended that day. Placed here, after item 0, because its first priority
+(tasks A-1 to A-6) removes the person's turn between tasks, which the
+measured pace says is the bottleneck. Its priority 2 is items 4 and 2 of
+this list; its priority 3 (B-1 to B-4) is parallel work within a project.
+Unlike most of this file it was not moved from the README.
+
 ### 1. **Project memory: role skills, per-project docs, and a pointer-based handoff.**
 
 […]
