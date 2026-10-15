@@ -56,6 +56,31 @@ invocation, which already re-reads the file because each verb is a fresh
 `docker compose run`. A form that edits a copy the dispatcher never reads is
 not this item.
 
+**The operator's answers, 2026-10-15.** (1) Yes: the console writes the
+settings directly, with no agent in the path, and the values in use today are
+the defaults. (2) Through the api is the operator's first thought, with the
+format left open: YAML or something else, a database probably being overkill.
+The api's write-free property (`docs/decisions.md` ADR 19, `front.md` tier 3)
+is what that thought runs into, so the design task weighs it against a
+separate writer rather than assuming either. (3) Case by case, by whether a
+key is worth editing from the front. Credentials are not excluded on
+principle: the GitHub token must be renewable from the console when it
+expires, and the operator wants the same for the Claude login — run
+`claude auth login` in the account's container, show the URL it prints, and
+paste the authorization code back. That is the Tokens task's open question in
+`front.md` ("whether a device code is ever rendered in the console"), answered
+yes by the operator; both writes reach a container or a credential file, so
+they ride tier 3's queue and never a docker socket in a web process.
+
+**The operator's agreement, 2026-10-15**, to three proposals the design task
+starts from rather than decides: `config.yaml` stays as written and is the
+defaults, and the console writes only a separate overrides file that
+`load_config` merges and validates, so a reset is deleting a key and the
+comments in `config.yaml` survive; the writer is a small separate service
+with its own credential and write access to that file alone, not a write
+route on the api; and credentials and the login are a second task (the
+Tokens task, through the queue), apart from the settings.
+
 ### 1. **Project memory: role skills, per-project docs, and a pointer-based handoff.**
 
 […]

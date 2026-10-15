@@ -697,7 +697,9 @@ Bound to the **Tokens task**:
   mints a `user_code` and a `verification_url` and the screen shows them. A
   login code on a web page is a different object from a login code in a
   terminal, and this repo already treats login codes as things that do not get
-  pasted around. A ruling, not an ADR.
+  pasted around. A ruling, not an ADR. The operator answered yes on
+  2026-10-15, for the Claude login and for renewing the GitHub token; see
+  item 0 of [`backlog.md`](backlog.md).
 
 Bound to the **Role models write**, if it happens here:
 
