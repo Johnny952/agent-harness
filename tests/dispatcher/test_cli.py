@@ -1401,3 +1401,115 @@ def test_cli_project_keygen_rejects_a_bad_slug(tmp_path: Path, monkeypatch) -> N
         _keygen(monkeypatch, _write_config(tmp_path), "--project", "../x", "--keys-dir", str(tmp_path / "k"))
 
     assert exc.value.code == 2
+
+
+# --- merge-task --push (A-4, ADR 78) ---
+
+
+def _fake_push(monkeypatch, outcome) -> list:
+    """push_base's docker half, faked: records each call, answers `outcome`."""
+    calls: list = []
+
+    def push_base(container, projects_root, slug, *a, **k):
+        calls.append((container, projects_root, slug))
+        return outcome
+
+    monkeypatch.setattr(cli_mod.docker_exec, "push_base", push_base)
+    return calls
+
+
+def _merge_task_args(*extra):
+    return ("merge-task", "--task-id", "task-1", "--project", "myproj", *extra)
+
+
+def test_cli_merge_task_with_push_pushes_the_base_after_the_merge(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    de = cli_mod.docker_exec
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    pushes = _fake_push(monkeypatch, de.PushOutcome(de.PUSHED, "main", "pushed main to origin/main at ccccccc"))
+
+    _run_command(monkeypatch, config_path, *_merge_task_args("--push"))
+
+    assert [(call[0], call[2]) for call in pushes] == [("agent-cuenta1", "myproj")]
+    assert "pushed main to origin/main at ccccccc" in capsys.readouterr().out
+
+
+def test_cli_merge_task_without_push_never_pushes(tmp_path: Path, monkeypatch, capsys) -> None:
+    de = cli_mod.docker_exec
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    pushes = _fake_push(monkeypatch, de.PushOutcome(de.PUSHED, "main", "pushed"))
+
+    _run_command(monkeypatch, config_path, *_merge_task_args())
+
+    assert pushes == []
+
+
+def test_cli_merge_task_push_retries_on_a_branch_already_merged(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The re-run after a refused push: nothing to merge, the push still runs."""
+    de = cli_mod.docker_exec
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(UP_TO_DATE, "main", "main already holds agent/task/task-1"))
+    pushes = _fake_push(monkeypatch, de.PushOutcome(de.PUSHED, "main", "pushed"))
+
+    _run_command(monkeypatch, config_path, *_merge_task_args("--push"))
+
+    assert len(pushes) == 1
+
+
+def test_cli_merge_task_push_that_is_refused_keeps_the_merge_and_exits_4(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    de = cli_mod.docker_exec
+    config_path = _write_config(tmp_path)
+    card = _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    _fake_push(monkeypatch, de.PushOutcome(
+        de.PUSH_REFUSED, "main", "pushing main to origin/main was refused; rejected",
+    ))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, *_merge_task_args("--push"))
+
+    assert excinfo.value.code == cli_mod.EXIT_NOT_PUSHED == 4
+    task = dispatcher_mod.context_transfer.read_task_file(str(card))
+    assert task.merged["into"] == "main"
+    assert task.status == "done"
+    assert "pushing main to origin/main was refused" in capsys.readouterr().err
+
+
+def test_cli_merge_task_push_without_an_upstream_is_not_an_error(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    de = cli_mod.docker_exec
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    _fake_push(monkeypatch, de.PushOutcome(de.NO_UPSTREAM, "main", "main tracks no upstream branch; nothing pushed"))
+
+    _run_command(monkeypatch, config_path, *_merge_task_args("--push"))
+
+    assert "main tracks no upstream branch; nothing pushed" in capsys.readouterr().out
+
+
+def test_cli_merge_task_push_does_not_push_a_refused_merge(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    de = cli_mod.docker_exec
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(REFUSED, "main", "has uncommitted changes"))
+    pushes = _fake_push(monkeypatch, de.PushOutcome(de.PUSHED, "main", "pushed"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, *_merge_task_args("--push"))
+
+    assert excinfo.value.code == 1
+    assert pushes == []

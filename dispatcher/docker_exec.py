@@ -914,6 +914,103 @@ def _ahead_behind(container: str, project_dir: str, other: str) -> tuple[int, in
         return None
 
 
+@dataclasses.dataclass(frozen=True)
+class _RemoteAccess:
+    """How one git command reaches a project's remote: its `-c` args, env, hint.
+
+    `missing` is the sentence added to a failure when the command fails, naming
+    what was or was not handed to git, so a refusal reads with its likely cause.
+    """
+
+    git_args: list[str]
+    env: dict[str, str]
+    missing: str
+
+
+def _remote_access(
+    container: str,
+    slug: str,
+    remote: str,
+    remote_url: str,
+    credentials_path: str,
+    keys_dir: str,
+) -> _RemoteAccess | str:
+    """What a fetch or a push to `remote_url` is handed, or why it cannot be tried.
+
+    One answer for both directions, so the base is pushed with the same
+    credential it is fetched with and a project never has one for reading and
+    another for writing (ADR 78). The string, when that is what comes back, is
+    the reason the command was not attempted, without the caller's own tail.
+
+    A project with a deploy key (project_key_path) goes over SSH with it, and
+    the https:// token is not consulted: an SSH remote as it is, and an
+    `https://github.com/` clone through `url.<ssh>.insteadOf` for this one
+    command, so the operator's remote is never rewritten. A project with no key
+    keeps the token, so the token works until every project has moved.
+    """
+    ssh_remote = is_ssh_remote(remote_url)
+    key_path = project_key_path(keys_dir, slug)
+    # Probed only for a remote it could serve, and with `test -f` for the same
+    # reason as the credential below. A key for a host other than github.com is
+    # used too; the image pins no host key for it, so that command fails on the
+    # host check and says so, rather than trusting the first answer.
+    has_key = (ssh_remote or remote_url.startswith(_GITHUB_HTTPS)) and (
+        run_docker_exec(container, "/", ["test", "-f", key_path]).returncode == 0
+    )
+    # Without GIT_TERMINAL_PROMPT a credential git cannot find turns into a
+    # prompt on a terminal nobody is watching, and the call hangs until the
+    # phase timeout instead of failing in a second with a reason.
+    env = {**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"}
+    if has_key:
+        env["GIT_SSH_COMMAND"] = ssh_command(key_path)
+        # `-c` and not `remote set-url`: rewriting someone's remote is a change
+        # to their clone, and this lasts for the one command.
+        git_args = (
+            [] if ssh_remote
+            else ["-c", f"url.{_GITHUB_SSH}.insteadOf={_GITHUB_HTTPS}"]
+        )
+        missing = (
+            f" (with the deploy key at {key_path}; is its public half one of "
+            f"the repository's deploy keys?)"
+        )
+        return _RemoteAccess(git_args, env, missing)
+    if ssh_remote:
+        return (
+            f"{remote} is an SSH remote and there is no deploy key at {key_path} "
+            f"(`project-keygen --project {slug}` makes one)"
+        )
+    if not remote_url.startswith("https://"):
+        # Said rather than fixed: rewriting someone's remote is a change to
+        # their clone, and the credential format mounted here can only answer
+        # for HTTPS.
+        return (
+            f"{remote} is neither an SSH nor an https:// remote, the only kinds "
+            f"a deploy key or the mounted credential can serve"
+        )
+    # `test -f` and not path_exists's `test -e`, because the thing most
+    # likely to be at this path is a directory: a bind mount whose host
+    # source does not exist gets one created for it, so the operator who
+    # brought the agents up before writing the credential file has an empty
+    # directory here, and a directory is not something git's store helper
+    # can read.
+    has_credential = (
+        run_docker_exec(container, "/", ["test", "-f", credentials_path]).returncode == 0
+    )
+    # A missing credential is not a reason to skip the command, only a reason
+    # not to name a helper. A public repo over https needs no credential to
+    # fetch, and this runs against whatever project the operator put under
+    # projects_root. A private remote refuses in a second instead, and comes
+    # back through the caller's failure in git's own words with the path that
+    # was looked for added.
+    git_args = (
+        ["-c", f"credential.helper=store --file={credentials_path}"]
+        if has_credential
+        else []
+    )
+    missing = "" if has_credential else f" (no credential file at {credentials_path})"
+    return _RemoteAccess(git_args, env, missing)
+
+
 def update_project_branch(
     container: str,
     projects_root: str,
@@ -933,15 +1030,10 @@ def update_project_branch(
     mid-cycle is how the revisor once came to review a tree with none of the
     implementador's work in it.
 
-    Nothing here pushes, so the credential it asks for only ever needs to read,
-    and a public remote needs none: the mounted file is named to git only when
-    it is there, and a fetch that then fails is reported rather than prevented.
-
-    A project with a deploy key (project_key_path) fetches over SSH with it, and
-    the https:// token is not consulted: an SSH remote as it is, and an
-    `https://github.com/` clone through `url.<ssh>.insteadOf` for this one
-    command, so the operator's remote is never rewritten. A project with no key
-    keeps the token, so the token works until every project has moved.
+    Nothing here pushes, and a public remote needs no credential to be read:
+    the mounted file is named to git only when it is there, and a fetch that
+    then fails is reported rather than prevented. The deploy key or token it
+    fetches with is the one push_base pushes with (_remote_access).
 
     The fetch is `--quiet` and the comparison is against FETCH_HEAD rather than
     refs/remotes/<remote>/<branch>: what was just fetched is what we want to
@@ -962,69 +1054,12 @@ def update_project_branch(
         return UpdateOutcome(
             UNAVAILABLE, f"{project_dir} has no remote named {remote}; {branch} left as it is"
         )
-    remote_url = url.stdout.strip()
-    ssh_remote = is_ssh_remote(remote_url)
-    key_path = project_key_path(keys_dir, slug)
-    # Probed only for a remote it could serve, and with `test -f` for the same
-    # reason as the credential below. A key for a host other than github.com is
-    # used too; the image pins no host key for it, so that fetch fails on the
-    # host check and says so, rather than trusting the first answer.
-    has_key = (ssh_remote or remote_url.startswith(_GITHUB_HTTPS)) and (
-        run_docker_exec(container, "/", ["test", "-f", key_path]).returncode == 0
+    access = _remote_access(
+        container, slug, remote, url.stdout.strip(), credentials_path, keys_dir
     )
-    # Without GIT_TERMINAL_PROMPT a credential git cannot find turns into a
-    # prompt on a terminal nobody is watching, and the call hangs until the
-    # phase timeout instead of failing in a second with a reason.
-    env = {**_GIT_ENV, "GIT_TERMINAL_PROMPT": "0"}
-    if has_key:
-        env["GIT_SSH_COMMAND"] = ssh_command(key_path)
-        # `-c` and not `remote set-url`: rewriting someone's remote is a change
-        # to their clone, and this lasts for the one fetch.
-        git_args = (
-            [] if ssh_remote
-            else ["-c", f"url.{_GITHUB_SSH}.insteadOf={_GITHUB_HTTPS}"]
-        )
-        missing = (
-            f" (with the deploy key at {key_path}; is its public half one of "
-            f"the repository's deploy keys?)"
-        )
-    elif ssh_remote:
-        return UpdateOutcome(
-            UNAVAILABLE,
-            f"{remote} is an SSH remote and there is no deploy key at {key_path} "
-            f"(`project-keygen --project {slug}` makes one); {branch} left as it is",
-        )
-    elif not remote_url.startswith("https://"):
-        # Said rather than fixed: rewriting someone's remote is a change to
-        # their clone, and the credential format mounted here can only answer
-        # for HTTPS.
-        return UpdateOutcome(
-            UNAVAILABLE,
-            f"{remote} is neither an SSH nor an https:// remote, the only kinds "
-            f"a deploy key or the mounted credential can serve; {branch} left as it is",
-        )
-    else:
-        # `test -f` and not path_exists's `test -e`, because the thing most
-        # likely to be at this path is a directory: a bind mount whose host
-        # source does not exist gets one created for it, so the operator who
-        # brought the agents up before writing the credential file has an empty
-        # directory here, and a directory is not something git's store helper
-        # can read.
-        has_credential = (
-            run_docker_exec(container, "/", ["test", "-f", credentials_path]).returncode == 0
-        )
-        # A missing credential is not a reason to skip the fetch, only a reason
-        # not to name a helper. A public repo over https needs no credential at
-        # all, and this runs against whatever project the operator put under
-        # projects_root. A private remote refuses in a second instead, and comes
-        # back through the failure below in git's own words with the path that
-        # was looked for added.
-        git_args = (
-            ["-c", f"credential.helper=store --file={credentials_path}"]
-            if has_credential
-            else []
-        )
-        missing = "" if has_credential else f" (no credential file at {credentials_path})"
+    if isinstance(access, str):
+        return UpdateOutcome(UNAVAILABLE, f"{access}; {branch} left as it is")
+    git_args, env, missing = access.git_args, access.env, access.missing
     fetched = run_docker_exec(
         container, project_dir,
         ["git", *git_args, "fetch", "--quiet", remote, branch],
@@ -1083,6 +1118,138 @@ def update_project_branch(
         UPDATED,
         f"fast-forwarded {branch} {behind} commit(s) from {before} to {remote_head}",
     )
+
+
+PUSHED = "pushed"
+NO_UPSTREAM = "no-upstream"
+PUSH_REFUSED = "push-refused"
+
+
+@dataclasses.dataclass(frozen=True)
+class PushOutcome:
+    """What became of pushing the project's own branch to its upstream.
+
+    Three outcomes, and only one of them is something to stop on:
+
+    * PUSHED — the upstream now has the branch, including the case where it
+      already had every commit and git had nothing to send.
+    * NO_UPSTREAM — there is nowhere to push: no remote, or a branch that
+      tracks nothing. A clone the operator keeps local is a choice, not a
+      fault, so this is said and never treated as a failure.
+    * PUSH_REFUSED — a push was due and did not land: the upstream moved and
+      the push is not a fast-forward, the remote could not be reached with the
+      credential there is, or git failed in any other way. The local branch
+      keeps the merge either way; this is the outcome the queue (A-5) stops on.
+    """
+
+    status: str
+    target: str | None
+    detail: str
+
+    @property
+    def pushed(self) -> bool:
+        return self.status == PUSHED
+
+    @property
+    def refused(self) -> bool:
+        return self.status == PUSH_REFUSED
+
+
+def _git_config(container: str, project_dir: str, key: str) -> str | None:
+    proc = run_docker_exec(
+        container, project_dir, ["git", "config", "--get", key], env=_GIT_ENV
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def push_base(
+    container: str,
+    projects_root: str,
+    slug: str,
+    credentials_path: str = GIT_CREDENTIALS_PATH,
+    timeout: float | None = None,
+    keys_dir: str = PROJECT_KEYS_DIR,
+) -> PushOutcome:
+    """Push the branch the project's checkout sits on to its upstream, or say why not.
+
+    Called after a task branch has landed in that branch, by the automatic
+    approve and by `merge-task --push` (docs/plans/autonomy.md, A-4). The
+    upstream is the branch's own tracking configuration, `branch.<b>.remote`
+    and `branch.<b>.merge`, and nothing else: no remote is guessed and no
+    branch name is assumed to match on the other side.
+
+    Never forced. The refspec has no `+` and neither `--force` nor
+    `--force-with-lease` is passed, so a remote that moved refuses the push
+    and the refusal is returned as it is. Nothing here resets, rebases or
+    otherwise rewrites the local branch afterwards: the merge stays where it
+    landed, and reconciling it with what the remote gained is a decision for a
+    person (charter C-5, ADR 78).
+
+    The credential is the one the fetch uses (_remote_access): the project's
+    deploy key when there is one, the mounted https:// token otherwise. A push
+    needs write scope where the fetch did not, and a credential without it
+    comes back as a refusal in git's own words.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug)
+    project_dir = f"{projects_root}/{slug}"
+
+    branch = current_branch(container, project_dir)
+    if branch is None:
+        return PushOutcome(
+            NO_UPSTREAM, None, f"{project_dir} is not on a branch; nothing pushed"
+        )
+    remote = _git_config(container, project_dir, f"branch.{branch}.remote")
+    merge_ref = _git_config(container, project_dir, f"branch.{branch}.merge")
+    if remote is None or merge_ref is None:
+        return PushOutcome(
+            NO_UPSTREAM, branch, f"{branch} tracks no upstream branch; nothing pushed"
+        )
+    if remote == ".":
+        # `git branch --track` onto another local branch: a push there would
+        # move a branch of this same clone, which is not what "the upstream"
+        # means for a base.
+        return PushOutcome(
+            NO_UPSTREAM, branch,
+            f"{branch} tracks {merge_ref} of this same clone, not a remote; nothing pushed",
+        )
+    url = run_docker_exec(
+        container, project_dir,
+        ["git", "remote", "get-url", "--push", remote],
+        env=_GIT_ENV,
+    )
+    if url.returncode != 0:
+        return PushOutcome(
+            NO_UPSTREAM, branch,
+            f"{branch} tracks {remote}, and {project_dir} has no remote by that name; "
+            f"nothing pushed",
+        )
+    upstream = f"{remote}/{merge_ref.removeprefix('refs/heads/')}"
+    access = _remote_access(
+        container, slug, remote, url.stdout.strip(), credentials_path, keys_dir
+    )
+    if isinstance(access, str):
+        return PushOutcome(
+            PUSH_REFUSED, branch, f"{access}; {branch} not pushed to {upstream}"
+        )
+    pushed = run_docker_exec(
+        container, project_dir,
+        [
+            "git", *access.git_args, "push", "--quiet", remote,
+            f"refs/heads/{branch}:{merge_ref}",
+        ],
+        env=access.env,
+        timeout=timeout,
+    )
+    if pushed.returncode != 0:
+        return PushOutcome(
+            PUSH_REFUSED, branch,
+            f"pushing {branch} to {upstream} was refused; {branch} keeps the merge "
+            f"locally and is not reset: {_output_tail(pushed)}{access.missing}",
+        )
+    head = _rev_parse_short(container, project_dir, "HEAD")
+    return PushOutcome(PUSHED, branch, f"pushed {branch} to {upstream} at {head}")
 
 
 def _branch_exists(container: str, project_dir: str, branch: str) -> bool:

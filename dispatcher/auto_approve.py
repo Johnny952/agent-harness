@@ -239,15 +239,39 @@ def refusal_note(decision: Decision) -> str:
     )
 
 
-def approval_note(decision: Decision, target: str, merge_commit: str | None) -> str:
-    """The comment on a task the check approved and the merge landed."""
+def approval_note(
+    decision: Decision, target: str, merge_commit: str | None, push=None
+) -> str:
+    """The comment on a task the check approved and the merge landed.
+
+    `push` is the docker_exec.PushOutcome of pushing the base afterwards (A-4),
+    read only for `pushed`, `refused` and `detail` so this module stays a
+    function of what it is handed; None leaves the note as it was before
+    anything pushed.
+    """
     lines = "\n".join(f"- `{name}`: {why}" for name, why in decision.held)
     commit = merge_commit or "unknown"
-    return (
+    note = (
         f"{HEADING}\n\n"
         f"Approved and merged into {target} at {commit}. Every condition held:\n\n"
         f"{lines}"
     )
+    if push is None:
+        return note
+    return f"{note}\n\n{push_paragraph(push, target)}"
+
+
+def push_paragraph(push, target: str) -> str:
+    """What became of the push of the base, as one paragraph of the note."""
+    if push.pushed:
+        return f"Pushed: {push.detail}."
+    if push.refused:
+        return (
+            f"The push did not land: {push.detail}. The merge stays on {target} "
+            "locally, nothing was reset, and the task is done; once the base and "
+            "its upstream are reconciled, `dispatch merge-task --push` pushes it."
+        )
+    return f"Not pushed: {push.detail}."
 
 
 def merge_failed_note(decision: Decision, detail: str) -> str:

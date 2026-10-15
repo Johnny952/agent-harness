@@ -5650,3 +5650,78 @@ says exactly what to look at. A task with no Surface paths, a project with
 the gates off, or an auditor that answers in prose is never merged by
 itself, on purpose. `authorized` is not something the dispatcher can verify:
 a scripted `run-task` counts as typed. Nothing is pushed until A-4.
+
+## ADR 78 — the base is pushed after an approve, fast-forward only, with the credential the fetch already uses
+
+**Status:** accepted (A-4 of `docs/plans/autonomy.md`, 2026-10-15). The
+dispatcher only; the task-branch push of C-5 (`review.md` step 5) and the
+queue that stops on a refused push (A-5) are not built here.
+
+**Context.** `docs/plans/autonomy.md` *Decisions*, 4, makes the push of the
+base the dispatcher's, after a merge on an automatic approve (ADR 77) or on
+`merge-task --push`, never forced, and leaves to this task where the
+credential lives (`review.md` *Decisions*, 4, "an ADR written when step 4 is
+built"). Two credentials already reach the remote, both for the fetch of
+ADR 36: the https:// token in git's `store` format at
+`/run/secrets/git-credentials` (from the host's
+`.data/credentials/git-credentials`), and, preferred when present, the
+project's deploy key at `<project_keys_dir>/<slug>/id_ed25519` (ADR 56). ADR
+36 said read-only scope was enough "because nothing in `dispatcher/`
+pushes". That stops being true here.
+
+**Decision.**
+
+1. *The credential.* The push uses exactly what the fetch uses, through one
+   function (`docker_exec._remote_access`) that both call: the deploy key
+   over SSH when the project has one, the mounted https:// token otherwise.
+   A project never has one credential for reading and another for writing.
+   It is never an environment variable (the `docker exec` argv is readable
+   by `ps`, ADR 36), and neither the api nor the board service holds it
+   (`review.md` *Decisions*, 4). A project that pushes needs write scope on
+   that credential: *Allow write access* on its deploy key, or a token that
+   can push; one without it comes back as a refused push in git's words.
+   This supersedes ADR 36's "read-only scope is enough" for a project that
+   pushes, and only for it.
+2. *What is pushed, where.* `docker_exec.push_base` pushes the branch the
+   project's checkout is on, `refs/heads/<b>:<branch.<b>.merge>`, to
+   `branch.<b>.remote`, and nothing else: no remote is guessed, no task
+   branch is pushed. Never `--force`, never `--force-with-lease`, never a
+   `+` refspec, so a remote that moved refuses the push. It runs in the agent
+   container `cleanup_container` picks, inside the merge's
+   read_owner/restore_owner window.
+3. *When.* Only after a merge landed: in `_auto_approve_and_merge` after an
+   approved merge, and in `merge-task` only with `--push`, when the merge
+   landed or the base already held the branch (so a re-run after a refused
+   push pushes without merging twice). `merge_on_done` (`_merge_task_branch`)
+   never pushes: it is not an approve.
+4. *The outcomes* (`docker_exec.PushOutcome`): `pushed`; `no-upstream` (no
+   remote, a branch that tracks nothing or tracks a branch of the same clone,
+   a detached checkout), which is said and is not an error; `push-refused`
+   (the upstream moved, the credential was refused, the remote is neither
+   SSH nor https://, or the push could not run at all). On a refusal the
+   local base keeps the merge and nothing is reset, rebased or rewritten.
+5. *What a refusal leaves.* After an automatic approve: the task stays
+   `done` with its `merged` block, and the `## automatic approve` comment
+   says the push did not land and why; a push that landed is named in the
+   same comment. `_auto_approve_and_merge` returns `ApproveResult(merged,
+   push)`, whose `push.refused` is what the queue (A-5) stops on. After
+   `merge-task --push`: the merge is recorded as any other, the reason goes
+   to stderr, and the command exits 4 (`EXIT_NOT_PUSHED`), distinct from 1
+   (the branch did not land). The CLI writes no comment on the task; the
+   person who ran it reads the reason.
+
+**Consequences.** A pushing project needs one setting changed on GitHub
+(write access on its deploy key), and nothing new on the host. The honest
+cost: both credentials are mounted read-only into every agent container,
+because the fetch and now the push run there by `docker exec`, and the
+phases run in those same containers. A credential with write scope is
+therefore readable from a phase's container, which is weaker than the
+charter's "no role ... holds the credential, which stays on the dispatcher's
+side" (C-5, *Amended* 2026-10-11) reads; no role is given a command that
+uses it, and no prompt names it. Moving the git calls that hold a
+credential into a container no phase runs in is the fix, and it is not this
+task's. The comment on the mount in `docker/compose/docker-compose.agents.yml`
+("needs no write scope") is now true only of a project that does not push.
+A refused push is never retried by the dispatcher; reconciling the base with
+what the remote gained is a person's decision (C-1), after which
+`merge-task --push` pushes it.

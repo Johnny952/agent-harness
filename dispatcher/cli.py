@@ -26,6 +26,7 @@ from dispatcher.dispatcher import (
     file_saved_split,
     left_behind_report,
     pre_merge_check,
+    push_base,
     record_merge,
     run_single_phase,
     run_task_cycle,
@@ -53,6 +54,11 @@ EXIT_HELD = 75
 #: argparse's; not 75, because waiting changes nothing (`docs/decisions.md`
 #: ADR 60).
 EXIT_SPLIT = 3
+#: `merge-task --push` whose merge landed and whose push did not: the upstream
+#: moved, or refused the credential. Not 1, which here means the branch did not
+#: land, and it did; not 3 or 75, which mean other things; so a script can tell
+#: "merged, push again later" from both (`docs/decisions.md` ADR 78).
+EXIT_NOT_PUSHED = 4
 
 
 def _epic_line(cfg: Config, task_id: str) -> str:
@@ -389,6 +395,13 @@ def main() -> None:
     )
     merge_parser.add_argument("--task-id", required=True)
     merge_parser.add_argument("--project", required=True, help="Project slug")
+    merge_parser.add_argument(
+        "--push",
+        action="store_true",
+        help="Once the branch is in the base (merged now, or already there), push the "
+        "base to its upstream, never with force. No upstream is said and is not an "
+        f"error; a refused push keeps the merge local and exits {EXIT_NOT_PUSHED}.",
+    )
 
     learnings_parser = sub.add_parser(
         "learnings",
@@ -628,6 +641,14 @@ def main() -> None:
             outcome = docker_exec.merge_task_branch(
                 container, cfg.projects_root, args.project, args.task_id
             )
+            # Only when the branch is in the base: a merge that landed now, or
+            # one already there, so a re-run after a refused push pushes
+            # again without merging twice (ADR 78).
+            push = (
+                push_base(cfg, container, args.project)
+                if args.push and not outcome.refused
+                else None
+            )
         finally:
             # git writes to .git/ as root here too — same restore as everywhere.
             docker_exec.restore_owner(container, project_dir, owner)
@@ -637,6 +658,8 @@ def main() -> None:
             print(outcome.detail, file=sys.stderr)
             raise SystemExit(1)
         print(outcome.detail)
+        if push is not None:
+            print(push.detail, file=sys.stderr if push.refused else sys.stdout)
         # What a dependency waits for, and what closes an epic on its last
         # sub-task (`docs/plans/task-split.md` section 3). Still exit 0 when
         # the record could not be written: exit 1 here means the branch did
@@ -677,6 +700,10 @@ def main() -> None:
                     f"so that phase never filed them: "
                     f"{', '.join(entry.ref for entry in kept)}"
                 )
+        if push is not None and push.refused:
+            # Last, after the merge is recorded and the learnings settled: the
+            # branch landed and all of that is true of it whatever the push did.
+            raise SystemExit(EXIT_NOT_PUSHED)
     elif args.command == "status":
         print(
             operator.format_status(

@@ -2079,6 +2079,40 @@ def _record_auto_approve(cfg: Config, task_id: str, note: str) -> None:
         logger.warning("task %s: could not record the automatic approve: %s", task_id, exc)
 
 
+def push_base(cfg: Config, container: str, slug: str) -> docker_exec.PushOutcome:
+    """Push a project's base to its upstream after a merge landed, never raising.
+
+    The one place both pushing paths call, the automatic approve's and
+    `merge-task --push`'s, and only after the branch is in the base. Run inside
+    the caller's read_owner/restore_owner window: a push writes the
+    remote-tracking ref under .git/ as root, the same files as the host
+    checkout. Anything that raises comes back as a refused push, because a push
+    that did not land is what it is whatever the reason (ADR 78).
+    """
+    try:
+        return docker_exec.push_base(
+            container,
+            cfg.projects_root,
+            slug,
+            credentials_path=cfg.git_credentials_path,
+            keys_dir=cfg.project_keys_dir,
+        )
+    except Exception as exc:
+        return docker_exec.PushOutcome(
+            docker_exec.PUSH_REFUSED, None, f"the push could not run: {exc}"
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class ApproveResult:
+    """What the automatic approve came to: whether the branch landed, and the
+    push of the base after it (None when nothing was merged, so nothing was
+    due). The queue (A-5) reads `push.refused` to stop."""
+
+    merged: bool
+    push: docker_exec.PushOutcome | None = None
+
+
 def _auto_approve_and_merge(
     cfg: Config,
     task_id: str,
@@ -2090,7 +2124,7 @@ def _auto_approve_and_merge(
     audited: DispatchResult,
     filed: list[tuple[str, debt.Declaration]],
     authorized: bool,
-) -> bool:
+) -> ApproveResult:
     """The automatic approve of `docs/plans/autonomy.md` *Decisions*, 1 (ADR 77).
 
     Where `_merge_task_branch` merges unconditionally, this merges only when
@@ -2099,7 +2133,12 @@ def _auto_approve_and_merge(
     the merge commit. The pre-merge check runs whatever else failed, so a
     branch that conflicts with its base still moves to `conflict`. Like the
     unconditional merge it never raises and never turns a finished task into
-    a crashed one. Returns whether the branch landed.
+    a crashed one.
+
+    A merge that landed is then pushed to the base's upstream (A-4, ADR 78),
+    which `_merge_task_branch` never does. A refused push keeps the merge local
+    and the task `done`, and says so in the same comment. Returns whether the
+    branch landed and what the push came to.
     """
     entries = _task_surface(description)
     patterns = auto_approve.protected_patterns(
@@ -2135,7 +2174,7 @@ def _auto_approve_and_merge(
         ))
         logger.warning("task %s: not merged: no agent container", task_id)
         _record_auto_approve(cfg, task_id, auto_approve.refusal_note(decision))
-        return False
+        return ApproveResult(False)
 
     project_dir = f"{cfg.projects_root}/{slug}"
     owner = docker_exec.read_owner(container, project_dir)
@@ -2144,6 +2183,7 @@ def _auto_approve_and_merge(
     outcome = None
     merge_commit = None
     merge_problem = None
+    push = None
     try:
         try:
             verdict = pre_merge_check(cfg, container, task_id, slug)
@@ -2169,6 +2209,8 @@ def _auto_approve_and_merge(
                     merge_commit = docker_exec.head_commit(container, project_dir)
             except Exception as exc:
                 merge_problem = f"the merge could not run: {exc}"
+            if merge_problem is None and not outcome.refused:
+                push = push_base(cfg, container, slug)
     finally:
         docker_exec.restore_owner(container, project_dir, owner)
 
@@ -2178,24 +2220,30 @@ def _auto_approve_and_merge(
             task_id, ", ".join(decision.failed_conditions),
         )
         _record_auto_approve(cfg, task_id, auto_approve.refusal_note(decision))
-        return False
+        return ApproveResult(False)
     if merge_problem is None and outcome is not None and outcome.refused:
         merge_problem = outcome.detail
     if merge_problem is not None:
         logger.warning("task %s: not merged: %s", task_id, merge_problem)
         _record_auto_approve(cfg, task_id, auto_approve.merge_failed_note(decision, merge_problem))
-        return False
+        return ApproveResult(False)
     logger.info("task %s: automatic approve: %s", task_id, outcome.detail)
+    if push.refused:
+        logger.warning("task %s: merged but not pushed: %s", task_id, push.detail)
+    else:
+        logger.info("task %s: %s", task_id, push.detail)
     _record_auto_approve(
         cfg, task_id,
-        auto_approve.approval_note(decision, outcome.target or "the project's branch", merge_commit),
+        auto_approve.approval_note(
+            decision, outcome.target or "the project's branch", merge_commit, push
+        ),
     )
     recorded, problem = record_merge(cfg, task_id, outcome)
     for line in recorded:
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
-    return True
+    return ApproveResult(True, push)
 
 
 def record_merge(
@@ -2954,8 +3002,10 @@ def run_task_cycle(
                 audited=audited,
                 filed=filed,
                 authorized=authorized,
-            )
+            ).merged
         else:
+            # Never pushes: the push of the base belongs to an approve, a
+            # person's or the automatic one (ADR 78), not to `merge_on_done`.
             merged = cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug)
         if merged:
             # Only now: the entries are in the project's docs on the branch

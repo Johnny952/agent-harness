@@ -164,6 +164,20 @@ class _FakeGit:
         self.merges.append((container, projects_root, slug, task_id))
         return self.outcome
 
+    #: What pushing the base comes to. Pushed is the ordinary case; a test
+    #: that wants the refusal, or a push that raises, sets one of these.
+    push_outcome = dispatcher_mod.docker_exec.PushOutcome(
+        dispatcher_mod.docker_exec.PUSHED, "main", "pushed main to origin/main at ccccccc"
+    )
+    push_error = None
+
+    def push_base(self, container, projects_root, slug, credentials_path=None, timeout=None, keys_dir=None):
+        self.pushes = getattr(self, "pushes", [])
+        self.pushes.append((container, projects_root, slug))
+        if self.push_error is not None:
+            raise self.push_error
+        return self.push_outcome
+
     #: What merging the base into the task branch comes to. Up to date is the
     #: ordinary case: nothing to merge, nothing to gate, the merge goes on.
     premerge = dispatcher_mod.docker_exec.PreMergeOutcome(
@@ -199,6 +213,7 @@ def fake_git(monkeypatch):
         dispatcher_mod.docker_exec, "remove_review_worktrees", fake.remove_review_worktrees
     )
     monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", fake.merge_task_branch)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "push_base", fake.push_base)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "premerge_base", fake.premerge_base)
     monkeypatch.setattr(dispatcher_mod.docker_exec, "adopt_premerge", fake.adopt_premerge)
     monkeypatch.setattr(
@@ -7487,3 +7502,94 @@ def test_a_project_without_auto_approve_and_merge_on_done_off_never_merges(
 
     assert aa_git.merges == []
     assert dispatcher_mod.auto_approve.HEADING not in _task(cfg).body
+
+
+# --- the base push after an automatic approve (A-4, ADR 78) ---
+
+
+def test_auto_approve_pushes_the_base_after_the_merge(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+
+    _aa_run(cfg, monkeypatch)
+
+    assert aa_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert aa_git.pushes == [("agent-cuenta1", cfg.projects_root, "myproj")]
+    task = _task(cfg)
+    assert task.status == "done"
+    assert "Pushed: pushed main to origin/main at ccccccc." in task.body
+
+
+def test_a_refused_push_leaves_the_task_done_and_says_why(tmp_path, monkeypatch, aa_git) -> None:
+    de = dispatcher_mod.docker_exec
+    cfg = _aa_config(tmp_path)
+    aa_git.push_outcome = de.PushOutcome(
+        de.PUSH_REFUSED, "main",
+        "pushing main to origin/main was refused; main keeps the merge locally and is not reset: rejected",
+    )
+
+    outcome = _aa_run(cfg, monkeypatch)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    task = _task(cfg)
+    assert task.status == "done"
+    assert task.merged["into"] == "main"
+    assert "The push did not land: pushing main to origin/main was refused" in task.body
+    assert "nothing was reset" in task.body
+
+
+def test_a_push_that_raises_is_a_refusal_not_a_crash(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.push_error = RuntimeError("docker went away")
+
+    _aa_run(cfg, monkeypatch)
+
+    task = _task(cfg)
+    assert task.status == "done"
+    assert task.merged["into"] == "main"
+    assert "The push did not land: the push could not run: docker went away" in task.body
+
+
+def test_a_base_with_no_upstream_is_said_and_not_a_failure(tmp_path, monkeypatch, aa_git) -> None:
+    de = dispatcher_mod.docker_exec
+    cfg = _aa_config(tmp_path)
+    aa_git.push_outcome = de.PushOutcome(
+        de.NO_UPSTREAM, "main", "main tracks no upstream branch; nothing pushed",
+    )
+
+    _aa_run(cfg, monkeypatch)
+
+    body = _task(cfg).body
+    assert "Not pushed: main tracks no upstream branch; nothing pushed." in body
+    assert "did not land" not in body
+
+
+def test_auto_approve_does_not_push_a_merge_that_did_not_land(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.outcome = dispatcher_mod.docker_exec.MergeOutcome(
+        dispatcher_mod.docker_exec.REFUSED, "main", "the project has uncommitted changes",
+    )
+
+    _aa_run(cfg, monkeypatch)
+
+    assert getattr(aa_git, "pushes", []) == []
+
+
+def test_auto_approve_refused_by_a_condition_never_pushes(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.changed = ["config.yaml"]
+
+    _aa_run(cfg, monkeypatch)
+
+    assert aa_git.merges == []
+    assert getattr(aa_git, "pushes", []) == []
+
+
+def test_merge_on_done_merges_and_never_pushes(tmp_path, monkeypatch, fake_git) -> None:
+    """ADR 78: only an approve pushes; `merge_on_done` stays a local merge."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert getattr(fake_git, "pushes", []) == []
