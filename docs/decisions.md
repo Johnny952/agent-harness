@@ -5579,3 +5579,74 @@ expired account costs one refused attempt, not a loop. A new wording of the
 CLI's login error that hits none of the phrases and carries no 401 falls
 back to the old behaviour, an ordinary failed phase; the list is extended
 when one is seen.
+
+
+## ADR 77 — the automatic approve merges a finished task only when seven named conditions hold, per project, off by default
+
+**Status:** accepted (A-3 of `docs/plans/autonomy.md`, 2026-10-15). The
+dispatcher only; the push of the base is A-4 and the console shows nothing
+new yet.
+
+**Context.** `docs/plans/autonomy.md` *Decisions*, 1, asks for a merge
+without a person, but only when what a person would look at is already
+known to be fine, and with a comment saying what was checked either way.
+`merge_on_done` (ADR 52's cycle) merges unconditionally; the pre-merge
+check (A-2) and the surface read (A-1) are the pieces this needs. Two
+shapes had to be fixed: what "protected" means, and how a project turns it
+on before `projects.md`'s project record exists.
+
+**Decision.**
+
+1. *The key.* `auto_approve` in `config.yaml` is a map of project slug to a
+   real YAML boolean (`auto_approve: {myproj: true}`); anything else, or a
+   bare boolean for every project, is refused at load. A slug not listed is
+   off. It moves into the project record when `projects.md` builds one.
+   `protected_paths` is a map of slug to a list of non-empty path entries,
+   read with the surface's semantics.
+2. *Where it runs.* Where `merge_on_done` runs, after the auditor, in
+   `run_task_cycle`. A project with the key on gets the check whatever
+   `merge_on_done` says: the conditions win over the unconditional merge.
+   A project without it runs exactly the old path.
+3. *The conditions,* each evaluated, every failure named
+   (`dispatcher/auto_approve.py`, a pure function over what the cycle has):
+   - `gates`: the last implementador round's gate report exists and has no
+     BLOCKING or ASK finding. No report (gates off, or a run that did not
+     finish) fails it: a project that wants the approve runs the gates.
+   - `revisor`: the verdict is APPROVED, with no `findings` and no debt
+     rejected or read as a block.
+   - `auditor`: the auditor's handoff is `complete`, with nothing `pending`,
+     no debt declared by the auditor itself, and no debt filed for the task
+     this cycle. The auditor's schema has no findings field, so this is the
+     reading of "no finding"; a prose return fails it.
+   - `pre-merge`: the A-2 check passed. It runs even when another condition
+     already failed, so a conflicting branch still moves to `conflict`.
+   - `surface`: the task's *Surface* names paths (none is the whole repo,
+     never approved), the branch's changed paths could be read
+     (`git diff --name-only --no-renames <target>...<branch>`, read after
+     the pre-merge check), and each is inside the surface or one of the
+     append-only logs.
+   - `protected`: no changed path matches the protected list.
+   - `authorized`: the cycle was started by a person. `run_task_cycle`
+     takes `authorized`, default true: a `run-task` is typed by the
+     operator. The queue (A-5) passes its own value.
+   Changed paths that cannot be read fail both `surface` and `protected`,
+   never pass as an empty change.
+4. *The protected list.* Fixed: `docs/charter.md`, `**/.env*` (an env file
+   anywhere in the tree, not only at the root), `config.yaml` (the root's,
+   the harness's own config), `docker/compose/**`, `.data/**`. Then the
+   configured credential paths (`git_credentials_path`,
+   `project_keys_dir`), kept only when they fall inside the project's
+   checkout and made repo-relative, since a path outside it cannot be
+   changed by a branch. Then the project's `protected_paths`.
+5. *The comment.* Under `## automatic approve` on the task: on a refusal,
+   each failed condition and why, the task left `done` (or `conflict`) and
+   its branch kept for `merge-task`; on a merge, each condition and what was
+   checked, the target and the merge commit, and the merge recorded as any
+   other; on an approve whose merge git refused, that it did not land and
+   why.
+
+**Consequences.** Turning it on is one line per project, and a refused task
+says exactly what to look at. A task with no Surface paths, a project with
+the gates off, or an auditor that answers in prose is never merged by
+itself, on purpose. `authorized` is not something the dispatcher can verify:
+a scripted `run-task` counts as typed. Nothing is pushed until A-4.

@@ -148,6 +148,20 @@ class Config:
     #: by default, which is exactly the round-count rule alone. On, the
     #: round-count rule still applies: this can only escalate sooner.
     escalate_effort_on_repeated_finding: bool = False
+    #: The projects whose finished tasks merge only when every condition of
+    #: the automatic approve holds (`docs/plans/autonomy.md` *Decisions*, 1;
+    #: `docs/decisions.md` ADR 77), as a map of slug to boolean until the
+    #: project record of `projects.md` exists. A project not named, or named
+    #: `false`, behaves exactly as before: `merge_on_done` decides. A project
+    #: named `true` gets the check even with `merge_on_done` on.
+    auto_approve: dict[str, bool] = dataclasses.field(default_factory=dict)
+    #: Per project, more repo paths or globs the automatic approve never
+    #: merges a change to, over the fixed list in `dispatcher/auto_approve.py`.
+    protected_paths: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+
+    def auto_approves(self, slug: str) -> bool:
+        """Whether a finished task of `slug` goes through the automatic approve."""
+        return self.auto_approve.get(slug, False)
 
     def effort_for(
         self, role: str, round_num: int | None = None, repeated_finding: bool = False,
@@ -378,6 +392,40 @@ def _load_fallback_roles(raw: dict) -> list[str]:
             raise ValueError("fallback_roles entries must be non-empty strings")
     return [role.strip() for role in roles]
 
+def _load_auto_approve(raw: dict) -> dict[str, bool]:
+    """`auto_approve`, a map of project slug to boolean (ADR 77).
+
+    Strictly booleans: `"no"` or `0` read through `bool()` would turn the
+    one key that lets a merge happen unattended on by a typo.
+    """
+    block = raw.get("auto_approve") or {}
+    if not isinstance(block, dict):
+        raise ValueError("auto_approve must be a mapping of project slug to true or false")
+    for slug, value in block.items():
+        if not isinstance(slug, str) or not slug.strip():
+            raise ValueError("auto_approve keys must be project slugs")
+        if not isinstance(value, bool):
+            raise ValueError(f"auto_approve.{slug} must be true or false")
+    return dict(block)
+
+
+def _load_protected_paths(raw: dict) -> dict[str, list[str]]:
+    """`protected_paths`, a map of project slug to a list of repo paths or globs."""
+    block = raw.get("protected_paths") or {}
+    if not isinstance(block, dict):
+        raise ValueError("protected_paths must be a mapping of project slug to a list of paths")
+    loaded: dict[str, list[str]] = {}
+    for slug, paths in block.items():
+        if not isinstance(slug, str) or not slug.strip():
+            raise ValueError("protected_paths keys must be project slugs")
+        if not isinstance(paths, list):
+            raise ValueError(f"protected_paths.{slug} must be a list of paths")
+        for path in paths:
+            if not isinstance(path, str) or not path.strip():
+                raise ValueError(f"protected_paths.{slug} entries must be non-empty paths")
+        loaded[slug] = [path.strip() for path in paths]
+    return loaded
+
 
 def load_config(path: str) -> Config:
     with open(path) as f:
@@ -502,4 +550,6 @@ def load_config(path: str) -> Config:
         # no other key to check it against, so bool() beside gates_enabled is
         # the whole reading.
         pace_primary_week=bool(raw.get("pace_primary_week", True)),
+        auto_approve=_load_auto_approve(raw),
+        protected_paths=_load_protected_paths(raw),
     )

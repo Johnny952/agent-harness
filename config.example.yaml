@@ -238,6 +238,28 @@ phase_timeout_seconds: 7200
 # Optional; defaults to false.
 merge_on_done: false
 
+# Per project, merge a finished task only when every condition of the
+# automatic approve holds (docs/plans/autonomy.md, Decisions 1; ADR 77): every
+# gate green, the revisor approved with no open finding, the auditor with no
+# finding and no debt filed this cycle, the pre-merge check passed, every
+# changed path inside the task's Surface section and none of them protected,
+# and the cycle started by a person (run-task). A failed condition leaves the
+# task done and unmerged, with a comment on the task naming it. A task with no
+# path in its Surface section is never approved automatically. A project with
+# this on gets the check even when merge_on_done is true; a project not named
+# here behaves as merge_on_done says. Optional; defaults to no project.
+# auto_approve:
+#   my-project: true
+
+# Per project, more repo paths or globs the automatic approve never merges a
+# change to, over the fixed list: docs/charter.md, .env* (anywhere),
+# config.yaml, docker/compose/**, .data/**, and the credential paths above
+# when they fall inside the project. Optional.
+# protected_paths:
+#   my-project:
+#     - migrations/**
+#     - infra/
+
 # Whether a task fetches the project's remote and fast-forwards the project's
 # own checkout before its first phase runs, so the branch it cuts is not taken
 # from a base that went stale while nobody was looking. Runs once per task, at

@@ -7252,3 +7252,238 @@ def test_an_expired_worker_does_not_hold_the_primary_back(tmp_path) -> None:
     set_state(cfg.state_dir, "cuenta2", AccountState.AUTH_EXPIRED)
 
     assert dispatcher_mod.pick_idle_account(cfg, role="revisor") == "cuenta1"
+
+
+# --- the automatic approve (docs/plans/autonomy.md A-3, ADR 77) -------------
+
+_AA_DESCRIPTION = (
+    f"## Goal\n\n{_GOAL}\n\n## Surface\n\n`src/app.py` and `tests/`.\n\n"
+    "## Done when\n\nGET /healthz answers 200.\n"
+)
+
+
+def _aa_dispatch_phase(
+    *, gate_report=gates.Report([]), revisor=None, auditor=None,
+):
+    """Every phase works; the revisor and the auditor return structured handoffs."""
+    revisor = {"status": "complete", "verdict": "APPROVED"} if revisor is None else revisor
+    auditor = {"status": "complete"} if auditor is None else auditor
+
+    def fake(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None,
+             effort=None, round_num=None, **kwargs):
+        payload = {"revisor": revisor, "auditor": auditor}.get(role)
+        return dispatcher_mod.DispatchResult(
+            success=True,
+            session_id=None,
+            result_text="VERDICT: APPROVED" if role == "revisor" else "ok",
+            account="cuenta1",
+            handoff=payload,
+            gates=gate_report if role == "implementador" else None,
+        )
+
+    return fake
+
+
+@pytest.fixture
+def aa_git(monkeypatch, fake_git):
+    """`fake_git`, plus the two reads only the automatic approve makes."""
+    fake_git.changed = ["src/app.py", "tests/test_app.py", "docs/decisions.md"]
+    fake_git.head = "c" * 40
+
+    def branch_changed_paths(container, projects_root, slug, task_id):
+        return None if fake_git.changed is None else list(fake_git.changed)
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "branch_changed_paths", branch_changed_paths)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "head_commit", lambda container, path: fake_git.head)
+    return fake_git
+
+
+def _aa_config(tmp_path, **overrides):
+    return _make_config(tmp_path, auto_approve={"myproj": True}, **overrides)
+
+
+def _aa_run(cfg, monkeypatch, *, description=_AA_DESCRIPTION, authorized=True, **phase):
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _aa_dispatch_phase(**phase))
+    return dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=description, authorized=authorized,
+    )
+
+
+def test_auto_approve_merges_when_every_condition_holds(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+
+    outcome = _aa_run(cfg, monkeypatch)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert aa_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    task = _task(cfg)
+    assert task.status == "done"
+    assert task.merged["into"] == "main"
+    assert dispatcher_mod.auto_approve.HEADING in task.body
+    assert "Approved and merged into main at " + "c" * 40 in task.body
+    for name in dispatcher_mod.auto_approve.CONDITIONS:
+        assert f"`{name}`" in task.body
+
+
+def _assert_refused_on(cfg, fake_git, condition) -> None:
+    assert fake_git.merges == []
+    task = _task(cfg)
+    assert task.merged is None
+    assert dispatcher_mod.auto_approve.HEADING in task.body
+    assert "Not merged: 1 condition(s) failed" in task.body
+    assert f"- `{condition}`:" in task.body
+
+
+@pytest.mark.parametrize(
+    ("condition", "phase"),
+    [
+        ("gates", dict(gate_report=None)),
+        ("gates", dict(gate_report=gates.Report([gates.Finding(gates.TESTS_IN_DIFF, "no test", gates.ASK)]))),
+        ("revisor", dict(revisor={"status": "complete", "verdict": "APPROVED",
+                                  "findings": ["the endpoint has no timeout"]})),
+        ("auditor", dict(auditor={"status": "partial"})),
+        ("auditor", dict(auditor={"status": "complete", "pending": ["update the README"]})),
+        ("auditor", dict(auditor={"status": "complete", "debt": [{"what": "the index is stale"}]})),
+    ],
+)
+def test_auto_approve_refuses_on_a_phase_condition_alone(
+    tmp_path, monkeypatch, aa_git, condition, phase,
+) -> None:
+    cfg = _aa_config(tmp_path)
+
+    outcome = _aa_run(cfg, monkeypatch, **phase)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    _assert_refused_on(cfg, aa_git, condition)
+    assert _task(cfg).status == "done"
+
+
+def test_auto_approve_refuses_when_debt_was_filed_this_cycle(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "_file_accepted_debt",
+        lambda *args, **kwargs: [("D-0007", debt.Declaration(what="cache the lookup"))],
+    )
+
+    _aa_run(cfg, monkeypatch)
+
+    _assert_refused_on(cfg, aa_git, "auditor")
+    assert "D-0007" in _task(cfg).body
+
+
+def test_auto_approve_refuses_a_branch_that_conflicts_with_its_base(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.premerge = _premerge_outcome(
+        dispatcher_mod.docker_exec.PREMERGE_CONFLICT, conflicts=("src/app.py",),
+    )
+
+    _aa_run(cfg, monkeypatch)
+
+    _assert_refused_on(cfg, aa_git, "pre-merge")
+    # The pre-merge check still moves a conflicting task to `conflict`.
+    assert _task(cfg).status == dispatcher_mod.CONFLICT_STATUS
+
+
+@pytest.mark.parametrize(
+    ("condition", "changed"),
+    [
+        ("surface", ["src/app.py", "src/other.py"]),
+        ("protected", ["src/app.py", "tests/.env"]),
+    ],
+)
+def test_auto_approve_refuses_on_the_changed_paths_alone(
+    tmp_path, monkeypatch, aa_git, condition, changed,
+) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.changed = changed
+
+    _aa_run(cfg, monkeypatch)
+
+    _assert_refused_on(cfg, aa_git, condition)
+
+
+def test_auto_approve_refuses_a_path_the_project_protects(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path, protected_paths={"myproj": ["tests/fixtures/"]})
+    aa_git.changed = ["src/app.py", "tests/fixtures/users.json"]
+
+    _aa_run(cfg, monkeypatch)
+
+    _assert_refused_on(cfg, aa_git, "protected")
+
+
+def test_auto_approve_refuses_a_task_with_no_surface(tmp_path, monkeypatch, aa_git) -> None:
+    """No Surface section is the whole repo, which is never approved by itself."""
+    cfg = _aa_config(tmp_path)
+
+    _aa_run(cfg, monkeypatch, description=_DESCRIPTION)
+
+    _assert_refused_on(cfg, aa_git, "surface")
+
+
+def test_auto_approve_refuses_when_the_changed_paths_cannot_be_read(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.changed = None
+
+    _aa_run(cfg, monkeypatch)
+
+    assert aa_git.merges == []
+    body = _task(cfg).body
+    assert "Not merged: 2 condition(s) failed" in body
+    assert "- `surface`: the changed paths could not be read" in body
+    assert "- `protected`: the changed paths could not be read" in body
+
+
+def test_auto_approve_refuses_a_cycle_nobody_authorized(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+
+    _aa_run(cfg, monkeypatch, authorized=False)
+
+    _assert_refused_on(cfg, aa_git, "authorized")
+
+
+def test_auto_approve_wins_over_merge_on_done(tmp_path, monkeypatch, aa_git) -> None:
+    """ADR 77: a project with both on merges only what the check allows."""
+    cfg = _aa_config(tmp_path, merge_on_done=True)
+    aa_git.changed = ["src/app.py", "tests/.env.test"]
+
+    _aa_run(cfg, monkeypatch)
+
+    _assert_refused_on(cfg, aa_git, "protected")
+
+
+def test_auto_approve_records_a_merge_that_did_not_land(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    aa_git.outcome = dispatcher_mod.docker_exec.MergeOutcome(
+        dispatcher_mod.docker_exec.REFUSED, "main", "the project has uncommitted changes",
+    )
+
+    _aa_run(cfg, monkeypatch)
+
+    task = _task(cfg)
+    assert task.merged is None
+    assert task.status == "done"
+    assert "but the merge did not land: the project has uncommitted changes" in task.body
+
+
+def test_a_project_without_auto_approve_merges_exactly_as_before(tmp_path, monkeypatch, aa_git) -> None:
+    """Off for the project: `merge_on_done` alone decides, with no check and no note."""
+    cfg = _make_config(tmp_path, merge_on_done=True, auto_approve={"other": True})
+    aa_git.changed = ["config.yaml"]
+
+    _aa_run(cfg, monkeypatch, description=_DESCRIPTION, authorized=False, gate_report=None)
+
+    assert aa_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    task = _task(cfg)
+    assert task.merged["into"] == "main"
+    assert dispatcher_mod.auto_approve.HEADING not in task.body
+
+
+def test_a_project_without_auto_approve_and_merge_on_done_off_never_merges(
+    tmp_path, monkeypatch, aa_git,
+) -> None:
+    cfg = _make_config(tmp_path)
+
+    _aa_run(cfg, monkeypatch)
+
+    assert aa_git.merges == []
+    assert dispatcher_mod.auto_approve.HEADING not in _task(cfg).body

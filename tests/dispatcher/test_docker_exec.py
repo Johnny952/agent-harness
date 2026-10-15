@@ -2218,3 +2218,55 @@ def test_update_project_branch_rejects_empty_path_components(monkeypatch, projec
         update_project_branch(_CONTAINER, projects_root, slug, remote)
 
     assert calls == []
+
+
+def _changed_responder(target="main", rc=0, out="src/app.py\0tests/test_app.py\0"):
+    def respond(args):
+        if args[:2] == ["git", "symbolic-ref"]:
+            return (0, f"{target}\n", "") if target else (128, "", "fatal: ref HEAD is not a symbolic ref\n")
+        if args[:2] == ["git", "diff"]:
+            return (rc, out, "" if rc == 0 else "fatal: bad revision\n")
+        return (0, "", "")
+
+    return respond
+
+
+def test_branch_changed_paths_diffs_the_branch_against_the_project_branch(monkeypatch) -> None:
+    """ADR 77: what the automatic approve checks against the surface."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _changed_responder()))
+
+    paths = docker_exec_mod.branch_changed_paths(_CONTAINER, "/data/projects", "myproj", "task-1")
+
+    assert paths == ["src/app.py", "tests/test_app.py"]
+    diff = next(args for args in map(_in_container, calls) if args[:2] == ["git", "diff"])
+    assert diff[-1] == f"main...{_BRANCH}"
+    assert "--no-renames" in diff and "-z" in diff
+    assert all(cmd[cmd.index("-w") + 1] == _PROJECT for cmd in calls)
+
+
+@pytest.mark.parametrize(
+    "responder",
+    [_changed_responder(target=None), _changed_responder(target=_BRANCH), _changed_responder(rc=128)],
+    ids=["detached", "on-the-task-branch", "git-error"],
+)
+def test_branch_changed_paths_is_none_when_it_cannot_be_read(monkeypatch, responder) -> None:
+    """None, never an empty list: an empty change would pass the surface check."""
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], responder))
+
+    assert docker_exec_mod.branch_changed_paths(_CONTAINER, "/data/projects", "myproj", "task-1") is None
+
+
+def test_head_commit_reads_the_project_head(monkeypatch) -> None:
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        _fake_docker([], lambda args: (0, "c" * 40 + "\n", "") if args[:2] == ["git", "rev-parse"] else (0, "", "")),
+    )
+
+    assert docker_exec_mod.head_commit(_CONTAINER, _PROJECT) == "c" * 40
+
+
+def test_head_commit_is_none_on_a_git_error(monkeypatch) -> None:
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], lambda args: (128, "", "fatal\n")))
+
+    assert docker_exec_mod.head_commit(_CONTAINER, _PROJECT) is None

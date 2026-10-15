@@ -620,3 +620,66 @@ def test_load_config_reads_project_keys_dir(tmp_path: Path) -> None:
     config_path.write_text(CONFIG_YAML + "\nproject_keys_dir: /keys\n")
 
     assert load_config(str(config_path)).project_keys_dir == "/keys"
+
+
+def test_auto_approve_and_protected_paths_default_to_off_and_empty(tmp_path: Path) -> None:
+    """ADR 77: a project without the key behaves exactly as before."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.auto_approve == {}
+    assert cfg.protected_paths == {}
+    assert cfg.auto_approves("myproj") is False
+
+
+def test_load_config_reads_auto_approve_per_project(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML
+        + "auto_approve:\n  myproj: true\n  other: false\n"
+        + "protected_paths:\n  myproj:\n    - migrations/\n    - 'secrets/**'\n"
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.auto_approves("myproj") is True
+    assert cfg.auto_approves("other") is False
+    assert cfg.auto_approves("unlisted") is False
+    assert cfg.protected_paths == {"myproj": ["migrations/", "secrets/**"]}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "auto_approve: true\n",
+        "auto_approve:\n  myproj: maybe\n",
+        "auto_approve:\n  myproj: 1\n",
+        "auto_approve:\n  myproj: 'true'\n",
+    ],
+)
+def test_load_config_refuses_a_bad_auto_approve(tmp_path: Path, extra: str) -> None:
+    """Only a real boolean turns merging without a person on."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + extra)
+
+    with pytest.raises(ValueError, match="auto_approve"):
+        load_config(str(config_path))
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "protected_paths: [a]\n",
+        "protected_paths:\n  myproj: migrations/\n",
+        "protected_paths:\n  myproj: ['']\n",
+        "protected_paths:\n  myproj: [3]\n",
+    ],
+)
+def test_load_config_refuses_bad_protected_paths(tmp_path: Path, extra: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + extra)
+
+    with pytest.raises(ValueError, match="protected_paths"):
+        load_config(str(config_path))

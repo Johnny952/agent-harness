@@ -11,6 +11,7 @@ import threading
 import time
 
 from dispatcher import (
+    auto_approve,
     context_transfer,
     debt,
     docker_exec,
@@ -22,6 +23,7 @@ from dispatcher import (
     role_skills,
     state_machine,
     subagents,
+    surface,
     tasks,
 )
 from dispatcher.config import Config
@@ -2056,6 +2058,146 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     return True
 
 
+def _task_surface(description: str | None) -> frozenset[str]:
+    """The paths a description's *Surface* section names; the whole repo when
+    it has none or the description does not parse."""
+    if not description:
+        return surface.WHOLE_REPO
+    try:
+        return surface.parse(tasks.parse_description(description).surface)
+    except Exception:
+        return surface.WHOLE_REPO
+
+
+def _record_auto_approve(cfg: Config, task_id: str, note: str) -> None:
+    """Write the automatic approve's comment, keeping a `conflict` the
+    pre-merge check set; every other refusal leaves the task `done`."""
+    status = CONFLICT_STATUS if _task_status(cfg, task_id) == CONFLICT_STATUS else "done"
+    try:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, status, note)
+    except Exception as exc:
+        logger.warning("task %s: could not record the automatic approve: %s", task_id, exc)
+
+
+def _auto_approve_and_merge(
+    cfg: Config,
+    task_id: str,
+    slug: str,
+    *,
+    description: str | None,
+    implemented: DispatchResult,
+    reviewed: DispatchResult,
+    audited: DispatchResult,
+    filed: list[tuple[str, debt.Declaration]],
+    authorized: bool,
+) -> bool:
+    """The automatic approve of `docs/plans/autonomy.md` *Decisions*, 1 (ADR 77).
+
+    Where `_merge_task_branch` merges unconditionally, this merges only when
+    every condition of `auto_approve.decide` holds, and writes a comment on
+    the task either way: the conditions that failed, or each one checked and
+    the merge commit. The pre-merge check runs whatever else failed, so a
+    branch that conflicts with its base still moves to `conflict`. Like the
+    unconditional merge it never raises and never turns a finished task into
+    a crashed one. Returns whether the branch landed.
+    """
+    entries = _task_surface(description)
+    patterns = auto_approve.protected_patterns(
+        cfg.projects_root, slug,
+        cfg.protected_paths.get(slug, []),
+        (cfg.git_credentials_path, cfg.project_keys_dir),
+    )
+    audit = audited.handoff
+    audit_status = audit.get("status") if isinstance(audit, dict) else None
+    inputs = dict(
+        gates=implemented.gates,
+        revisor_approved=revisor_approved(reviewed.result_text, reviewed.handoff),
+        revisor_findings=tuple(handoff.findings_of(reviewed.handoff)),
+        revisor_debt_open=tuple(
+            debt.rejected(reviewed.handoff) + debt.blocking(reviewed.handoff)
+        ),
+        auditor_status=audit_status.strip().lower() if isinstance(audit_status, str) else None,
+        auditor_pending=tuple(handoff.pending(audit)),
+        auditor_debt=tuple(d.what for d in debt.declarations(audit)),
+        filed_debt=tuple(entry_id for entry_id, _ in filed),
+        surface=entries,
+        protected=patterns,
+        authorized=authorized,
+    )
+
+    container = cleanup_container(cfg)
+    if container is None:
+        decision = auto_approve.decide(auto_approve.Inputs(
+            **inputs,
+            pre_merge_passed=False,
+            pre_merge_detail="no agent container to run it in",
+            changed_paths=None,
+        ))
+        logger.warning("task %s: not merged: no agent container", task_id)
+        _record_auto_approve(cfg, task_id, auto_approve.refusal_note(decision))
+        return False
+
+    project_dir = f"{cfg.projects_root}/{slug}"
+    owner = docker_exec.read_owner(container, project_dir)
+    for line in left_behind_report(cfg, task_id):
+        logger.warning("%s", line)
+    outcome = None
+    merge_commit = None
+    merge_problem = None
+    try:
+        try:
+            verdict = pre_merge_check(cfg, container, task_id, slug)
+        except Exception as exc:
+            verdict = PreMergeVerdict(False, f"task {task_id}: the pre-merge check could not run: {exc}")
+        try:
+            changed = docker_exec.branch_changed_paths(
+                container, cfg.projects_root, slug, task_id
+            )
+        except Exception as exc:
+            logger.warning("task %s: could not read the changed paths: %s", task_id, exc)
+            changed = None
+        decision = auto_approve.decide(auto_approve.Inputs(
+            **inputs,
+            pre_merge_passed=verdict.passed,
+            pre_merge_detail=verdict.detail,
+            changed_paths=tuple(changed) if changed is not None else None,
+        ))
+        if decision.approved:
+            try:
+                outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
+                if not outcome.refused:
+                    merge_commit = docker_exec.head_commit(container, project_dir)
+            except Exception as exc:
+                merge_problem = f"the merge could not run: {exc}"
+    finally:
+        docker_exec.restore_owner(container, project_dir, owner)
+
+    if not decision.approved:
+        logger.warning(
+            "task %s: not merged: the automatic approve refused on %s",
+            task_id, ", ".join(decision.failed_conditions),
+        )
+        _record_auto_approve(cfg, task_id, auto_approve.refusal_note(decision))
+        return False
+    if merge_problem is None and outcome is not None and outcome.refused:
+        merge_problem = outcome.detail
+    if merge_problem is not None:
+        logger.warning("task %s: not merged: %s", task_id, merge_problem)
+        _record_auto_approve(cfg, task_id, auto_approve.merge_failed_note(decision, merge_problem))
+        return False
+    logger.info("task %s: automatic approve: %s", task_id, outcome.detail)
+    _record_auto_approve(
+        cfg, task_id,
+        auto_approve.approval_note(decision, outcome.target or "the project's branch", merge_commit),
+    )
+    recorded, problem = record_merge(cfg, task_id, outcome)
+    for line in recorded:
+        logger.info("%s", line)
+    if problem:
+        logger.warning("%s", problem)
+    return True
+
+
 def record_merge(
     cfg: Config, task_id: str, outcome: docker_exec.MergeOutcome
 ) -> tuple[list[str], str | None]:
@@ -2610,6 +2752,7 @@ def run_task_cycle(
     task_id: str,
     slug: str,
     description: str | None = None,
+    authorized: bool = True,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
 
@@ -2618,6 +2761,11 @@ def run_task_cycle(
     an epic, BLOCKED for every other stop, FINISHED when the auditor closed
     it — merged or not, since a refused merge is reported by `merge-task` and
     leaves the task done.
+
+    `authorized` says the cycle was started by a person's authorization, one
+    condition of the automatic approve (ADR 77). `run-task` is a command the
+    operator typed, so it is the default; a caller that starts cycles on its
+    own passes False and its tasks are never merged automatically.
     """
     ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
@@ -2790,11 +2938,26 @@ def run_task_cycle(
         filed = _file_accepted_debt(
             cfg, task_id, slug, implemented.handoff, revisor_result.handoff
         )
-        if run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed)) is None:
+        audited = run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed))
+        if audited is None:
             return stopped()
         completed = True
 
-        if cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug):
+        if cfg.auto_approves(slug):
+            # The conditions win over `merge_on_done` (ADR 77): a project
+            # with both on merges only what the automatic approve allows.
+            merged = _auto_approve_and_merge(
+                cfg, task_id, slug,
+                description=ctx.description,
+                implemented=implemented,
+                reviewed=revisor_result,
+                audited=audited,
+                filed=filed,
+                authorized=authorized,
+            )
+        else:
+            merged = cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug)
+        if merged:
             # Only now: the entries are in the project's docs on the branch
             # that just landed, so the inbox copy would charge every later
             # phase for a row the repo already has. A branch that did not

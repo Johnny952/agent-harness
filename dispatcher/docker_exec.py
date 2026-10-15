@@ -543,6 +543,44 @@ def merge_task_branch(
     return MergeOutcome(MERGED, target, f"merged {branch} into {target}")
 
 
+def branch_changed_paths(
+    container: str, projects_root: str, slug: str, task_id: str,
+) -> list[str] | None:
+    """The repo paths a task branch changes against the branch the project is on.
+
+    What the automatic approve compares with the task's surface and the
+    protected list (`dispatcher/auto_approve.py`). A three-dot diff, so it is
+    the branch's own changes since it last met the target: after the pre-merge
+    check merged the base in, that is the task's work and its conflict
+    resolutions, not what the base gained meanwhile. Renames are split into a
+    deletion and an addition so both paths are checked. None when it cannot
+    be read — no branch, a detached project, a git error — and the caller
+    treats that as a failed condition, never as an empty change.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
+    project_dir = f"{projects_root}/{slug}"
+    branch = task_branch(task_id)
+    target = current_branch(container, project_dir)
+    if target is None or target == branch:
+        return None
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "diff", "--name-only", "--no-renames", "-z", f"{target}...{branch}"],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return None
+    return [path for path in proc.stdout.split("\0") if path]
+
+
+def head_commit(container: str, project_dir: str) -> str | None:
+    """The commit the project's checkout is at, or None when it cannot be read."""
+    proc = run_docker_exec(container, project_dir, ["git", "rev-parse", "HEAD"], env=_GIT_ENV)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 PREMERGE_CLEAN = "clean"
 PREMERGE_CONFLICT = "conflict"
 
