@@ -11,7 +11,9 @@ import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import learnings, tasks
 from dispatcher.tasks import set_resolved_debt
 from dispatcher.dispatcher import CycleOutcome, DispatchResult
-from dispatcher.docker_exec import MERGED, REFUSED, MergeOutcome
+from dispatcher.docker_exec import (
+    MERGED, PREMERGE_CLEAN, PREMERGE_CONFLICT, REFUSED, UP_TO_DATE, MergeOutcome, PreMergeOutcome,
+)
 from dispatcher.handoff import SubTask
 
 CONFIG_YAML = """
@@ -531,6 +533,28 @@ def _fake_merge(monkeypatch, outcome) -> None:
         "merge_task_branch",
         lambda container, projects_root, slug, task_id: outcome,
     )
+    _fake_premerge(monkeypatch, PreMergeOutcome(
+        UP_TO_DATE, "main", "b" * 40, "a" * 40, "agent/task/task-1 already holds main",
+        merged_tip="a" * 40,
+    ))
+
+
+def _fake_premerge(monkeypatch, outcome) -> list:
+    """The pre-merge check's docker half, faked: what merging the base came to."""
+    adopted: list = []
+    monkeypatch.setattr(
+        cli_mod.docker_exec, "premerge_base",
+        lambda container, projects_root, slug, task_id, *a, **k: outcome,
+    )
+    monkeypatch.setattr(
+        cli_mod.docker_exec, "adopt_premerge",
+        lambda container, projects_root, slug, task_id, o: adopted.append(o),
+    )
+    monkeypatch.setattr(
+        cli_mod.docker_exec, "drop_premerge_worktree",
+        lambda container, projects_root, slug, task_id: None,
+    )
+    return adopted
 
 
 def test_cli_merge_task_drops_the_entries_the_merged_branch_filed(
@@ -633,6 +657,54 @@ def test_cli_merge_task_records_the_merge_on_the_task(tmp_path: Path, monkeypatc
     assert task.merged["into"] == "release"
     assert task.status == "done"
     assert "task task-1: recorded as merged into release" in capsys.readouterr().out
+
+
+def test_cli_merge_task_does_not_merge_a_branch_that_conflicts_with_the_base(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """`docs/plans/autonomy.md` *Decisions*, 2: the manual merge goes through
+    the same pre-merge check the cycle's does, and stops where it stops."""
+    config_path = _write_config(tmp_path)
+    card = _card(tmp_path, "task-1")
+    merges = []
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged"))
+    monkeypatch.setattr(
+        cli_mod.docker_exec, "merge_task_branch",
+        lambda container, projects_root, slug, task_id: merges.append(task_id),
+    )
+    _fake_premerge(monkeypatch, PreMergeOutcome(
+        PREMERGE_CONFLICT, "main", "b" * 40, "a" * 40, "conflicts", conflicts=("app.py",),
+    ))
+
+    with pytest.raises(SystemExit) as excinfo:
+        _merge_task(monkeypatch, config_path)
+
+    assert excinfo.value.code == 1
+    assert merges == []
+    task = dispatcher_mod.context_transfer.read_task_file(str(card))
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    assert task.merged is None
+    assert "app.py" in task.body and "b" * 40 in task.body
+    assert "app.py" in capsys.readouterr().err
+
+
+def test_cli_merge_task_keeps_a_clean_premerge_before_it_merges(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    clean = PreMergeOutcome(
+        PREMERGE_CLEAN, "main", "b" * 40, "a" * 40, "merged main cleanly",
+        merged_tip="c" * 40, workdir="/data/projects/myproj/worktrees/task-1/premerge",
+    )
+    adopted = _fake_premerge(monkeypatch, clean)
+    monkeypatch.setattr(dispatcher_mod.gates, "run", lambda *a, **k: dispatcher_mod.gates.Report([]))
+
+    _merge_task(monkeypatch, config_path)
+
+    assert adopted == [clean]
+    assert "test gate green" in capsys.readouterr().out
 
 
 def test_cli_merge_task_that_was_refused_records_nothing(

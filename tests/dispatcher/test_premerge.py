@@ -1,0 +1,283 @@
+"""The pre-merge check against real git repositories.
+
+Every other docker_exec test fakes the commands and answers them by hand, which
+proves the calls but not what git does with them. A merge that conflicts, or
+one git accepts and the tests reject, is a claim about git's behaviour: so here
+the in-container command runs on the host instead, in a throwaway repository,
+and the assertions read the refs back out of it.
+"""
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+import dispatcher.dispatcher as dispatcher_mod
+from dispatcher import docker_exec as docker_exec_mod
+from dispatcher import gates
+from dispatcher.config import AccountConfig, Config
+from dispatcher.context_transfer import read_task_file, task_file_path
+from dispatcher.tasks import handoff
+
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+
+_CONTAINER = "agent-cuenta1"
+_BRANCH = "agent/task/task-1"
+_ISOLATED = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.invalid",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.invalid",
+}
+
+
+def _local_exec(container, workdir, command, env=None, timeout=None):
+    """`docker exec -w workdir container command`, run on the host instead."""
+    assert container == _CONTAINER
+    return subprocess.run(
+        command, cwd=workdir, env={**os.environ, **_ISOLATED, **(env or {})},
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _git(cwd, *args) -> str:
+    proc = _local_exec(_CONTAINER, str(cwd), ["git", *args])
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _commit(cwd, name, text, message) -> str:
+    (Path(cwd) / name).write_text(text)
+    _git(cwd, "add", name)
+    _git(cwd, "commit", "-q", "-m", message)
+    return _git(cwd, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A project on `main` with a task branch checked out in its writer worktree.
+
+    Laid out the way the dispatcher lays it out: `projects/<slug>` is the
+    shared checkout, `worktrees/<task>/work` the writers' one on the branch.
+    """
+    monkeypatch.setattr(docker_exec_mod, "run_docker_exec", _local_exec)
+    projects = tmp_path / "projects"
+    project = projects / "myproj"
+    project.mkdir(parents=True)
+    _git(project, "init", "-q", "-b", "main")
+    (project / ".git" / "info" / "exclude").write_text("worktrees/\n")
+    _commit(project, "shared.txt", "one\ntwo\nthree\n", "start")
+    writer = project / "worktrees" / "task-1" / "work"
+    _git(project, "worktree", "add", "-q", "-b", _BRANCH, str(writer))
+    return dict(projects=str(projects), project=project, writer=writer)
+
+
+def _sha(cwd, rev) -> str:
+    return _git(cwd, "rev-parse", rev)
+
+
+def _premerge(repo):
+    return docker_exec_mod.premerge_base(_CONTAINER, repo["projects"], "myproj", "task-1")
+
+
+def _diverge(repo, *, conflict: bool) -> tuple[str, str]:
+    """A commit on the task branch and another on main; returns (tip, base)."""
+    tip = _commit(repo["writer"], "shared.txt", "one\nTASK\nthree\n", "task work")
+    if conflict:
+        base = _commit(repo["project"], "shared.txt", "one\nMAIN\nthree\n", "main work")
+    else:
+        base = _commit(repo["project"], "other.txt", "from main\n", "main work")
+    return tip, base
+
+
+def test_a_clean_premerge_builds_the_merge_without_moving_anything(repo) -> None:
+    tip, base = _diverge(repo, conflict=False)
+
+    outcome = _premerge(repo)
+
+    assert outcome.clean
+    assert (outcome.base, outcome.base_commit, outcome.tip) == ("main", base, tip)
+    # The merge is a real one: both histories are its parents, the task's
+    # commit is still the task's commit, and nothing was rebased.
+    parents = _git(repo["project"], "rev-list", "--parents", "-n", "1", outcome.merged_tip).split()
+    assert parents[1:] == [tip, base]
+    assert (Path(outcome.workdir) / "other.txt").exists()
+    # Built aside: the branch and the base are where they were.
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _sha(repo["project"], "main") == base
+
+
+def test_adopting_a_clean_premerge_moves_the_branch_and_its_writer_checkout(repo) -> None:
+    tip, base = _diverge(repo, conflict=False)
+    outcome = _premerge(repo)
+
+    docker_exec_mod.adopt_premerge(_CONTAINER, repo["projects"], "myproj", "task-1", outcome)
+    docker_exec_mod.drop_premerge_worktree(_CONTAINER, repo["projects"], "myproj", "task-1")
+
+    assert _sha(repo["project"], _BRANCH) == outcome.merged_tip
+    assert (repo["writer"] / "other.txt").read_text() == "from main\n"
+    assert _sha(repo["project"], "main") == base
+    assert not Path(outcome.workdir).exists()
+
+
+def test_adopting_without_a_writer_checkout_moves_only_the_ref(repo) -> None:
+    tip, base = _diverge(repo, conflict=False)
+    _git(repo["project"], "worktree", "remove", str(repo["writer"]))
+    outcome = _premerge(repo)
+
+    docker_exec_mod.adopt_premerge(_CONTAINER, repo["projects"], "myproj", "task-1", outcome)
+
+    assert _sha(repo["project"], _BRANCH) == outcome.merged_tip
+
+
+def test_adopting_refuses_when_the_branch_moved_since_the_premerge(repo) -> None:
+    """update-ref is told the old tip, so work committed in between is never lost."""
+    _diverge(repo, conflict=False)
+    _git(repo["project"], "worktree", "remove", str(repo["writer"]))
+    outcome = _premerge(repo)
+    _git(repo["project"], "branch", "-f", _BRANCH, "main")
+
+    with pytest.raises(RuntimeError, match="could not move"):
+        docker_exec_mod.adopt_premerge(_CONTAINER, repo["projects"], "myproj", "task-1", outcome)
+
+
+def test_a_conflicting_premerge_is_aborted_and_moves_nothing(repo) -> None:
+    tip, base = _diverge(repo, conflict=True)
+
+    outcome = _premerge(repo)
+
+    assert outcome.conflicted
+    assert outcome.conflicts == ("shared.txt",)
+    assert base[:7] in outcome.detail and "shared.txt" in outcome.detail
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _sha(repo["project"], "main") == base
+    assert not Path(docker_exec_mod.premerge_worktree_path(
+        repo["projects"], "myproj", "task-1",
+    )).exists()
+    # The writers' checkout never saw the merge: no half-merged files there.
+    assert _git(repo["writer"], "status", "--porcelain") == ""
+    assert (repo["writer"] / "shared.txt").read_text() == "one\nTASK\nthree\n"
+
+
+def test_a_branch_that_already_holds_the_base_needs_no_premerge(repo) -> None:
+    tip = _commit(repo["writer"], "task.txt", "x\n", "task work")
+
+    outcome = _premerge(repo)
+
+    assert outcome.up_to_date
+    assert outcome.merged_tip == tip
+    assert _sha(repo["project"], _BRANCH) == tip
+
+
+# The check end to end: real git, the dispatcher's own pre_merge_check, and
+# a test gate faked only at gates.run, the one piece that needs a container.
+
+
+def _config(tmp_path, projects) -> Config:
+    return Config(
+        accounts=[AccountConfig(name="cuenta1", container=_CONTAINER)],
+        quota_threshold_pct=90,
+        quota_cooldown_seconds=1800,
+        heartbeat_ttl_seconds=120,
+        heartbeat_interval_seconds=1,
+        projects_root=projects,
+        hive_tasks_dir=str(tmp_path / "hive"),
+        state_dir=str(tmp_path / "state"),
+        collector_url="http://127.0.0.1:8787",
+        default_model="opus",
+        permission_mode="acceptEdits",
+        allowed_tools=[],
+        max_revision_rounds=3,
+        escalate_effort_after_round=2,
+        escalated_effort="high",
+        phase_timeout_seconds=7200,
+        merge_on_done=True,
+        mapping_enabled=False,
+        mapping_model="sonnet",
+        mapping_max_turns=40,
+        gates_enabled=True,
+        gates_test_timeout_seconds=900,
+    )
+
+
+def _gate(monkeypatch, findings) -> list:
+    """gates.run, answering `findings` and recording what it was run on."""
+    seen = []
+
+    def fake_run(container, workdir, project_dir, *, test_timeout_seconds, test_log_path=None):
+        seen.append(dict(workdir=workdir, has_base=(Path(workdir) / "other.txt").exists()))
+        return gates.Report(list(findings))
+
+    monkeypatch.setattr(dispatcher_mod.gates, "run", fake_run)
+    return seen
+
+
+def _red():
+    return [gates.Finding(gates.TESTS_RUN, "`pytest` failed (exit 1)", gates.BLOCKING)]
+
+
+def test_a_merge_git_accepts_but_the_tests_reject_lands_nothing(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    handoff(cfg.hive_tasks_dir, "task-1", "done", "## auditor\n\napproved")
+    tip, base = _diverge(repo, conflict=False)
+    seen = _gate(monkeypatch, _red())
+
+    verdict = dispatcher_mod.pre_merge_check(cfg, _CONTAINER, "task-1", "myproj")
+
+    assert not verdict.passed
+    # The gate ran on the merged result, not on the branch alone.
+    assert seen == [dict(
+        workdir=docker_exec_mod.premerge_worktree_path(repo["projects"], "myproj", "task-1"),
+        has_base=True,
+    )]
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _sha(repo["project"], "main") == base
+    assert not (repo["writer"] / "other.txt").exists()
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    assert "`tests-run`" in task.body and base in task.body
+
+
+def test_a_conflict_through_the_check_names_the_files_and_the_base(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    handoff(cfg.hive_tasks_dir, "task-1", "done", "## auditor\n\napproved")
+    tip, base = _diverge(repo, conflict=True)
+    seen = _gate(monkeypatch, [])
+
+    verdict = dispatcher_mod.pre_merge_check(cfg, _CONTAINER, "task-1", "myproj")
+
+    assert not verdict.passed
+    assert seen == []
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _sha(repo["project"], "main") == base
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    assert "shared.txt" in task.body and base in task.body
+
+
+def test_a_clean_green_check_keeps_the_merge_and_the_merge_lands_it(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    handoff(cfg.hive_tasks_dir, "task-1", "done", "## auditor\n\napproved")
+    tip, base = _diverge(repo, conflict=False)
+    _gate(monkeypatch, [])
+
+    verdict = dispatcher_mod.pre_merge_check(cfg, _CONTAINER, "task-1", "myproj")
+    merged = docker_exec_mod.merge_task_branch(_CONTAINER, repo["projects"], "myproj", "task-1")
+
+    assert verdict.passed
+    assert merged.status == docker_exec_mod.MERGED
+    head = _sha(repo["project"], "main")
+    assert _git(repo["project"], "merge-base", "--is-ancestor", tip, head) == ""
+    assert (repo["project"] / "shared.txt").read_text() == "one\nTASK\nthree\n"
+    assert (repo["project"] / "other.txt").read_text() == "from main\n"
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status == "done"

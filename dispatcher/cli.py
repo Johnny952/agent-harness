@@ -25,6 +25,7 @@ from dispatcher.dispatcher import (
     container_for,
     file_saved_split,
     left_behind_report,
+    pre_merge_check,
     record_merge,
     run_single_phase,
     run_task_cycle,
@@ -380,8 +381,10 @@ def main() -> None:
     merge_parser = sub.add_parser(
         "merge-task",
         help="Merge agent/task/<task-id> into the branch the project is checked out on. "
-        "A --no-ff merge that refuses on a detached HEAD or a dirty tree and rolls "
-        "itself back on a conflict; the task branch is never touched. Set "
+        "First the pre-merge check: the base is merged into the task branch and the "
+        "test gate runs on the result; a conflict or a red gate moves the task to "
+        "`conflict` and merges nothing. Then a --no-ff merge that refuses on a "
+        "detached HEAD or a dirty tree and rolls itself back on a conflict. Set "
         "merge_on_done in config.yaml to have a finished cycle do this by itself.",
     )
     merge_parser.add_argument("--task-id", required=True)
@@ -614,6 +617,14 @@ def main() -> None:
                 file=sys.stderr,
             )
         try:
+            # The same check the automatic merge runs: the base merged into
+            # the branch and gated first (`docs/plans/autonomy.md` A-2). A
+            # stop is exit 1, like a refused merge: the branch did not land.
+            verdict = pre_merge_check(cfg, container, args.task_id, args.project)
+            if not verdict.passed:
+                print(verdict.detail, file=sys.stderr)
+                raise SystemExit(1)
+            print(verdict.detail)
             outcome = docker_exec.merge_task_branch(
                 container, cfg.projects_root, args.project, args.task_id
             )

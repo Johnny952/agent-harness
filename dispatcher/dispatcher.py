@@ -1875,6 +1875,144 @@ def left_behind_report(cfg: Config, task_id: str, role: str | None = None) -> li
     return lines
 
 
+#: The status a task gets when the pre-merge check stops its merge
+#: (`docs/plans/autonomy.md` *Decisions*, 2). The integrador resolves it once
+#: that role exists; until then, the operator.
+CONFLICT_STATUS = "conflict"
+
+#: The heading of the note the pre-merge check appends to the task file.
+PRE_MERGE_HEADING = "## pre-merge check"
+
+
+@dataclasses.dataclass(frozen=True)
+class PreMergeVerdict:
+    """Whether a task branch may be merged, and the line that says why."""
+
+    passed: bool
+    detail: str
+
+
+def _task_status(cfg: Config, task_id: str) -> str | None:
+    try:
+        return context_transfer.read_task_file(
+            context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+        ).status
+    except Exception:
+        return None
+
+
+def _stop_on_conflict(
+    cfg: Config, task_id: str, outcome: docker_exec.PreMergeOutcome, why: str,
+) -> str:
+    """Move the task to `conflict` with a note naming why and the base commit."""
+    branch = docker_exec.task_branch(task_id)
+    tip = (outcome.tip or "")[:7]
+    note = (
+        f"{PRE_MERGE_HEADING}\n\n"
+        f"Not merged: {why}. The base was {outcome.base} at {outcome.base_commit}. "
+        f"The pre-merge was undone: {branch} is still at {tip} and {outcome.base} "
+        f"is unchanged. Resolve it on the branch (merge {outcome.base} in, never "
+        "rebase), then run `dispatch merge-task` again."
+    )
+    try:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, CONFLICT_STATUS, note)
+    except Exception as exc:
+        logger.warning("task %s: could not record the conflict on the task: %s", task_id, exc)
+    return f"task {task_id}: moved to {CONFLICT_STATUS}: {why} (base {outcome.base} at {(outcome.base_commit or '')[:7]})"
+
+
+def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> PreMergeVerdict:
+    """Merge the base into the task branch and gate the result, before any merge.
+
+    `docs/plans/autonomy.md` *Decisions*, 2, and the one function both merge
+    paths call, the cycle's `merge_on_done` and `merge-task`. No quota: git
+    and the test gate, no model.
+
+    - The base already in the branch: nothing new came in, so the branch's
+      own tip is what lands, and the gate is not run again. It passes.
+    - A conflict, or a test gate that goes red on the merged result: the
+      pre-merge is dropped (the branch never moved; it was built in a
+      detached checkout), the base is untouched, the task moves to
+      `conflict` with a note naming the files or the failing gate and the
+      base commit, and the merge does not happen.
+    - Clean and green: the merge commit is kept on the task branch, and the
+      merge that follows lands it. A pool with `gates_enabled: false` keeps a
+      clean merge without running the gate, as its phases ran without one.
+
+    A check that cannot run, or a gate that did not finish, stops the merge
+    without touching the task's status: there is nothing to resolve, only
+    something to run again.
+    """
+    project_dir = f"{cfg.projects_root}/{slug}"
+    try:
+        outcome = docker_exec.premerge_base(container, cfg.projects_root, slug, task_id)
+    except Exception as exc:
+        return PreMergeVerdict(False, f"task {task_id}: the pre-merge check could not run: {exc}")
+    if outcome.refused:
+        return PreMergeVerdict(False, f"task {task_id}: pre-merge check refused: {outcome.detail}")
+    if outcome.conflicted:
+        why = (
+            f"merging {outcome.base} in conflicts in {', '.join(outcome.conflicts)}"
+            if outcome.conflicts else outcome.detail
+        )
+        return PreMergeVerdict(False, _stop_on_conflict(cfg, task_id, outcome, why))
+    if outcome.up_to_date:
+        return _passed(cfg, task_id, f"task {task_id}: pre-merge check: {outcome.detail}; nothing new to gate")
+
+    gated = "test gate green"
+    log_path = None
+    try:
+        if cfg.gates_enabled:
+            log_path = os.path.join(
+                context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id),
+                "gates-premerge.log",
+            )
+            try:
+                report = gates.run(
+                    container, outcome.workdir, project_dir,
+                    test_timeout_seconds=cfg.gates_test_timeout_seconds,
+                    test_log_path=log_path,
+                )
+            except Exception as exc:
+                return PreMergeVerdict(
+                    False, f"task {task_id}: the pre-merge test gate did not finish: {exc}"
+                )
+        else:
+            # The pool turned its gates off, so the merged result is kept
+            # ungated, the way every phase of the task went ungated.
+            report = gates.Report()
+            gated = "test gate off (gates_enabled: false)"
+        if report.blocking:
+            failed = "; ".join(
+                f"`{f.gate}` {f.detail}" for f in report.findings if f.level == gates.BLOCKING
+            )
+            why = f"the test gate went red on {outcome.base} merged in: {failed} (log: {log_path})"
+            return PreMergeVerdict(False, _stop_on_conflict(cfg, task_id, outcome, why))
+        try:
+            docker_exec.adopt_premerge(container, cfg.projects_root, slug, task_id, outcome)
+        except Exception as exc:
+            return PreMergeVerdict(False, f"task {task_id}: pre-merge passed but was not kept: {exc}")
+    finally:
+        try:
+            docker_exec.drop_premerge_worktree(container, cfg.projects_root, slug, task_id)
+        except Exception as exc:
+            logger.warning("task %s: could not drop the pre-merge checkout: %s", task_id, exc)
+    return _passed(cfg, task_id, f"task {task_id}: pre-merge check: {outcome.detail}, {gated}")
+
+
+def _passed(cfg: Config, task_id: str, detail: str) -> PreMergeVerdict:
+    """A pass; a task the check stopped before is `done` again once it passes."""
+    if _task_status(cfg, task_id) == CONFLICT_STATUS:
+        try:
+            tasks.handoff(
+                cfg.hive_tasks_dir, task_id, "done",
+                f"{PRE_MERGE_HEADING}\n\nResolved: {detail}.",
+            )
+        except Exception as exc:
+            logger.warning("task %s: could not clear its conflict status: %s", task_id, exc)
+    return PreMergeVerdict(True, detail)
+
+
 def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     """Offer a finished task's branch to the branch the project sits on.
 
@@ -1895,6 +2033,11 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     for line in left_behind_report(cfg, task_id):
         logger.warning("%s", line)
     try:
+        verdict = pre_merge_check(cfg, container, task_id, slug)
+        if not verdict.passed:
+            logger.warning("task %s: not merged: %s", task_id, verdict.detail)
+            return False
+        logger.info("%s", verdict.detail)
         outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
     except Exception as exc:
         logger.warning("could not merge task %s: %s", task_id, exc)

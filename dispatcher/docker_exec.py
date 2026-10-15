@@ -491,7 +491,9 @@ def merge_task_branch(
     Every refusal leaves the repository exactly as it was found. The task
     branch is never touched, deleted, or rewritten by any path through here —
     it stays as the record of the work and as the way back if the merge turns
-    out to be wrong.
+    out to be wrong. (The pre-merge check that runs before this, `premerge_base`
+    and `adopt_premerge`, may add one merge commit on top of it; it never
+    rewrites what was there.)
     """
     _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
     project_dir = f"{projects_root}/{slug}"
@@ -539,6 +541,211 @@ def merge_task_branch(
     if "Already up to date" in proc.stdout:
         return MergeOutcome(UP_TO_DATE, target, f"{target} already contains {branch}")
     return MergeOutcome(MERGED, target, f"merged {branch} into {target}")
+
+
+PREMERGE_CLEAN = "clean"
+PREMERGE_CONFLICT = "conflict"
+
+#: The detached checkout the pre-merge check builds its merge in. Not a writer,
+#: so `remove_review_worktrees` clears a leftover one with the reviewers'.
+PREMERGE_WORKTREE_NAME = "premerge"
+
+
+@dataclasses.dataclass(frozen=True)
+class PreMergeOutcome:
+    """What merging the base into a task branch came to, before anything moved.
+
+    `clean` is a merge commit sitting in `workdir`, a detached checkout, with
+    the task branch still at `tip`: the caller gates it there and only then
+    adopts it (`adopt_premerge`) or drops it (`drop_premerge_worktree`).
+    `up-to-date` means the base is already in the branch, so there is nothing
+    to merge and nothing new to gate. `conflict` was aborted and its checkout
+    dropped; `conflicts` names the files (empty when git refused without
+    any, as on unrelated histories, and `detail` then says why). `refused`
+    never started a merge.
+    """
+
+    status: str
+    base: str | None
+    base_commit: str | None
+    tip: str | None
+    detail: str
+    merged_tip: str | None = None
+    conflicts: tuple[str, ...] = ()
+    workdir: str | None = None
+
+    @property
+    def clean(self) -> bool:
+        return self.status == PREMERGE_CLEAN
+
+    @property
+    def conflicted(self) -> bool:
+        return self.status == PREMERGE_CONFLICT
+
+    @property
+    def up_to_date(self) -> bool:
+        return self.status == UP_TO_DATE
+
+    @property
+    def refused(self) -> bool:
+        return self.status == REFUSED
+
+
+def _rev_parse(container: str, workdir: str, rev: str) -> str | None:
+    """`rev` as a full commit sha, or None when it does not name one."""
+    proc = run_docker_exec(
+        container, workdir, ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def premerge_worktree_path(projects_root: str, slug: str, task_id: str) -> str:
+    return f"{task_worktrees_dir(projects_root, slug, task_id)}/{PREMERGE_WORKTREE_NAME}"
+
+
+def premerge_base(
+    container: str,
+    projects_root: str,
+    slug: str,
+    task_id: str,
+    author_name: str = "ia-harness dispatcher",
+    author_email: str = "dispatcher@ia-harness.invalid",
+) -> PreMergeOutcome:
+    """Merge the base into a task branch, in a checkout of its own.
+
+    The base is the branch the project checkout is on (`current_branch`), the
+    same one `merge_task_branch` lands the task in. A real merge, never a
+    rebase, and never required to fast-forward: the task's commits stay what
+    they were, and the merge commit is one more on top.
+
+    The merge runs in a detached worktree at the branch's tip rather than in
+    the writers' worktree, so nothing that fails here can move the branch or
+    touch what a phase left uncommitted there. On a conflict it is aborted
+    and the checkout dropped: the branch is still at its tip, and the base was
+    only ever read.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
+    project_dir = f"{projects_root}/{slug}"
+    branch = task_branch(task_id)
+
+    if not _branch_exists(container, project_dir, branch):
+        return PreMergeOutcome(REFUSED, None, None, None, f"there is no branch {branch} to check")
+    base = current_branch(container, project_dir)
+    if base is None:
+        return PreMergeOutcome(
+            REFUSED, None, None, None,
+            f"{project_dir} is on a detached HEAD, so there is no base to merge in",
+        )
+    if base == branch:
+        return PreMergeOutcome(
+            REFUSED, base, None, None, f"{project_dir} is checked out on {branch} itself",
+        )
+    base_commit = _rev_parse(container, project_dir, base)
+    tip = _rev_parse(container, project_dir, branch)
+    if base_commit is None or tip is None:
+        return PreMergeOutcome(
+            REFUSED, base, base_commit, tip, f"could not resolve {base} or {branch} to a commit",
+        )
+
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "merge-base", "--is-ancestor", base_commit, tip],
+        env=_GIT_ENV,
+    )
+    if proc.returncode == 0:
+        return PreMergeOutcome(
+            UP_TO_DATE, base, base_commit, tip,
+            f"{branch} already contains {base} at {base_commit[:7]}",
+            merged_tip=tip,
+        )
+
+    workdir = _add_review_worktree(container, project_dir, task_id, PREMERGE_WORKTREE_NAME, tip)
+    proc = run_docker_exec(
+        container, workdir,
+        [
+            "git",
+            "-c", f"user.name={author_name}",
+            "-c", f"user.email={author_email}",
+            "merge", "--no-edit", "-m", f"Merge {base} ({base_commit[:7]}) into {branch}",
+            base_commit,
+        ],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        listed = run_docker_exec(
+            container, workdir, ["git", "diff", "--name-only", "--diff-filter=U"], env=_GIT_ENV,
+        )
+        conflicts = tuple(
+            line.strip() for line in listed.stdout.splitlines() if line.strip()
+        ) if listed.returncode == 0 else ()
+        # Allowed to fail: a merge git refused outright never started one.
+        run_docker_exec(container, workdir, ["git", "merge", "--abort"], env=_GIT_ENV)
+        _drop_worktrees(container, project_dir, [workdir])
+        named = ", ".join(conflicts) if conflicts else f"no file named ({_output_tail(proc)})"
+        return PreMergeOutcome(
+            PREMERGE_CONFLICT, base, base_commit, tip,
+            f"merging {base} at {base_commit[:7]} into {branch} conflicts: {named}",
+            conflicts=conflicts,
+        )
+
+    merged_tip = _rev_parse(container, workdir, "HEAD")
+    if merged_tip is None:
+        _drop_worktrees(container, project_dir, [workdir])
+        raise RuntimeError(f"the pre-merge of {base} into {branch} left no HEAD in {workdir}")
+    return PreMergeOutcome(
+        PREMERGE_CLEAN, base, base_commit, tip,
+        f"merged {base} at {base_commit[:7]} into {branch} cleanly",
+        merged_tip=merged_tip, workdir=workdir,
+    )
+
+
+def adopt_premerge(
+    container: str, projects_root: str, slug: str, task_id: str, outcome: PreMergeOutcome,
+) -> None:
+    """Move the task branch onto a clean pre-merge's commit.
+
+    Where the writers' worktree has the branch checked out, it fast-forwards
+    there, so that checkout's files follow the branch instead of going stale
+    under it; anything a phase left uncommitted is carried, or git refuses
+    and this raises. Otherwise `update-ref` moves the ref, and only if it is
+    still at the tip the merge was built on.
+    """
+    if not outcome.clean or outcome.merged_tip is None or outcome.tip is None:
+        raise ValueError(f"nothing to adopt from a {outcome.status} pre-merge")
+    project_dir = f"{projects_root}/{slug}"
+    branch = task_branch(task_id)
+    writer = f"{task_worktrees_dir(projects_root, slug, task_id)}/{WRITER_WORKTREE_NAME}"
+    if path_exists(container, writer) and current_branch(container, writer) == branch:
+        proc = run_docker_exec(
+            container, writer,
+            ["git", "merge", "--ff-only", "--quiet", outcome.merged_tip],
+            env=_GIT_ENV,
+        )
+    else:
+        proc = run_docker_exec(
+            container, project_dir,
+            [
+                "git", "update-ref", "-m", f"pre-merge of {outcome.base}",
+                f"refs/heads/{branch}", outcome.merged_tip, outcome.tip,
+            ],
+            env=_GIT_ENV,
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"could not move {branch} onto the pre-merge {outcome.merged_tip[:7]}: "
+            f"{_output_tail(proc)}"
+        )
+
+
+def drop_premerge_worktree(container: str, projects_root: str, slug: str, task_id: str) -> None:
+    """Remove the pre-merge's detached checkout; the commits it made stay in git."""
+    _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
+    _drop_worktrees(
+        container, f"{projects_root}/{slug}", [premerge_worktree_path(projects_root, slug, task_id)]
+    )
 
 
 GIT_CREDENTIALS_PATH = "/run/secrets/git-credentials"

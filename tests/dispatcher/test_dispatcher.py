@@ -164,6 +164,27 @@ class _FakeGit:
         self.merges.append((container, projects_root, slug, task_id))
         return self.outcome
 
+    #: What merging the base into the task branch comes to. Up to date is the
+    #: ordinary case: nothing to merge, nothing to gate, the merge goes on.
+    premerge = dispatcher_mod.docker_exec.PreMergeOutcome(
+        dispatcher_mod.docker_exec.UP_TO_DATE, "main", "b" * 40, "a" * 40,
+        "agent/task/task-1 already holds main",
+        merged_tip="a" * 40,
+    )
+
+    def premerge_base(self, container, projects_root, slug, task_id, author_name=None, author_email=None):
+        self.premerges = getattr(self, "premerges", [])
+        self.premerges.append((container, projects_root, slug, task_id))
+        return self.premerge
+
+    def adopt_premerge(self, container, projects_root, slug, task_id, outcome):
+        self.adopted = getattr(self, "adopted", [])
+        self.adopted.append(outcome)
+
+    def drop_premerge_worktree(self, container, projects_root, slug, task_id):
+        self.premerge_drops = getattr(self, "premerge_drops", [])
+        self.premerge_drops.append(task_id)
+
 
 @pytest.fixture(autouse=True)
 def fake_git(monkeypatch):
@@ -178,6 +199,11 @@ def fake_git(monkeypatch):
         dispatcher_mod.docker_exec, "remove_review_worktrees", fake.remove_review_worktrees
     )
     monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", fake.merge_task_branch)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "premerge_base", fake.premerge_base)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "adopt_premerge", fake.adopt_premerge)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "drop_premerge_worktree", fake.drop_premerge_worktree
+    )
     return fake
 
 
@@ -3071,6 +3097,112 @@ def test_run_task_cycle_merges_a_done_task_when_asked_to(tmp_path, monkeypatch, 
 
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert fake_git.premerges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+
+
+def _premerge_outcome(status, **kw):
+    de = dispatcher_mod.docker_exec
+    return de.PreMergeOutcome(
+        status, "main", "b" * 40, "a" * 40, kw.pop("detail", f"pre-merge {status}"), **kw,
+    )
+
+
+def test_run_task_cycle_does_not_merge_a_branch_that_conflicts_with_the_base(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """`docs/plans/autonomy.md` *Decisions*, 2: merge_on_done goes through the check."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    fake_git.premerge = _premerge_outcome(
+        dispatcher_mod.docker_exec.PREMERGE_CONFLICT, conflicts=("src/app.py", "README.md"),
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert fake_git.merges == []
+    assert getattr(fake_git, "adopted", []) == []
+    task = _task(cfg)
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    assert task.merged is None
+    assert dispatcher_mod.PRE_MERGE_HEADING in task.body
+    assert "src/app.py, README.md" in task.body
+    assert "b" * 40 in task.body
+
+
+def test_run_task_cycle_does_not_merge_when_the_merged_result_fails_its_tests(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True, gates_enabled=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    fake_git.premerge = _premerge_outcome(
+        dispatcher_mod.docker_exec.PREMERGE_CLEAN, merged_tip="c" * 40,
+        workdir=f"{cfg.projects_root}/myproj/worktrees/task-1/premerge",
+    )
+    gated = []
+
+    def fake_gates(container, workdir, project_dir, *, test_timeout_seconds, test_log_path=None):
+        gated.append(workdir)
+        if workdir.endswith("/premerge"):
+            return gates.Report([gates.Finding(gates.TESTS_RUN, "`pytest` failed (exit 1)", gates.BLOCKING)])
+        return gates.Report([])
+
+    monkeypatch.setattr(dispatcher_mod.gates, "run", fake_gates)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert gated[-1] == f"{cfg.projects_root}/myproj/worktrees/task-1/premerge"
+    assert fake_git.merges == []
+    assert getattr(fake_git, "adopted", []) == []
+    assert fake_git.premerge_drops == ["task-1"]
+    task = _task(cfg)
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    assert "`tests-run`" in task.body and "b" * 40 in task.body
+
+
+def test_run_task_cycle_keeps_a_clean_green_premerge_and_then_merges(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True, gates_enabled=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    fake_git.premerge = _premerge_outcome(
+        dispatcher_mod.docker_exec.PREMERGE_CLEAN, merged_tip="c" * 40,
+        workdir=f"{cfg.projects_root}/myproj/worktrees/task-1/premerge",
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.gates, "run", lambda *a, **k: gates.Report([]),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert fake_git.adopted == [fake_git.premerge]
+    assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
+    assert _task(cfg).status == "done"
+
+
+def test_a_premerge_check_that_cannot_run_merges_nothing_and_changes_no_status(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    fake_git.premerge = _premerge_outcome(dispatcher_mod.docker_exec.REFUSED)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert fake_git.merges == []
+    assert _task(cfg).status == "done"
+
+
+def test_a_task_stopped_on_a_conflict_is_done_again_once_the_check_passes(
+    tmp_path, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", dispatcher_mod.CONFLICT_STATUS, "stopped")
+
+    verdict = dispatcher_mod.pre_merge_check(cfg, "agent-cuenta1", "task-1", "myproj")
+
+    assert verdict.passed
+    assert _task(cfg).status == "done"
 
 
 def test_run_task_cycle_still_drops_the_entries_its_auditor_filed(
