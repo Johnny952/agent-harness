@@ -22,8 +22,13 @@ services:
       # One `<source_app>=<token>` entry per agent, the source_app spelt as
       # that agent's SOURCE_APP in docker-compose.agents.yml. The collector
       # stores the source_app its token is bound to, whatever the body says.
-      # A new account adds its entry here and its token to that agent alone.
-      - COLLECTOR_WRITE_TOKENS=agent-cuenta1=${COLLECTOR_WRITE_TOKEN_CUENTA1},agent-cuenta2=${COLLECTOR_WRITE_TOKEN_CUENTA2}
+      # scripts/configure.sh writes the whole map into .env as
+      # COLLECTOR_WRITE_TOKENS, one entry per configured account with the
+      # token spelt out, so a pool other than cuenta1/cuenta2 needs no edit
+      # here. The default is the map this line held before that, so a .env
+      # written earlier, which has only the per-account variables, resolves
+      # exactly as it did.
+      - COLLECTOR_WRITE_TOKENS=${COLLECTOR_WRITE_TOKENS:-agent-cuenta1=${COLLECTOR_WRITE_TOKEN_CUENTA1},agent-cuenta2=${COLLECTOR_WRITE_TOKEN_CUENTA2}}
     networks:
       - ia_harness_net
 
