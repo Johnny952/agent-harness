@@ -14,6 +14,12 @@ approved: evaluate it when the work is taken on, not before.
 
 ### 0. **Editing `config.yaml` from the console.**
 
+**Status:** designed 2026-10-15 by T-055, not built. The decisions are in
+`docs/decisions.md` ADR 75: an overrides file merged by `load_config`, a
+`config-writer` service, the key table, and when a change takes effect. The
+four build tasks, in order, are in `docs/plans/console-config.md`. The text
+below is kept as it was written.
+
 Added on 2026-10-15 at the operator's request and placed first by them. It is
 numbered 0 so the items below keep the numbers other documents cite. Unlike
 the rest of this file it was not moved from the README; like the rest, nothing
