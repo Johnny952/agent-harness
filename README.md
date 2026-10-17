@@ -538,7 +538,8 @@ This step brings up five **persistent** control-plane services (`collector`,
 `api`, `console`, `caddy`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account. The console answers at
 `http://127.0.0.1:8790` (from another machine, through an SSH tunnel: it is
-published on loopback only; see *TLS* below for serving it on a domain). Its first
+published on loopback only; see *TLS* below for serving it on a domain; `caddy` needs `CONSOLE_AUTH_HASH`
+there). Its first
 `up` builds `front/` into an image, which takes a few minutes.
 
 The console's `CONSOLE_PROJECT` does what `BOARD_PROJECT` did here until
@@ -584,9 +585,23 @@ HTTP/3); the api and the collector stay unexposed. To serve a domain over HTTPS:
    live in the `caddy_data` volume, so a restart does not ask again.
 
 With `HARNESS_DOMAIN` unset, Caddy serves `http://localhost` over plain HTTP,
-with no certificate and no HSTS, for development. Sign-in is not built yet
-(`docs/plans/server-deployment.md`), so a public console is guarded only by the
-Basic auth the api checks.
+with no certificate and no HSTS, for development.
+
+The console has no auth of its own, so Caddy asks for a Basic credential on
+every request it proxies, with or without a domain (`docs/decisions.md`
+ADR 103). Make the hash and put it in the .env file:
+
+```bash
+docker run --rm -it caddy:2.10.2 caddy hash-password
+# .env: single quotes, because compose expands a $ in anything else
+CONSOLE_AUTH_HASH='$2a$14$...'
+CONSOLE_AUTH_USER=console   # optional, this is the default
+```
+
+With no `CONSOLE_AUTH_HASH`, Caddy refuses its config and does not start; the
+other services still do. On plain `http://localhost` the credential travels in
+clear, so use the domain when the console is reachable from outside. This is a
+stopgap: the sign-in of `docs/plans/server-deployment.md` replaces it.
 
 ### 5. Run a task
 
@@ -1203,6 +1218,11 @@ Coolify's UI (port 8790) and let Coolify's proxy issue the certificate. Do not
 add a `caddy` service or set `HARNESS_DOMAIN` in this resource; the Caddy service
 exists in the plain compose only (`docs/decisions.md` ADR 100), and a second
 proxy would fight Coolify's for ports 80 and 443.
+
+**The console has no auth of its own** (it forwards every call with its own
+bearer token), and in Coolify nothing asks for a credential in front of it. Do
+not give the `console` service a public domain without Coolify's own basic auth
+on it, or keep it on a private network (`docs/decisions.md` ADR 103).
 
 A private project is reached through its SSH deploy key: run
 `project-keygen` in the dispatcher, which writes the pair under

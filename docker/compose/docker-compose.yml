@@ -124,6 +124,8 @@ services:
   # (the certificates, so a restart does not ask Let's Encrypt again).
   # HARNESS_DOMAIN unset serves http://localhost with no certificate;
   # ACME_EMAIL is optional. Only the console is proxied, never the api.
+  # The console asks for Basic auth (ADR 103): with no CONSOLE_AUTH_HASH Caddy
+  # refuses its config and the rest of the stack still starts.
   caddy:
     image: caddy:2.10.2
     restart: unless-stopped
@@ -138,6 +140,8 @@ services:
     environment:
       - HARNESS_DOMAIN=${HARNESS_DOMAIN:-http://localhost}
       - ACME_EMAIL=${ACME_EMAIL:-}
+      - CONSOLE_AUTH_USER=${CONSOLE_AUTH_USER:-console}
+      - CONSOLE_AUTH_HASH=${CONSOLE_AUTH_HASH}
     depends_on:
       - console
     networks:

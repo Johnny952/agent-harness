@@ -700,6 +700,12 @@ if [ "$setup_credentials" = "y" ]; then
             echo "# a domain over HTTPS; unset, Caddy serves http://localhost."
             echo "# HARNESS_DOMAIN=console.example.com"
             echo "# ACME_EMAIL=you@example.com"
+            echo "# The console's Basic auth through Caddy (docs/decisions.md ADR 103)."
+            echo "# Required: with no hash Caddy refuses to start. Make one with"
+            echo "#   docker run --rm -it caddy:2.10.2 caddy hash-password"
+            echo "# and paste it in single quotes: compose expands a \$ in anything else."
+            echo "# CONSOLE_AUTH_USER=console"
+            echo "# CONSOLE_AUTH_HASH='\$2a\$14\$...'"
         } > "$ENV_OUT"
         echo "Wrote $ENV_OUT"
     fi
