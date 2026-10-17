@@ -6541,3 +6541,55 @@ task removes `basic_auth` and these two variables under its own ADR.
 `tests/integration/test_compose_invariants.py` holds the shape: the
 directive in the Caddyfile, the two variables on `caddy` alone, the hash bare
 in both files, the user's fallback the same in both.
+
+## ADR 106 — the key table gains `auto_approve` and `protected_paths` as read-only, and an error is the overrides' only when `config.yaml` alone loads
+
+**Status:** accepted (T-064, 2026-10-17). Narrows ADR 75 parts 1, 2 and 5
+for task 1 of `docs/plans/console-config.md`. ADR 75's text is not edited.
+
+**Context.** ADR 75 part 5 says its table holds "all the keys `load_config`
+reads". It was written on 2026-10-15, and ADR 77 added two keys to
+`load_config` the same day: `auto_approve` and `protected_paths`. They are
+in neither the table nor its count. Task 1's test checks the table against
+`Config`'s fields plus the removed board keys, so they need a class.
+
+ADR 75 also says every error the overrides cause names the overrides file,
+including one found only on the merged mapping. It does not say how
+`load_config` knows the overrides caused a merged-result error.
+
+**Decision.**
+
+1. *Two more rows, both read-only.* The table then has 15 *read-only*
+   keys: ADR 75's ten settings, its three refused board keys, and these two.
+   - `auto_approve`, read-only. It turns on merges no person looks at
+     (ADR 77). It moves into the project record of `docs/plans/projects.md`,
+     and making it editable from the console is a decision for that plan or
+     a later ADR, not something this table settles in passing.
+   - `protected_paths`, read-only. Loosening it widens what merges
+     unattended (ADR 77), and it lives wherever `auto_approve` lives.
+
+   An account's `max_concurrent_phases` (ADR 88) is a field inside
+   `accounts`, not a top-level key. It stays read-only with `accounts`.
+2. *Unknown keys.* An overrides key that is not in the table at all is
+   refused like a non-editable one, with a message saying it is not a
+   config key.
+3. *Who caused a merged-result error.* When the merged mapping fails a
+   check and the overrides file is not empty, `load_config` loads
+   `config.yaml` alone.
+   - If `config.yaml` alone loads, the overrides caused the error. The
+     `ValueError` names the overrides path and the overridden keys, and
+     says to reset the key from the console or delete it from the file.
+   - If `config.yaml` alone fails too, its own error is raised unchanged.
+     Telling the operator to reset an override would not fix a broken
+     `config.yaml`.
+
+   This costs a second load only on a failure.
+4. *The file's own failures.* Only a missing file (`FileNotFoundError`)
+   means no overrides. Any other `OSError`, such as a directory where the
+   file should be, propagates unchanged, as it does for `config.yaml`.
+
+**Consequences.** Task 2's `GET /settings` serves 22 *editable*, 13
+*read-only* and 2 *credential* rows, counting the three board keys as one
+row as ADR 75 does. A `config.yaml` that is broken by itself is reported as
+`config.yaml`'s problem even when an override is also wrong. The operator
+sees the override's error after fixing the base.
