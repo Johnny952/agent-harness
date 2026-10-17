@@ -6229,3 +6229,29 @@ back to 1 is the way out, and a holder already above the new capacity is not
 evicted, only no new one is admitted. The observability api and the console
 still show the first holder only, through `get_current_task`; `dispatch
 status` shows all. Fair share of slots between projects is not decided here.
+
+## ADR 91 — the Coolify compose mounts the deploy keys, and not the https:// credential file
+
+**Status:** accepted (T-059, authorized by the owner 2026-10-17).
+
+**Context.** `docker/compose/docker-compose.coolify.yml` mounted neither git
+credential (`docs/plans/projects.md`, *What exists today*, the SSH bullet), so
+a Coolify deploy could not fetch or push (ADR 78) a private project. The split
+files mount two: the directory `.data/credentials/projects` (ADR 56) and the
+file `.data/credentials/git-credentials` (ADR 36). A bind mount whose source
+is missing gets a directory created in its place, which is harmless for the
+first and breaks the second unless the file exists before `up` — a step a
+Coolify import has no place for.
+
+**Decision.** The Coolify file mounts `../../.data/credentials/projects` at
+`/run/secrets/projects`, writable in `dispatcher` (so `project-keygen` can
+write a pair) and `:ro` in every agent, as the split files do. It does not
+mount the https:// file. A private project deployed through Coolify uses its
+deploy key, with *Allow write access* when the project pushes (ADR 78).
+`tests/integration/test_compose_invariants.py` holds both compose paths to
+the deploy-key mounts.
+
+**Consequences.** On Coolify, a project with no deploy key reaches only a
+public https:// remote; there is no token fallback. Adding the
+`git-credentials` mount there later needs a way to create the file before the
+first `up`, and is a decision to revisit this ADR, not an oversight to fix.
