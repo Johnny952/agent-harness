@@ -1103,9 +1103,9 @@ def run_draft_specs(
     worktree, the usage records and the task file all key on it as on any
     phase's. The worktree is a detached checkout of the project's base, no
     branch and no commit, removed when the run ends (ADR 94). The task file
-    ends `drafted`, a status
-    nothing runs. The result is None when another owner holds that lock.
-    What the phase wrote is not checked here: `tasks.check_drafts` is.
+    ends `drafted`, a status nothing runs. The result is None when another
+    owner holds that lock. What the phase wrote is not checked here:
+    `tasks.check_drafts` is.
     """
     if os.path.isabs(plan) or ".." in plan.split("/"):
         raise ValueError(f"plan {plan!r} must be a path inside the project, relative to its root")
