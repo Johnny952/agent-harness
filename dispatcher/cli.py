@@ -527,7 +527,8 @@ def main() -> None:
     )
     queue_parser.add_argument(
         "--parallel", type=int, default=1,
-        help="Cycles at a time; only 1 for now (docs/plans/autonomy.md, B-3)",
+        help="Cycles at a time, at most one per account; overlapping surfaces "
+        "never write at once (docs/plans/autonomy.md, B-3, ADR 83)",
     )
     queue_parser.add_argument(
         "--yes", action="store_true",
@@ -879,11 +880,17 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
     only one: each cycle is passed `authorized=True` because of it, and a
     resume carries the same, since it adds nothing that was not confirmed.
     """
-    if args.parallel != 1:
-        parser.error("--parallel: only 1 is supported until parallel cycles land")
+    if args.parallel < 1:
+        parser.error("--parallel: at least 1")
+    if args.parallel > len(cfg.accounts):
+        # One phase per account (out of B-3's scope to change): a slot no
+        # account can serve only holds its cycle at the next phase.
+        parser.error(
+            f"--parallel: at most {len(cfg.accounts)}, one cycle per configured account"
+        )
     if args.resume:
-        if args.task_ids or args.limit is not None or args.project:
-            parser.error("--resume takes the queue's own project, tasks and limit")
+        if args.task_ids or args.limit is not None or args.project or args.parallel != 1:
+            parser.error("--resume takes the queue's own project, tasks, limit and parallelism")
         try:
             queue = queue_mod.resume(cfg, args.resume)
         except queue_mod.QueueError as exc:
@@ -895,6 +902,7 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
             queue = queue_mod.plan(cfg, args.project, args.task_ids, args.limit)
         except queue_mod.QueueError as exc:
             parser.error(str(exc))
+        queue.parallel = args.parallel
         print(queue_mod.confirmation(cfg, queue))
         if not args.yes:
             try:

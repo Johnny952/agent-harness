@@ -34,10 +34,11 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 
-from dispatcher import context_transfer, project_docs, tasks
+from dispatcher import context_transfer, project_docs, surface, surface_lock, tasks
 from dispatcher import dispatcher as core
 from dispatcher.config import Config
 
@@ -48,6 +49,11 @@ QUEUE_SUBDIR = "queues"
 
 #: Seconds between two looks for an open account while the queue waits.
 WAIT_POLL_SECONDS = 300
+
+#: Seconds a task waiting for its write window sleeps before it looks again
+#: at a surface lock another process holds; one of this queue's own wakes it
+#: as soon as it is released.
+SURFACE_LOCK_POLL_SECONDS = 5
 
 #: How much of a task's goal its title shows on the confirmation screen.
 TITLE_WIDTH = 72
@@ -404,6 +410,8 @@ def run(
         return queue
     queue.status = Q_RUNNING
     save(cfg, queue)
+    if queue.parallel > 1:
+        return _run_parallel(cfg, queue, sleep)
     while True:
         if queue.spent >= queue.limit:
             _stop_on_limit(cfg, queue, None)
@@ -460,10 +468,205 @@ def run(
         save(cfg, queue)
 
 
-def _next(cfg: Config, queue: Queue) -> Entry | None:
-    """The first pending task that can start, skipping what depends on a failure."""
+# --- Parallel cycles (`docs/plans/autonomy.md` decision 6, task B-3, ADR 83) ---
+
+
+class _Scheduler:
+    """What the cycles of one parallel queue share: the write windows and the mapping.
+
+    One condition guards the queue's state, its waiters and its slots, so a
+    cycle leaving its window, a cycle ending and the main loop all wake each
+    other. A task that wants its write window waits while an earlier task of
+    the confirmed order wants an overlapping one, then takes the surface lock
+    (`surface_lock`), which also keeps out another process's cycles.
+    """
+
+    def __init__(self, cfg: Config, queue: Queue, cond: threading.Condition) -> None:
+        self.cfg = cfg
+        self.queue = queue
+        self.cond = cond
+        self.order = {e.task_id: n for n, e in enumerate(queue.entries)}
+        self.mapping_lock = threading.Lock()
+        self.mapped_by: str | None = None
+        self._waiting: dict[str, frozenset[str]] = {}
+        self._held: dict[str, surface_lock.SurfaceLock] = {}
+        # Every write window granted, in order, as (task_id, "enter"|"leave"):
+        # the record the tests read the windows from.
+        self.windows: list[tuple[str, str]] = []
+
+    def _first_in_line(self, task_id: str, entries: frozenset[str]) -> bool:
+        mine = self.order.get(task_id, len(self.order))
+        return not any(
+            self.order.get(other, len(self.order)) < mine and surface.overlaps(entries, theirs)
+            for other, theirs in self._waiting.items()
+            if other != task_id
+        )
+
+    def enter_write_window(self, task_id: str, entries: frozenset[str]) -> None:
+        """Return once this task holds the surface lock for `entries`."""
+        with self.cond:
+            self._waiting[task_id] = entries
+            try:
+                announced = False
+                while True:
+                    if self._first_in_line(task_id, entries):
+                        taken = surface_lock.SurfaceLock.take(
+                            self.cfg.state_dir, self.queue.project, task_id, entries,
+                            ttl_seconds=self.cfg.heartbeat_ttl_seconds,
+                            heartbeat_interval_seconds=self.cfg.heartbeat_interval_seconds,
+                        )
+                        if isinstance(taken, surface_lock.SurfaceLock):
+                            self._held[task_id] = taken
+                            self.windows.append((task_id, "enter"))
+                            return
+                        if not announced:
+                            logger.info(
+                                "queue %s: task %s waits for its write window: %s write(s) "
+                                "an overlapping surface",
+                                self.queue.queue_id, task_id, ", ".join(taken),
+                            )
+                            announced = True
+                    self.cond.wait(timeout=SURFACE_LOCK_POLL_SECONDS)
+            finally:
+                self._waiting.pop(task_id, None)
+
+    def leave_write_window(self, task_id: str) -> None:
+        with self.cond:
+            held = self._held.pop(task_id, None)
+            if held is not None:
+                held.release()
+                self.windows.append((task_id, "leave"))
+            self.cond.notify_all()
+
+
+def _run_parallel(cfg: Config, queue: Queue, sleep: Callable[[float], None]) -> Queue:
+    """`run` with up to `queue.parallel` cycles at once (B-3, ADR 83).
+
+    A free slot goes to the first task of the confirmed order that can start,
+    once an account could take its phase; a task whose dependency is still
+    running waits like one whose dependency is not merged. The limit is read
+    live: what the finished tasks spent plus what the running ones have
+    written so far, so a phase of any cycle stops every cycle's next phase.
+    A refused push stops the next phase of every cycle still running.
+    """
+    cond = threading.Condition(threading.RLock())
+    scheduler = _Scheduler(cfg, queue, cond)
+    running: dict[str, threading.Thread] = {}
+    refused: list[str] = []
+    stop = {"limit": False}
+
+    def spent_now() -> int:
+        return sum(
+            _spend(cfg, e)[0] if e.state == RUNNING else e.tokens for e in queue.entries
+        )
+
+    def start(entry: Entry) -> None:
+        stopped_by: dict[str, bool] = {"limit": False, "refused": False}
+        own_refusal: list[str] = []
+
+        def may_start_phase() -> bool:
+            with cond:
+                if refused:
+                    stopped_by["refused"] = True
+                    return False
+                if spent_now() >= queue.limit:
+                    stopped_by["limit"] = stop["limit"] = True
+                    return False
+                return True
+
+        def on_approve(result: core.ApproveResult) -> None:
+            if result.push is not None and result.push.refused:
+                with cond:
+                    detail = result.push.detail or "the push was refused"
+                    own_refusal.append(detail)
+                    refused.append(detail)
+
+        def work() -> None:
+            try:
+                try:
+                    outcome = core.run_task_cycle(
+                        cfg, entry.task_id, queue.project,
+                        authorized=queue.authorized,
+                        on_approve=on_approve,
+                        may_start_phase=may_start_phase,
+                        scheduler=scheduler,
+                    )
+                except Exception:  # noqa: BLE001 — one cycle's crash is that task's block
+                    logger.exception("queue %s: task %s crashed", queue.queue_id, entry.task_id)
+                    outcome = core.CycleOutcome.BLOCKED
+                with cond:
+                    entry.tokens, entry.unmeasured = _spend(cfg, entry)
+                    _settle(
+                        cfg, queue, entry, outcome,
+                        stopped_by["limit"] or stopped_by["refused"],
+                    )
+                    if own_refusal:
+                        entry.note = f"merged, but the push of the base was refused: {own_refusal[0]}"
+                        logger.error("queue %s stops: %s", queue.queue_id, entry.note)
+                    elif entry.state == STOPPED and stopped_by["refused"]:
+                        entry.note = "stopped before its next phase: another task's push was refused"
+                    elif entry.state == STOPPED:
+                        entry.note = "stopped by the queue's limit before its next phase"
+                    save(cfg, queue)
+                if entry.state == PENDING:
+                    # As in `run`: held before any phase spent, so the slot
+                    # pauses before the same hold can repeat.
+                    sleep(WAIT_POLL_SECONDS)
+            finally:
+                with cond:
+                    running.pop(entry.task_id, None)
+                    cond.notify_all()
+
+        entry.usage_offset = len(_usage_lines(cfg, entry.task_id))
+        entry.state = RUNNING
+        save(cfg, queue)
+        thread = threading.Thread(target=work, name=f"queue-{entry.task_id}", daemon=True)
+        running[entry.task_id] = thread
+        thread.start()
+
+    with cond:
+        while True:
+            stopping = bool(refused) or stop["limit"] or spent_now() >= queue.limit
+            if not stopping and len(running) < queue.parallel:
+                entry = _next(cfg, queue, frozenset(running))
+                if entry is not None:
+                    # Outside the condition: a wait for quota can be hours,
+                    # and the running cycles have to settle meanwhile.
+                    cond.release()
+                    try:
+                        wait_for_account(cfg, sleep)
+                    finally:
+                        cond.acquire()
+                    if (
+                        entry.state == PENDING and entry.task_id not in running
+                        and not refused and spent_now() < queue.limit
+                    ):
+                        start(entry)
+                    continue
+            if not running:
+                break
+            cond.wait()
+
+        if refused:
+            queue.status = Q_PUSH_REFUSED
+            save(cfg, queue)
+        elif stop["limit"] or queue.spent >= queue.limit:
+            _stop_on_limit(cfg, queue, None)
+        else:
+            left = [e for e in queue.entries if e.state in (PENDING, FINISHED)]
+            queue.status = Q_WAITING if any(e.state == PENDING for e in left) else Q_DONE
+            save(cfg, queue)
+    return queue
+
+
+def _next(cfg: Config, queue: Queue, busy: frozenset[str] = frozenset()) -> Entry | None:
+    """The first pending task that can start, skipping what depends on a failure.
+
+    `busy` is the parallel queue's: tasks whose thread has not ended yet, such
+    as one sent back to wait, which a second slot must not start twice.
+    """
     for entry in queue.entries:
-        if entry.state != PENDING:
+        if entry.state != PENDING or entry.task_id in busy:
             continue
         failed = [
             d for d in entry.depends_on

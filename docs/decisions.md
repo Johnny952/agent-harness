@@ -5985,3 +5985,82 @@ anything it leaves in its worktree is committed to the draft branch, and that
 branch is never merged: no task carries its id. A real `draft-specs` run, the check on the cut it
 produces (*Done when* of A-6), is still to be made and needs the owner's
 authorization.
+
+
+## ADR 83 — a parallel queue serializes each write window by surface, maps once, and tells the implementador when the base moved under its plan
+
+**Status:** accepted (B-3 of `docs/plans/autonomy.md`, 2026-10-17). It
+narrows `docs/plans/projects.md` *Decisions*, 5 ("within a project,
+later"): a queue started with `--parallel` above 1 runs up to that many
+cycles of one project at once, under the rules below. Every other start
+still runs one cycle per project. Number 82 is reserved for A-6.
+
+**Context.** `docs/plans/autonomy.md` *Decisions*, 6. A-5's queue (ADR 79)
+runs one cycle at a time, so a project with several accounts idle uses one.
+Running two cycles of one project at once is safe while they read. The
+mapping, the arquitecto's plan and the gates are each confined to the
+task's own branch, and the base lock (ADR 80) and the union merge of the
+logs (ADR 81) already cover the operations they share. What is not safe is
+two implementadores writing the same files on two branches. The second
+merge then conflicts, or worse, merges cleanly over a plan that no longer
+holds.
+
+**Decision.**
+
+1. *Slots.* `run-queue --parallel N` runs up to N cycles at once. The
+   default is 1, and N may not exceed the number of configured accounts,
+   since there is still one phase per account. With 1 the queue runs
+   exactly as ADR 79 says, through the same code. A free slot goes to the
+   first task in the confirmed order that can start, once an account could
+   take its phase. A task whose dependency is still running waits, like
+   one whose dependency is not merged. The limit is read live: the spend
+   of the finished tasks plus what the running ones have written so far.
+   When it is reached, no cycle starts another phase. A refused push stops
+   every running cycle at its next phase, and those cycles are recorded
+   `limit_reached` with a note saying why.
+2. *The write window and the surface lock.* A cycle's write window runs
+   from its first implementador until its merge or the end of its cycle.
+   Before that phase it takes the project's surface lock
+   (`dispatcher/surface_lock.py`), which is one record per holder under
+   `state_dir/surface-locks/<slug>/`. It may take the lock only when no
+   live holder's surface overlaps its own (`surface.overlaps`). So the
+   append-only logs never collide, and a whole-repo surface collides with
+   everything. Every check-and-write runs under an `flock`. Liveness works
+   like the base lock's: a fresh heartbeat, or a live pid on this host. A
+   dead holder's record is broken on the next look. Among one queue's
+   waiters, a task waits while an earlier task in the confirmed order
+   wants an overlapping window, so the order decides a contested lock as
+   well as a free slot.
+3. *The free roles.* The mapping and the arquitecto take no surface lock
+   and run as soon as a slot is free, whatever the surfaces. The mapping
+   runs once per queue. A second task that needs it waits for the first
+   and checks `_needs_mapping` again. If the index is still missing (the
+   first task's map stays on its branch until it merges), that task runs
+   unmapped, as a failed mapping would leave it. It does not map a second
+   time.
+4. *Merging the base into the branch at the window, and the stale-plan
+   note.* On taking the lock, the cycle merges the base into its branch,
+   under the base lock, using the pre-merge's own detached checkout
+   (`premerge_base`, then `adopt_premerge`). If the branch already holds
+   the base, nothing is said and no phase is spent. If the merge changed a
+   path that the task's surface or the arquitecto's *Changed* lines name,
+   the round-1 implementador's prompt carries a note. The note names the
+   tasks whose merges came in (read from their `Merge agent/task/<id>`
+   commits) and the paths. It says the plan predates them, and tells the
+   implementador to end `blocked`, saying what to replan, if the plan no
+   longer holds. A merge that would conflict is aborted and named in the
+   same note, and the pre-merge check before the merge still stops on it.
+   When the noted implementador blocks, the cycle ends blocked there.
+
+**Consequences.** Two arquitectos may plan overlapping surfaces at once.
+The second one's plan is then checked against what the first merged, by
+the note and not by a replan, and replanning is the implementador's call
+to block back. A clean merge of the base at the window is adopted without
+its own gate run, because the implementador's gates run on that branch
+next. A map made by a task that has not merged is not seen by later tasks
+in the queue. They run unmapped, which costs context but not correctness.
+Two cycles may look for the last idle account at once. The loser's next
+phase is held, and a hold before any spend sends the task back to wait, as
+in ADR 79. The surface lock is per `state_dir`, like the base lock. Fair
+shares between projects, the console's slots screen, and more than one
+phase per account remain out of scope.

@@ -167,6 +167,8 @@ had before this, which `dispatch migrate` writes once
   this as a write window serialized per *Surface*, with the cartografo and
   the arquitecto free to run at once; it applies to a queue started with
   `--parallel` above 1, and until it is built this rule holds.
+  *Built 2026-10-17* for `run-queue --parallel N` (`docs/decisions.md`
+  ADR 83); every other start still runs one cycle per project.
 - **What "running" means.** A project is busy from its cycle's first phase
   until the task is *Awaiting review*, and again for a revision round. Two
   tasks awaiting review on one project can still diverge from the base, as

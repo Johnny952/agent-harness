@@ -2988,6 +2988,160 @@ def run_single_phase(
         close_cycle(ctx, completed=final and result is not None)
 
 
+# --- The write window (`docs/plans/autonomy.md` decision 6, task B-3, ADR 83) ---
+#
+# With cycles in parallel, the base a task's arquitecto planned against can
+# move before its implementador starts: another task of the queue merged in
+# the meantime. So a cycle that runs under a scheduler merges the base into
+# its branch as it enters its write window, and tells the implementador when
+# what came in touches what the plan names.
+
+
+@dataclasses.dataclass(frozen=True)
+class BaseMove:
+    """What merging the base into a task branch at its write window brought in.
+
+    `changed` is the paths the merge changed on the branch; `conflicts` the
+    files a merge that was aborted would have conflicted in, in which case the
+    branch did not move. `merged_tasks` names the task merges the base gained
+    since the branch was cut, read from their merge commits.
+    """
+
+    changed: tuple[str, ...]
+    merged_tasks: tuple[str, ...]
+    conflicts: tuple[str, ...] = ()
+    detail: str = ""
+
+
+#: The subject `docker_exec.merge_task_branch` gives a task's merge commit.
+_TASK_MERGE_SUBJECT = re.compile(r"^Merge agent/task/(\S+)$")
+
+
+def _git_lines(container: str, workdir: str, argv: list[str]) -> list[str]:
+    proc = docker_exec.run_docker_exec(container, workdir, argv, env=docker_exec._GIT_ENV)
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.replace("\0", "\n").splitlines() if line.strip()]
+
+
+def merge_base_at_write_window(cfg: Config, task_id: str, slug: str) -> BaseMove | None:
+    """Merge the base into the task branch before its first implementador.
+
+    None when nothing moved — the base is already in the branch — or when the
+    merge could not be tried (no container, no branch, a git error, logged):
+    either way no note is given and no phase is spent. A clean merge is kept
+    on the branch without a gate, since the implementador's own gates run on
+    it next; a conflict is aborted and left for the pre-merge check, and is
+    reported so the implementador hears of it. Under the base lock (ADR 80):
+    it reads the base and moves a ref while the base may be merging.
+    `tasks.BaseLockHeldError` is the caller's.
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return None
+    project_dir = f"{cfg.projects_root}/{slug}"
+    with _base_lock(cfg, slug, "write-window merge"):
+        owner = docker_exec.read_owner(container, project_dir)
+        try:
+            outcome = docker_exec.premerge_base(container, cfg.projects_root, slug, task_id)
+            if outcome.refused or outcome.up_to_date:
+                logger.info("task %s: write window: %s", task_id, outcome.detail)
+                return None
+            merged = tuple(
+                match.group(1)
+                for subject in _git_lines(
+                    container, project_dir,
+                    ["git", "log", "--merges", "--format=%s", f"{outcome.tip}..{outcome.base_commit}"],
+                )
+                if (match := _TASK_MERGE_SUBJECT.match(subject.strip()))
+            )
+            if outcome.conflicted:
+                logger.warning("task %s: write window: %s", task_id, outcome.detail)
+                return BaseMove((), merged, outcome.conflicts, outcome.detail)
+            try:
+                changed = tuple(_git_lines(
+                    container, outcome.workdir,
+                    ["git", "diff", "--name-only", "--no-renames", "-z",
+                     outcome.tip, outcome.merged_tip],
+                ))
+                docker_exec.adopt_premerge(container, cfg.projects_root, slug, task_id, outcome)
+            finally:
+                docker_exec.drop_premerge_worktree(container, cfg.projects_root, slug, task_id)
+            logger.info("task %s: write window: %s", task_id, outcome.detail)
+            return BaseMove(changed, merged, detail=outcome.detail)
+        except Exception as exc:
+            # The pre-merge check before the merge still catches a conflict;
+            # what is lost is only the warning to the implementador.
+            logger.warning("task %s: write window: the base could not be merged in: %s", task_id, exc)
+            return None
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
+
+
+def _plan_entries(arquitecto_handoff: dict | None) -> frozenset[str]:
+    """The paths the arquitecto's handoff names under Changed, as surface entries.
+
+    A line is "by path or symbol", so a path is its first token or a
+    backticked one, and a symbol is dropped the way `surface.parse` drops it.
+    """
+    entries: set[str] = set()
+    for line in handoff._lines(arquitecto_handoff or {}, "changed"):
+        tokens = [line.split()[0].rstrip(":,")] if line.split() else []
+        tokens += re.findall(r"`([^`\n]+)`", line)
+        entries.update(
+            token.strip() for token in tokens if surface._looks_like_path(token.strip())
+        )
+    return frozenset(entries)
+
+
+def stale_plan_note(
+    move: BaseMove | None, task_surface: frozenset[str], plan: frozenset[str],
+) -> str | None:
+    """The implementador's note when the base moved under the plan, or None.
+
+    Only the paths the merge changed (or conflicted in) that the task's
+    Surface or the arquitecto's Changed lines cover count; the append-only
+    logs never do. A conflict always counts: it is the base against the
+    arquitecto's own commits.
+    """
+    if move is None:
+        return None
+
+    def named(path: str) -> bool:
+        if surface.is_append_only(path):
+            return False
+        return surface.covers(task_surface, path) or (bool(plan) and surface.covers(plan, path))
+
+    touched = [path for path in move.changed if named(path)]
+    if not touched and not move.conflicts:
+        return None
+    who = ", ".join(move.merged_tasks) if move.merged_tasks else "work outside this queue's tasks"
+    lines = [
+        "## The base moved under the plan",
+        "",
+        f"While this task waited for its write window, {who} merged into the base.",
+    ]
+    if touched:
+        lines.append(
+            "Merging the base into this task's branch changed paths the plan names: "
+            + ", ".join(f"`{p}`" for p in touched) + "."
+        )
+    if move.conflicts:
+        lines.append(
+            "Merging the base in conflicts with this branch in "
+            + ", ".join(f"`{p}`" for p in move.conflicts)
+            + ", so it was not merged; the pre-merge check will stop on it."
+        )
+    lines += [
+        "",
+        "The arquitecto planned before that. Read what changed on those paths "
+        "before you implement. If the plan no longer holds, do not improvise a "
+        "new one: end with `status: blocked` and say in `pending` what has to "
+        "be replanned.",
+    ]
+    return "\n".join(lines)
+
+
 def run_task_cycle(
     cfg: Config,
     task_id: str,
@@ -2996,6 +3150,7 @@ def run_task_cycle(
     authorized: bool = True,
     on_approve: Callable[[ApproveResult], None] | None = None,
     may_start_phase: Callable[[], bool] | None = None,
+    scheduler=None,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
 
@@ -3014,6 +3169,13 @@ def run_task_cycle(
     so a caller can read what the outcome does not carry: the queue (A-5)
     stops on `push.refused`. `may_start_phase` is asked before every phase;
     False stops the cycle HELD before that phase starts (CycleContext).
+
+    `scheduler` is the parallel queue's (B-3, ADR 83), None everywhere else,
+    and None runs the cycle exactly as before. With one, the mapping runs once
+    for the queue (`scheduler.mapping_lock`, `scheduler.mapped_by`), and the
+    cycle enters its write window before the first implementador
+    (`scheduler.enter_write_window(task_id, surface)`, which waits for the
+    surface lock) and leaves it when it ends (`leave_write_window(task_id)`).
     """
     ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
@@ -3031,6 +3193,8 @@ def run_task_cycle(
         return CycleOutcome.BLOCKED
     # Set once the auditor has filed what this task learned.
     completed = False
+    # Set once the scheduler granted this cycle its write window.
+    in_window = False
 
     try:
         try:
@@ -3057,7 +3221,33 @@ def run_task_cycle(
             # the remote has to be readable as such afterwards.
             log = logger.warning if update.status == docker_exec.UNAVAILABLE else logger.info
             log("task %s: %s", task_id, update.detail)
-        if _needs_mapping(cfg, slug):
+        if scheduler is not None:
+            if _needs_mapping(cfg, slug):
+                # One mapping per queue: a second task that needs one waits
+                # for the first and asks again. The first's map is on its own
+                # branch until it merges, so asking again can still say no
+                # index; the queue has mapped once, and this task runs
+                # unmapped as a failed mapping would leave it.
+                with scheduler.mapping_lock:
+                    if _needs_mapping(cfg, slug):
+                        if scheduler.mapped_by is not None:
+                            logger.info(
+                                "task %s: not mapped again: task %s mapped %s in this queue, "
+                                "and its map lands with its merge",
+                                task_id, scheduler.mapped_by, slug,
+                            )
+                        else:
+                            scheduler.mapped_by = task_id
+                            run_phase(
+                                ctx,
+                                project_docs.MAPPER_ROLE,
+                                fatal=False,
+                                model=cfg.mapping_model,
+                                max_turns=cfg.mapping_max_turns,
+                            )
+                if ctx.foreign_lock:
+                    return CycleOutcome.BLOCKED
+        elif _needs_mapping(cfg, slug):
             # Before the arquitecto, because what it writes is what the
             # arquitecto reads. Optional in both directions: the operator has
             # to turn it on, and if it fails the task runs anyway on a project
@@ -3096,6 +3286,24 @@ def run_task_cycle(
             outcome = _file_split(ctx, subtasks)
             return blocked() if outcome is CycleOutcome.BLOCKED else outcome
 
+        stale_note = None
+        if scheduler is not None:
+            # The write window: from here to the merge, no task whose surface
+            # overlaps this one's writes (ADR 83). Left in the `finally`.
+            task_surface = _task_surface(ctx.description)
+            scheduler.enter_write_window(task_id, task_surface)
+            in_window = True
+            try:
+                move = merge_base_at_write_window(cfg, task_id, slug)
+            except tasks.BaseLockHeldError as exc:
+                logger.warning("task %s: %s", task_id, exc)
+                return blocked()
+            stale_note = stale_plan_note(move, task_surface, _plan_entries(arquitecto.handoff))
+            if stale_note:
+                logger.warning(
+                    "task %s: the base moved under the plan; the implementador is told", task_id,
+                )
+
         approved = False
         # Counted separately from `round_num`: `max_revision_rounds: 0` makes
         # the range empty and leaves the loop variable unbound, and the one
@@ -3109,11 +3317,23 @@ def run_task_cycle(
         repeated_finding = False
         for round_num in range(1, cfg.max_revision_rounds + 1):
             rounds_run = round_num
+            # Only the first round hears of the moved base: later rounds open
+            # on the review's findings, written against the merged branch.
+            noted = {"note": stale_note} if stale_note and round_num == 1 else {}
             implemented = run_phase(
                 ctx, "implementador", round_num=round_num, repeated_finding=repeated_finding,
+                **noted,
             )
             if implemented is None:
                 return stopped()
+            if stale_note and round_num == 1 and handoff.blocked(implemented.handoff):
+                # The block back the note offers: the plan no longer holds,
+                # and the arquitecto replans on the next run of the task.
+                logger.warning(
+                    "task %s: the implementador blocked on the moved base: %s",
+                    task_id, "; ".join(handoff.pending(implemented.handoff)) or "no reason given",
+                )
+                return blocked()
             if implemented.gates is not None and implemented.gates.blocking:
                 # The gates already asked for this in-session and checked the
                 # answer. Paying a revisor to read a branch whose tests fail
@@ -3225,4 +3445,8 @@ def run_task_cycle(
             learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
         return CycleOutcome.FINISHED
     finally:
-        close_cycle(ctx, completed=completed)
+        try:
+            close_cycle(ctx, completed=completed)
+        finally:
+            if in_window:
+                scheduler.leave_write_window(task_id)
