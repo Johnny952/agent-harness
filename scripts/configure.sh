@@ -342,7 +342,7 @@ EOF
 render_coolify_compose() {
     # render_coolify_compose SOURCE NAME... -> prints docker-compose.coolify.yml
     # for that pool. Everything above the first agent pair (header, collector,
-    # api, registry-mirror, dispatcher) is SOURCE's own, kept as it is but for
+    # api, console, registry-mirror, dispatcher) is SOURCE's own, kept as it is but for
     # the collector's COLLECTOR_WRITE_TOKENS line, which is rebuilt to bind
     # exactly these agents; the agent pairs and the volumes are rendered here.
     # Unlike the agents file, the map stays a list of ${...} references: a
@@ -672,7 +672,7 @@ if [ "$setup_credentials" = "y" ]; then
             echo "# the password above. The console reads the same value from its"
             echo "# own environment; rotate it by changing both and restarting."
             echo "API_TOKEN=$API_TOKEN"
-            # The collector's tokens (docs/decisions.md ADR 72). Required, unlike
+            # The collector's tokens (docs/decisions.md ADR 72). Required, like
             # API_TOKEN: the collector refuses to start without them. Generated
             # here with the rest because a hand-picked token is a guessable one.
             echo "# The operator's token for GET /events on the collector"

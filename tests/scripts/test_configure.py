@@ -188,6 +188,7 @@ def test_a_rendered_pool_holds_the_compose_invariants(tmp_path, monkeypatch, nam
         check("coolify")
     invariants.test_every_agent_service_isolates_its_config_home("docker-compose.coolify.yml")
     invariants.test_dispatcher_is_gated_behind_its_own_profile("docker-compose.coolify.yml")
+    invariants.test_the_console_reads_only_through_the_api("docker-compose.coolify.yml")
 
 
 @pytest.mark.parametrize("names", [["solo"], ["a", "b-c", "d_e"]], ids=["one", "three"])
