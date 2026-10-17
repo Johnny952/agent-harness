@@ -58,11 +58,11 @@ are caught in. Four `@lovable.dev/*` packages are excluded because the
 toolchain itself ships that fast. **Adding a fifth exclusion is a decision to
 make with the operator, not a lockfile fix.**
 
-### The three environment variables
+### The five environment variables
 
-The console reads three names from its environment, and **none of them may take a
+The console reads five names from its environment, and **none of them may take a
 `VITE_` prefix**: Vite inlines every `import.meta.env.VITE_*` into the client
-bundle, and one of the three is a credential. They are read in
+bundle, and two of the five are credentials. They are read in
 `src/lib/api/server-env.ts`, on the server, once, at import.
 
 | Name | Default | When it is missing |
@@ -70,15 +70,18 @@ bundle, and one of the three is a credential. They are read in
 | `API_BASE_URL` | `http://api:8789` — the compose network name, the same default the Jinja board took | the default is used. Running against the api on the host means `API_BASE_URL=http://127.0.0.1:8789` |
 | `API_TOKEN` | none | **the console does not start.** The module throws at import and `src/server.ts` imports it, so a missing token is a refusal to boot rather than a 401 from a screen. It is the same value `observability/api/` reads from `docker/compose/.env` |
 | `CONSOLE_PROJECT` | none | `?project=` is omitted from the debt call and the api picks the project — right for a harness with one checkout, and a self-describing 400 for the other kind |
+| `CONFIG_WRITER_URL` | `http://127.0.0.1:8791` — the config writer on the host; a trailing slash is trimmed | the default is used |
+| `CONFIG_WRITER_TOKEN` | none | **the console still starts.** Every `/api/settings` call answers a JSON 503 naming this variable instead, so the Settings screen says what to set rather than the console refusing to boot over one screen. Unset, empty and whitespace all count as unset. It is the token `config_writer/` reads |
 
 ```sh
 API_TOKEN=<the same token observability/api reads> \
 API_BASE_URL=http://127.0.0.1:8789 \
 CONSOLE_PROJECT=ia-harness \
+CONFIG_WRITER_TOKEN=<the token config_writer reads> \
 bun run dev
 ```
 
-`docs/decisions.md` ADR 15 and ADR 24 are the decisions; this table is here because
+`docs/decisions.md` ADR 15 and ADR 24 are the decisions, and ADR 112 for the two `CONFIG_WRITER_*` names; this table is here because
 an env key only an ADR names is a key nobody sets
 (`docs/learnings/an-env-key-only-an-adr-names-is-invisible.md`).
 
@@ -100,7 +103,7 @@ on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
   the rows plus the envelope's `warnings`. The rest still resolve from
   `src/lib/api/mock/` after a fake 120ms. A component that fetches on its own has
   bypassed the seam.
-- **The server half is two files.** `src/lib/api/server-env.ts` reads the three
+- **The server half is two files.** `src/lib/api/server-env.ts` reads the five
   environment variables above and throws if the token is absent;
   `src/lib/api/forward.ts` is the whitelist that presents it. `src/server.ts` calls
   the forward before SSR — that import is also the boot-time refusal, so do not
@@ -108,6 +111,14 @@ on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
   `handlerType === "serverFn"`; the forward is not a server function and all eight
   calls are reads, so its comment stays true. A write that ever goes this way
   re-opens that sentence.
+- **One prefix goes elsewhere.** `/api/settings` (GET) and
+  `/api/settings/<key>` (PUT, DELETE) are forwarded to the config writer, not the
+  api, with `CONFIG_WRITER_TOKEN`, `X-Actor: operator` and — for a write — the
+  body bytes, and nothing else of the browser's request. Those are the first
+  writes through the forward; what keeps them from being cross-site is
+  `docs/decisions.md` ADR 112 part 7: no CORS header is ever sent and OPTIONS and
+  POST are a 405, so a foreign page cannot send a PUT or a DELETE here at all.
+  The Settings screen at `/models` reads it, read-only for now (ADR 113).
 - **Query keys and intervals are central.** `src/lib/api/queries.ts` holds
   every key and every `refetchInterval`. `POLL_MS` is 2500 and **nothing polls
   faster than 2s** — the harness is four containers and a SQLite file, not a
@@ -164,7 +175,7 @@ route, and the card carries `owner` and the api's `lock_expired` instead.
 
 The console authenticates as a service, not as a human: a bearer token read
 server-side, never under a `VITE_` prefix, so Vite cannot inline it into the
-browser bundle. See *The three environment variables* above and
+browser bundle. See *The five environment variables* above and
 `docs/decisions.md` ADR 15.
 
 **The loop runs all three.** `docs/README.md`'s frontmatter names them —

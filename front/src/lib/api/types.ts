@@ -388,3 +388,61 @@ export interface ChatThread {
 // `dispatcher/learnings.py:MAX_ROWS`, the cap on the table a phase's prompt
 // carries, and the Learnings screen's whole subject is which rows get there. It
 // arrives per row now as `phase_table_cap`.
+
+/**
+ * One key of the config writer's settings table, as `GET /settings` serves it
+ * (`config_writer/app.py:payload`, `docs/decisions.md` ADR 110 part 6).
+ *
+ * `class` is `dispatcher/config.py`'s three strings — `editable`, `read-only`,
+ * `credential` — typed open because the writer owns the list and a fourth would
+ * still have to render. `value` is the effective value and may be any JSON type,
+ * including `null` for a key nothing sets; the Settings screen renders it by type
+ * (ADR 113 part 5). `source` names which layer it came from.
+ */
+export interface SettingRow {
+  key: string;
+  class: "editable" | "read-only" | "credential" | (string & {});
+  kind: string | null;
+  reason: string;
+  value: unknown;
+  source: "override" | "config.yaml" | "default" | (string & {});
+}
+
+/**
+ * One line of the writer's change log: a save or a reset made through it, newest
+ * first and at most twenty (`config_writer/app.py:recent_changes`). `at` is the
+ * writer's UTC ISO stamp, served verbatim.
+ */
+export interface SettingChange {
+  at: string;
+  actor: string;
+  via: string;
+  key: string;
+  op: "set" | "reset" | (string & {});
+  old: unknown;
+  new: unknown;
+  revision_before: string;
+  revision_after: string;
+}
+
+/**
+ * The writer's whole settings payload (ADR 110 part 6, ADR 112, ADR 113).
+ *
+ * `rows` and `recent_changes` are typed `unknown` on purpose — what the writer
+ * means is `SettingRow[]` and `SettingChange[]`, and the screen narrows to those
+ * only after `Array.isArray`. They are built by
+ * another service from a log file and a YAML file, and the screen names a list
+ * that is not a list with `Malformed` rather than trusting the type into a
+ * `.map` that would take the page (`docs/decisions.md` ADR 29). `error` is the
+ * config's own validation error, the one that makes the dispatcher refuse every
+ * verb; `revision` is what the follow-up's save sends back.
+ */
+export interface Settings {
+  base: Record<string, unknown>;
+  overrides: Record<string, unknown>;
+  revision: string;
+  rows: unknown;
+  roles: Record<string, string[]>;
+  recent_changes: unknown;
+  error: string | null;
+}

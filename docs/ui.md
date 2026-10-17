@@ -427,7 +427,7 @@ not draw its own chrome and does not register a global key.
 
 The map is `g` then a letter, armed for 1200ms: `b` board, `a` approvals,
 `p` pool, `t` tokens, `s` session logs, `l` live tail, `d` debt, `n` learnings,
-`q` queue, `k` backlog, `m` role models. Outside the chord, `c` toggles the
+`q` queue, `k` backlog, `m` settings. Outside the chord, `c` toggles the
 chat dock, `/` focuses search and `Escape` closes or blurs. A new screen takes
 a free letter and adds a row; it does not invent a second gesture.
 

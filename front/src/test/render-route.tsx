@@ -35,8 +35,19 @@ import {
 } from "@tanstack/react-router";
 import { vi } from "vitest";
 
-/** What `observability/api/` serves: `{data, warnings}`, keyed by the path asked for. */
-export type Served = Record<string, { data: unknown; warnings?: string[] }>;
+/**
+ * What `observability/api/` serves: `{data, warnings}`, keyed by the path asked for.
+ *
+ * Or a refusal: `{status, error}` answers that status with `{"error"}`, the shape
+ * every non-200 from the api, the config writer and the forward itself takes
+ * (`docs/decisions.md` ADR 110 part 6, ADR 112). The Settings screen's
+ * *unreachable* state is the forward's 503, and a 404 from an unserved path would
+ * pass that test for the wrong reason.
+ */
+export type Served = Record<
+  string,
+  { data: unknown; warnings?: string[] } | { status: number; error: string }
+>;
 
 function stubApi(served: Served) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -48,6 +59,9 @@ function stubApi(served: Served) {
         status: 404,
         headers,
       });
+    }
+    if ("status" in body) {
+      return new Response(JSON.stringify({ error: body.error }), { status: body.status, headers });
     }
     return new Response(JSON.stringify({ data: body.data, warnings: body.warnings ?? [] }), {
       status: 200,
