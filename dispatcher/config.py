@@ -18,6 +18,10 @@ class AccountConfig:
     #: account's own block — see `_load_primary_account` for why there is only
     #: one place to name it.
     is_primary: bool = False
+    #: How many phases this account holds at once (`docs/decisions.md` ADR 84
+    #: and 88). 1 is today's behaviour; only the owner raises it, on an account
+    #: whose plan allows it. `--parallel` is still the ceiling.
+    max_concurrent_phases: int = 1
 
 
 #: The config keys the board seam read, all refused now that it is gone
@@ -451,7 +455,14 @@ def load_config(path: str) -> Config:
                 "accounts entries must not set is_primary: name the primary "
                 "once, in the top-level primary_account"
             )
-        accounts.append(AccountConfig(**entry))
+        account = AccountConfig(**entry)
+        slots = account.max_concurrent_phases
+        if isinstance(slots, bool) or not isinstance(slots, int) or slots < 1:
+            raise ValueError(
+                f"account {account.name}: max_concurrent_phases must be an "
+                f"integer of at least 1, not {slots!r}"
+            )
+        accounts.append(account)
     primary_account = _load_primary_account(raw, accounts)
     quota_threshold_pct = raw.get("quota_threshold_pct", 90)
     # Checked now that reserve_pct is compared against it: an unvalidated

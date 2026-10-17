@@ -147,6 +147,13 @@ def container_for(cfg: Config, account: str) -> str:
     raise ValueError(f"Unknown account: {account}")
 
 
+def _capacity_for(cfg: Config, account: str) -> int:
+    for acc in cfg.accounts:
+        if acc.name == account:
+            return acc.max_concurrent_phases
+    raise ValueError(f"Unknown account: {account}")
+
+
 def reap_stale_busy_accounts(cfg: Config) -> list[str]:
     """Free accounts left BUSY by a phase that is no longer running.
 
@@ -160,61 +167,63 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
     dead one stops refreshing — the same evidence `reap_expired_locks` reads,
     one level up. `busy_since` is only consulted for an account holding no card
     at all, or a card nothing ever beat on, where there is nothing else to read.
+
+    Each holder of an account is judged on its own card and its own
+    `busy_since`, and only a dead one is released: a live phase beside it keeps
+    its slot, and a park stays as it is (`docs/decisions.md` ADR 88). An account
+    is reported once however many of its holders were dead.
     """
     reaped = []
     now = time.time()
     for acc in cfg.accounts:
-        if state_machine.get_state(cfg.state_dir, acc.name) != AccountState.BUSY:
-            continue
-        busy_since = state_machine.get_busy_since(cfg.state_dir, acc.name)
-        if busy_since is None:
-            # BUSY written before this stamp existed, or by hand. Start the
-            # clock instead of reaping on no evidence: one TTL of patience
-            # costs a dispatch, reaping a live phase costs the phase.
-            task_id = state_machine.get_current_task(cfg.state_dir, acc.name)
-            state_machine.set_state(
-                cfg.state_dir, acc.name, AccountState.BUSY, current_task_id=task_id,
-                only_from={AccountState.BUSY},
-            )
-            continue
-        # A floor under the heartbeat test, not a second opinion on it. A phase
-        # stamps BUSY before it takes its card, and the card it is about to
-        # take may still carry the previous phase's heartbeat, so the TTL alone
-        # would let one dispatcher reap another's phase inside that window.
-        # The claim now comes before the `/usage` probe, so the window opens
-        # with the probe's worst case (`docs/decisions.md` ADR 71).
-        if now - busy_since <= cfg.heartbeat_ttl_seconds + _PROBE_WORST_CASE_SECONDS:
-            continue
-        task_id = state_machine.get_current_task(cfg.state_dir, acc.name)
-        task = None
-        if task_id:
-            path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
-            if os.path.exists(path):
-                task = context_transfer.read_task_file(path)
-        if task is not None and task.heartbeat is not None:
-            if not context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
+        dead = False
+        for holder in state_machine.get_holders(cfg.state_dir, acc.name):
+            busy_since = holder.busy_since
+            task_id = holder.task_id
+            if busy_since is None:
+                # BUSY written before this stamp existed, or by hand. Start the
+                # clock instead of reaping on no evidence: one TTL of patience
+                # costs a dispatch, reaping a live phase costs the phase.
+                state_machine.stamp_holder(cfg.state_dir, acc.name, task_id)
                 continue
-            why = (
-                f"the heartbeat on card {task_id} is more than "
-                f"{cfg.heartbeat_ttl_seconds}s old"
-            )
-        else:
-            # Nothing to read but the wall clock, so it is given the whole
-            # phase timeout rather than the heartbeat TTL: past that the phase
-            # is over one way or the other, since `timeout` kills it in the
-            # container.
-            if now - busy_since <= cfg.phase_timeout_seconds:
+            # A floor under the heartbeat test, not a second opinion on it. A phase
+            # stamps BUSY before it takes its card, and the card it is about to
+            # take may still carry the previous phase's heartbeat, so the TTL alone
+            # would let one dispatcher reap another's phase inside that window.
+            # The claim now comes before the `/usage` probe, so the window opens
+            # with the probe's worst case (`docs/decisions.md` ADR 71).
+            if now - busy_since <= cfg.heartbeat_ttl_seconds + _PROBE_WORST_CASE_SECONDS:
                 continue
-            why = (
-                f"it has been BUSY for {int(now - busy_since)}s with no card to heartbeat, "
-                f"past the {cfg.phase_timeout_seconds}s phase timeout"
+            task = None
+            if task_id:
+                path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+                if os.path.exists(path):
+                    task = context_transfer.read_task_file(path)
+            if task is not None and task.heartbeat is not None:
+                if not context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
+                    continue
+                why = (
+                    f"the heartbeat on card {task_id} is more than "
+                    f"{cfg.heartbeat_ttl_seconds}s old"
+                )
+            else:
+                # Nothing to read but the wall clock, so it is given the whole
+                # phase timeout rather than the heartbeat TTL: past that the phase
+                # is over one way or the other, since `timeout` kills it in the
+                # container.
+                if now - busy_since <= cfg.phase_timeout_seconds:
+                    continue
+                why = (
+                    f"it has been BUSY for {int(now - busy_since)}s with no card to heartbeat, "
+                    f"past the {cfg.phase_timeout_seconds}s phase timeout"
+                )
+            logger.warning(
+                "account %s holds %s but %s; releasing it back to the pool",
+                acc.name, task_id, why,
             )
-        logger.warning(
-            "account %s is BUSY but %s; releasing it back to the pool", acc.name, why,
-        )
-        if state_machine.set_state(
-            cfg.state_dir, acc.name, AccountState.IDLE, only_from={AccountState.BUSY},
-        ):
+            if state_machine.release(cfg.state_dir, acc.name, task_id):
+                dead = True
+        if dead:
             reaped.append(acc.name)
     return reaped
 
@@ -285,6 +294,12 @@ def pick_idle_account(
     # dispatcher killed mid-phase no longer retires its account for good.
     reap_stale_busy_accounts(cfg)
     idle = state_machine.list_idle_accounts(cfg.state_dir, cfg.accounts)
+    # A busy account with a free slot is available too, behind every account
+    # that holds nothing; the sort is stable, so the primary still ranks last
+    # (`docs/decisions.md` ADR 88). With every capacity at 1 `shared` is empty.
+    shared = state_machine.list_shared_accounts(cfg.state_dir, cfg.accounts)
+    by_name = {a.name: a for a in cfg.accounts}
+    idle = sorted(idle + shared, key=lambda n: by_name[n].is_primary)
     if exclude:
         idle = [a for a in idle if a not in exclude]
     if not idle:
@@ -633,7 +648,7 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             account,
         )
         state_machine.record_rate_limit(cfg.state_dir, account)
-        state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
+        state_machine.park(cfg.state_dir, account, AccountState.COOLING_DOWN)
         return False
     # Same reasoning, and it has to come before the parse for the same
     # reason: a rejected login is something a probe can actually report, and
@@ -657,7 +672,7 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             "parking it PRE_COOLDOWN and looking for another",
             account, usage.session_pct, usage.week_pct, decision.limit_phrase,
         )
-        state_machine.set_state(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
+        state_machine.park(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
         return False
     return True
 
@@ -732,12 +747,10 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             logger.info("account %s came back from %s and is IDLE again", acc.name, state.value)
             # The cooldown is over and the numbers agree, so the old refusal
             # must not go on holding the account on the next pass.
-            # Conditional: a claim made during the probe must not be undone.
-            if state_machine.set_state(
-                cfg.state_dir, acc.name, AccountState.IDLE,
-                only_from={AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN},
-                forget_rate_limit=True,
-            ):
+            # Conditional: unpark does nothing on an account that is no longer
+            # parked, so a claim made during the probe is not undone. It keeps
+            # the holders the park left running.
+            if state_machine.unpark(cfg.state_dir, acc.name, forget_rate_limit=True):
                 recovered.append(acc.name)
     return recovered
 
@@ -793,7 +806,7 @@ def _park_auth_expired(cfg: Config, account: str, where: str) -> None:
         "(docker exec -it %s claude, then /login) and runs `release %s`",
         account, where, container_for(cfg, account), account,
     )
-    state_machine.set_state(cfg.state_dir, account, AccountState.AUTH_EXPIRED)
+    state_machine.park(cfg.state_dir, account, AccountState.AUTH_EXPIRED)
 
 
 def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
@@ -1628,7 +1641,9 @@ def dispatch_phase(
         # seconds, and a claim made after it would leave that whole window for
         # another process to pick the same account (`docs/decisions.md`
         # ADR 71). A loser moves on like a failed probe does.
-        if not state_machine.claim(cfg.state_dir, account, task_id):
+        if not state_machine.claim(
+            cfg.state_dir, account, task_id, capacity=_capacity_for(cfg, account),
+        ):
             logger.info(
                 "task %s: account %s was taken by another dispatcher; trying the next",
                 task_id, account,
@@ -1640,13 +1655,13 @@ def dispatch_phase(
             # BaseException, so a Ctrl+C during the probe gives the account
             # back too: no card carries a heartbeat yet, and the reaper would
             # otherwise wait out the whole phase timeout to free it.
-            state_machine.set_state(
-                cfg.state_dir, account, AccountState.IDLE, only_from={AccountState.BUSY},
-            )
+            state_machine.release(cfg.state_dir, account, task_id)
             raise
         if not quota_ok:
             # check_quota_ok parked the account (PRE_COOLDOWN, COOLING_DOWN
-            # or AUTH_EXPIRED).
+            # or AUTH_EXPIRED) but cannot release its claimant: park first,
+            # then give this phase's slot back (`docs/decisions.md` ADR 88).
+            state_machine.release(cfg.state_dir, account, task_id)
             continue
 
         container = container_for(cfg, account)
@@ -1738,7 +1753,7 @@ def dispatch_phase(
             # Never leave an account stuck BUSY (disk-persisted, survives
             # restart) because of an exception between claiming it and
             # returning — that permanently removes it from the pool.
-            state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
+            state_machine.release(cfg.state_dir, account, task_id)
             if lock_acquired:
                 tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             raise
@@ -1759,7 +1774,8 @@ def dispatch_phase(
             # recheck cannot reproduce it. Write it down before parking the
             # account, or the next recheck recovers it on stale local numbers.
             state_machine.record_rate_limit(cfg.state_dir, account)
-            state_machine.set_state(cfg.state_dir, account, AccountState.COOLING_DOWN)
+            state_machine.park(cfg.state_dir, account, AccountState.COOLING_DOWN)
+            state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id
             continue
@@ -1770,12 +1786,15 @@ def dispatch_phase(
             # the same work. Not COOLING_DOWN, which the recheck would undo on
             # local counters that say nothing about a login.
             _park_auth_expired(cfg, account, f"the {role} phase of task {task_id}")
+            # Park first, then give this phase's slot back: the other holders
+            # keep running, and no slot is claimable in between.
+            state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id
             continue
 
         if not _exec_succeeded(result):
-            state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
+            state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             return DispatchResult(
                 success=False, session_id=result.session_id, result_text=result.result_text,
@@ -1786,7 +1805,7 @@ def dispatch_phase(
         # better proof than any /usage report, and the only kind worth
         # dropping the mark for.
         state_machine.clear_rate_limit(cfg.state_dir, account)
-        state_machine.set_state(cfg.state_dir, account, AccountState.IDLE)
+        state_machine.release(cfg.state_dir, account, task_id)
         return DispatchResult(
             success=True, session_id=result.session_id, result_text=result.result_text,
             account=account, handoff=_phase_handoff(container, result), gates=gate_report,

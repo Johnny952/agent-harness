@@ -9,6 +9,8 @@ from dispatcher.config import AccountConfig, Config
 from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import (
     AccountState,
+    claim,
+    get_holders,
     get_rate_limited_at,
     get_state,
     record_rate_limit,
@@ -591,3 +593,55 @@ def test_release_brings_an_expired_login_back_and_says_what_it_took_on_trust(tmp
     assert get_state(cfg.state_dir, "cuenta1") is AccountState.IDLE
     assert "AUTH_EXPIRED -> IDLE" in outcome.detail
     assert "expired login" in outcome.detail
+
+
+def _two_holders(tmp_path):
+    cfg = _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1", max_concurrent_phases=2),
+        ],
+    )
+    assert claim(cfg.state_dir, "cuenta1", "T-1", capacity=2)
+    assert claim(cfg.state_dir, "cuenta1", "T-2", capacity=2)
+    _write_task(cfg, "T-1", owner="cuenta1", heartbeat_age=9999)
+    _write_task(cfg, "T-2", owner="cuenta1", heartbeat_age=9999)
+    return cfg
+
+
+def test_status_shows_every_holder(tmp_path):
+    cfg = _two_holders(tmp_path)
+
+    text = operator_mod.format_status(cfg, operator_mod.account_reports(cfg), [])
+
+    assert "on T-1, T-2" in text
+
+
+def test_release_with_a_task_frees_that_holder_and_keeps_the_other(tmp_path):
+    cfg = _two_holders(tmp_path)
+
+    outcome = operator_mod.release_account(cfg, "cuenta1", task_id="T-1")
+
+    assert outcome.refused is False
+    assert "released T-1; now BUSY" in outcome.detail
+    assert [h.task_id for h in get_holders(cfg.state_dir, "cuenta1")] == ["T-2"]
+
+
+def test_release_with_no_task_frees_every_holder(tmp_path):
+    cfg = _two_holders(tmp_path)
+
+    outcome = operator_mod.release_account(cfg, "cuenta1")
+
+    assert outcome.refused is False
+    assert get_holders(cfg.state_dir, "cuenta1") == []
+    assert get_state(cfg.state_dir, "cuenta1") is AccountState.IDLE
+
+
+def test_release_of_a_task_the_account_does_not_hold_is_refused(tmp_path):
+    cfg = _two_holders(tmp_path)
+
+    outcome = operator_mod.release_account(cfg, "cuenta1", task_id="T-9")
+
+    assert outcome.refused is True
+    assert "T-9" in outcome.detail
+    assert len(get_holders(cfg.state_dir, "cuenta1")) == 2

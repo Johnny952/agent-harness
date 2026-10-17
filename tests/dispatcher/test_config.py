@@ -684,3 +684,39 @@ def test_load_config_refuses_bad_protected_paths(tmp_path: Path, extra: str) -> 
 
     with pytest.raises(ValueError, match="protected_paths"):
         load_config(str(config_path))
+
+
+def test_an_account_holds_one_phase_unless_told_otherwise(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert [a.max_concurrent_phases for a in cfg.accounts] == [1, 1]
+
+
+def test_load_config_reads_max_concurrent_phases(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML.replace(
+            "container: agent-cuenta2", "container: agent-cuenta2\n    max_concurrent_phases: 2"
+        )
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert [a.max_concurrent_phases for a in cfg.accounts] == [1, 2]
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "true", "'2'", "1.5"])
+def test_load_config_refuses_a_bad_max_concurrent_phases(tmp_path: Path, bad_value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML.replace(
+            "container: agent-cuenta2",
+            f"container: agent-cuenta2\n    max_concurrent_phases: {bad_value}",
+        )
+    )
+
+    with pytest.raises(ValueError, match="max_concurrent_phases"):
+        load_config(str(config_path))
