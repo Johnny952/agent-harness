@@ -222,6 +222,16 @@ This screen and its forward may be too large for one cycle. If so, that
 task's arquitecto may split it into a read-only screen first and the
 controls second.
 
+**Note, 2026-10-17 (T-065, `docs/decisions.md` ADR 109).** The writer listens
+on 8791, not 8790, which is the console's own port. The forward's host
+default for `CONFIG_WRITER_URL` is therefore `http://127.0.0.1:8791`. In
+compose, both files already give the `console` service
+`CONFIG_WRITER_URL=http://config-writer:8791` and `CONFIG_WRITER_TOKEN`, on
+`console_net`, so this task writes only the forward and the screen. The
+routes' edge cases that the screen meets are in ADR 110. A reset is allowed
+on any key the file holds, a 422 names the real overrides path, and
+`X-Actor` is required.
+
 ## 4. Credentials and the login (named, not designed here)
 
 **Surface:** the Tokens screen and tier 3's queue. This is the Tokens task

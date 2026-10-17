@@ -6593,3 +6593,168 @@ including one found only on the merged mapping. It does not say how
 row as ADR 75 does. A `config.yaml` that is broken by itself is reported as
 `config.yaml`'s problem even when an override is also wrong. The operator
 sees the override's error after fixing the base.
+
+## ADR 109 — the console, Caddy, the api and the writer share `console_net`, which no agent joins; the writer listens on 8791
+
+**Status:** accepted (T-065, decided by the owner 2026-10-17, who authorized
+the edit of `docker/compose/**`). Narrows ADR 75 part 4 (*Port*, *Network*,
+*How the console reaches it*), ADR 97 point 1 (the console's network) and
+ADR 100 point 1 (Caddy's network). None of their text is edited.
+
+**Context.** ADR 75 was written while the console ran only on the host. It
+gave the writer `127.0.0.1:8790` and a network of its own,
+`config_writer_net`, and had the console reach it at `http://127.0.0.1:8790`.
+Since ADR 97 the console is the `console` compose service on
+`127.0.0.1:8790`, on `ia_harness_net`, and since ADR 100 Caddy is there too.
+The agent containers are on `ia_harness_net` and run arbitrary code from
+cloned repos (ADR 72). The console has no auth of its own: its server half
+forwards every `/api/*` call with its own bearer
+(`front/src/lib/api/forward.ts`), and Caddy's `basic_auth` (ADR 103) guards
+only what enters through Caddy. So an agent can call
+`http://console:8790/api/...` and read the api without a credential, and once
+task 3 of `docs/plans/console-config.md` adds the settings screen it could
+change quota policy through the console. That is the hop ADR 75's separate
+network was meant to remove, and the console now sits on the agents' side of
+it. Port 8790 is the console's.
+
+**Decision.**
+
+1. *One new network, `console_net`,* declared in `docker-compose.yml` and
+   `docker-compose.coolify.yml`. A plain bridge, not `internal`, because
+   every service on it publishes a loopback port and Caddy needs egress for
+   ACME. It has no `name:` key, so compose prefixes it with the project name
+   and no other file can join it as `external` by the bare name.
+   `config_writer_net` is not created.
+2. *Who is on it.*
+   - `console`: `console_net` only. It leaves `ia_harness_net`.
+   - `caddy` (plain file only): `console_net` only. It leaves
+     `ia_harness_net`.
+   - `api`: `console_net` and `ia_harness_net`. It needs the collector.
+   - `config-writer`: `console_net` only, never `ia_harness_net`.
+   - Nothing else. No agent, sidecar, dind, collector, registry mirror or
+     dispatcher service joins it, in any compose file, and
+     `docker-compose.agents.yml` never declares it.
+3. *The writer listens on 8791* and publishes `127.0.0.1:8791:8791`, so a
+   console run on the host with `bun run dev` reaches it on loopback.
+4. *The console is given the writer's address and token now,* in both
+   files: `CONFIG_WRITER_URL=http://config-writer:8791` (a literal) and
+   `CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}` (bare, like `API_TOKEN`). The
+   compose side of task 3 is then done, and task 3 writes only the forward.
+   **Task 3's host default for `CONFIG_WRITER_URL` becomes
+   `http://127.0.0.1:8791`**, not ADR 75's `http://127.0.0.1:8790`, which is
+   the console's own port.
+5. *The token's holders* are `config-writer` and `console`, and no other
+   service of either deployment.
+6. *What holds it.* `tests/integration/test_compose_invariants.py` asserts,
+   for both files, the exact set of services on `console_net`, that
+   `console`, `caddy` and `config-writer` are not on `ia_harness_net`, that
+   the api is on both, the token's two holders, the writer's one publish,
+   and that no service of `docker-compose.agents.yml` names `console_net`.
+
+**Coolify.** `docker-compose.coolify.yml` carries no proxy labels and no proxy
+network: the domain is set on the `console` service in Coolify's UI (ADR 100
+point 1). Coolify attaches its own per-resource network to the services at
+deploy time and connects its proxy to that network, so its proxy reaches
+`console` without `ia_harness_net`, and moving the console off it does not
+break that. This was read from Coolify's documented behaviour, not run, since a
+phase cannot deploy. The same injection is a limit of this ADR. If Coolify
+attaches that network to every service of the resource, agent containers
+included, then on Coolify an agent shares a network with the console whatever
+`console_net` says. The separation is guaranteed for the plain compose
+files only. ADR 103's advice stands: no public domain on the Coolify console
+without Coolify's own auth or a private network. Run `docker network inspect`
+on a Coolify deploy to settle it.
+
+**Consequences.**
+
+- A console on `console_net` reaches the api and the writer by service name,
+  and Caddy reaches the console. An agent no longer resolves `console`,
+  `caddy` or `config-writer` on the plain compose.
+- `render_coolify_compose` in `scripts/configure.sh` writes the Coolify
+  file's trailing `networks:` block from a heredoc, so `console_net` is
+  added there too. Without that the byte-for-byte render test fails, and the
+  next `configure.sh` run would drop the network.
+- Two existing invariants assumed the old networks and change with this
+  ADR: `test_the_console_reads_only_through_the_api` and
+  `test_caddy_gets_no_socket_and_no_state`.
+
+## ADR 110 — the writer's edges: a reset repairs any key the file holds, a file that does not parse is fixed on the host, and the writer runs as root
+
+**Status:** accepted (T-065, 2026-10-17). Narrows ADR 75 parts 3 and 4 for
+task 2 of `docs/plans/console-config.md`. ADR 75's text is not edited.
+
+**Context.** ADR 75 fixes the writer's routes, its write and its token, and
+leaves some cases open. One of them conflicts with part 2's "repair is always
+possible". If a hand-edit puts a non-editable key in the overrides file,
+every verb refuses to start, and ADR 75's 400 for a non-editable key would
+also refuse the reset that removes it. The task also asks how `config.d`
+comes to exist, and who may write it, before the first `up`.
+
+**Decision.**
+
+1. *A reset may name any key the file holds.* `DELETE /settings/<key>`
+   answers 400 for a key that is not *editable* only when the current
+   overrides file does not hold it. A key the file holds is reset whatever
+   its class, unknown keys included. `PUT` keeps ADR 75's 400 for every key
+   that is not *editable*.
+2. *A reset of a key the file does not hold,* with the current revision,
+   answers 200 with the current settings. It writes nothing and logs
+   nothing.
+3. *A file that does not parse,* or is not a mapping, cannot be edited key by
+   key. `PUT` and `DELETE` answer 422 with `load_config`'s message, which
+   already says to delete the key from the file. The operator fixes the file
+   on the host. `GET` still answers 200, with `error` set, `overrides: null`
+   and the revision of the bytes on disk.
+4. *What a 422 names.* The candidate is validated with
+   `load_config(config_path, overrides_path=<temp file>)`. Every occurrence of
+   the temp file's path in the message is replaced with the real
+   `overrides.yaml` path, so the message names the file the operator knows.
+   An error from `config.yaml` alone (ADR 106 part 3) is also a 422. The save
+   is refused because the result does not load, whoever caused it.
+5. *`X-Actor` is required* on `PUT` and `DELETE`. A missing or blank header is
+   a 400, so no change is logged without a person. `via` is the fixed string
+   `console`, the one credential there is.
+6. *Shapes.*
+   - Every 200 is `{"data", "warnings"}`. A successful `PUT` or `DELETE`
+     answers with the same `data` as `GET`, read after the write.
+   - Every other status is `{"error": <message>}`.
+   - The 401 carries a `WWW-Authenticate` Bearer challenge with the realm
+     `ia-harness-config-writer` and no Basic challenge, as the collector
+     does.
+   - `GET`'s `data` holds `base`, `overrides`, `revision`, `rows`, `roles`,
+     `recent_changes` and `error`.
+     - `rows` is one row per `CONFIG_KEYS` entry, in the table's order:
+       `key`, `class`, `kind`, `reason`, `value` and `source`.
+     - `value` is what the dispatcher would run on: the loaded `Config`'s
+       attribute when the merge loads. When it does not, `value` is the
+       winning layer's raw value, or `null` for a `default` source. The three
+       board keys are never fields, so their `value` is `null`.
+     - `roles` maps `role_model`, `role_effort` and `fallback_roles` to the
+       role names each accepts, from `dispatcher/config.py`'s constants.
+     - `recent_changes` is the log's last 20 lines, newest first. A line that
+       does not parse is skipped and named in `warnings`.
+7. *Files in `config.d`.* `overrides.yaml`, `overrides.yaml.prev`,
+   `changes.jsonl`, and the lock `overrides.lock`, all mode 0644, plus
+   short-lived dot-named temp files. A first save writes no `.prev`. A reset
+   that empties the file leaves `{}` under the header, not an absent file.
+8. *The writer runs as root in its container,* like the api and the
+   collector (no `USER` in its Dockerfile).
+   - Docker creates a missing bind-mount source root-owned, and the
+     Coolify deploy has no step that could create it first. A non-root uid
+     would need a host `chown`, which `scripts/configure.sh` cannot do
+     without `sudo`.
+   - Root keeps the root-owned directory writable on every path. The
+     container holds no socket and has one writable mount, so root there
+     reaches `config.d` and nothing else.
+9. *`scripts/configure.sh` creates `config.d`* beside the `config.yaml` it
+   writes (`--config-out`'s directory), whether or not it overwrote that
+   file. The directory then belongs to the operator, who can delete or
+   replace a file in it without `sudo`, which is the hand repair part 3
+   leaves to the host. A host that skips the script still works: docker
+   creates the directory root-owned and the root writer writes it.
+
+**Consequences.** The files the writer creates are root-owned on the host.
+The operator can delete them, since the directory is theirs, but editing one
+in place needs `sudo` or a copy and a rename. ADR 75's *Consequences* about a
+root-owned `config.d` stays true for a host that never ran the script.
+`tests/config_writer/` pins each part.
