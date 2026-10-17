@@ -264,6 +264,17 @@ arquitecto took the split this task allows: T-066 built the read-only half.
   banner with *Reset* present", "a save sending the revision" and "a 422
   message shown under its row". The forward needs no change for them.
 
+**Built, 2026-10-17 (T-067, `docs/decisions.md` ADR 114).** The follow-up
+T-066 left: the controls, one per editable row by key and `kind`; *Save*
+sending `{value, revision}` (`null` when there is no overrides file) and
+*Reset* sending `{revision}`, one write at a time with the page disabled
+while it is in flight; a refetch after every save or reset; the 409 banner
+with its refetch, the edit dropped; a 422, or any other refusal, quoted under
+its row with the value kept; and the broken-config banner's *Reset* for every
+overridden key, with none offered when the overrides file does not parse. The
+*Done when* tests left open by T-066 are in `front/src/routes/-models.test.tsx`.
+The forward did not change.
+
 ## 4. Credentials and the login (named, not designed here)
 
 **Surface:** the Tokens screen and tier 3's queue. This is the Tokens task

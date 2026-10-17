@@ -28,8 +28,10 @@
  * through the same `readEnvelope`, so a writer that refused, timed out or was never
  * configured is the same `ApiError` a screen already knows how to draw (ADR 113).
  * The mock it replaced — the Role models screen's options, map and save — is
- * gone; the save and reset that will replace the last of those are the follow-up
- * task's.
+ * gone. `putSetting` and `resetSetting` are the writes that replaced the save:
+ * `PUT` and `DELETE` on `/api/settings/<key>`, through the same forward and the
+ * same envelope reader, so a refusal keeps the writer's message and its status
+ * (`docs/decisions.md` ADR 110 part 6, ADR 114).
  */
 import type {
   Account,
@@ -76,10 +78,19 @@ const actionBackendDown = false;
  * "one boundary function per call", inherited by the console under ADR 16.
  */
 
-async function readEnvelope<T>(path: string): Promise<ApiResult<T>> {
+async function readEnvelope<T>(path: string, write?: WriteRequest): Promise<ApiResult<T>> {
   let res: Response;
   try {
-    res = await fetch(path, { headers: { accept: "application/json" } });
+    res = await fetch(
+      path,
+      write
+        ? {
+            method: write.method,
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body: JSON.stringify(write.body),
+          }
+        : { headers: { accept: "application/json" } },
+    );
   } catch (cause) {
     // The console's own origin did not answer. Status 0: there was no response.
     throw new ApiError(`${path} could not be reached: ${String(cause)}`, 0);
@@ -121,6 +132,15 @@ async function readEnvelope<T>(path: string): Promise<ApiResult<T>> {
   // `data === null` and `data === []` are *not* errors — both mean "nothing to
   // show, read the warnings". The error path belongs to non-200s alone.
   return { data: body.data as T, warnings: body.warnings };
+}
+
+/**
+ * A write through the same reader. Only the settings forward takes one; every
+ * other path is the api's, which answers a closed list of GETs (ADR 112).
+ */
+interface WriteRequest {
+  method: "PUT" | "DELETE";
+  body: Record<string, unknown>;
 }
 
 function isEnvelope(body: unknown): body is { data: unknown; warnings: string[] } {
@@ -257,12 +277,44 @@ export function listUsage(taskId: string): Promise<ApiResult<UsageGroup[] | null
  *
  * One read and no mapping. `data` is the writer's `GET /settings` as served
  * (`config_writer/app.py`, ADR 110 part 6), because the screen is a view of the
- * writer's table and the follow-up's save has to send its `revision` back
+ * writer's table and a save has to send its `revision` back
  * byte for byte. `docs/decisions.md` ADR 112 for the path, ADR 113 part 2 for why
  * this is `readEnvelope` and has no poll.
  */
 export function getSettings(): Promise<ApiResult<Settings>> {
   return readEnvelope<Settings>("/api/settings");
+}
+
+/**
+ * Save one key: `PUT /api/settings/<key>` with `{value, revision}`.
+ *
+ * `revision` is the last read's, sent as it came — `null` included, which is an
+ * overrides file that does not exist yet. A 200 is the writer's whole payload
+ * again, the same envelope as `getSettings`; a refusal is an `ApiError` carrying
+ * the writer's own message and status, because the screen tells a 409 from a 422
+ * by that status and quotes the message (ADR 110 part 6, ADR 114).
+ */
+export function putSetting(
+  key: string,
+  value: unknown,
+  revision: string | null,
+): Promise<ApiResult<Settings>> {
+  return readEnvelope<Settings>(`/api/settings/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: { value, revision },
+  });
+}
+
+/**
+ * Reset one key: `DELETE /api/settings/<key>` with `{revision}`, which takes the
+ * key out of the overrides file. A key the file does not hold is the writer's
+ * 200 no-op, not an error.
+ */
+export function resetSetting(key: string, revision: string | null): Promise<ApiResult<Settings>> {
+  return readEnvelope<Settings>(`/api/settings/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+    body: { revision },
+  });
 }
 
 /* ── Still fixtures: tier 3, and the ones that never land ───────────────── */

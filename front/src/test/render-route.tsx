@@ -35,6 +35,9 @@ import {
 } from "@tanstack/react-router";
 import { vi } from "vitest";
 
+/** One answer: `{data, warnings}`, or a refusal with its status. */
+export type Answer = { data: unknown; warnings?: string[] } | { status: number; error: string };
+
 /**
  * What `observability/api/` serves: `{data, warnings}`, keyed by the path asked for.
  *
@@ -43,16 +46,39 @@ import { vi } from "vitest";
  * (`docs/decisions.md` ADR 110 part 6, ADR 112). The Settings screen's
  * *unreachable* state is the forward's 503, and a 404 from an unserved path would
  * pass that test for the wrong reason.
+ *
+ * Two additions for the Settings screen's writes (ADR 114). A key may name its
+ * method — `"PUT /api/settings/max_revision_rounds"` — and is then tried before
+ * the bare path, so a write and the read beside it answer differently. And a
+ * value may be a list, answered one entry per request with the last repeated, so
+ * the read a write's refetch makes can serve what the write left behind.
  */
-export type Served = Record<
-  string,
-  { data: unknown; warnings?: string[] } | { status: number; error: string }
->;
+export type Served = Record<string, Answer | Answer[]>;
 
-function stubApi(served: Served) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+/** One request the screen made: its method, path and parsed JSON body, if any. */
+export interface Sent {
+  method: string;
+  path: string;
+  body: unknown;
+}
+
+function stubApi(served: Served, sent: Sent[]) {
+  const asked: Record<string, number> = {};
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://console.test");
-    const body = served[url.pathname];
+    const method = (init?.method ?? "GET").toUpperCase();
+    const raw = init?.body;
+    sent.push({
+      method,
+      path: url.pathname,
+      body: typeof raw === "string" ? (JSON.parse(raw) as unknown) : undefined,
+    });
+    const named = `${method} ${url.pathname}`;
+    const key = named in served ? named : url.pathname;
+    const entry = served[key];
+    const n = asked[key] ?? 0;
+    asked[key] = n + 1;
+    const body = Array.isArray(entry) ? entry[Math.min(n, entry.length - 1)] : entry;
     const headers = { "content-type": "application/json" };
     if (!body) {
       return new Response(JSON.stringify({ error: `${url.pathname} is not served here` }), {
@@ -81,10 +107,12 @@ function stubApi(served: Served) {
  * `route` is the module's exported `Route`; only its `component` is taken, so the
  * generated tree it is attached to never loads. Resolves once the route has
  * mounted — the screen's first read may still be in flight, so wait on what it
- * draws (`findByText`) rather than on this.
+ * draws (`findByText`) rather than on this. `sent` is every request made so far,
+ * in order, for a test that asserts what a write carried.
  */
 export async function renderRoute(route: AnyRoute, path: string, served: Served, at = path) {
-  const fetchMock = stubApi(served);
+  const sent: Sent[] = [];
+  const fetchMock = stubApi(served, sent);
   // `retry: false`: a read the test did not serve should be the error state now,
   // not after the default three retries with backoff.
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -109,5 +137,5 @@ export async function renderRoute(route: AnyRoute, path: string, served: Served,
     </QueryClientProvider>,
   );
   await router.load();
-  return { ...result, fetchMock, queryClient, router };
+  return { ...result, fetchMock, queryClient, router, sent };
 }

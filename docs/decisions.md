@@ -6899,3 +6899,73 @@ behind them in `front/src/lib/api/mock/ops-fixtures.ts` and
 outside this task. `docs/ui.md` *One shell, one nav, one set of chords* names
 `m` settings. Plan task 3 carries a dated note naming what the follow-up
 builds.
+
+## ADR 114 — the settings screen's controls: one write at a time with the revision, a refetch after it, and where a refusal is shown
+
+**Status:** accepted (T-067, 2026-10-17). Completes `docs/plans/console-config.md`
+task 3, the follow-up ADR 113 part 1 left. Narrows nothing.
+
+**Context.** ADR 113 shipped the screen read-only. The writer (ADR 110) takes
+`PUT /settings/<key>` with `{value, revision}` and `DELETE /settings/<key>`
+with `{revision}`, refuses a stale revision with 409 and a value or a config
+that does not load with 422, and serves `revision: null` when there is no
+overrides file. The forward (ADR 112) already passes both writes through.
+
+**Decision.**
+
+1. *Two writers.* `putSetting(key, value, revision)` and
+   `resetSetting(key, revision)` in `front/src/lib/api/client.ts` go through
+   the same `readEnvelope` as every read, which now takes an optional method
+   and JSON body. A refusal is an `ApiError` carrying the writer's message and
+   status. `revision` is sent as served, `null` included, and the key is one
+   encoded path segment.
+2. *One write at a time, then a refetch.* The page holds one mutation. While it
+   is pending, or while the read is fetching, every control on the page —
+   the banner's *Reset* included — is disabled, so no write is ever sent on a
+   revision the page has not yet read back. On success the page invalidates
+   `settingsQuery` and refetches, rather than taking the write's own envelope,
+   so the table shown is always a read's.
+3. *Controls by key, then by kind.* Only an `editable` row gets a control;
+   `read-only` and `credential` rows, and the unreachable state, get none.
+   - `role_model`: a text field per role in `roles.role_model`, suggesting
+     the model IDs the base and the overrides already name (`default_model`,
+     `mapping_model`, every `role_model` value) through one `datalist`;
+     empty means *(default)*.
+   - `role_effort`: a select per role over *(default)* and `EFFORT_LEVELS`.
+   - Both send the whole map: a role on *(default)* is taken out of it, and
+     an entry for a role not in the writer's list is kept.
+   - `fallback_roles`: a checkbox per role, sent in the writer's role order.
+   - `primary_account`: a select over the `accounts` row's names.
+   - `bool` a switch, `effort` a select, `positive_int` and
+     `non_negative_int` a number field, `string` a text field (with the model
+     suggestions on `default_model` and `mapping_model`).
+   - Any other kind says this console has no control for it; its *Reset* is
+     still offered when overridden.
+   Each row has *Save*; *Reset* only when its source is `override`. The
+   selects are native `<select>`, the console's idiom on the Tail, Index and
+   Sessions screens.
+4. *What the front checks.* A number field sends nothing when it is empty or
+   not a whole number, and says so under the row. A range (positive, not
+   negative) and every other value is the writer's to refuse: its 422 is the
+   one source of truth, so the front does not restate `CONFIG_KEYS`.
+5. *Where a refusal is shown.*
+   - *409:* a warning banner above the table says the settings changed since
+     the page loaded and the change was not saved; the page refetches, and
+     every row's draft is dropped for the current value, because the edit was
+     made against a table that no longer exists.
+   - *Any other refusal* (422, 400, 503, 504, a non-JSON answer) is quoted
+     verbatim on an alert line directly under its row, and the control keeps
+     the value that was sent, so it can be corrected. A new write clears it.
+   - *The broken-config banner* offers *Reset* for every key the overrides
+     hold, editable or not, since any of them may be what breaks the load; its
+     refusals are shown in the banner. When `overrides` is `null` the file
+     does not parse, so no reset can succeed and none is offered: the banner
+     says it is fixed on the host.
+6. *Drafts.* A row's draft lives in the row and is reset when the revision
+   changes or a 409 arrives (the row is keyed by both).
+
+**Consequences.** `front/src/test/render-route.tsx` keys a served answer by
+`"<METHOD> <path>"` before the bare path, takes a list answered in order (the
+last repeating) for a refetch, and records every request's method, path and
+body as `sent`, so a write's body is asserted as `fetch` received it. Plan
+task 3 is built; its *Done when* tests are in `front/src/routes/-models.test.tsx`.
