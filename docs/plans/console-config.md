@@ -241,6 +241,29 @@ routes' edge cases that the screen meets are in ADR 110. A reset is allowed
 on any key the file holds, a 422 names the real overrides path, and
 `X-Actor` is required.
 
+**Built, 2026-10-17 (T-066, `docs/decisions.md` ADR 112, ADR 113).** The
+arquitecto took the split this task allows: T-066 built the read-only half.
+
+- *The path.* ADR 112 narrowed the forward from a prefix passed through to
+  exactly `/api/settings` (GET) and `/api/settings/<key>` (PUT, DELETE), the
+  key one segment, decoded and re-encoded. A wrong method is a JSON 405 and
+  any other path under the prefix a JSON 404; `OPTIONS` and `POST` are 405s
+  with no `Access-Control-*` header (ADR 112 part 7).
+- *Built.* The forward in full, PUT and DELETE included, with its 503 when
+  `CONFIG_WRITER_TOKEN` is unset, its 504 on a timeout and its 503 on a
+  refused connection. The screen at `/models`, titled *Settings*, with every
+  state a read produces: loading, unreachable, broken config (the banner,
+  with the table still drawn), warnings, the note, the table with its source
+  column, the credential rows' Tokens line, and recent changes with their
+  own empty state. It draws no control, disabled or otherwise (ADR 113).
+- *Left for the follow-up.* The controls: one per editable row by `kind`,
+  *Save* sending `revision`, *Reset* on overridden rows and on the
+  broken-config banner, the 422 message under its row with the value kept,
+  the 409 banner with its refetch, and the refetch after every save or reset.
+  The *Done when* tests that need them are still open: "the broken-config
+  banner with *Reset* present", "a save sending the revision" and "a 422
+  message shown under its row". The forward needs no change for them.
+
 ## 4. Credentials and the login (named, not designed here)
 
 **Surface:** the Tokens screen and tier 3's queue. This is the Tokens task

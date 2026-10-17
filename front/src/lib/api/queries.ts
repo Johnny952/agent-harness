@@ -85,15 +85,16 @@ export const approvalsQuery = queryOptions({
   refetchInterval: POLL_MS,
 });
 
-export const modelOptionsQuery = queryOptions({
-  queryKey: ["model-options"],
-  queryFn: () => api.listModelOptions(),
-});
-
-export const roleModelsQuery = queryOptions({
-  queryKey: ["role-models"],
-  queryFn: () => api.listRoleModels(),
-  refetchInterval: POLL_MS * 4,
+/**
+ * The config writer's settings table, read once per visit and never polled
+ * (`docs/decisions.md` ADR 113 part 2). The plan's *Stale* state is answered by
+ * the follow-up's refetch after a save or a reset, and by the writer's revision
+ * check, not by a timer: a page that rewrote itself every few seconds would
+ * move a row out from under the control an operator is about to use.
+ */
+export const settingsQuery = queryOptions({
+  queryKey: ["settings"],
+  queryFn: () => api.getSettings(),
 });
 
 export const backlogQuery = queryOptions({

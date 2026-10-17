@@ -80,6 +80,19 @@ export function formatClock(iso: string | null): string {
   return d.toISOString().slice(11, 19);
 }
 
+/**
+ * The UTC date and `formatClock`'s clock, or `—`: the Settings screen's change
+ * log (`docs/decisions.md` ADR 113 part 6). Twenty changes span days, and the
+ * clock alone would drop the day. The writer's `at` is served verbatim, so an
+ * unreadable stamp degrades to `formatClock`'s own sentinel rather than throwing
+ * the `RangeError` that `toISOString` answers it with.
+ */
+export function formatDateClock(iso: string | null): string {
+  const clock = formatClock(iso);
+  if (clock === "—" || !iso) return "—";
+  return `${new Date(iso).toISOString().slice(0, 10)} ${clock}`;
+}
+
 /** A token or turn count, grouped in thousands, never rounded (`docs/decisions.md` ADR 67). */
 export function formatCount(n: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 20 }).format(n);

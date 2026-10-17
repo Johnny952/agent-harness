@@ -21,9 +21,13 @@ vi.mock("./server-env", () => ({
   API_TOKEN: "test-token",
   CONSOLE_PROJECT: "ia-harness",
   API_TIMEOUT_MS: 5000,
+  CONFIG_WRITER_URL: "http://writer.test:8791",
+  CONFIG_WRITER_TOKEN: "writer-token",
+  CONFIG_WRITER_TIMEOUT_MS: 5000,
 }));
 
 const BASE = "http://api.test:8789";
+const WRITER = "http://writer.test:8791";
 
 function get(path: string, init?: RequestInit): Request {
   return new Request(`http://console.test${path}`, init);
@@ -236,5 +240,216 @@ describe("the api's answer", () => {
     // browser does not.
     expect(body).not.toContain("api.test");
     expect(logged.mock.calls[0]![0]).toContain(BASE);
+  });
+});
+
+/**
+ * The settings forward, `docs/decisions.md` ADR 112: one test or a small group per
+ * part of the decision. The subject is again what leaves — the writer's url, the
+ * method, the exact headers, the body bytes — and what a request the console
+ * would never send gets back without the writer being asked.
+ */
+describe("the settings forward", () => {
+  /** The `init` the forward handed `fetch`, after asserting it was called once. */
+  function sent(fetchMock: ReturnType<typeof stubApi>): RequestInit {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return fetchMock.mock.calls[0]![1]!;
+  }
+
+  it("reads the collection from the writer with its own headers and nothing else", async () => {
+    const fetchMock = stubApi('{"data":{},"warnings":[]}');
+    await forwardApiRequest(
+      get("/api/settings?revision=x&project=other", {
+        headers: { cookie: "session=whatever", authorization: "Bearer from-the-browser" },
+      }),
+    );
+    // No query parameter crosses: the writer's GET takes none.
+    expect(target(fetchMock)).toBe(`${WRITER}/settings`);
+    const init = sent(fetchMock);
+    expect(init.method).toBe("GET");
+    expect(init.headers).toEqual({
+      Authorization: "Bearer writer-token",
+      "X-Actor": "operator",
+      Accept: "application/json",
+    });
+    expect(init.body).toBeUndefined();
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("passes a PUT's body bytes through under its own JSON content type", async () => {
+    const fetchMock = stubApi();
+    const payload = '{"value": 3, "revision": "abc"}';
+    await forwardApiRequest(
+      get("/api/settings/max_rounds", {
+        method: "PUT",
+        body: payload,
+        headers: { "content-type": "text/plain", "x-forwarded-for": "10.0.0.1" },
+      }),
+    );
+    expect(target(fetchMock)).toBe(`${WRITER}/settings/max_rounds`);
+    const init = sent(fetchMock);
+    expect(init.method).toBe("PUT");
+    expect(init.headers).toEqual({
+      Authorization: "Bearer writer-token",
+      "X-Actor": "operator",
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    });
+    expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe(payload);
+  });
+
+  it("passes a DELETE's body through the same way", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(
+      get("/api/settings/max_rounds", { method: "DELETE", body: '{"revision":"abc"}' }),
+    );
+    const init = sent(fetchMock);
+    expect(init.method).toBe("DELETE");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe('{"revision":"abc"}');
+  });
+
+  it("re-encodes a decoded key, so a %2f stays inside one segment", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/settings/a%2fb", { method: "PUT", body: "{}" }));
+    expect(target(fetchMock)).toBe(`${WRITER}/settings/a%2Fb`);
+  });
+
+  it.each([
+    ["/api/settings", "POST"],
+    ["/api/settings", "PUT"],
+    ["/api/settings", "DELETE"],
+    ["/api/settings", "OPTIONS"],
+    ["/api/settings/max_rounds", "GET"],
+    ["/api/settings/max_rounds", "POST"],
+    ["/api/settings/max_rounds", "PATCH"],
+    ["/api/settings/max_rounds", "OPTIONS"],
+  ])("answers %s with %s as a 405 without asking the writer", async (path, method) => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get(path, { method }));
+    expect(answer?.status).toBe(405);
+    expect(answer?.headers.get("content-type")).toBe("application/json");
+    expect((await answer!.json()).error).toContain(`${method} is not served on`);
+    // No preflight is ever answered: ADR 112 part 7.
+    for (const name of answer!.headers.keys()) {
+      expect(name.toLowerCase().startsWith("access-control-")).toBe(false);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "/api/settings/",
+    "/api/settings//max_rounds",
+    "/api/settings/max_rounds/",
+    "/api/settings/a/b",
+    "/api/settings/%zz",
+  ])("answers %s as a JSON 404 without asking the writer", async (path) => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get(path, { method: "PUT", body: "{}" }));
+    expect(answer?.status).toBe(404);
+    expect(answer?.headers.get("content-type")).toBe("application/json");
+    expect(typeof (await answer!.json()).error).toBe("string");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves a path that only resembles the prefix to the api's whitelist", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/settingsx"));
+    expect(answer?.status).toBe(404);
+    expect(await answer?.json()).toEqual({
+      error: "/api/settingsx is not one of the eight routes the console forwards.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the writer's status, body and content type back as they came", async () => {
+    stubApi('{"error":"the settings changed since they were read"}', 409);
+    const answer = await forwardApiRequest(
+      get("/api/settings/max_rounds", { method: "PUT", body: "{}" }),
+    );
+    expect(answer?.status).toBe(409);
+    expect(answer?.headers.get("content-type")).toBe("application/json");
+    expect(await answer?.text()).toBe('{"error":"the settings changed since they were read"}');
+  });
+
+  it("turns a timeout into a 504 that names the service and not its address", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new DOMException("The operation timed out.", "TimeoutError"),
+    );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answer = await forwardApiRequest(get("/api/settings"));
+    expect(answer?.status).toBe(504);
+    const body = await answer?.text();
+    expect(body).toBe('{"error":"The config-writer service did not answer within 5000 ms."}');
+    expect(body).not.toContain("writer.test");
+    expect(logged.mock.calls[0]![0]).toContain(WRITER);
+  });
+
+  it("turns a refused connection into a 503 that names the service and not its address", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new TypeError("fetch failed: connect ECONNREFUSED http://writer.test:8791"),
+    );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answer = await forwardApiRequest(
+      get("/api/settings/max_rounds", { method: "DELETE", body: "{}" }),
+    );
+    expect(answer?.status).toBe(503);
+    const body = await answer?.text();
+    expect(body).toBe('{"error":"The config-writer service could not be reached."}');
+    expect(body).not.toContain("writer.test");
+    expect(logged.mock.calls[0]![0]).toContain(WRITER);
+  });
+});
+
+/**
+ * `CONFIG_WRITER_TOKEN` unset. The value is read when `server-env.ts` is imported,
+ * so the module graph is reset and re-imported under a second mock rather than
+ * mutated (ADR 112 *Consequences*).
+ */
+describe("the settings forward without CONFIG_WRITER_TOKEN", () => {
+  async function unconfigured() {
+    vi.resetModules();
+    vi.doMock("./server-env", () => ({
+      API_BASE_URL: "http://api.test:8789",
+      API_TOKEN: "test-token",
+      CONSOLE_PROJECT: "ia-harness",
+      API_TIMEOUT_MS: 5000,
+      CONFIG_WRITER_URL: "http://writer.test:8791",
+      CONFIG_WRITER_TOKEN: null,
+      CONFIG_WRITER_TIMEOUT_MS: 5000,
+    }));
+    const forward = await import("./forward");
+    vi.doUnmock("./server-env");
+    return forward.forwardApiRequest;
+  }
+
+  it("answers a JSON 503 naming the variable, without asking the writer", async () => {
+    const forward = await unconfigured();
+    const fetchMock = stubApi();
+    for (const request of [
+      get("/api/settings"),
+      get("/api/settings/max_rounds", { method: "PUT", body: "{}" }),
+      get("/api/settings/max_rounds", { method: "DELETE", body: "{}" }),
+    ]) {
+      const answer = await forward(request);
+      expect(answer?.status).toBe(503);
+      expect(answer?.headers.get("content-type")).toBe("application/json");
+      expect((await answer!.json()).error).toContain("CONFIG_WRITER_TOKEN is not set");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still answers a wrong method or shape the same way, before the token", async () => {
+    const forward = await unconfigured();
+    expect((await forward(get("/api/settings", { method: "POST" })))?.status).toBe(405);
+    expect((await forward(get("/api/settings/max_rounds")))?.status).toBe(405);
+    expect((await forward(get("/api/settings/a/b", { method: "PUT" })))?.status).toBe(404);
+  });
+
+  it("leaves the api's routes working", async () => {
+    const forward = await unconfigured();
+    const fetchMock = stubApi();
+    expect((await forward(get("/api/tasks")))?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks`);
   });
 });

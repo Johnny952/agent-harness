@@ -21,6 +21,15 @@
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
  * `useEffect` today, and ADR 24 names moving one into a route loader as the case
  * that has to answer the base-URL question again.
+ *
+ * **A ninth is real through another forward.** `getSettings` reads
+ * `/api/settings`, which `lib/api/forward.ts` sends to the config writer rather
+ * than the api, under the writer's own token (`docs/decisions.md` ADR 112). It goes
+ * through the same `readEnvelope`, so a writer that refused, timed out or was never
+ * configured is the same `ApiError` a screen already knows how to draw (ADR 113).
+ * The mock it replaced — the Role models screen's options, map and save — is
+ * gone; the save and reset that will replace the last of those are the follow-up
+ * task's.
  */
 import type {
   Account,
@@ -31,6 +40,7 @@ import type {
   LearningEntry,
   Phase,
   QueuedAction,
+  Settings,
   Task,
   TaskDetail,
   UsageGroup,
@@ -54,9 +64,10 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  * control which fakes a failure is a fixture wearing a button — so that function
  * and its `isActionBackendDown` reader are gone, with no callers anywhere in
  * `front/src` to mourn them. Nothing flips this now, and nothing will until there
- * is a real write surface to be down. Kept because the five mock write helpers
- * below read it, and deleting it would reshape five more functions that have no
- * route either.
+ * is a real write surface to be down. Kept because five mock helpers below read
+ * it, and deleting it would reshape five more functions that have no route
+ * either. (Four of them write; the fifth is `pingActionBackend`. The role-model
+ * save that used to be a fifth writer left with its mock, ADR 113.)
  */
 const actionBackendDown = false;
 
@@ -240,6 +251,20 @@ export function listUsage(taskId: string): Promise<ApiResult<UsageGroup[] | null
   return readEnvelope<UsageGroup[] | null>(`/api/tasks/${encodeURIComponent(taskId)}/usage`);
 }
 
+/**
+ * The config writer's settings table: every key with its effective value, its
+ * source and its class, the recent console changes, and the config's own error.
+ *
+ * One read and no mapping. `data` is the writer's `GET /settings` as served
+ * (`config_writer/app.py`, ADR 110 part 6), because the screen is a view of the
+ * writer's table and the follow-up's save has to send its `revision` back
+ * byte for byte. `docs/decisions.md` ADR 112 for the path, ADR 113 part 2 for why
+ * this is `readEnvelope` and has no poll.
+ */
+export function getSettings(): Promise<ApiResult<Settings>> {
+  return readEnvelope<Settings>("/api/settings");
+}
+
 /* ── Still fixtures: tier 3, and the ones that never land ───────────────── */
 
 export async function listActions(): Promise<QueuedAction[]> {
@@ -278,21 +303,17 @@ export function commandLine(verb: string, args: string[]): string {
   return `harness ${verb} ${args.join(" ")}`.trim();
 }
 
-/* ── Sessions, tokens, approvals, role models ─────────────────────────── */
+/* ── Sessions, tokens, approvals ─────────────────────────────────────── */
 import type {
   Approval,
   BacklogItem,
   ContainerToken,
-  ModelOption,
-  RoleModelConfig,
   SessionInfo,
   SessionLogLine,
 } from "./ops-types";
 import {
-  MODEL_OPTIONS,
   initialApprovals,
   initialBacklog,
-  initialRoleModels,
   initialTokens,
   mockSessionLines,
   mockSessions,
@@ -303,8 +324,6 @@ let tokenState: ContainerToken[] | null = null;
 const tokens = () => (tokenState ??= initialTokens());
 let approvalState: Approval[] | null = null;
 const approvals = () => (approvalState ??= initialApprovals());
-let modelState: RoleModelConfig[] | null = null;
-const models = () => (modelState ??= initialRoleModels());
 
 export async function listSessions(): Promise<SessionInfo[]> {
   await latency();
@@ -379,27 +398,6 @@ export async function decideApproval(
   if (a.state !== "pending") throw new ApiError(`Approval ${id} was already ${a.state}`, 409);
   const next = { ...a, state: decision, decided_at: new Date().toISOString() };
   approvalState = approvals().map((x) => (x.id === id ? next : x));
-  return next;
-}
-
-export async function listModelOptions(): Promise<ModelOption[]> {
-  await latency();
-  return MODEL_OPTIONS;
-}
-
-export async function listRoleModels(): Promise<RoleModelConfig[]> {
-  await latency();
-  return models();
-}
-
-export async function setRoleModel(
-  role: RoleModelConfig["role"],
-  model: string,
-): Promise<RoleModelConfig> {
-  await latency();
-  if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
-  const next = { role, model, updated_at: new Date().toISOString() };
-  modelState = models().map((m) => (m.role === role ? next : m));
   return next;
 }
 
