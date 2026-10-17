@@ -301,6 +301,12 @@ Each step is a single surface:
    In Coolify its own proxy does this and Caddy is not added; the README says
    so. See `docs/decisions.md` ADR 100.
 
+   **Amended 2026-10-17** by T-063: Caddy now asks for Basic auth on every
+   request (`CONSOLE_AUTH_USER`, `CONSOLE_AUTH_HASH`) and refuses its config
+   with no hash. The console behind Coolify's proxy is still unauthenticated.
+   Step 4 of *The order across the plans* replaces this. See
+   `docs/decisions.md` ADR 103.
+
 4. The account records, the seed from `config.yaml`, the reload at each
    pick, and pause. Under an ADR, which also settles the login method of
    *Decisions*, 3.

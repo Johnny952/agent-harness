@@ -10,7 +10,11 @@ text, so formatting changes don't break the test.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -419,6 +423,8 @@ def test_caddy_gets_no_socket_and_no_state() -> None:
     assert _environment(caddy) == {
         "HARNESS_DOMAIN": "${HARNESS_DOMAIN:-http://localhost}",
         "ACME_EMAIL": "${ACME_EMAIL:-}",
+        "CONSOLE_AUTH_USER": "${CONSOLE_AUTH_USER:-console}",
+        "CONSOLE_AUTH_HASH": "${CONSOLE_AUTH_HASH}",
     }
     assert "console" in caddy["depends_on"]
     assert "ia_harness_net" in caddy["networks"]
@@ -450,6 +456,89 @@ def test_the_caddyfile_takes_its_site_from_harness_domain() -> None:
     assert "protocol https" in matcher.group(1)
     assert "not host localhost" in matcher.group(1)
     assert text.count("Strict-Transport-Security") == 1
+
+
+def test_the_caddyfile_asks_for_basic_auth_before_the_proxy() -> None:
+    """ADR 103: the console has no auth of its own, so Caddy asks on every
+    request. The hash has no fallback: with none, the account line is the user
+    alone, which `basic_auth` refuses, and Caddy will not load."""
+    text = CADDYFILE.read_text()
+    assert text.count("basic_auth") == 1
+    assert text.count("reverse_proxy") == 1
+    directive = re.search(
+        r"basic_auth\s*\{\s*\{\$CONSOLE_AUTH_USER:([^}]*)\}\s+\{\$CONSOLE_AUTH_HASH\}\s*\}",
+        text,
+    )
+    assert directive, "basic_auth takes no matcher and the hash has no default"
+
+    compose_default = re.fullmatch(
+        r"\$\{CONSOLE_AUTH_USER:-([^}]*)\}",
+        _environment(_load("docker-compose.yml")["services"]["caddy"])["CONSOLE_AUTH_USER"],
+    )
+    assert compose_default
+    assert directive.group(1) == compose_default.group(1) == "console"
+
+    site = text.index("{$HARNESS_DOMAIN:")
+    assert text.count("{$HARNESS_DOMAIN:") == 1
+    assert site < directive.start() < text.index("reverse_proxy")
+
+
+def test_only_caddy_reads_the_console_credential() -> None:
+    for compose_file in ["docker-compose.yml", *OTHER_COMPOSE_FILES]:
+        for name, service in _load(compose_file).get("services", {}).items():
+            read = _variables_read_by(service)
+            holder = compose_file == "docker-compose.yml" and name == "caddy"
+            for variable in ("CONSOLE_AUTH_USER", "CONSOLE_AUTH_HASH"):
+                assert (variable in read) == holder, f"{compose_file}: {name} {variable}"
+            if holder:
+                # Bare: compose warns on a missing hash and does not refuse.
+                assert read["CONSOLE_AUTH_HASH"] == {""}
+                assert "DASHBOARD_PASSWORD_HASH" not in read
+
+
+def test_configure_writes_the_console_credential_commented() -> None:
+    text = (CADDYFILE.parent.parent.parent / "scripts" / "configure.sh").read_text()
+    image = _load("docker-compose.yml")["services"]["caddy"]["image"]
+
+    assert "# CONSOLE_AUTH_USER=" in text
+    assert "# CONSOLE_AUTH_HASH='" in text
+    assert f"{image} caddy hash-password" in text
+    # Only commented examples: an uncommented line would write a fake hash.
+    assert not re.search(r"echo \"CONSOLE_AUTH_", text)
+
+
+def test_compose_passes_a_quoted_bcrypt_hash_through_intact(tmp_path: Path) -> None:
+    if not shutil.which("docker"):
+        pytest.skip("docker is not installed")
+    version = subprocess.run(
+        ["docker", "compose", "version"], capture_output=True, text=True
+    )
+    if version.returncode != 0:
+        pytest.skip("docker compose is not available")
+
+    bcrypt = "$2a$14$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4IjWJPDhjvG"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CONSOLE_AUTH_")}
+    compose = str(COMPOSE_DIR / "docker-compose.yml")
+
+    def render(env_text: str) -> subprocess.CompletedProcess:
+        env_file = tmp_path / "case.env"
+        env_file.write_text(env_text)
+        return subprocess.run(
+            ["docker", "compose", "-f", compose, "--env-file", str(env_file),
+             "config", "--format", "json"],
+            capture_output=True, text=True, env=env,
+        )
+
+    result = render(f"CONSOLE_AUTH_HASH='{bcrypt}'\n")
+    assert result.returncode == 0, result.stderr
+    caddy_env = json.loads(result.stdout)["services"]["caddy"]["environment"]
+    assert caddy_env["CONSOLE_AUTH_HASH"] == bcrypt
+    assert caddy_env["CONSOLE_AUTH_USER"] == "console"
+
+    # No hash: compose does not refuse; Caddy does, at its own start.
+    result = render("\n")
+    assert result.returncode == 0, result.stderr
+    assert {"api", "console"} <= set(json.loads(result.stdout)["services"])
 
 
 @pytest.mark.parametrize(

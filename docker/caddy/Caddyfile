@@ -4,6 +4,9 @@
 # ends TLS. Two variables, both from the .env file through compose:
 #   HARNESS_DOMAIN  bare host name to serve over HTTPS; unset, http://localhost
 #   ACME_EMAIL      optional ACME account email
+# Two more, for the console's Basic auth (ADR 103):
+#   CONSOLE_AUTH_USER  the user name; unset, console
+#   CONSOLE_AUTH_HASH  bcrypt from `caddy hash-password`; no fallback
 
 {
 	# Quoted so an empty ACME_EMAIL is still one argument and the directive parses.
@@ -27,6 +30,12 @@
 		not host localhost
 	}
 	header @hsts Strict-Transport-Security "max-age=31536000"
+
+	# ADR 103: every proxied request asks for this. No hash, and the account
+	# line is the user alone, which the directive below refuses: Caddy will not load.
+	basic_auth {
+		{$CONSOLE_AUTH_USER:console} {$CONSOLE_AUTH_HASH}
+	}
 
 	reverse_proxy console:8790
 }
