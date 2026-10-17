@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from dispatcher.config import AccountConfig
@@ -36,18 +37,66 @@ def _read_state(state_dir: str, account_name: str) -> dict | None:
     return json.loads(Path(path).read_text())
 
 
+#: The quota and login states. They describe the account, not a phase, so they
+#: are kept next to the holders and never drop them (`docs/decisions.md` ADR 85).
+PARKED_STATES = frozenset({
+    AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN, AccountState.AUTH_EXPIRED,
+})
+
+
+@dataclass(frozen=True)
+class Holder:
+    task_id: str | None
+    busy_since: float | None
+
+
+def _holders_of(data: dict) -> list[Holder]:
+    if "holders" in data:
+        holders = [Holder(e["task_id"], e.get("busy_since")) for e in data["holders"]]
+    elif data["state"] == AccountState.BUSY.value:
+        # The old shape: BUSY with one task is one holder.
+        holders = [Holder(None, None)]
+    else:
+        holders = []
+    if holders:
+        # The top-level pair mirrors the first holder and wins on read
+        # (ADR 85 point 3): tests and hand edits age a phase by editing
+        # `busy_since` there, and the reaper must see it.
+        holders[0] = Holder(data.get("current_task_id"), data.get("busy_since"))
+    return holders
+
+
+def _parked_of(data: dict) -> AccountState | None:
+    if "state" not in data:
+        return None
+    state = AccountState(data["state"])
+    return state if state in PARKED_STATES else None
+
+
+def _state_of(parked: AccountState | None, holders: list[Holder]) -> AccountState:
+    if parked is not None:
+        return parked
+    return AccountState.BUSY if holders else AccountState.IDLE
+
+
 def get_state(state_dir: str, account_name: str) -> AccountState:
     data = _read_state(state_dir, account_name)
     if data is None:
         return AccountState.IDLE
-    return AccountState(data["state"])
+    return _state_of(_parked_of(data), _holders_of(data))
+
+
+def get_holders(state_dir: str, account_name: str) -> list[Holder]:
+    """Every phase the account holds, in the order they claimed it."""
+    data = _read_state(state_dir, account_name)
+    if data is None:
+        return []
+    return _holders_of(data)
 
 
 def get_current_task(state_dir: str, account_name: str) -> str | None:
-    data = _read_state(state_dir, account_name)
-    if data is None:
-        return None
-    return data.get("current_task_id")
+    holders = get_holders(state_dir, account_name)
+    return holders[0].task_id if holders else None
 
 
 def _write_state(state_dir: str, account_name: str, data: dict) -> None:
@@ -85,12 +134,94 @@ def _locked(state_dir: str):
         os.close(fd)
 
 
-def claim(state_dir: str, account_name: str, task_id: str) -> bool:
-    """Take an IDLE account for `task_id`; False if someone else holds it."""
-    return set_state(
-        state_dir, account_name, AccountState.BUSY,
-        current_task_id=task_id, only_from={AccountState.IDLE},
-    )
+def _write_account(
+    state_dir: str,
+    account_name: str,
+    existing: dict,
+    parked: AccountState | None,
+    holders: list[Holder],
+    forget_rate_limit: bool = False,
+) -> None:
+    # The write replaces the whole document, so anything persisted next to the
+    # state has to be carried across by hand. `rate_limited_at` is the first
+    # such field, and it has to outlive every transition: an account is refused,
+    # parked and re-probed in three separate writes, and the refusal is only
+    # worth anything if it is still there on the third.
+    data: dict = {
+        "state": _state_of(parked, holders).value,
+        "holders": [{"task_id": h.task_id, "busy_since": h.busy_since} for h in holders],
+        "current_task_id": holders[0].task_id if holders else None,
+    }
+    # The stamp lives per holder; the top-level copy mirrors the first one for
+    # the readers of the old shape.
+    if holders:
+        data["busy_since"] = holders[0].busy_since
+    if existing.get("rate_limited_at") is not None and not forget_rate_limit:
+        data["rate_limited_at"] = existing["rate_limited_at"]
+    # `last_probe` is carried for the same reason and by the same rule: it is a
+    # fact about the account, not about the transition, and the gate writes it
+    # one line before the `set_state` that parks the account on it
+    # (`docs/decisions.md` ADR 49). Dropping it here would erase every probe
+    # that ever parked anything.
+    if existing.get("last_probe") is not None:
+        data["last_probe"] = existing["last_probe"]
+    _write_state(state_dir, account_name, data)
+
+
+def claim(state_dir: str, account_name: str, task_id: str, capacity: int = 1) -> bool:
+    """Admit `task_id` as a holder while fewer than `capacity` hold the account.
+
+    False, writing nothing, if the account is parked on a quota or login state,
+    is full, or already holds `task_id`.
+    """
+    if capacity < 1:
+        raise ValueError(f"capacity must be at least 1, not {capacity}")
+    with _locked(state_dir):
+        existing = _read_state(state_dir, account_name) or {}
+        parked = _parked_of(existing)
+        holders = _holders_of(existing) if existing else []
+        if parked is not None or len(holders) >= capacity:
+            return False
+        if any(h.task_id == task_id for h in holders):
+            return False
+        holders.append(Holder(task_id, time.time()))
+        _write_account(state_dir, account_name, existing, None, holders)
+        return True
+
+
+def release(state_dir: str, account_name: str, task_id: str) -> bool:
+    """Drop `task_id` alone; the other holders and a parked state stay."""
+    with _locked(state_dir):
+        existing = _read_state(state_dir, account_name) or {}
+        holders = _holders_of(existing) if existing else []
+        kept = [h for h in holders if h.task_id != task_id]
+        if len(kept) == len(holders):
+            return False
+        _write_account(state_dir, account_name, existing, _parked_of(existing), kept)
+        return True
+
+
+def park(state_dir: str, account_name: str, state: AccountState) -> None:
+    """Put the account in a quota or login state, keeping its holders."""
+    if state not in PARKED_STATES:
+        raise ValueError(f"{state.value} is not an account-wide state")
+    with _locked(state_dir):
+        existing = _read_state(state_dir, account_name) or {}
+        holders = _holders_of(existing) if existing else []
+        _write_account(state_dir, account_name, existing, state, holders)
+
+
+def unpark(state_dir: str, account_name: str, *, forget_rate_limit: bool = False) -> bool:
+    """Leave a quota or login state, keeping its holders; False if not parked."""
+    with _locked(state_dir):
+        existing = _read_state(state_dir, account_name) or {}
+        if _parked_of(existing) is None:
+            return False
+        _write_account(
+            state_dir, account_name, existing, None, _holders_of(existing),
+            forget_rate_limit,
+        )
+        return True
 
 
 def set_state(
@@ -105,6 +236,9 @@ def set_state(
     """Write the state; with `only_from`, only if the account is in one of them.
 
     Returns whether it wrote. The check and the write share one lock hold.
+    This is a whole-account write: it replaces every holder, and a park through
+    it drops them. Use `claim`, `release` and `park` to touch one holder
+    (`docs/decisions.md` ADR 85 point 6).
     """
     with _locked(state_dir):
         return _set_state_locked(
@@ -121,34 +255,26 @@ def _set_state_locked(
     only_from: Iterable[AccountState] | None,
     forget_rate_limit: bool,
 ) -> bool:
-    # The write replaces the whole document, so anything persisted next to the
-    # state has to be carried across by hand. `rate_limited_at` is the first
-    # such field, and it has to outlive every transition: an account is refused,
-    # parked and re-probed in three separate writes, and the refusal is only
-    # worth anything if it is still there on the third.
     existing = _read_state(state_dir, account_name) or {}
     if only_from is not None:
-        current = AccountState(existing["state"]) if "state" in existing else AccountState.IDLE
+        current = _derived_state(existing)
         if current not in set(only_from):
             return False
-    data = {"state": state.value, "current_task_id": current_task_id}
-    if existing.get("rate_limited_at") is not None and not forget_rate_limit:
-        data["rate_limited_at"] = existing["rate_limited_at"]
-    # `last_probe` is carried for the same reason and by the same rule: it is a
-    # fact about the account, not about the transition, and the gate writes it
-    # one line before the `set_state` that parks the account on it
-    # (`docs/decisions.md` ADR 49). Dropping it here would erase every probe
-    # that ever parked anything.
-    if existing.get("last_probe") is not None:
-        data["last_probe"] = existing["last_probe"]
-    # `busy_since` is the opposite case: it belongs to this transition and not
-    # to the account, so it is stamped on the way into BUSY and dropped on the
-    # way out rather than carried. Nothing re-enters BUSY without a new phase
-    # behind it, so a fresh stamp each time is the clock the reaper wants.
+    # The stamp now lives per holder: a fresh one on the way into BUSY, none
+    # otherwise, which is the clock the reaper wants.
     if state == AccountState.BUSY:
-        data["busy_since"] = time.time()
-    _write_state(state_dir, account_name, data)
+        holders = [Holder(current_task_id, time.time())]
+    else:
+        holders = []
+    parked = state if state in PARKED_STATES else None
+    _write_account(state_dir, account_name, existing, parked, holders, forget_rate_limit)
     return True
+
+
+def _derived_state(data: dict) -> AccountState:
+    if not data:
+        return AccountState.IDLE
+    return _state_of(_parked_of(data), _holders_of(data))
 
 
 def record_rate_limit(state_dir: str, account_name: str, at: float | None = None) -> None:
@@ -246,10 +372,8 @@ def get_busy_since(state_dir: str, account_name: str) -> float | None:
     a wall-clock reading would expire a phase that is legitimately long. This
     is what is left to judge an account that holds no card at all.
     """
-    data = _read_state(state_dir, account_name)
-    if data is None:
-        return None
-    return data.get("busy_since")
+    holders = get_holders(state_dir, account_name)
+    return holders[0].busy_since if holders else None
 
 
 def list_idle_accounts(state_dir: str, accounts: list[AccountConfig]) -> list[str]:

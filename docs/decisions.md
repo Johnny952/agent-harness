@@ -6101,3 +6101,75 @@ account runs two phases at once without the second throttling the first.
 six concurrent ones, one afternoon, one account). If a real implementador
 pair, running tests and builds, comes out past the threshold, that
 supersedes this ADR, and the default of 1 makes going back a config edit.
+
+## ADR 85 — an account's state file holds a list of holders, and the quota and login states are account-wide
+
+**Status:** accepted (T-057, the state machine half of B-4 of
+`docs/plans/autonomy.md`, 2026-10-17). Narrows ADR 71's point 3, the claim,
+and does not supersede it: the lock, what it covers and the order of claim
+and probe all stand.
+
+**Context.** ADR 84 says *go* for more than one phase on one account. The
+state file in `dispatcher/state_machine.py` had room for one: `state`,
+`current_task_id` and `busy_since`. `claim` took an account only from
+`IDLE`, and every write replaced the whole document, so the release a phase
+makes (`set_state(..., AccountState.IDLE)`) would drop a second phase
+running beside it. Nothing may claim with a capacity above 1 until T-058, so
+this has to land with every existing caller answered as before.
+
+**Decision.**
+
+1. *The shape.* The document keeps `state`, `rate_limited_at` and
+   `last_probe`, and gains `holders`: a list, in claim order, of
+   `{"task_id", "busy_since"}`, each holder with its own stamp. `state` is
+   always written as what `get_state` answers: the parked state if the
+   account is parked, otherwise `BUSY` with any holder and `IDLE` with none.
+   `current_task_id` and `busy_since` are still written, as the first
+   holder's (null, and no `busy_since`, with no holder).
+2. *The old shape.* A document with no `holders` key reads as one holder,
+   `current_task_id` with `busy_since`, when its `state` is `BUSY`, and as
+   none otherwise. Nothing rewrites a file just to convert it.
+3. *The first holder lives in the old keys too.* Where the list and the two
+   top-level keys disagree, the top-level keys win for the first holder.
+   They are all that a reader or a writer built for the old shape can see or
+   change — an image not yet rebuilt, or the test helper that backdates a
+   stamp by editing the file — and the first holder is the oldest claim,
+   the one `get_current_task` and `get_busy_since` answer for.
+4. *Per-holder writers.* `claim(state_dir, account, task_id, capacity=1)`
+   admits a phase while the account has fewer than `capacity` holders, is
+   not parked and does not already list that `task_id`. `release(state_dir,
+   account, task_id)` removes that one holder and leaves the others and any
+   parked state; it returns whether it removed one. `park(state_dir,
+   account, state)` parks the account and keeps its holders, and
+   `unpark(state_dir, account, *, forget_rate_limit=False)` lifts a park, if
+   there is one, and keeps them too. Each holds `_locked` (ADR 71) from its
+   read to its write. `get_holders` returns the whole list.
+5. *Account-wide states.* `PRE_COOLDOWN`, `COOLING_DOWN` and
+   `AUTH_EXPIRED` belong to the account, not to a phase. While one is set,
+   `get_state` answers it whatever the holders, and `claim` refuses. The
+   holders that were running stay listed until each is released, and lifting
+   the park leaves the account `BUSY` if any remain.
+6. *`set_state` keeps its whole-account meaning.* `IDLE` leaves no holder
+   and no park. `BUSY` leaves exactly one holder, `current_task_id` with a
+   new stamp. A parked state parks the account with no holder. `only_from`
+   is checked against `get_state`'s answer. A parked `set_state` drops the
+   holder because every caller that parks today is the process holding the
+   only holder, and it moves on without releasing it. A park that kept the
+   holder would list a phase that is not running there, and
+   `operator._held_task_ids` would read that task, which is by then live on
+   the next account, as a live lock on the parked one, so `release-account`
+   would refuse it. `park` and `unpark` are the writers that keep holders,
+   and T-058 moves the callers onto them and onto `release`.
+
+**Consequences.** Until T-058 every account holds at most one phase, and
+`dispatcher/dispatcher.py`, `dispatcher/operator.py` and
+`observability/api/app.py` get the same answers as before. At a capacity
+above 1, each `set_state` call in those files would drop the other holders,
+so T-058 has to replace all of them: the phase's releases and its two
+`except` paths, the parks in `check_quota_ok`, `_park_auth_expired` and
+after a 429, the recovery in `_recheck_cooling_accounts` (by `unpark`),
+both writes in `reap_stale_busy_accounts`, and `release-account`. A reader
+built before this ADR sees only the first holder of a file written after it.
+`record_rate_limit`, `clear_rate_limit` and `record_probe` are unchanged:
+they rewrite the document they read, so they carry the holders with
+everything else.
