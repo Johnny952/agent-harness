@@ -7,6 +7,10 @@ task file itself — status, lock, handoffs — whose writers (`acquire_lock`,
 `refresh_heartbeat`, `release_stale_lock`, `handoff`, `set_resolved_debt`,
 `file_split`, `mark_merged`, `mark_blocked`, `close_epic`) all end in
 `_write_task_file`.
+
+It also keeps the per-project base lock (`BaseLock`, ADR 80): not a board
+file but the lock under `<state_dir>/base-locks/` that serializes every
+operation on a project's checkout.
 `context_transfer` keeps
 the `TaskFile` shape, its reader and the serializer `write_task_file`, which
 nothing under `dispatcher/` but this module calls.
@@ -29,10 +33,17 @@ hand. The dispatcher calls all of them; `file_split` only through
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
+import json
 import os
 import re
+import socket
+import threading
+import time
+import uuid
 from pathlib import Path
 
 import yaml
@@ -315,6 +326,274 @@ def release_stale_lock(hive_dir: str, task_id: str) -> None:
     task.owner = None
     task.heartbeat = None
     _write_task_file(path, task)
+
+
+# --- The base lock (`docs/plans/autonomy.md` decision 6, task B-1, ADR 80) ---
+#
+# The project's checkout under `projects_root` is one resource: an update of
+# its branch, a mapping commit, a pre-merge check, a merge and a push all
+# work on it, and two of them at once — two dispatcher processes, or the
+# dispatcher and an operator's `merge-task` — can interleave a fetch with a
+# merge, or restore the wrong owner over each other's `read_owner` window.
+# The base lock serializes them, one project at a time, and is held only for
+# the one operation.
+#
+# It is crash-safe the way the task lock is: the file names its holder (host,
+# pid and a token of its own per acquisition), a heartbeat thread keeps it
+# fresh, and a lock whose heartbeat is older than the TTL is broken — but only
+# after the holder is checked. A holder on this host whose pid is still alive
+# is never broken, however old its heartbeat: a process stuck in a long merge
+# is not a dead one. Unlike the task lock, every read-check-write takes a
+# short `flock` on a guard file next to the lock, so two acquirers can never
+# both see the lock free.
+
+
+class BaseLockHeldError(RuntimeError):
+    """Raised when a project's base lock is held by a live holder."""
+
+    def __init__(
+        self,
+        slug: str,
+        holder: dict,
+        operation: str,
+        waited_seconds: float | None = None,
+    ) -> None:
+        self.slug = slug
+        self.holder = holder
+        self.operation = operation
+        self.waited_seconds = waited_seconds
+        held_by = holder.get("owner") or "an unknown holder"
+        held_for = holder.get("operation") or "an unknown operation"
+        since = holder.get("acquired") or "an unknown time"
+        waited = f" after waiting {waited_seconds:.0f}s" if waited_seconds else ""
+        super().__init__(
+            f"project {slug!r}: the base is locked by {held_by} "
+            f"({held_for}, since {since}); {operation} was refused{waited}"
+        )
+
+
+def base_lock_path(state_dir: str, slug: str) -> str:
+    """Where a project's base lock lives: `<state_dir>/base-locks/<slug>.lock`."""
+    if not context_transfer._is_single_path_component(slug):
+        raise ValueError(f"project slug {slug!r} is not a single path component")
+    return os.path.join(state_dir, "base-locks", f"{slug}.lock")
+
+
+def new_base_lock_owner() -> str:
+    """A holder identity unique to one acquisition: `<host>:<pid>:<token>`."""
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+@contextlib.contextmanager
+def _base_lock_guard(path: str):
+    """Hold an exclusive `flock` on the lock's guard file for one read-check-write."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(f"{path}.guard", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _read_base_lock(path: str) -> dict | None:
+    """The lock's record, None when there is none; a corrupt file reads as `{}`."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    except FileNotFoundError:
+        return None
+    try:
+        record = json.loads(content)
+    except ValueError:
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists, under another user.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def base_lock_is_live(
+    record: dict, ttl_seconds: int, now: dt.datetime | None = None
+) -> bool:
+    """Is this lock's holder still there? A live holder is never broken.
+
+    A heartbeat no older than the TTL is live. A stale or missing one is
+    still live when the holder is on this host and its pid is alive: the
+    holder is checked, not presumed dead. A holder on another host with a
+    stale heartbeat cannot be checked and counts as dead, as the task lock's
+    does. A corrupt record is stale.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    heartbeat = record.get("heartbeat")
+    if isinstance(heartbeat, str):
+        try:
+            beat = dt.datetime.fromisoformat(heartbeat)
+        except ValueError:
+            beat = None
+        if beat is not None and (now - beat).total_seconds() <= ttl_seconds:
+            return True
+    pid = record.get("pid")
+    if record.get("host") == socket.gethostname() and isinstance(pid, int) and pid > 0:
+        return _pid_alive(pid)
+    return False
+
+
+def acquire_base_lock(
+    state_dir: str,
+    slug: str,
+    owner: str,
+    operation: str,
+    ttl_seconds: int,
+    now: dt.datetime | None = None,
+) -> dict:
+    """Take a project's base lock now, or raise `BaseLockHeldError`.
+
+    A lock already held by `owner` is taken again (its heartbeat refreshed);
+    one held by a live foreign holder raises; one whose holder is gone is
+    broken and taken.
+    """
+    path = base_lock_path(state_dir, slug)
+    stamp = (now or dt.datetime.now(dt.timezone.utc)).isoformat()
+    with _base_lock_guard(path):
+        record = _read_base_lock(path)
+        if (
+            record is not None
+            and record.get("owner") != owner
+            and base_lock_is_live(record, ttl_seconds, now)
+        ):
+            raise BaseLockHeldError(slug, record, operation)
+        mine = {
+            "owner": owner,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "operation": operation,
+            "acquired": stamp,
+            "heartbeat": stamp,
+        }
+        context_transfer._write_atomic(path, json.dumps(mine, indent=2) + "\n")
+    return mine
+
+
+def refresh_base_heartbeat(state_dir: str, slug: str, owner: str) -> bool:
+    """Refresh the heartbeat of a lock `owner` holds; False when it is not theirs."""
+    path = base_lock_path(state_dir, slug)
+    with _base_lock_guard(path):
+        record = _read_base_lock(path)
+        if not record or record.get("owner") != owner:
+            return False
+        record["heartbeat"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        context_transfer._write_atomic(path, json.dumps(record, indent=2) + "\n")
+    return True
+
+
+def release_base_lock(state_dir: str, slug: str, owner: str) -> bool:
+    """Remove the lock if `owner` holds it; a lock someone else took is left."""
+    path = base_lock_path(state_dir, slug)
+    with _base_lock_guard(path):
+        record = _read_base_lock(path)
+        if not record or record.get("owner") != owner:
+            return False
+        os.remove(path)
+    return True
+
+
+class BaseLock:
+    """A project's base lock held for one operation, as a context manager.
+
+    `acquire` waits up to `wait_seconds` for a live holder to let go, then
+    raises `BaseLockHeldError`; `with` acquires (unless `acquire` was called
+    already, so a caller can handle the refusal before entering) and always
+    releases. While held, a daemon thread refreshes the heartbeat every
+    `heartbeat_interval_seconds`. The lock is not reentrant: an operation that
+    runs inside another's window (the push inside a merge) takes no lock of
+    its own.
+    """
+
+    def __init__(
+        self,
+        state_dir: str,
+        slug: str,
+        operation: str,
+        *,
+        ttl_seconds: int,
+        heartbeat_interval_seconds: float,
+        wait_seconds: float = 0,
+        poll_seconds: float = 2,
+    ) -> None:
+        self.state_dir = state_dir
+        self.slug = slug
+        self.operation = operation
+        self.ttl_seconds = ttl_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.wait_seconds = wait_seconds
+        self.poll_seconds = poll_seconds
+        self.owner = new_base_lock_owner()
+        self.held = False
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def acquire(self) -> "BaseLock":
+        start = time.monotonic()
+        while True:
+            try:
+                acquire_base_lock(
+                    self.state_dir, self.slug, self.owner, self.operation, self.ttl_seconds
+                )
+                break
+            except BaseLockHeldError as exc:
+                waited = time.monotonic() - start
+                if waited >= self.wait_seconds:
+                    raise BaseLockHeldError(
+                        self.slug, exc.holder, self.operation, waited
+                    ) from None
+                time.sleep(max(0.0, min(self.poll_seconds, self.wait_seconds - waited)))
+        self.held = True
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._beat, name=f"base-lock-{self.slug}", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def _beat(self) -> None:
+        while not self._stop.wait(self.heartbeat_interval_seconds):
+            try:
+                refresh_base_heartbeat(self.state_dir, self.slug, self.owner)
+            except Exception:  # noqa: BLE001 — a missed beat is retried on the next one
+                pass
+
+    def release(self) -> None:
+        """Let go of the lock. Idempotent, and never raises."""
+        if not self.held:
+            return
+        self.held = False
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        try:
+            release_base_lock(self.state_dir, self.slug, self.owner)
+        except Exception:  # noqa: BLE001 — a lock left behind goes stale and is broken
+            pass
+
+    def __enter__(self) -> "BaseLock":
+        if not self.held:
+            self.acquire()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
 
 
 def handoff(

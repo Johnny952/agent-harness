@@ -22,6 +22,7 @@ from dispatcher import queue as queue_mod
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     CycleOutcome,
+    _base_lock,
     cleanup_container,
     container_for,
     file_saved_split,
@@ -654,40 +655,48 @@ def main() -> None:
         container = cleanup_container(cfg)
         if container is None:
             parser.error("no accounts configured: nothing to run the merge in")
-        project_dir = f"{cfg.projects_root}/{args.project}"
-        owner = docker_exec.read_owner(container, project_dir)
-        left = left_behind_report(cfg, args.task_id)
-        for line in left:
-            print(line, file=sys.stderr)
-        if left:
-            print(
-                f"task {args.task_id}: merging anyway; those edits are not on the branch "
-                "and stay out of it",
-                file=sys.stderr,
-            )
+        # The merge, its pre-merge check and its push are one base operation,
+        # the same lock the dispatcher takes (ADR 80): a refusal is exit 1.
         try:
-            # The same check the automatic merge runs: the base merged into
-            # the branch and gated first (`docs/plans/autonomy.md` A-2). A
-            # stop is exit 1, like a refused merge: the branch did not land.
-            verdict = pre_merge_check(cfg, container, args.task_id, args.project)
-            if not verdict.passed:
-                print(verdict.detail, file=sys.stderr)
-                raise SystemExit(1)
-            print(verdict.detail)
-            outcome = docker_exec.merge_task_branch(
-                container, cfg.projects_root, args.project, args.task_id
-            )
-            # Only when the branch is in the base: a merge that landed now, or
-            # one already there, so a re-run after a refused push pushes
-            # again without merging twice (ADR 78).
-            push = (
-                push_base(cfg, container, args.project)
-                if args.push and not outcome.refused
-                else None
-            )
-        finally:
-            # git writes to .git/ as root here too — same restore as everywhere.
-            docker_exec.restore_owner(container, project_dir, owner)
+            base = _base_lock(cfg, args.project, "merge-task").acquire()
+        except tasks.BaseLockHeldError as exc:
+            print(f"task {args.task_id}: not merged: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        with base:
+            project_dir = f"{cfg.projects_root}/{args.project}"
+            owner = docker_exec.read_owner(container, project_dir)
+            left = left_behind_report(cfg, args.task_id)
+            for line in left:
+                print(line, file=sys.stderr)
+            if left:
+                print(
+                    f"task {args.task_id}: merging anyway; those edits are not on the branch "
+                    "and stay out of it",
+                    file=sys.stderr,
+                )
+            try:
+                # The same check the automatic merge runs: the base merged into
+                # the branch and gated first (`docs/plans/autonomy.md` A-2). A
+                # stop is exit 1, like a refused merge: the branch did not land.
+                verdict = pre_merge_check(cfg, container, args.task_id, args.project)
+                if not verdict.passed:
+                    print(verdict.detail, file=sys.stderr)
+                    raise SystemExit(1)
+                print(verdict.detail)
+                outcome = docker_exec.merge_task_branch(
+                    container, cfg.projects_root, args.project, args.task_id
+                )
+                # Only when the branch is in the base: a merge that landed now, or
+                # one already there, so a re-run after a refused push pushes
+                # again without merging twice (ADR 78).
+                push = (
+                    push_base(cfg, container, args.project)
+                    if args.push and not outcome.refused
+                    else None
+                )
+            finally:
+                # git writes to .git/ as root here too — same restore as everywhere.
+                docker_exec.restore_owner(container, project_dir, owner)
         if outcome.refused:
             # Exit non-zero so a script that chains this can tell the refusal
             # from the merge, which the wording alone would not give it.

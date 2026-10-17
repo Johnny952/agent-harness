@@ -7631,3 +7631,222 @@ def test_merge_on_done_merges_and_never_pushes(tmp_path, monkeypatch, fake_git) 
 
     assert fake_git.merges == [("agent-cuenta1", cfg.projects_root, "myproj", "task-1")]
     assert getattr(fake_git, "pushes", []) == []
+
+
+# --- the base lock around every base operation (B-1, ADR 80) -----------------
+
+
+def _base_lock_record(cfg, slug="myproj"):
+    """The project's base lock as it stands, None when nobody holds it."""
+    path = dispatcher_mod.tasks.base_lock_path(cfg.state_dir, slug)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _hold_the_base(cfg, slug="myproj"):
+    """Another live holder takes the project's base lock, and nobody waits."""
+    dispatcher_mod.tasks.acquire_base_lock(
+        cfg.state_dir, slug, "elsewhere:1:feedface", "merge", ttl_seconds=cfg.heartbeat_ttl_seconds,
+    )
+
+
+def _recording_under_the_lock(cfg, seen, name, real):
+    """Wrap `real` so each call records the base lock held while it ran."""
+
+    def wrapped(*args, **kwargs):
+        seen.append((name, _base_lock_record(cfg)))
+        return real(*args, **kwargs)
+
+    return wrapped
+
+
+def test_update_project_branch_holds_the_base_lock_for_the_update(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    seen = []
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "update_project_branch",
+        _recording_under_the_lock(
+            cfg, seen, "update", lambda *a, **kw: _update_outcome(dispatcher_mod.docker_exec.UNCHANGED),
+        ),
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "read_owner",
+        _recording_under_the_lock(cfg, seen, "read_owner", fake_git.read_owner),
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "restore_owner",
+        _recording_under_the_lock(cfg, seen, "restore_owner", fake_git.restore_owner),
+    )
+
+    dispatcher_mod.update_project_branch(cfg, "myproj")
+
+    # The owner is read and restored inside the same window as the update.
+    assert [name for name, _ in seen] == ["read_owner", "update", "restore_owner"]
+    assert all(record is not None and record["operation"] == "update" for _, record in seen)
+    assert len({record["owner"] for _, record in seen}) == 1
+    assert _base_lock_record(cfg) is None
+
+
+def test_update_project_branch_lets_go_of_the_lock_when_the_update_raises(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("docker exec died")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", boom)
+
+    with pytest.raises(RuntimeError):
+        dispatcher_mod.update_project_branch(cfg, "myproj")
+
+    assert _base_lock_record(cfg) is None
+
+
+def test_run_task_cycle_blocks_when_the_base_is_locked(tmp_path, monkeypatch, caplog) -> None:
+    """A task cut from a base another operation is moving starts on ground
+    nobody can name; refused after the wait, it stops before any phase runs."""
+    cfg = _make_config(tmp_path, update_project_before_task=True)
+    monkeypatch.setattr(dispatcher_mod, "BASE_LOCK_WAIT_SECONDS", 0)
+    _hold_the_base(cfg)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the update ran under another holder's lock")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "update_project_branch", never)
+    roles = []
+
+    def fake_dispatch_phase(*args, **kwargs):
+        roles.append(kwargs.get("role") or args[3])
+        return _approving_dispatch_phase(*args, **kwargs)
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    with caplog.at_level("WARNING"):
+        outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert roles == []
+    assert "the base is locked by elsewhere:1:feedface" in caplog.text
+    # The other holder's lock is left as it was.
+    assert _base_lock_record(cfg)["owner"] == "elsewhere:1:feedface"
+
+
+def test_dispatch_phase_holds_the_base_lock_for_the_mapping_commit(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="mapped", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "commit_worktree",
+        _recording_under_the_lock(cfg, seen, "commit", fake_git.commit_worktree),
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", project_docs.MAPPER_ROLE, "map it")
+
+    assert [name for name, _ in seen] == ["commit"]
+    assert seen[0][1]["operation"] == "mapping commit"
+    assert _base_lock_record(cfg) is None
+
+
+def test_dispatch_phase_takes_no_base_lock_for_a_task_branch_commit(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The writing phases commit on the task's own branch, not the base."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "commit_worktree",
+        _recording_under_the_lock(cfg, seen, "commit", fake_git.commit_worktree),
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert seen == [("commit", None)]
+
+
+def test_the_automatic_merge_holds_the_base_lock_from_the_check_to_the_merge(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """The pre-merge verdict is about the base as it stood; let it move before
+    the merge and the verdict is about a base that is gone."""
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    seen = []
+    for name in ("read_owner", "premerge_base", "merge_task_branch", "restore_owner"):
+        monkeypatch.setattr(
+            dispatcher_mod.docker_exec, name,
+            _recording_under_the_lock(cfg, seen, name, getattr(fake_git, name)),
+        )
+
+    assert dispatcher_mod._merge_task_branch(cfg, "task-1", "myproj") is True
+
+    assert [name for name, _ in seen] == ["read_owner", "premerge_base", "merge_task_branch", "restore_owner"]
+    assert all(record is not None and record["operation"] == "merge" for _, record in seen)
+    assert len({record["owner"] for _, record in seen}) == 1
+    assert _base_lock_record(cfg) is None
+
+
+def test_the_automatic_merge_is_refused_while_the_base_is_locked(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    cfg = _make_config(tmp_path, merge_on_done=True)
+    monkeypatch.setattr(dispatcher_mod, "BASE_LOCK_WAIT_SECONDS", 0)
+    _hold_the_base(cfg)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        assert dispatcher_mod._merge_task_branch(cfg, "task-1", "myproj") is False
+
+    assert fake_git.merges == []
+    assert fake_git.restored == []
+    assert "not merged" in caplog.text and "the base is locked" in caplog.text
+
+
+def test_auto_approve_holds_one_base_lock_for_the_check_the_merge_and_the_push(
+    tmp_path, monkeypatch, aa_git,
+) -> None:
+    cfg = _aa_config(tmp_path)
+    seen = []
+    for name in ("premerge_base", "merge_task_branch", "push_base"):
+        monkeypatch.setattr(
+            dispatcher_mod.docker_exec, name,
+            _recording_under_the_lock(cfg, seen, name, getattr(aa_git, name)),
+        )
+
+    _aa_run(cfg, monkeypatch)
+
+    assert [name for name, _ in seen] == ["premerge_base", "merge_task_branch", "push_base"]
+    assert all(record is not None and record["operation"] == "merge" for _, record in seen)
+    # One window, not three: nothing can move the base between them.
+    assert len({record["owner"] for _, record in seen}) == 1
+    assert _base_lock_record(cfg) is None
+
+
+def test_auto_approve_is_refused_while_the_base_is_locked(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "BASE_LOCK_WAIT_SECONDS", 0)
+    _hold_the_base(cfg)
+
+    outcome = _aa_run(cfg, monkeypatch)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert aa_git.merges == []
+    assert getattr(aa_git, "pushes", []) == []
+    task = _task(cfg)
+    assert task.merged is None
+    assert dispatcher_mod.auto_approve.HEADING in task.body
+    assert "- `pre-merge`:" in task.body
+    assert "the base is locked by elsewhere:1:feedface" in task.body

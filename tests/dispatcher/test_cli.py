@@ -1,5 +1,6 @@
 import datetime as dt
 import io
+import json
 import logging
 import sys
 from pathlib import Path
@@ -25,7 +26,7 @@ heartbeat_ttl_seconds: 120
 heartbeat_interval_seconds: 30
 projects_root: /data/projects
 hive_tasks_dir: {hive_tasks_dir}
-state_dir: /data/dispatcher_state
+state_dir: {state_dir}
 collector_url: http://127.0.0.1:8787
 """
 
@@ -51,7 +52,9 @@ def _write_config(tmp_path: Path) -> Path:
     """A config whose hive_tasks_dir is a real directory: run-task reads it
     to decide whether the task already carries a description."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(CONFIG_YAML.format(hive_tasks_dir=str(tmp_path / "hive")))
+    config_path.write_text(CONFIG_YAML.format(
+        hive_tasks_dir=str(tmp_path / "hive"), state_dir=str(tmp_path / "state")
+    ))
     return config_path
 
 
@@ -1513,3 +1516,64 @@ def test_cli_merge_task_push_does_not_push_a_refused_merge(
 
     assert excinfo.value.code == 1
     assert pushes == []
+
+
+# --- merge-task under the base lock (B-1, ADR 80) ---
+
+
+def _cli_base_lock(tmp_path: Path):
+    """merge-task's base lock as it stands, None when nobody holds it."""
+    path = Path(tasks.base_lock_path(str(tmp_path / "state"), "myproj"))
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def test_cli_merge_task_holds_the_base_lock_for_the_merge(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """The same lock the dispatcher's own merges and updates take, so an
+    operator's merge never interleaves with one of theirs."""
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    seen = []
+
+    def merge(container, projects_root, slug, task_id):
+        seen.append(_cli_base_lock(tmp_path))
+        return MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main")
+
+    monkeypatch.setattr(cli_mod.docker_exec, "merge_task_branch", merge)
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    assert len(seen) == 1 and seen[0]["operation"] == "merge-task"
+    assert _cli_base_lock(tmp_path) is None
+
+
+def test_cli_merge_task_is_refused_while_the_base_is_locked(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+    monkeypatch.setattr(dispatcher_mod, "BASE_LOCK_WAIT_SECONDS", 0)
+    tasks.acquire_base_lock(
+        str(tmp_path / "state"), "myproj", "elsewhere:1:feedface", "merge", ttl_seconds=120,
+    )
+
+    def never(*args, **kwargs):
+        raise AssertionError("merged under another holder's lock")
+
+    monkeypatch.setattr(cli_mod.docker_exec, "merge_task_branch", never)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(
+            monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "task task-1: not merged" in err
+    assert "the base is locked by elsewhere:1:feedface" in err
+    assert _cli_base_lock(tmp_path)["owner"] == "elsewhere:1:feedface"

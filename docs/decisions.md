@@ -5787,3 +5787,69 @@ auto-approve, a queue of dependent tasks runs only the first of each chain
 and then waits for a person. Waiting for quota calls the cooling-account
 recheck, which runs a `/usage` probe and spends nothing. Parallel cycles
 (B-3) will need the spend read per cycle rather than from one offset.
+
+## ADR 80 — a project's base is locked for each operation on it; a held lock is waited on, bounded, then refused
+
+**Status:** accepted (B-1 of `docs/plans/autonomy.md`, 2026-10-17). The base
+lock only; B-3's surface lock and the scheduler that runs tasks in parallel
+are not built here.
+
+**Context.** Several operations move a project's base checkout: the
+dispatcher's update before a task (`update_project_branch`), the automatic
+merge (`_merge_task_branch`), the automatic approve with its pre-merge check,
+merge and push (`_auto_approve_and_merge`, ADR 77 and 78), the mapper's
+commit, and an operator's `merge-task`. Each one brackets its git calls with
+`read_owner`/`restore_owner`. With one task at a time and nobody at the CLI
+they never met. Two cycles in parallel, or an operator's merge while a cycle
+updates, can interleave on one checkout, and two owner windows can cross so
+that one restores ownership while the other's git is still writing. The task
+lock (`acquire_lock`) is per task and does not cover this.
+
+**Decision.**
+
+1. *The lock.* One file per project, `<state_dir>/base-locks/<slug>.lock`,
+   a JSON record of `owner` (`host:pid:uuid8`, new for each acquisition),
+   `host`, `pid`, `operation`, `acquired` and `heartbeat`. Each read-check-write
+   on it runs under a short `fcntl.flock` on `<path>.guard`, and each write is
+   atomic (`context_transfer._write_atomic`), so two contenders never both
+   believe they took it. Only the owner that holds it can release it or
+   refresh it.
+2. *Liveness.* The holder refreshes the heartbeat from a daemon thread every
+   `heartbeat_interval_seconds`. A heartbeat within `heartbeat_ttl_seconds`
+   is live. Past the TTL, a holder on this host whose pid is still alive is
+   still live (a hung git is not a dead holder), and the lock is not broken.
+   A stale holder on another host, a dead local pid, or a corrupt record is
+   dead, and the lock is broken and taken. A live holder is never broken.
+3. *When the lock is held.* The caller waits, polling every 2 seconds, for
+   up to `BASE_LOCK_WAIT_SECONDS` (300). That is longer than the default
+   TTL, so a crashed holder is reaped within the wait. After that the
+   operation is refused with `BaseLockHeldError`, which names the holder,
+   its operation and since when. Every base operation is short, so a wait
+   longer than this means something is wrong, and the dispatcher reports it
+   rather than queueing behind it without end. What each caller does with
+   a refusal:
+   - the cycle's update ends the cycle BLOCKED before any phase runs;
+   - `merge_on_done` does not merge, and a warning says why;
+   - an automatic approve records a refused `pre-merge` condition in its
+     `## automatic approve` comment, and the task stays `done`, not merged;
+   - `merge-task` prints `not merged` and the reason, and exits 1.
+4. *The window.* The lock is taken before `read_owner` and released after
+   `restore_owner`, so owner windows never cross. It is held for that one
+   operation and no longer. In an automatic approve the pre-merge check, the
+   merge and the push are one locked operation: the check's verdict is about
+   the base as it stands when the merge lands. `push_base` therefore takes no
+   lock of its own, and it runs inside the merge's window. The lock is not
+   reentrant, and no base operation calls another while holding it.
+5. *What is locked.* The mapper's commit is locked, because it commits what
+   becomes the project's mapping docs. The writing phases' commits go to the
+   task's own branch, and they take no lock.
+
+**Consequences.** Base operations on one project are serialized across the
+dispatcher's threads and processes and the CLI on the same `state_dir`. The
+cost is a wait of up to five minutes, and on a timeout a refused operation
+that a person or the next cycle has to retry; nothing is retried
+automatically. A holder that hangs while alive on this host is never broken,
+so a stuck git holds the base until someone kills it, by design: breaking a
+live holder is how two writers end up on one checkout. The lock assumes one
+`state_dir` shared by everyone who moves the base; a second host with its own
+`state_dir` is not covered.

@@ -1,6 +1,7 @@
 # dispatcher/dispatcher.py
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 import enum
@@ -1632,14 +1633,19 @@ def dispatch_phase(
                     cfg, container, workdir, role, result, model, effort, recorder,
                 )
             if _should_commit(role, result):
-                docker_exec.commit_worktree(
-                    container, workdir,
-                    message=_commit_message(role, task_id, account, result.session_id, round_num),
-                    author_name=f"{role} ({account})",
-                    author_email=f"{role}@ia-harness.invalid",
-                    paths=project_docs.commit_scope(role),
-                    excludes=project_docs.commit_excludes(),
-                )
+                # The mapping commit is a base operation (ADR 80).
+                with (
+                    _base_lock(cfg, slug, "mapping commit")
+                    if role == project_docs.MAPPER_ROLE else contextlib.nullcontext()
+                ):
+                    docker_exec.commit_worktree(
+                        container, workdir,
+                        message=_commit_message(role, task_id, account, result.session_id, round_num),
+                        author_name=f"{role} ({account})",
+                        author_email=f"{role}@ia-harness.invalid",
+                        paths=project_docs.commit_scope(role),
+                        excludes=project_docs.commit_excludes(),
+                    )
                 _record_left_behind(cfg, container, workdir, task_id, role, round_num)
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives
@@ -1761,6 +1767,29 @@ def cleanup_container(cfg: Config) -> str | None:
     return cfg.accounts[0].container if cfg.accounts else None
 
 
+# How long a base operation waits for another holder of the project's base lock
+# before it is refused (ADR 80). Longer than the default heartbeat TTL, so a
+# holder that crashed is reaped within the wait rather than refusing the work.
+BASE_LOCK_WAIT_SECONDS = 300
+
+
+def _base_lock(cfg: Config, slug: str, operation: str) -> tasks.BaseLock:
+    """The project's base lock for one operation on its checkout (ADR 80).
+
+    Taken before the operation's read_owner and released after its
+    restore_owner, so two operations never interleave on the base nor restore
+    an owner the other one read while the tree was root's.
+    """
+    return tasks.BaseLock(
+        cfg.state_dir,
+        slug,
+        operation,
+        ttl_seconds=cfg.heartbeat_ttl_seconds,
+        heartbeat_interval_seconds=cfg.heartbeat_interval_seconds,
+        wait_seconds=BASE_LOCK_WAIT_SECONDS,
+    )
+
+
 def update_project_branch(cfg: Config, slug: str) -> docker_exec.UpdateOutcome | None:
     """Bring a project's checkout up to date with its remote, once, per task.
 
@@ -1781,17 +1810,18 @@ def update_project_branch(cfg: Config, slug: str) -> docker_exec.UpdateOutcome |
     if container is None:
         return None
     project_dir = f"{cfg.projects_root}/{slug}"
-    owner = docker_exec.read_owner(container, project_dir)
-    try:
-        return docker_exec.update_project_branch(
-            container,
-            cfg.projects_root,
-            slug,
-            credentials_path=cfg.git_credentials_path,
-            keys_dir=cfg.project_keys_dir,
-        )
-    finally:
-        docker_exec.restore_owner(container, project_dir, owner)
+    with _base_lock(cfg, slug, "update"):
+        owner = docker_exec.read_owner(container, project_dir)
+        try:
+            return docker_exec.update_project_branch(
+                container,
+                cfg.projects_root,
+                slug,
+                credentials_path=cfg.git_credentials_path,
+                keys_dir=cfg.project_keys_dir,
+            )
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
 
 
 def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
@@ -2031,22 +2061,28 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     container = cleanup_container(cfg)
     if container is None:
         return False
-    project_dir = f"{cfg.projects_root}/{slug}"
-    owner = docker_exec.read_owner(container, project_dir)
-    for line in left_behind_report(cfg, task_id):
-        logger.warning("%s", line)
     try:
-        verdict = pre_merge_check(cfg, container, task_id, slug)
-        if not verdict.passed:
-            logger.warning("task %s: not merged: %s", task_id, verdict.detail)
-            return False
-        logger.info("%s", verdict.detail)
-        outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
-    except Exception as exc:
-        logger.warning("could not merge task %s: %s", task_id, exc)
+        base = _base_lock(cfg, slug, "merge").acquire()
+    except tasks.BaseLockHeldError as exc:
+        logger.warning("task %s: not merged: %s", task_id, exc)
         return False
-    finally:
-        docker_exec.restore_owner(container, project_dir, owner)
+    with base:
+        project_dir = f"{cfg.projects_root}/{slug}"
+        owner = docker_exec.read_owner(container, project_dir)
+        for line in left_behind_report(cfg, task_id):
+            logger.warning("%s", line)
+        try:
+            verdict = pre_merge_check(cfg, container, task_id, slug)
+            if not verdict.passed:
+                logger.warning("task %s: not merged: %s", task_id, verdict.detail)
+                return False
+            logger.info("%s", verdict.detail)
+            outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
+        except Exception as exc:
+            logger.warning("could not merge task %s: %s", task_id, exc)
+            return False
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
     if outcome.refused:
         logger.warning("task %s: not merged: %s", task_id, outcome.detail)
         return False
@@ -2177,43 +2213,58 @@ def _auto_approve_and_merge(
         _record_auto_approve(cfg, task_id, auto_approve.refusal_note(decision))
         return ApproveResult(False)
 
-    project_dir = f"{cfg.projects_root}/{slug}"
-    owner = docker_exec.read_owner(container, project_dir)
-    for line in left_behind_report(cfg, task_id):
-        logger.warning("%s", line)
-    outcome = None
-    merge_commit = None
-    merge_problem = None
-    push = None
+    # One base operation from the pre-merge check to the push (ADR 80): a
+    # verdict on a base that moves before the merge is a verdict on nothing.
     try:
-        try:
-            verdict = pre_merge_check(cfg, container, task_id, slug)
-        except Exception as exc:
-            verdict = PreMergeVerdict(False, f"task {task_id}: the pre-merge check could not run: {exc}")
-        try:
-            changed = docker_exec.branch_changed_paths(
-                container, cfg.projects_root, slug, task_id
-            )
-        except Exception as exc:
-            logger.warning("task %s: could not read the changed paths: %s", task_id, exc)
-            changed = None
+        base = _base_lock(cfg, slug, "merge").acquire()
+    except tasks.BaseLockHeldError as exc:
         decision = auto_approve.decide(auto_approve.Inputs(
             **inputs,
-            pre_merge_passed=verdict.passed,
-            pre_merge_detail=verdict.detail,
-            changed_paths=tuple(changed) if changed is not None else None,
+            pre_merge_passed=False,
+            pre_merge_detail=str(exc),
+            changed_paths=None,
         ))
-        if decision.approved:
+        logger.warning("task %s: not merged: %s", task_id, exc)
+        _record_auto_approve(cfg, task_id, auto_approve.refusal_note(decision))
+        return ApproveResult(False)
+    with base:
+        project_dir = f"{cfg.projects_root}/{slug}"
+        owner = docker_exec.read_owner(container, project_dir)
+        for line in left_behind_report(cfg, task_id):
+            logger.warning("%s", line)
+        outcome = None
+        merge_commit = None
+        merge_problem = None
+        push = None
+        try:
             try:
-                outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
-                if not outcome.refused:
-                    merge_commit = docker_exec.head_commit(container, project_dir)
+                verdict = pre_merge_check(cfg, container, task_id, slug)
             except Exception as exc:
-                merge_problem = f"the merge could not run: {exc}"
-            if merge_problem is None and not outcome.refused:
-                push = push_base(cfg, container, slug)
-    finally:
-        docker_exec.restore_owner(container, project_dir, owner)
+                verdict = PreMergeVerdict(False, f"task {task_id}: the pre-merge check could not run: {exc}")
+            try:
+                changed = docker_exec.branch_changed_paths(
+                    container, cfg.projects_root, slug, task_id
+                )
+            except Exception as exc:
+                logger.warning("task %s: could not read the changed paths: %s", task_id, exc)
+                changed = None
+            decision = auto_approve.decide(auto_approve.Inputs(
+                **inputs,
+                pre_merge_passed=verdict.passed,
+                pre_merge_detail=verdict.detail,
+                changed_paths=tuple(changed) if changed is not None else None,
+            ))
+            if decision.approved:
+                try:
+                    outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
+                    if not outcome.refused:
+                        merge_commit = docker_exec.head_commit(container, project_dir)
+                except Exception as exc:
+                    merge_problem = f"the merge could not run: {exc}"
+                if merge_problem is None and not outcome.refused:
+                    push = push_base(cfg, container, slug)
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
 
     if not decision.approved:
         logger.warning(
@@ -2851,7 +2902,13 @@ def run_task_cycle(
     completed = False
 
     try:
-        update = update_project_branch(cfg, slug)
+        try:
+            update = update_project_branch(cfg, slug)
+        except tasks.BaseLockHeldError as exc:
+            # Another operation held the base past the wait (ADR 80): the
+            # task has not started, so it stops before anything is cut.
+            logger.warning("task %s: %s", task_id, exc)
+            return CycleOutcome.BLOCKED
         if update is not None:
             if update.blocking:
                 # Before any worktree exists, so nothing has been cut from the

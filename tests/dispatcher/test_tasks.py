@@ -1,7 +1,11 @@
 import ast
 import datetime as dt
+import json
 import os
+import socket
 import stat
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1097,3 +1101,190 @@ def test_epic_problems_reports_every_problem_at_once(tmp_path: Path) -> None:
         "epic task-1 does not name task-1-S2 in its split_into",
         "epic task-1: an epic has 2 to 4 sub-tasks, this one has 1",
     ]
+
+
+# --- the base lock (docs/plans/autonomy.md B-1, ADR 80) ----------------------
+
+def _base_record(state_dir, slug="myproj"):
+    path = Path(tasks.base_lock_path(str(state_dir), slug))
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _plant_base_lock(state_dir, *, owner="elsewhere:1:abcd", host=None, pid=None,
+                     age_seconds=0.0, slug="myproj"):
+    """A lock file some other holder left, its heartbeat `age_seconds` old."""
+    path = Path(tasks.base_lock_path(str(state_dir), slug))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    beat = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age_seconds)).isoformat()
+    path.write_text(json.dumps({
+        "owner": owner, "host": host or "another-host", "pid": pid or 1,
+        "operation": "merge", "acquired": beat, "heartbeat": beat,
+    }))
+    return path
+
+
+def _dead_pid() -> int:
+    """A pid nothing on this host is using."""
+    pid = 4_000_000
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return pid
+        except PermissionError:
+            pass
+        pid += 1
+
+
+def test_the_base_lock_path_is_one_file_per_project(tmp_path) -> None:
+    assert tasks.base_lock_path(str(tmp_path), "myproj") == str(tmp_path / "base-locks" / "myproj.lock")
+    with pytest.raises(ValueError):
+        tasks.base_lock_path(str(tmp_path), "../escape")
+
+
+def test_two_holders_contend_and_the_second_is_refused(tmp_path) -> None:
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-a", "merge", ttl_seconds=120)
+
+    with pytest.raises(tasks.BaseLockHeldError) as excinfo:
+        tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "update", ttl_seconds=120)
+
+    # The refusal names the project, who holds it, for what, and what was refused.
+    message = str(excinfo.value)
+    assert "myproj" in message and "holder-a" in message
+    assert "(merge," in message and "update was refused" in message
+    assert _base_record(tmp_path)["owner"] == "holder-a"
+
+
+def test_the_base_lock_is_per_project(tmp_path) -> None:
+    tasks.acquire_base_lock(str(tmp_path), "one", "holder-a", "merge", ttl_seconds=120)
+
+    tasks.acquire_base_lock(str(tmp_path), "two", "holder-b", "merge", ttl_seconds=120)
+
+    assert _base_record(tmp_path, "two")["owner"] == "holder-b"
+
+
+def test_only_the_holder_releases_the_base_lock(tmp_path) -> None:
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-a", "merge", ttl_seconds=120)
+
+    assert tasks.release_base_lock(str(tmp_path), "myproj", "holder-b") is False
+    assert _base_record(tmp_path)["owner"] == "holder-a"
+    assert tasks.release_base_lock(str(tmp_path), "myproj", "holder-a") is True
+    assert _base_record(tmp_path) is None
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "merge", ttl_seconds=120)
+
+
+def test_a_stale_base_lock_on_another_host_is_broken_after_its_ttl(tmp_path) -> None:
+    _plant_base_lock(tmp_path, age_seconds=121)
+
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "merge", ttl_seconds=120)
+
+    assert _base_record(tmp_path)["owner"] == "holder-b"
+
+
+def test_a_stale_base_lock_whose_pid_is_dead_is_broken_after_its_ttl(tmp_path) -> None:
+    _plant_base_lock(tmp_path, host=socket.gethostname(), pid=_dead_pid(), age_seconds=121)
+
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "merge", ttl_seconds=120)
+
+    assert _base_record(tmp_path)["owner"] == "holder-b"
+
+
+def test_a_corrupt_base_lock_file_counts_as_stale(tmp_path) -> None:
+    path = _plant_base_lock(tmp_path)
+    path.write_text("not json")
+
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "merge", ttl_seconds=120)
+
+    assert _base_record(tmp_path)["owner"] == "holder-b"
+
+
+def test_a_base_lock_inside_its_ttl_is_never_broken(tmp_path) -> None:
+    _plant_base_lock(tmp_path, age_seconds=60)
+
+    with pytest.raises(tasks.BaseLockHeldError):
+        tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "merge", ttl_seconds=120)
+
+
+def test_a_live_base_lock_holder_is_never_broken_however_old_its_heartbeat(tmp_path) -> None:
+    """The holder is checked before it is broken: a process on this host that
+    is still alive is stuck, not dead, and a merge under it would interleave."""
+    _plant_base_lock(tmp_path, host=socket.gethostname(), pid=os.getpid(), age_seconds=10_000)
+
+    with pytest.raises(tasks.BaseLockHeldError):
+        tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-b", "merge", ttl_seconds=120)
+
+
+def test_base_lock_is_held_for_the_operation_only(tmp_path) -> None:
+    lock = tasks.BaseLock(str(tmp_path), "myproj", "update",
+                          ttl_seconds=120, heartbeat_interval_seconds=30)
+
+    with lock:
+        record = _base_record(tmp_path)
+        assert record["owner"] == lock.owner
+        assert record["operation"] == "update"
+        assert record["host"] == socket.gethostname() and record["pid"] == os.getpid()
+
+    assert _base_record(tmp_path) is None
+    assert lock.held is False
+
+
+def test_base_lock_is_released_when_the_operation_raises(tmp_path) -> None:
+    with pytest.raises(RuntimeError):
+        with tasks.BaseLock(str(tmp_path), "myproj", "merge",
+                            ttl_seconds=120, heartbeat_interval_seconds=30):
+            raise RuntimeError("docker exec died")
+
+    assert _base_record(tmp_path) is None
+
+
+def test_base_lock_refuses_after_its_bounded_wait(tmp_path) -> None:
+    tasks.acquire_base_lock(str(tmp_path), "myproj", "holder-a", "merge", ttl_seconds=120)
+    lock = tasks.BaseLock(str(tmp_path), "myproj", "update", ttl_seconds=120,
+                          heartbeat_interval_seconds=30, wait_seconds=0.2, poll_seconds=0.05)
+
+    start = time.monotonic()
+    with pytest.raises(tasks.BaseLockHeldError) as excinfo:
+        lock.acquire()
+
+    assert time.monotonic() - start >= 0.2
+    assert "after waiting" in str(excinfo.value)
+    assert lock.held is False
+    assert _base_record(tmp_path)["owner"] == "holder-a"
+
+
+def test_base_lock_waits_for_the_holder_to_let_go(tmp_path) -> None:
+    first = tasks.BaseLock(str(tmp_path), "myproj", "merge",
+                           ttl_seconds=120, heartbeat_interval_seconds=30).acquire()
+    second = tasks.BaseLock(str(tmp_path), "myproj", "update", ttl_seconds=120,
+                            heartbeat_interval_seconds=30, wait_seconds=5, poll_seconds=0.05)
+    timer = threading.Timer(0.2, first.release)
+    timer.start()
+    try:
+        with second:
+            assert _base_record(tmp_path)["owner"] == second.owner
+    finally:
+        timer.join()
+
+    assert _base_record(tmp_path) is None
+
+
+def test_base_lock_heartbeat_keeps_a_long_operation_fresh(tmp_path) -> None:
+    lock = tasks.BaseLock(str(tmp_path), "myproj", "merge",
+                          ttl_seconds=120, heartbeat_interval_seconds=0.05)
+    with lock:
+        first = _base_record(tmp_path)["heartbeat"]
+        deadline = time.monotonic() + 5
+        while _base_record(tmp_path)["heartbeat"] == first and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _base_record(tmp_path)["heartbeat"] > first
+
+
+def test_a_base_lock_holder_whose_lock_was_broken_leaves_the_new_one(tmp_path) -> None:
+    lock = tasks.BaseLock(str(tmp_path), "myproj", "merge",
+                          ttl_seconds=120, heartbeat_interval_seconds=30).acquire()
+    # Someone broke it and took it in between.
+    _plant_base_lock(tmp_path, owner="newcomer")
+
+    lock.release()
+
+    assert _base_record(tmp_path)["owner"] == "newcomer"
