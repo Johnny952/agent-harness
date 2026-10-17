@@ -294,6 +294,13 @@ Each step is a single surface:
 2. The console's sign-in screen and the first-user setup command. A front
    task, behind its own ask for a build.
 3. TLS: the proxy in the plain compose, and the Coolify notes in the README.
+
+   **Built 2026-10-17** by T-062: a `caddy` service in the plain compose only,
+   in front of the console, with its Caddyfile in `docker/caddy/Caddyfile`;
+   `HARNESS_DOMAIN` and optional `ACME_EMAIL` choose HTTPS or plain localhost.
+   In Coolify its own proxy does this and Caddy is not added; the README says
+   so. See `docs/decisions.md` ADR 100.
+
 4. The account records, the seed from `config.yaml`, the reload at each
    pick, and pause. Under an ADR, which also settles the login method of
    *Decisions*, 3.

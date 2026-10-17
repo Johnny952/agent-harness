@@ -1,0 +1,32 @@
+# docker/caddy/Caddyfile
+# Mounted read-only by the `caddy` service of docker/compose/docker-compose.yml
+# (docs/decisions.md ADR 100). The plain compose only: in Coolify its own proxy
+# ends TLS. Two variables, both from the .env file through compose:
+#   HARNESS_DOMAIN  bare host name to serve over HTTPS; unset, http://localhost
+#   ACME_EMAIL      optional ACME account email
+
+{
+	# Quoted so an empty ACME_EMAIL is still one argument and the directive parses.
+	email "{$ACME_EMAIL}"
+}
+
+# The fallback carries http://: that scheme turns automatic HTTPS off for the
+# site, so with no domain there is no certificate and no ACME attempt. A bare
+# host name gets a certificate and an HTTP-to-HTTPS redirect.
+{$HARNESS_DOMAIN:http://localhost} {
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# HSTS only over HTTPS and never for localhost.
+	@hsts {
+		protocol https
+		not host localhost
+	}
+	header @hsts Strict-Transport-Security "max-age=31536000"
+
+	reverse_proxy console:8790
+}
