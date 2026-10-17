@@ -6469,3 +6469,75 @@ call, and this ADR does not make it safer than that.
 plain file only, the only non-loopback publisher, its exact mounts, and the
 Caddyfile text. Changing Caddy's version is an edit of the pin and a recheck of
 points 3 and 4, which rest on how that version reads env placeholders.
+
+## ADR 103 — Caddy asks for Basic auth on everything it proxies, and refuses its config without a hash
+
+**Status:** accepted (T-063, decided by the owner 2026-10-17, who authorized
+the edit of `docker/compose/**`). Narrows ADR 100 and does not supersede it.
+
+**Context.** ADR 100's *Consequences* say: "The console still has only Basic
+auth through the api; exposing it publicly before sign-in (plan step 4
+ordering) is the operator's call, and this ADR does not make it safer than
+that." The first clause is false. The console's server half forwards every
+`/api/*` call with its own bearer (`front/src/lib/api/forward.ts`, ADR 7 and
+ADR 24) and takes no credential from the browser, so the api's Basic auth
+guards the api's own port and never the console. Anyone who reaches the
+console reads tasks, accounts, events and debt. Since ADR 100 that is anyone
+who reaches port 80 with `Host: localhost`, and the internet once
+`HARNESS_DOMAIN` is set. Sign-in (`docs/plans/server-deployment.md`, *The
+order across the plans* item 4) is not built. ADR 100's decision stands: only
+the premise about the console's auth is retired here.
+
+**Decision.**
+
+1. *Where.* The `caddy` site block holds `basic_auth` with no matcher, beside
+   the one `reverse_proxy console:8790`, so every request Caddy proxies, with
+   or without `HARNESS_DOMAIN`, asks for the credential. There is one site
+   block and one `reverse_proxy`, so no route skips it. bcrypt, Caddy's
+   default for the directive, made with `caddy hash-password`.
+2. *Names.* `CONSOLE_AUTH_USER` and `CONSOLE_AUTH_HASH`, read by `caddy`
+   only. `CONSOLE_` because the door is the console's; `AUTH_HASH` and not
+   `PASSWORD_HASH` so nobody reads it as a sibling of
+   `DASHBOARD_PASSWORD_HASH`, which is a sha256 the api checks on its own port:
+   a different format for a different door, and never reused here.
+3. *The user has a fallback, the hash has none.* The user is spelt with the
+   same fallback in both places, as ADR 100 point 3 does for the site:
+   `{$CONSOLE_AUTH_USER:console}` in the Caddyfile and
+   `CONSOLE_AUTH_USER=${CONSOLE_AUTH_USER:-console}` in compose. The hash is
+   bare in both: `{$CONSOLE_AUTH_HASH}` and
+   `CONSOLE_AUTH_HASH=${CONSOLE_AUTH_HASH}`.
+4. *Fail closed is Caddy refusing the config, not compose refusing.* With no
+   hash, the account line is the user alone, and `basic_auth`'s parser refuses
+   a line without a password, so Caddy exits at load, again on every restart
+   its policy gives it, and nothing listens on 80 or 443. Compose's
+   `${CONSOLE_AUTH_HASH:?...}` was not taken: compose interpolates the whole
+   file before it starts any service, so a missing hash would stop `api` and
+   `console` too, which must still start. The bare `${CONSOLE_AUTH_HASH}` keeps
+   compose's "variable is not set" warning, the rule the other required
+   credentials follow. The user's fallback is what makes the refusal certain:
+   with both unset the block would otherwise be empty, a case this ADR does
+   not want to rest on. Whatever Caddy does with a credential that is present
+   but wrong, `basic_auth` stays in front of the proxy, so no case serves the
+   console without one.
+5. *The `$` in a bcrypt hash.* In the .env file the hash is single-quoted
+   (`CONSOLE_AUTH_HASH='$2a$14$...'`): compose takes a single-quoted value
+   literally, and unquoted or double-quoted it would read `$...` as variables
+   and mangle the hash. `scripts/configure.sh` stays bash and coreutils, which
+   cannot make bcrypt: it writes the two lines commented, quoted that way, and
+   the `docker run` of the pinned Caddy image's `caddy hash-password` that
+   makes the hash.
+
+**Consequences.** `up` with no hash starts every service but `caddy`, which
+logs the parse error and restarts; the console stays on `127.0.0.1:8790`,
+unauthenticated, for an SSH tunnel, as ADR 100 point 6 left it. On the
+`http://localhost` fallback the credential crosses the network in clear,
+like everything else on that port; a host reached from outside sets
+`HARNESS_DOMAIN`. Two things stay open. The console behind Coolify's proxy
+(`docker/compose/docker-compose.coolify.yml`) still has no auth at all:
+Caddy is not there (ADR 100 point 1), so the README says not to give it a public domain without
+Coolify's own basic auth or a private network; this ADR does not change that
+file. And Basic auth is a stopgap: plan item 4's sign-in replaces it, and that
+task removes `basic_auth` and these two variables under its own ADR.
+`tests/integration/test_compose_invariants.py` holds the shape: the
+directive in the Caddyfile, the two variables on `caddy` alone, the hash bare
+in both files, the user's fallback the same in both.
