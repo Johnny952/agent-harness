@@ -1,8 +1,18 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
+import yaml
 
-from dispatcher.config import load_config
+from dispatcher.config import (
+    CONFIG_KEYS,
+    CREDENTIAL,
+    EDITABLE,
+    READ_ONLY,
+    REMOVED_BOARD_KEYS,
+    Config,
+    load_config,
+)
 
 CONFIG_YAML = """
 accounts:
@@ -720,3 +730,164 @@ def test_load_config_refuses_a_bad_max_concurrent_phases(tmp_path: Path, bad_val
 
     with pytest.raises(ValueError, match="max_concurrent_phases"):
         load_config(str(config_path))
+
+
+# --- config.d/overrides.yaml (docs/decisions.md ADR 75, ADR 106) ---
+
+
+def _write(tmp_path: Path, overrides: str | None, base_extra: str = "") -> tuple[str, Path]:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + base_extra)
+    overrides_path = tmp_path / "config.d" / "overrides.yaml"
+    if overrides is not None:
+        overrides_path.parent.mkdir()
+        overrides_path.write_text(overrides)
+    return str(config_path), overrides_path
+
+
+@pytest.mark.parametrize("text", [None, "", "# only a comment\n"])
+def test_load_config_reads_no_overrides_from_a_missing_empty_or_comment_file(
+    tmp_path: Path, text: str | None
+) -> None:
+    path, _ = _write(tmp_path, text)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "config.yaml").write_text(CONFIG_YAML)
+
+    assert load_config(path) == load_config(str(plain / "config.yaml"))
+
+
+def test_load_config_lets_a_scalar_override_win(tmp_path: Path) -> None:
+    path, _ = _write(tmp_path, "merge_on_done: true\nquota_threshold_pct: 95\n")
+
+    cfg = load_config(path)
+
+    assert cfg.merge_on_done is True
+    assert cfg.quota_threshold_pct == 95
+
+
+def test_load_config_replaces_a_map_override_whole(tmp_path: Path) -> None:
+    base = "role_model:\n  revisor: a\n  auditor: b\n"
+    path, _ = _write(tmp_path, "role_model:\n  revisor: c\n", base)
+    assert load_config(path).role_model == {"revisor": "c"}
+
+    (tmp_path / "empty").mkdir()
+    path, _ = _write(tmp_path / "empty", "role_model: {}\n", base)
+    assert load_config(path).role_model == {}
+
+
+def test_load_config_replaces_a_list_override_whole(tmp_path: Path) -> None:
+    path, _ = _write(tmp_path, "fallback_roles: [auditor]\n", "fallback_roles: [revisor, auditor]\n")
+
+    assert load_config(path).fallback_roles == ["auditor"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "accounts: []\n",
+        "project_keys_dir: /x\n",
+        "vibe_kanban: {}\n",
+        "no_such_key: 1\n",
+        "merge_on_done: null\n",
+        "merge_on_done: 'true'\n",
+        "max_revision_rounds: true\n",
+        "- merge_on_done\n",
+        "merge_on_done: [unclosed\n",
+    ],
+)
+def test_load_config_refuses_a_bad_overrides_file_naming_it(tmp_path: Path, text: str) -> None:
+    path, overrides_path = _write(tmp_path, text)
+
+    with pytest.raises(ValueError) as err:
+        load_config(path)
+
+    assert str(overrides_path) in str(err.value)
+    assert "console" in str(err.value)
+    assert "delete" in str(err.value)
+
+
+def test_load_config_attributes_a_merged_result_error_to_the_overrides(tmp_path: Path) -> None:
+    path, overrides_path = _write(tmp_path, "reserve_pct: 95\n")
+
+    with pytest.raises(ValueError) as err:
+        load_config(path)
+
+    assert str(overrides_path) in str(err.value)
+    assert "reserve_pct" in str(err.value)
+    assert "delete" in str(err.value)
+
+
+def test_load_config_blames_a_broken_base_not_the_overrides(tmp_path: Path) -> None:
+    path, overrides_path = _write(tmp_path, "merge_on_done: true\n", "reserve_pct: 95\n")
+
+    with pytest.raises(ValueError, match="reserve_pct") as err:
+        load_config(path)
+
+    assert str(overrides_path) not in str(err.value)
+
+
+def test_load_config_reads_an_explicit_overrides_path(tmp_path: Path) -> None:
+    path, _ = _write(tmp_path, "merge_on_done: false\n")
+    elsewhere = tmp_path / "elsewhere.yaml"
+    elsewhere.write_text("merge_on_done: true\n")
+
+    assert load_config(path, overrides_path=str(elsewhere)).merge_on_done is True
+
+
+def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> None:
+    values = {
+        "accounts": [{"name": "cuenta1", "container": "agent-cuenta1"}],
+        "primary_account": "cuenta1",
+        "quota_threshold_pct": 90,
+        "reserve_pct": 50,
+        "pace_primary_week": True,
+        "quota_cooldown_seconds": 60,
+        "fallback_roles": ["revisor"],
+        "default_model": "m",
+        "role_model": {"revisor": "m"},
+        "mapping_model": "m",
+        "default_effort": "low",
+        "role_effort": {"revisor": "low"},
+        "escalated_effort": "high",
+        "escalate_effort_after_round": 1,
+        "escalate_effort_on_repeated_finding": True,
+        "max_revision_rounds": 2,
+        "max_handoff_resumes": 1,
+        "phase_timeout_seconds": 60,
+        "gates_test_timeout_seconds": 60,
+        "mapping_max_turns": 5,
+        "merge_on_done": True,
+        "gates_enabled": True,
+        "mapping_enabled": True,
+        "heartbeat_ttl_seconds": 120,
+        "heartbeat_interval_seconds": 30,
+        "projects_root": "/p",
+        "hive_tasks_dir": "/t",
+        "state_dir": "/s",
+        "collector_url": "http://c",
+        "permission_mode": "plan",
+        "allowed_tools": ["Bash(ls*)"],
+        "update_project_before_task": True,
+        "git_credentials_path": "/g",
+        "project_keys_dir": "/k",
+        "auto_approve": {"p": True},
+        "protected_paths": {"p": ["docs/"]},
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(values))
+
+    load_config(str(config_path))
+
+    fields = {f.name for f in dataclasses.fields(Config)}
+    assert set(CONFIG_KEYS) == fields | set(REMOVED_BOARD_KEYS)
+    assert set(values) | set(REMOVED_BOARD_KEYS) == set(CONFIG_KEYS)
+    classes = [spec.key_class for spec in CONFIG_KEYS.values()]
+    assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
+        22,
+        15,
+        2,
+    )
+    for spec in CONFIG_KEYS.values():
+        assert (spec.kind is not None) == (spec.key_class == EDITABLE)
+        assert spec.reason

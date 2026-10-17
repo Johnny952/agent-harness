@@ -67,6 +67,13 @@ tests in `tests/dispatcher/test_config.py`.
   table against `Config`'s fields plus the removed board keys.
 - `python3 -m pytest` is green.
 
+**Built 2026-10-17** by T-064: `CONFIG_KEYS` (39 keys: 22 editable, 15
+read-only, 2 credential) and `load_config(path, *, overrides_path=None)` in
+`dispatcher/config.py`. `docs/decisions.md` ADR 106 narrows ADR 75: it adds
+`auto_approve` and `protected_paths` as read-only, refuses unknown keys, and
+says a merged-result error is the overrides' only when `config.yaml` alone
+loads. Nothing writes `config.d` and no service mounts it yet.
+
 ## 2. The writer service
 
 **Surface:** the `config-writer` service. That covers its package

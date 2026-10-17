@@ -11,4 +11,5 @@ dispatcher_state/
 build/
 *.egg-info/
 /config.yaml
+/config.d/
 docker/compose/.env

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import yaml
 
@@ -64,6 +65,137 @@ PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
 #: model. Not a role: the phase runs as the arquitecto, with its skills and
 #: its effort. Unset, the run takes the arquitecto's model.
 DRAFT_ROLE = "arquitecto-draft"
+
+EDITABLE = "editable"
+READ_ONLY = "read-only"
+CREDENTIAL = "credential"
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfigKey:
+    key_class: str
+    reason: str
+    #: The strict check an override of an editable key is held to; None on any
+    #: other key. One of bool, positive_int, non_negative_int, string, effort,
+    #: list, mapping (see `_check_override_value`).
+    kind: str | None = None
+
+
+def _editable(kind: str, reason: str) -> ConfigKey:
+    return ConfigKey(EDITABLE, reason, kind)
+
+
+def _read_only(reason: str) -> ConfigKey:
+    return ConfigKey(READ_ONLY, reason)
+
+
+def _credential(reason: str) -> ConfigKey:
+    return ConfigKey(CREDENTIAL, reason)
+
+
+_BOARD_REASON = "Read only to be refused (ADR 59); an override naming one is refused as well."
+
+#: Every top-level key `load_config` reads, with its class and the reason for
+#: it. `load_config` refuses an overrides key that is not editable, and task 2's
+#: `config_writer` imports this table for its settings rows
+#: (`docs/decisions.md` ADR 75 part 5, ADR 106). A new key read by
+#: `load_config` needs a row here, or the table test fails.
+CONFIG_KEYS: dict[str, ConfigKey] = {
+    "accounts": _read_only(
+        "Names containers. Adding an account is docs/plans/server-deployment.md's, "
+        "with a container template."
+    ),
+    "primary_account": _editable(
+        "string",
+        "C-3 amended makes the primary a setting a person changes from the console. "
+        "It must name a configured account.",
+    ),
+    "quota_threshold_pct": _editable(
+        "positive_int",
+        "Quota policy the owner sets. reserve_pct is checked against it on the merged result.",
+    ),
+    "reserve_pct": _editable(
+        "positive_int",
+        "Quota policy. It must not exceed the threshold, and the merged check catches that.",
+    ),
+    "pace_primary_week": _editable("bool", "A boolean policy switch (ADR 48)."),
+    "quota_cooldown_seconds": _editable(
+        "positive_int", "A timeout that is already validated as a positive integer."
+    ),
+    "fallback_roles": _editable(
+        "list", "Which phases the primary takes. It is a list, replaced whole."
+    ),
+    "default_model": _editable(
+        "string", "Item 0 names it. The override must be a non-empty string."
+    ),
+    "role_model": _editable(
+        "mapping", "Item 0 names it. It is a map, replaced whole, and validated against the roles."
+    ),
+    "mapping_model": _editable("string", "Like default_model, for the cartografo (ADR 66)."),
+    "default_effort": _editable("effort", "It is one of EFFORT_LEVELS, checked."),
+    "role_effort": _editable(
+        "mapping",
+        "It is a map, replaced whole, and validated against the roles and the levels.",
+    ),
+    "escalated_effort": _editable("effort", "It is one of EFFORT_LEVELS, checked."),
+    "escalate_effort_after_round": _editable(
+        "non_negative_int", "A round count. The override must be a non-negative integer."
+    ),
+    "escalate_effort_on_repeated_finding": _editable("bool", "A boolean switch (ADR 73)."),
+    "max_revision_rounds": _editable(
+        "positive_int", "It bounds a cycle's spend. The override must be a positive integer."
+    ),
+    "max_handoff_resumes": _editable(
+        "non_negative_int", "The cap C-4 amended puts in the config. It is already validated."
+    ),
+    "phase_timeout_seconds": _editable("positive_int", "A timeout that is already validated."),
+    "gates_test_timeout_seconds": _editable(
+        "positive_int", "A timeout that is already validated."
+    ),
+    "mapping_max_turns": _editable("positive_int", "A cap that is already validated."),
+    "merge_on_done": _editable("bool", "Item 0 names it. It is a boolean, and the override must be one."),
+    "gates_enabled": _editable("bool", "Item 0 names it. It is a boolean."),
+    "mapping_enabled": _editable("bool", "Item 0 names it. It is a boolean."),
+    "heartbeat_ttl_seconds": _read_only(
+        "Two dispatchers running at once must agree on it, or one reaps the other's "
+        "live lock. load_config does not validate it."
+    ),
+    "heartbeat_interval_seconds": _read_only(
+        "It pairs with the TTL above, for the same reason."
+    ),
+    "projects_root": _read_only("A path inside the containers, fixed by the compose mounts."),
+    "hive_tasks_dir": _read_only("A path, the same as above."),
+    "state_dir": _read_only("A path, the same as above."),
+    "collector_url": _read_only("A service address on the compose network."),
+    "permission_mode": _read_only(
+        "It widens or narrows what every phase may do. The api's boot-time harness "
+        "fingerprint (ADR 41 part 8) reads it."
+    ),
+    "allowed_tools": _read_only(
+        "A standing grant to every phase. docs/plans/command-requests.md is where "
+        "grants are given."
+    ),
+    "update_project_before_task": _read_only(
+        "Turning it on needs a credential or deploy key on the host that the console "
+        "cannot see. That is the second task's ground."
+    ),
+    "git_credentials_path": _credential(
+        "A path. Renewing the GitHub token at that path is the second task. The key "
+        "itself is never edited."
+    ),
+    "project_keys_dir": _credential(
+        "A path to the deploy keys (ADR 56). It is the same as above."
+    ),
+    **{key: _read_only(_BOARD_REASON) for key in REMOVED_BOARD_KEYS},
+    "auto_approve": _read_only(
+        "It turns on merges no person looks at (ADR 77). It moves into the project "
+        "record of docs/plans/projects.md (ADR 106)."
+    ),
+    "protected_paths": _read_only(
+        "Loosening it widens what merges unattended (ADR 77), and it lives wherever "
+        "auto_approve lives (ADR 106)."
+    ),
+}
 
 
 @dataclasses.dataclass
@@ -442,9 +574,97 @@ def _load_protected_paths(raw: dict) -> dict[str, list[str]]:
     return loaded
 
 
-def load_config(path: str) -> Config:
+def _check_override_value(key: str, value: object, kind: str) -> str | None:
+    """The strict check an override is held to (ADR 75 part 1), or the reason
+    it fails. `config.yaml` keeps its coercions; only an override is strict."""
+    if kind == "bool":
+        return None if isinstance(value, bool) else "must be true or false"
+    if kind in ("positive_int", "non_negative_int"):
+        floor = 1 if kind == "positive_int" else 0
+        if isinstance(value, bool) or not isinstance(value, int) or value < floor:
+            return "must be a positive integer" if floor else "must be a non-negative integer"
+        return None
+    if kind == "string":
+        ok = isinstance(value, str) and value.strip()
+        return None if ok else "must be a non-empty string"
+    if kind == "effort":
+        ok = isinstance(value, str) and value in EFFORT_LEVELS
+        return None if ok else f"must be one of: {', '.join(EFFORT_LEVELS)}"
+    if kind == "list":
+        return None if isinstance(value, list) else "must be a list"
+    if kind == "mapping":
+        return None if isinstance(value, dict) else "must be a mapping"
+    raise ValueError(f"{key}: unknown kind {kind!r}")
+
+
+def _overrides_error(overrides_path: str, keys: str, detail: str, plural: bool = False) -> ValueError:
+    """The one message every error the overrides cause goes through."""
+    it = "them" if plural else "it"
+    return ValueError(
+        f"{overrides_path}: {detail}. Reset {keys} from the console or "
+        f"delete {it} from {overrides_path}."
+    )
+
+
+def _read_overrides(overrides_path: str) -> dict:
+    """The overrides file as a mapping, each key checked against `CONFIG_KEYS`
+    and its kind (`docs/decisions.md` ADR 75 part 1, ADR 106)."""
+    try:
+        with open(overrides_path) as f:
+            loaded = yaml.safe_load(f)
+    except FileNotFoundError:
+        return {}
+    except yaml.YAMLError as err:
+        raise _overrides_error(
+            overrides_path, "the overrides", f"does not parse ({err})"
+        ) from err
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise _overrides_error(
+            overrides_path, "the overrides", "must be a mapping of config key to value"
+        )
+    for key in sorted(loaded, key=str):
+        value = loaded[key]
+        spec = CONFIG_KEYS.get(key) if isinstance(key, str) else None
+        if spec is None:
+            detail = f"{key!r} is not a config key"
+        elif spec.key_class != EDITABLE:
+            detail = f"{key} is {spec.key_class} and cannot be overridden: {spec.reason}"
+        elif value is None:
+            detail = f"{key} is null; null is not a value, a reset is deleting the key"
+        else:
+            problem = _check_override_value(key, value, spec.kind)
+            if problem is None:
+                continue
+            detail = f"{key} {problem}"
+        raise _overrides_error(overrides_path, str(key), detail)
+    return loaded
+
+
+def load_config(path: str, *, overrides_path: str | None = None) -> Config:
+    """`config.yaml` with `config.d/overrides.yaml` merged over it, each
+    top-level key replaced whole (`docs/decisions.md` ADR 75, ADR 106)."""
     with open(path) as f:
         raw = yaml.safe_load(f)
+    if overrides_path is None:
+        overrides_path = os.path.join(os.path.dirname(path), "config.d", "overrides.yaml")
+    overrides = _read_overrides(overrides_path)
+    if not overrides:
+        return _build_config(raw)
+    try:
+        return _build_config({**raw, **overrides})
+    except ValueError as err:
+        # Only the overrides' fault if config.yaml alone loads (ADR 106 part 3);
+        # otherwise its own error propagates unchanged.
+        _build_config(raw)
+        keys = sorted(overrides)
+        raise _overrides_error(
+            overrides_path, ", ".join(keys), str(err), plural=len(keys) > 1
+        ) from err
+
+
+def _build_config(raw: dict) -> Config:
     accounts = []
     for entry in raw["accounts"]:
         # `AccountConfig(**entry)` would accept `is_primary` here now that the
