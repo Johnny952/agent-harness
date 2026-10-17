@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -7,17 +8,173 @@ import pytest
 from dispatcher.config import AccountConfig
 from dispatcher.state_machine import (
     AccountState,
+    Holder,
+    claim,
     clear_rate_limit,
     get_busy_since,
     get_current_task,
+    get_holders,
     get_last_probe,
     get_rate_limited_at,
     get_state,
     list_idle_accounts,
+    park,
     record_probe,
     record_rate_limit,
+    release,
     set_state,
+    unpark,
 )
+
+PARKED = [AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN, AccountState.AUTH_EXPIRED]
+
+
+def test_two_claims_at_capacity_two_are_admitted_and_a_third_is_refused(tmp_path: Path) -> None:
+    d = str(tmp_path)
+
+    assert claim(d, "a", "T-1", capacity=2)
+    assert claim(d, "a", "T-2", capacity=2)
+    assert not claim(d, "a", "T-3", capacity=2)
+
+    holders = get_holders(d, "a")
+    assert [h.task_id for h in holders] == ["T-1", "T-2"]
+    assert all(h.busy_since is not None for h in holders)
+    assert get_state(d, "a") == AccountState.BUSY
+
+
+def test_capacity_one_refuses_a_second_claim_and_writes_nothing(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    assert claim(d, "a", "T-1")
+    before = (tmp_path / "a.json").read_text()
+
+    assert not claim(d, "a", "T-2")
+
+    assert (tmp_path / "a.json").read_text() == before
+
+
+def test_the_same_task_cannot_hold_twice(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    assert claim(d, "a", "T-1", capacity=2)
+    assert not claim(d, "a", "T-1", capacity=2)
+
+
+def test_a_capacity_below_one_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        claim(str(tmp_path), "a", "T-1", capacity=0)
+
+
+def test_release_drops_only_its_holder(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    claim(d, "a", "T-1", capacity=2)
+    claim(d, "a", "T-2", capacity=2)
+
+    assert release(d, "a", "T-1")
+
+    assert [h.task_id for h in get_holders(d, "a")] == ["T-2"]
+    assert get_state(d, "a") == AccountState.BUSY
+    assert get_current_task(d, "a") == "T-2"
+    assert release(d, "a", "T-2")
+    assert get_state(d, "a") == AccountState.IDLE
+    assert not release(d, "a", "T-2")
+
+
+@pytest.mark.parametrize("parked", PARKED)
+def test_a_quota_state_keeps_the_holders(tmp_path: Path, parked: AccountState) -> None:
+    d = str(tmp_path)
+    claim(d, "a", "T-1", capacity=2)
+    claim(d, "a", "T-2", capacity=2)
+
+    park(d, "a", parked)
+
+    assert get_state(d, "a") == parked
+    assert [h.task_id for h in get_holders(d, "a")] == ["T-1", "T-2"]
+    assert not claim(d, "a", "T-3", capacity=3)
+    assert release(d, "a", "T-1")
+    assert get_state(d, "a") == parked
+    assert unpark(d, "a")
+    assert get_state(d, "a") == AccountState.BUSY
+    assert release(d, "a", "T-2")
+    assert get_state(d, "a") == AccountState.IDLE
+
+
+def test_unpark_of_an_account_that_is_not_parked_does_nothing(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    claim(d, "a", "T-1")
+    assert not unpark(d, "a")
+
+
+def test_an_old_shape_file_reads_as_one_holder(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    (tmp_path / "a.json").write_text(json.dumps(
+        {"state": "BUSY", "current_task_id": "T-1", "busy_since": 5.0}))
+
+    assert get_holders(d, "a") == [Holder("T-1", 5.0)]
+    assert get_state(d, "a") == AccountState.BUSY
+    assert get_busy_since(d, "a") == 5.0
+    assert claim(d, "a", "T-2", capacity=2)
+    assert get_holders(d, "a")[0] == Holder("T-1", 5.0)
+    assert len(get_holders(d, "a")) == 2
+
+
+def test_an_old_shape_parked_file_has_no_holders(tmp_path: Path) -> None:
+    (tmp_path / "a.json").write_text(json.dumps(
+        {"state": "COOLING_DOWN", "current_task_id": None}))
+
+    assert get_holders(str(tmp_path), "a") == []
+    assert get_state(str(tmp_path), "a") == AccountState.COOLING_DOWN
+
+
+def test_the_refusal_and_the_probe_survive_the_per_holder_writers(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    record_rate_limit(d, "a", at=7.0)
+    probe = {"probed_at": 1}
+    record_probe(d, "a", probe)
+
+    claim(d, "a", "T-1", capacity=2)
+    park(d, "a", AccountState.COOLING_DOWN)
+    unpark(d, "a")
+    release(d, "a", "T-1")
+
+    data = json.loads((tmp_path / "a.json").read_text())
+    assert data["rate_limited_at"] == 7.0
+    assert data["last_probe"] == probe
+
+
+def test_set_state_idle_still_clears_every_holder(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    claim(d, "a", "T-1", capacity=2)
+    claim(d, "a", "T-2", capacity=2)
+
+    set_state(d, "a", AccountState.IDLE)
+
+    assert get_holders(d, "a") == []
+
+
+def test_park_refuses_a_state_that_is_not_account_wide(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        park(str(tmp_path), "a", AccountState.BUSY)
+    with pytest.raises(ValueError):
+        park(str(tmp_path), "a", AccountState.IDLE)
+
+
+def test_two_threads_claiming_the_last_slot_have_one_winner(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    claim(d, "a", "T-0", capacity=2)
+    barrier = threading.Barrier(2, timeout=5)
+    results: list[bool] = []
+
+    def go(task: str) -> None:
+        barrier.wait()
+        results.append(claim(d, "a", task, capacity=2))
+
+    threads = [threading.Thread(target=go, args=(t,)) for t in ("T-1", "T-2")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == [False, True]
+    assert len(get_holders(d, "a")) == 2
 
 
 def test_get_state_defaults_to_idle(tmp_path: Path) -> None:
