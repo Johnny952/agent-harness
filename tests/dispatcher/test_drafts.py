@@ -379,6 +379,105 @@ def test_run_draft_specs_runs_one_arquitecto_phase(tmp_path, monkeypatch, fixed_
     assert tasks.read_description(cfg.hive_tasks_dir, DRAFT_ID) is None
 
 
+class _Cleanup:
+    """What the draft run did to the checkout on its way out."""
+
+    def __init__(self):
+        self.removed: list[str] = []
+        self.restored: list[str | None] = []
+        self.dirty: list[str] = []
+        self.remove_error: Exception | None = None
+
+
+@pytest.fixture(autouse=True)
+def cleanup(monkeypatch):
+    rec = _Cleanup()
+
+    def remove(container, projects_root, slug, task_id):
+        rec.removed.append(task_id)
+        if rec.remove_error:
+            raise rec.remove_error
+        return ["arquitecto"]
+
+    monkeypatch.setattr(core.docker_exec, "remove_task_worktrees", remove)
+    monkeypatch.setattr(core.docker_exec, "read_owner", lambda container, path: "1000:1000")
+    monkeypatch.setattr(core.docker_exec, "restore_owner", lambda container, path, owner: rec.restored.append(owner))
+    monkeypatch.setattr(core.docker_exec, "dirty_paths", lambda container, workdir: list(rec.dirty))
+    return rec
+
+
+def test_run_draft_specs_asks_for_a_checkout_of_the_base_and_removes_it(tmp_path, monkeypatch, fixed_draft_id, cleanup):
+    cfg = _make_config(tmp_path)
+    seen: list[dict] = []
+    inner = _phase_that_drafts([])
+
+    def fake(*args, **kwargs):
+        seen.append(kwargs)
+        assert cleanup.removed == []  # still there while the phase runs
+        return inner(*args, **kwargs)
+
+    monkeypatch.setattr(core, "dispatch_phase", fake)
+
+    core.run_draft_specs(cfg, "proj", "docs/plans/x.md")
+
+    assert seen[0]["at_base"] is True
+    assert cleanup.removed == [DRAFT_ID] and cleanup.restored == ["1000:1000"]
+
+
+def test_run_draft_specs_removes_the_checkout_after_a_failed_phase(tmp_path, monkeypatch, fixed_draft_id, cleanup):
+    monkeypatch.setattr(core, "dispatch_phase", _phase_that_drafts([], success=False, write=None))
+
+    _, result = core.run_draft_specs(_make_config(tmp_path), "proj", "docs/plans/x.md")
+
+    assert not result.success
+    assert cleanup.removed == [DRAFT_ID] and cleanup.restored == ["1000:1000"]
+
+
+def test_run_draft_specs_removes_the_checkout_after_an_exception(tmp_path, monkeypatch, fixed_draft_id, cleanup):
+    def boom(*args, **kwargs):
+        raise RuntimeError("phase blew up")
+    monkeypatch.setattr(core, "dispatch_phase", boom)
+
+    with pytest.raises(RuntimeError, match="phase blew up"):
+        core.run_draft_specs(_make_config(tmp_path), "proj", "docs/plans/x.md")
+
+    assert cleanup.removed == [DRAFT_ID] and cleanup.restored == ["1000:1000"]
+
+
+def test_run_draft_specs_leaves_the_lock_holders_checkout_alone(tmp_path, monkeypatch, fixed_draft_id, cleanup):
+    def held(*args, **kwargs):
+        raise context_transfer.LockHeldError(DRAFT_ID, "someone-else")
+    monkeypatch.setattr(core, "dispatch_phase", held)
+
+    draft_id, result = core.run_draft_specs(_make_config(tmp_path), "proj", "docs/plans/x.md")
+
+    assert result is None
+    assert cleanup.removed == []
+
+
+def test_a_failed_cleanup_is_a_warning_not_the_runs_error(tmp_path, monkeypatch, fixed_draft_id, cleanup, caplog):
+    monkeypatch.setattr(core, "dispatch_phase", _phase_that_drafts([]))
+    cleanup.remove_error = OSError("disk on fire")
+
+    _, result = core.run_draft_specs(_make_config(tmp_path), "proj", "docs/plans/x.md")
+
+    assert result.success
+    assert "disk on fire" in caplog.text
+    assert cleanup.restored == ["1000:1000"]
+
+
+def test_what_a_draft_phase_left_modified_is_named_when_it_is_discarded(
+    tmp_path, monkeypatch, fixed_draft_id, cleanup, caplog,
+):
+    monkeypatch.setattr(core, "dispatch_phase", _phase_that_drafts([]))
+    cleanup.dirty = ["src/app.py"]
+
+    core.run_draft_specs(_make_config(tmp_path), "proj", "docs/plans/x.md")
+
+    assert "src/app.py" in caplog.text and "discarded" in caplog.text
+    assert cleanup.removed == [DRAFT_ID]
+
+
 @pytest.mark.parametrize("plan", ["/etc/passwd", "../other/plan.md"])
 def test_run_draft_specs_refuses_a_plan_outside_the_project(tmp_path, monkeypatch, plan):
     monkeypatch.setattr(core, "dispatch_phase", _no_phase)

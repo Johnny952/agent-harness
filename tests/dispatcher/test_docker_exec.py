@@ -782,6 +782,30 @@ def test_create_worktree_creates_the_task_branch_when_it_is_missing(monkeypatch)
     assert _in_container(calls[-1]) == ["git", "worktree", "add", "-b", _BRANCH, path]
 
 
+def test_create_worktree_at_base_is_a_detached_checkout_of_head_with_no_branch(monkeypatch) -> None:
+    """A draft run's arquitecto is a reader of the base (ADR 94)."""
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls))
+
+    path = create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", "arquitecto", at_base=True)
+
+    assert path == f"{_PROJECT}/worktrees/task-1/arquitecto"
+    commands = [_in_container(c) for c in calls]
+    assert ["rm", "-rf", path] in commands
+    assert commands[-1] == ["git", "worktree", "add", "--detach", path, "HEAD"]
+    assert not any("-b" in args or _BRANCH in args or "show-ref" in args for args in commands)
+
+
+def test_create_worktree_without_at_base_still_gives_the_arquitecto_the_writer_worktree(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker(calls, _branch_missing))
+
+    path = create_worktree(_CONTAINER, "/data/projects", "myproj", "task-1", "arquitecto")
+
+    assert path == f"{_PROJECT}/worktrees/task-1/work"
+    assert _in_container(calls[-1]) == ["git", "worktree", "add", "-b", _BRANCH, path]
+
+
 def test_create_worktree_never_resets_an_existing_task_branch(monkeypatch) -> None:
     """Round 2 checks the branch out where it is.
 

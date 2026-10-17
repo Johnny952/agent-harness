@@ -3354,6 +3354,48 @@ def test_dispatch_phase_commits_the_writing_phase(tmp_path, monkeypatch, fake_gi
     assert "Session: sess-1" in commit["message"]
 
 
+def test_dispatch_phase_at_base_commits_nothing_even_when_the_phase_modified_a_file(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """A draft run's arquitecto reads the base; what it leaves is discarded (ADR 94)."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    seen = []
+
+    def spy_create_worktree(container, projects_root, slug, task_id, role, **kwargs):
+        seen.append(kwargs)
+        return f"{projects_root}/{slug}/worktrees/{task_id}/{role}"
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "create_worktree", spy_create_worktree)
+    fake_git.dirty = ("src/app.py",)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "d-1", "myproj", "arquitecto", "draft", at_base=True)
+
+    assert result.success is True
+    assert seen == [{"at_base": True}]
+    assert fake_git.commits == []
+
+
+def test_dispatch_phase_without_at_base_still_commits_the_arquitecto_in_the_writer_worktree(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "plan it")
+
+    [commit] = fake_git.commits
+    assert commit["workdir"].endswith("/worktrees/task-1/work")
+    assert commit["author_name"] == "arquitecto (cuenta1)"
+
+
 def test_dispatch_phase_holds_the_auditor_to_its_docs(tmp_path, monkeypatch, fake_git) -> None:
     """It writes, so it commits — but it runs after the revisor has approved,
     and a commit taking the whole tree would land code nobody read."""
