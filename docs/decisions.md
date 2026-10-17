@@ -6173,3 +6173,59 @@ built before this ADR sees only the first holder of a file written after it.
 `record_rate_limit`, `clear_rate_limit` and `record_probe` are unchanged:
 they rewrite the document they read, so they carry the holders with
 everything else.
+
+## ADR 88 — `max_concurrent_phases` per account, default 1; a phase releases only itself, and a park keeps the others
+
+**Status:** accepted (T-058, the dispatcher half of B-4 of
+`docs/plans/autonomy.md`, 2026-10-17). Builds on ADR 84 and ADR 85.
+
+**Context.** ADR 85 gave the state file a list of holders and the writers
+`claim(..., capacity=)`, `release`, `park`, `unpark`. Every caller in
+`dispatcher/dispatcher.py` and `dispatcher/operator.py` still used
+`set_state`, which replaces every holder, so a second phase on one account
+would be dropped by the first one's release, park or reap.
+
+**Decision.**
+
+1. *The key.* Each `accounts` entry takes `max_concurrent_phases`, an
+   integer of at least 1, default 1. A bool, a non-integer or a value below 1
+   is refused at load. With every account at 1 the picker, the claim and
+   every write answer exactly as before. `--parallel` stays the ceiling on
+   phases at once; this only adds slots.
+2. *The pick.* An account is available while it is not parked and holds
+   fewer phases than its `max_concurrent_phases`. The order is the primary
+   last, then, within each of the two groups, an account with no holder
+   before one with a free slot beside a running phase, then config order.
+   So a worker's second slot is taken before an idle primary: the primary is
+   the operator's console and spending it is the cost the `fallback_roles`
+   and `_waitable_workers` gates exist for. Those gates are unchanged.
+3. *A phase releases only itself.* A phase that ends, well or badly, and
+   every error path between its claim and its return call
+   `release(state_dir, account, task_id)`.
+4. *A park keeps the others and then releases its own.* A quota or login
+   park (`PRE_COOLDOWN`, `COOLING_DOWN`, `AUTH_EXPIRED`) is written with
+   `park`, so the other phases running there keep their hold and finish.
+   The phase that parked the account is moving to another one, so it then
+   calls `release` for itself (ADR 85 point 6 is why: a listed holder that
+   is not running there reads as a live lock). Park first, release second:
+   the other order leaves a moment where the account is open and a free
+   slot can be claimed on it.
+5. *Leaving a park* is `unpark`, which is a no-op on an account that is not
+   parked; the recheck keeps `forget_rate_limit=True`. An account leaving a
+   park with holders left is `BUSY`, not `IDLE`.
+6. *The reaper judges each holder,* on any account, parked or not, by that
+   holder's card heartbeat and its own `busy_since` under the same floor and
+   timeout as before, and releases only a dead holder. A holder with no
+   stamp gets one (`state_machine.stamp_holder`) instead of a whole-account
+   rewrite.
+7. *`set_state` stays only where a whole-account write is meant:*
+   `release-account` with no task id, which frees every holder and lifts the
+   park. `release-account --task <id>` frees that holder alone and leaves the
+   park.
+
+**Consequences.** Raising `max_concurrent_phases` is the owner's config
+edit, per account, and only on a Max account (ADR 84 point 4); lowering it
+back to 1 is the way out, and a holder already above the new capacity is not
+evicted, only no new one is admitted. The observability api and the console
+still show the first holder only, through `get_current_task`; `dispatch
+status` shows all. Fair share of slots between projects is not decided here.
