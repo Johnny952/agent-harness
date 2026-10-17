@@ -114,7 +114,7 @@ def _assert_tokens(env: dict[str, str], names: list[str]) -> None:
     agent-<name> to exactly that value, every entry spelt out literally."""
     keys = {f"COLLECTOR_WRITE_TOKEN_{name.upper().replace('-', '_')}" for name in names}
     assert {key for key in env if key.startswith("COLLECTOR_WRITE_TOKEN_")} == keys
-    for key in keys | {"API_TOKEN", "COLLECTOR_READ_TOKEN"}:
+    for key in keys | {"API_TOKEN", "COLLECTOR_READ_TOKEN", "CONFIG_WRITER_TOKEN"}:
         ok = bool(TOKEN.fullmatch(env[key]))
         assert ok, f"{key} is not 64 hex characters"
 
@@ -126,7 +126,7 @@ def _assert_tokens(env: dict[str, str], names: list[str]) -> None:
         assert ok, f"COLLECTOR_WRITE_TOKENS binds {source_app} to another value than its own key"
     assert "${" not in raw, "the map must spell its tokens out, not as substitutions"
     # Every token distinct: a shared one is an agent able to post as another.
-    tokens = [env[key] for key in keys | {"API_TOKEN", "COLLECTOR_READ_TOKEN"}]
+    tokens = [env[key] for key in keys | {"API_TOKEN", "COLLECTOR_READ_TOKEN", "CONFIG_WRITER_TOKEN"}]
     assert len(set(tokens)) == len(tokens)
 
 
@@ -286,6 +286,15 @@ def test_one_account_writes_its_config_agents_file_and_tokens(tmp_path) -> None:
     _assert_tokens(_env(tmp_path), ["solo"])
     assert "scripts/setup_volumes.sh solo\n" in result.stdout
     assert "does not edit that file" not in result.stdout
+
+
+def test_config_d_is_made_beside_config_yaml(tmp_path) -> None:
+    """The writer's directory exists before the first `up`, so docker does not
+    create it root-owned (docs/decisions.md ADR 110 part 9)."""
+    result = _run(tmp_path, _answers("solo"))
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "config.d").is_dir()
 
 
 def test_three_accounts_write_three_pairs_and_three_tokens(tmp_path) -> None:

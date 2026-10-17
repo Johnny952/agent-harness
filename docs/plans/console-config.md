@@ -129,6 +129,15 @@ the key table and `overrides_path` from task 1.
   - the dispatcher and the api mount `config.d` `:ro`.
 - `python3 -m pytest` is green.
 
+**Built 2026-10-17** by T-065: the `config_writer` package, its `Dockerfile`
+and `tests/config_writer/`; the `config-writer` service in both compose files
+with `console_net` and port 8791 in place of `config_writer_net` and 8790
+(`docs/decisions.md` ADR 109); the writer's edges and `config.d` made by
+`scripts/configure.sh` (ADR 110); the invariants above for both files.
+`CONFIG_WRITER_TOKEN` reaches the writer and the console, not only the writer
+(ADR 109 part 5). The Docker image build was not run from the phase; see
+`docs/implementations/T-065.md`.
+
 ## 3. The console's settings screen
 
 **Surface:** one screen, the Role models screen at

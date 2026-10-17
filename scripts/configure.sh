@@ -451,6 +451,7 @@ EOF
 networks:
   ia_harness_net:
     name: ia_harness_net
+  console_net:
 
 volumes:
   observability_data:
@@ -601,6 +602,14 @@ if [ "$write_config" -eq 1 ]; then
     echo "Wrote $CONFIG_OUT"
 fi
 
+# config.d, beside config.yaml, whether or not it was just written
+# (docs/decisions.md ADR 110 part 9). The config-writer mounts it read-write
+# and the dispatcher and api mount it :ro; if it does not exist at the first
+# `up`, docker creates it root-owned and the operator needs sudo to repair a
+# file in it by hand. Made here it is the operator's. Never chmod'd: the root
+# writer reaches it either way.
+mkdir -p "$(dirname "$CONFIG_OUT")/config.d"
+
 # The list the repo ships with is the shipped agents file already; rendering
 # it again would only trade its comments for the generated ones.
 sorted_input=$(printf '%s\n' "${ACCOUNT_NAMES[@]}" | sort | paste -sd, -)
@@ -672,6 +681,10 @@ if [ "$setup_credentials" = "y" ]; then
             echo "# the password above. The console reads the same value from its"
             echo "# own environment; rotate it by changing both and restarting."
             echo "API_TOKEN=$API_TOKEN"
+            echo "# How the console authenticates to the config-writer service"
+            echo "# (127.0.0.1:8791; docs/decisions.md ADR 75, ADR 109). Required: the"
+            echo "# writer refuses to start without it. Given to it and the console only."
+            echo "CONFIG_WRITER_TOKEN=$(gen_token)"
             # The collector's tokens (docs/decisions.md ADR 72). Required, like
             # API_TOKEN: the collector refuses to start without them. Generated
             # here with the rest because a hand-picked token is a guessable one.

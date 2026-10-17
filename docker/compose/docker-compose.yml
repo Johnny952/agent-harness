@@ -70,6 +70,7 @@ services:
       - ../../.hive:/data/.hive:ro
       - ../../.data/projects:/data/projects:ro
       - ../../config.yaml:/app/config.yaml:ro
+      - ../../config.d:/app/config.d:ro
     environment:
       - COLLECTOR_DB_PATH=/events/events.db
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
@@ -87,12 +88,16 @@ services:
     depends_on:
       - collector
     networks:
+      # ia_harness_net for the collector, console_net so the console reaches it
+      # (ADR 109).
       - ia_harness_net
+      - console_net
 
   # The console (`front/`, docs/decisions.md ADR 15, ADR 24 and ADR 97): built
   # for Node by docker/console/Dockerfile. It reads only through the api, so it
-  # has no volume and no docker socket, and it holds API_TOKEN alone: never
-  # COLLECTOR_READ_TOKEN or a write token.
+  # has no volume and no docker socket, and it holds API_TOKEN and
+  # CONFIG_WRITER_TOKEN: never COLLECTOR_READ_TOKEN or a write token. It is on
+  # console_net only (ADR 109), so no agent container can call it.
   #
   # API_TOKEN is bare `${API_TOKEN}`: the console refuses to boot without it, so
   # compose should announce it missing rather than start a restart loop.
@@ -111,10 +116,35 @@ services:
       - API_BASE_URL=http://api:8789
       - API_TOKEN=${API_TOKEN}
       - CONSOLE_PROJECT=${CONSOLE_PROJECT:-}
+      # The settings screen's forward (task 3 of docs/plans/console-config.md).
+      # The token is bare like API_TOKEN (ADR 109 part 4).
+      - CONFIG_WRITER_URL=http://config-writer:8791
+      - CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}
     depends_on:
       - api
     networks:
-      - ia_harness_net
+      - console_net
+
+  # The settings writer (docs/decisions.md ADR 75, ADR 109 and ADR 110): the one
+  # service that changes config.d/overrides.yaml, validated by the dispatcher's
+  # own load_config. Its mounts are config.yaml :ro and config.d, the one
+  # writable mount; no docker socket, no .hive, no state, no credentials. It is
+  # on console_net only, so no agent reaches it, and publishes loopback only for
+  # a console run on the host. It exits 2 without CONFIG_WRITER_TOKEN.
+  config-writer:
+    build:
+      context: ../..
+      dockerfile: config_writer/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8791:8791"
+    volumes:
+      - ../../config.yaml:/app/config.yaml:ro
+      - ../../config.d:/app/config.d
+    environment:
+      - CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}
+    networks:
+      - console_net
 
   # TLS in front of the console (docs/decisions.md ADR 100). In this file only:
   # in Coolify its own proxy ends TLS, and a second one would fight it for 80
@@ -145,7 +175,7 @@ services:
     depends_on:
       - console
     networks:
-      - ia_harness_net
+      - console_net
 
   registry-mirror:
     image: registry:2
@@ -198,6 +228,10 @@ services:
       # ../../config.example.yaml to ../../config.yaml (and adjust values)
       # at this host path before `docker compose up`.
       - ../../config.yaml:/app/config.yaml:ro
+      # The writer's overrides, read-only here (docs/decisions.md ADR 75): the
+      # directory, not the file, because the writer swaps the file with a
+      # rename. configure.sh creates it so docker does not make it root-owned.
+      - ../../config.d:/app/config.d:ro
     depends_on:
       - collector
     networks:
@@ -209,6 +243,11 @@ networks:
   # registry-mirror by service name.
   ia_harness_net:
     name: ia_harness_net
+  # The console's side (docs/decisions.md ADR 109): console, caddy, api and
+  # config-writer. No agent, sidecar or dind service joins it, and
+  # docker-compose.agents.yml never names it. No `name:` key, so no other file
+  # can join it as `external` by the bare name.
+  console_net:
 
 volumes:
   observability_data:

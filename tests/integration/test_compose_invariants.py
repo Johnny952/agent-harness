@@ -364,7 +364,9 @@ def test_the_console_reads_only_through_the_api(compose_file: str) -> None:
     assert console.get("volumes", []) == []
     assert "docker.sock" not in yaml.safe_dump(console)
     assert "api" in console["depends_on"]
-    assert "ia_harness_net" in console["networks"]
+    # console_net only (docs/decisions.md ADR 109): an agent on ia_harness_net
+    # must not resolve the console, which forwards with its own bearer.
+    assert console["networks"] == ["console_net"]
     assert console["build"] == {
         "context": "../..",
         "dockerfile": "docker/console/Dockerfile",
@@ -427,7 +429,7 @@ def test_caddy_gets_no_socket_and_no_state() -> None:
         "CONSOLE_AUTH_HASH": "${CONSOLE_AUTH_HASH}",
     }
     assert "console" in caddy["depends_on"]
-    assert "ia_harness_net" in caddy["networks"]
+    assert caddy["networks"] == ["console_net"]  # ADR 109
     assert "caddy_data" in services["volumes"]
     assert "caddy_config" in services["volumes"]
 
@@ -567,7 +569,8 @@ def test_an_optional_variable_carries_an_empty_default(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
 @pytest.mark.parametrize(
-    "variable", ["DASHBOARD_USERNAME", "DASHBOARD_PASSWORD_HASH", "API_TOKEN"]
+    "variable",
+    ["DASHBOARD_USERNAME", "DASHBOARD_PASSWORD_HASH", "API_TOKEN", "CONFIG_WRITER_TOKEN"],
 )
 def test_a_required_credential_stays_bare_so_compose_says_it_is_missing(
     compose_file: str, variable: str
@@ -835,3 +838,108 @@ def test_the_collector_tokens_are_spelt_bare_with_no_default(deployment: str) ->
         for name, suffixes in _variables_read_by(service).items():
             if name in names:
                 assert suffixes == {""}, f"{service_name} spells ${{{name}}} with {suffixes}"
+
+
+# --- the config writer and console_net (docs/decisions.md ADR 75, 109, 110) ----
+
+BOTH_FILES = ["docker-compose.yml", "docker-compose.coolify.yml"]
+
+
+def _on_console_net(services: dict) -> set[str]:
+    return {name for name, service in services.items() if "console_net" in service.get("networks", [])}
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_writer_has_no_socket_and_config_d_is_its_only_writable_mount(
+    compose_file: str,
+) -> None:
+    """One read-write mount, the directory the overrides live in; config.yaml
+    is `:ro`; nothing else: no .hive, state, projects or credentials."""
+    writer = _load(compose_file)["services"]["config-writer"]
+
+    assert writer["volumes"] == [
+        "../../config.yaml:/app/config.yaml:ro",
+        "../../config.d:/app/config.d",
+    ]
+    assert "docker.sock" not in yaml.safe_dump(writer)
+    assert writer["build"] == {"context": "../..", "dockerfile": "config_writer/Dockerfile"}
+    assert "profiles" not in writer
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_writer_publishes_only_loopback_8791(compose_file: str) -> None:
+    writer = _load(compose_file)["services"]["config-writer"]
+
+    assert writer["ports"] == ["127.0.0.1:8791:8791"]
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_console_net_holds_the_console_side_and_no_agent_network(compose_file: str) -> None:
+    """ADR 109: the writer, the console and caddy are on `console_net` and not on
+    `ia_harness_net`; the api is on both because it needs the collector."""
+    compose = _load(compose_file)
+    services = compose["services"]
+
+    expected = {"api", "console", "config-writer"}
+    if compose_file == "docker-compose.yml":
+        expected.add("caddy")
+    assert _on_console_net(services) == expected
+    for name in expected - {"api"}:
+        assert services[name]["networks"] == ["console_net"], name
+    assert sorted(services["api"]["networks"]) == ["console_net", "ia_harness_net"]
+    assert "console_net" in compose["networks"]
+    assert "name" not in (compose["networks"]["console_net"] or {})
+    assert "config_writer_net" not in compose["networks"]
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_dispatcher_and_the_api_mount_config_d_read_only(compose_file: str) -> None:
+    services = _load(compose_file)["services"]
+
+    for name in ("dispatcher", "api"):
+        assert "../../config.d:/app/config.d:ro" in services[name]["volumes"], name
+    # Only the writer may write it.
+    for name, service in services.items():
+        for volume in service.get("volumes", []):
+            if isinstance(volume, str) and "config.d" in volume and name != "config-writer":
+                assert volume.endswith(":ro"), f"{name} mounts {volume!r}"
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_the_writer_token_reaches_only_the_writer_and_the_console(deployment: str) -> None:
+    services = _deployment_services(deployment)
+
+    holders = {
+        name
+        for name, service in services.items()
+        if "CONFIG_WRITER_TOKEN" in _variables_read_by(service)
+    }
+    assert holders == {"config-writer", "console"}
+    for name, service in services.items():
+        env = _environment(service)
+        assert "CONFIG_WRITER_TOKEN" not in env or name in holders, name
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_console_is_told_where_the_writer_is(compose_file: str) -> None:
+    env = _environment(_load(compose_file)["services"]["console"])
+
+    assert env["CONFIG_WRITER_URL"] == "http://config-writer:8791"
+    assert env["CONFIG_WRITER_TOKEN"] == "${CONFIG_WRITER_TOKEN}"
+
+
+def test_no_agent_or_sidecar_joins_console_net() -> None:
+    """The agents file never names it, and neither do the agent and dind
+    services of the Coolify file, which is one resource with them all."""
+    agents = _load("docker-compose.agents.yml")
+    assert "console_net" not in (agents.get("networks") or {})
+    assert "console_net" not in yaml.safe_dump(agents)
+    for name, service in agents["services"].items():
+        assert "console_net" not in service.get("networks", []), name
+
+    coolify = _load("docker-compose.coolify.yml")["services"]
+    for name, service in coolify.items():
+        if name.startswith(("agent-", "dind-")):
+            assert "console_net" not in service.get("networks", []), name
+    for name in ("collector", "registry-mirror", "dispatcher"):
+        assert "console_net" not in coolify[name]["networks"], name
