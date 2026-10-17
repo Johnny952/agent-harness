@@ -6758,3 +6758,144 @@ The operator can delete them, since the directory is theirs, but editing one
 in place needs `sudo` or a copy and a rename. ADR 75's *Consequences* about a
 root-owned `config.d` stays true for a host that never ran the script.
 `tests/config_writer/` pins each part.
+
+## ADR 112 — the settings forward: `/api/settings` onto the writer, its own token, methods and timeout, beside the api's whitelist
+
+**Status:** accepted (T-066, 2026-10-17; the paths, the variables, the headers,
+the methods and the timeout were decided by the owner in the task, the failure
+statuses and the CSRF answer by its arquitecto). Narrows ADR 75 part 4 (*How
+the console reaches it*) and the first bullet of `docs/plans/console-config.md`
+task 3 *The forward*; ADR 109 part 4 already moved the host default. ADR 24 is
+not reversed: its whitelist is unchanged, and the sentence of its
+*Consequences* about a write is answered below, not struck.
+
+**Context.** ADR 75 has `front/src/server.ts` intercept `/settings` and
+`/settings/<key>`. Everything the browser fetches as JSON already lives under
+`/api/`, `front/src/lib/api/forward.ts` answers every other `/api/*` path with
+a JSON 404, and a bare `/settings` would shadow a page path in the SSR router. The writer's own
+contract is `config_writer/app.py` and `tests/config_writer/test_app.py`:
+`GET /settings`, `PUT /settings/<key>` with `{"value", "revision"}`,
+`DELETE /settings/<key>` with `{"revision"}`, a required `X-Actor`, the
+envelope on 200 and `{"error"}` on everything else (ADR 110 part 6). Flask's
+`get_json` reads a body only under a JSON content type.
+
+**Decision.**
+
+1. *Paths.* The browser calls `/api/settings` and `/api/settings/<key>`, and
+   the forward maps them onto the writer's `/settings` and `/settings/<key>`.
+   Every path that is `/api/settings` or starts with `/api/settings/` belongs
+   to this forward, never to the api's whitelist.
+2. *Separate from `FORWARDED`.* The two paths are not entries of the api's
+   list: they have their own upstream, token and timeout. `FORWARDED`, its
+   count and its rejection message stay as they are.
+3. *Variables,* read in `front/src/lib/api/server-env.ts` beside the api's,
+   neither with a `VITE_` prefix:
+   - `CONFIG_WRITER_URL`, default `http://127.0.0.1:8791` (ADR 109 part 3), a
+     trailing slash trimmed as `API_BASE_URL`'s is;
+   - `CONFIG_WRITER_TOKEN`, optional. Unset, empty or whitespace is *unset*,
+     as the writer's own `main` reads it. Unlike `API_TOKEN` it does not throw
+     at import: every other screen keeps working, and this forward answers 503
+     with a JSON body naming the variable.
+4. *Methods and shape.* `GET` only on `/api/settings`. `PUT` and `DELETE` only
+   on `/api/settings/<key>` with exactly one segment, `TASK_DETAIL`'s shape:
+   the key is decoded (a key that will not decode is a 404) and re-encoded
+   into the writer's path. A wrong method on a right shape is a JSON 405;
+   anything else under the prefix — a second segment, an empty one — is a
+   JSON 404. Neither reaches the writer. The shape and method checks run
+   before the token check, so a 405 or 404 does not depend on configuration.
+5. *What crosses.* The forward sends `Authorization: Bearer
+   <CONFIG_WRITER_TOKEN>`, `X-Actor: operator` (ADR 75 part 3: the console
+   has no signed-in person yet) and `Accept: application/json`. On `PUT` and
+   `DELETE` it also sends the browser's body bytes unchanged, under its own
+   `Content-Type: application/json`, which the writer needs to read a body at
+   all. Nothing else of the browser's request crosses: no header, no cookie,
+   no query parameter. The writer's status, body and content type come back as
+   they came, as the api's do.
+6. *Timeout and failures.* 5000 ms, the api's number (ADR 7, ADR 24), as its
+   own constant `CONFIG_WRITER_TIMEOUT_MS`: a save is one small file write
+   under a lock, so nothing argues for a longer wait. A timeout is a JSON
+   504, and a refused or failed connection a JSON 503. Both bodies name the
+   service, *the config-writer service*, and never its address; the address
+   goes to the server log, as the forward already does for the api. 503 and not the
+   api's 502 because the settings screen treats every one of these as one
+   state, *unreachable*, which `docs/plans/console-config.md` task 3 words as
+   "the forward answers 503".
+7. *CSRF.* ADR 24 asked a task sending a write this way to notice the CSRF
+   middleware in `front/src/start.ts`, which filters server functions only.
+   The answer is that the writes are `PUT` and `DELETE`, which are never a
+   CORS *simple* request: a cross-site page cannot send either without a
+   preflight `OPTIONS`, and the forward answers `OPTIONS` with a 405 that
+   carries no `Access-Control-*` header, so the browser refuses the write
+   before it is sent. A `POST`, which a form can send cross-site, is a 405
+   on both paths. The middleware's filter stays as it is. A later change that
+   accepts `POST` here, or answers a preflight, re-opens this part.
+
+**Consequences.**
+
+- A host console started without `CONFIG_WRITER_TOKEN` boots and loses one
+  screen. In compose both files already give the `console` service both
+  variables (ADR 109 part 4), so nothing under `docker/compose/` changes.
+- `front/AGENTS.md` and `front/README.md` name five variables, not three.
+- `front/src/lib/api/forward.test.ts` pins every part above; the token-unset case re-imports the
+  module under a second `server-env` mock, since the value is read at import.
+- Plan task 3's *Built* note says the path was narrowed here.
+
+## ADR 113 — the settings screen ships read-only first; how it renders the writer's rows and its states
+
+**Status:** accepted (T-066, 2026-10-17). Takes the split
+`docs/plans/console-config.md` task 3 allows. Narrows nothing.
+
+**Context.** Task 3 is the forward, a table of 39 rows, seven kinds of
+control, save and reset with a revision, and their 409 and 422 states. The plan
+lets its arquitecto cut it into a read-only screen first and the controls
+second, and tier 3's floor allows no control that is not wired.
+
+**Decision.**
+
+1. *The split.* T-066 builds the forward complete (ADR 112) and the screen
+   with every state except the ones a save or a reset produces. The controls,
+   *Save*, *Reset* (the broken-config banner's included), the 409 banner, the
+   422 message under a row, and the refetch after a write are the follow-up
+   task's. The read-only screen draws no control and no disabled control.
+2. *One read, no poll.* `getSettings` in `front/src/lib/api/client.ts` reads `/api/settings`
+   through the same `readEnvelope` as the api's reads, so a writer error is an
+   `ApiError` carrying its `{"error"}` message and a 200 carries its
+   `warnings`. `settingsQuery` has no `refetchInterval`: the plan's *Stale*
+   state says there is no poll.
+3. *Title and nav.* The page title and the nav label are *Settings*; the route
+   `/models`, its file and the `m` chord stay.
+4. *States.*
+   - *Loading:* one muted line for the page.
+   - *Unreachable:* any failed read — the forward's 503 or 504, a 401 from the
+     writer, a non-JSON answer — takes the page with an `ErrorState` that
+     names the config-writer service and both variables and quotes the
+     served message. Nothing else is drawn.
+   - *Broken config:* `error` non-null is a danger `Banner` carrying the
+     message verbatim and saying the dispatcher refuses every verb until it is
+     fixed; the table is still drawn.
+   - *Warnings:* one `WarningBanner`.
+   - *The note* (the plan's three sentences, verbatim) is an `info` `Banner`,
+     always shown when the read succeeded.
+   - *No overrides* is not an empty state: every row draws with its source.
+     An empty `recent_changes` is an `EmptyState` titled *No change has been
+     saved from the console*.
+5. *A row* shows the key, the effective value, the source, the class and the
+   reason. A value is one of any JSON type, so it renders by type: `null` as
+   `Absent` reading *not set*, a string, number or boolean as itself in
+   `mono`, a list or mapping as compact JSON in `mono`. A credential row adds
+   that renewing it belongs to the Tokens screen. `rows` or `recent_changes`
+   that is not a list is named with `Malformed` in its region (ADR 29).
+6. *A change line* shows its time, actor, key, operation, and old and new
+   values in the row rendering above. The time is the UTC date and
+   `formatClock`'s clock, because a log of twenty changes spans days and
+   `formatClock` alone drops the date; the served `at` string is the cell's
+   `title`.
+
+**Consequences.** The mock the screen read (`listRoleModels`,
+`listModelOptions`, `setRoleModel` and their two queries) is removed from
+the client and from `front/src/lib/api/queries.ts`; the fixtures and types
+behind them in `front/src/lib/api/mock/ops-fixtures.ts` and
+`front/src/lib/api/ops-types.ts` stay, unused, because those files are
+outside this task. `docs/ui.md` *One shell, one nav, one set of chords* names
+`m` settings. Plan task 3 carries a dated note naming what the follow-up
+builds.
