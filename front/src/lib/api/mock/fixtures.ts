@@ -85,7 +85,7 @@ export function mockDebt(): DebtEntry[] {
 }
 
 export function mockTasks(): Task[] {
-  // The served four statuses, with no role in any of them (ADR 26), and no `body`
+  // The served five statuses, with no role in any of them (ADR 26), and no `body`
   // or `debt[]`: the body is the detail route's (ADR 21) and the debt list is a
   // filter over /api/debt (ADR 17). `lock_expired` is the api's judgement, which is
   // why a stale heartbeat here carries `true` rather than leaving it to be derived.
@@ -182,6 +182,18 @@ export function mockTasks(): Task[] {
       heartbeat: null,
       depends_on: ["T-008"],
       description: "Operator console: live tail transport hardening",
+      resolved_debt: [],
+      lock_expired: null,
+    },
+    {
+      // The pre-merge check's stop (`CONFLICT_STATUS` in
+      // `dispatcher/dispatcher.py`): the cycle finished, and main moved under it.
+      task_id: "T-016",
+      status: "conflict",
+      owner: null,
+      heartbeat: null,
+      depends_on: ["T-011"],
+      description: "Fold the gate summary into the revisor handoff",
       resolved_debt: [],
       lock_expired: null,
     },
