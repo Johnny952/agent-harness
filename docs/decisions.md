@@ -6064,3 +6064,40 @@ phase is held, and a hold before any spend sends the task back to wait, as
 in ADR 79. The surface lock is per `state_dir`, like the base lock. Fair
 shares between projects, the console's slots screen, and more than one
 phase per account remain out of scope.
+
+## ADR 84 — two phases at once on one Max account: go for B-4
+
+**Status:** accepted (T-056, the measurement part of B-4 of
+`docs/plans/autonomy.md`, 2026-10-17). T-056 was not dispatched, so it holds
+no reserved block. 84 is the next number after the highest one in this file,
+and the counter under `state_dir/adr/` had not been started.
+
+**Context.** `docs/plans/autonomy.md` *Decisions*, 8, makes
+`max_concurrent_phases` (B-4) depend on a measurement: whether one Max
+account runs two phases at once without the second throttling the first.
+`docs/implementations/T-056.md` records the method and the figures.
+
+**Decision.**
+
+1. *Threshold.* *Go* when the median wall time of the concurrent runs is no
+   more than 25% above the median of the solo runs, and no run is refused
+   (no 429, no rate-limit retry, no error result). The owner set this
+   threshold before round 2 ran.
+2. *Result.* Go. The concurrent median was +11.4% over solo (397.4 s
+   against 356.6 s). Per output token it was +2.3%. None of the nine runs
+   was refused. A pair finished its two runs in about 60% of the wall time
+   that two runs back to back take.
+3. *What it does not buy.* Each run costs the same share of the account's
+   five-hour window whether it runs alone or beside another, about 2–3
+   points of a Max x5 session per six-minute run. Two phases at once reach
+   the account's session ceiling (`reserve_pct`) in half the wall time.
+   B-4 trades wall time for nothing else, so the ceilings and the queue's
+   limit (ADR 79) keep their meaning per phase and need no change.
+4. *What follows.* T-057 (an account holds a list of holders) and T-058
+   (`max_concurrent_phases`, default 1) may be built. The default stays 1,
+   and the owner raises it per account, only on a Max account.
+
+**Consequences.** The measurement was read-only and short (three solo runs,
+six concurrent ones, one afternoon, one account). If a real implementador
+pair, running tests and builds, comes out past the threshold, that
+supersedes this ADR, and the default of 1 makes going back a config edit.
