@@ -329,3 +329,10 @@ def test_an_entry_file_is_a_record_whatever_its_status_and_the_index_is_not(
     is the path's, never the file's contents, so it does not flip when an entry
     is resolved and the gate never has to read a status to decide it."""
     assert project_docs.is_record(path) is record
+
+
+def test_the_arquitecto_numbers_an_adr_from_its_block() -> None:
+    # The note carries the block (ADR 81); the file's next number is only the fallback.
+    duties = project_docs.duties("arquitecto", "task-1")
+    assert "block of ADR numbers your note names" in duties
+    assert "only when no block is named" in duties

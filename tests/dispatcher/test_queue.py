@@ -359,7 +359,8 @@ def test_cli_confirmation_and_no_start_without_yes(tmp_path, accounts, monkeypat
     out = capsys.readouterr().out
     assert code == cli_mod.EXIT_BLOCKED
     assert fake.started == []
-    for shown in ("T-1", "Do T-1.", "arquitecto", "auditor", "Parallelism: 1", "Limit: 500"):
+    for shown in ("T-1", "Do T-1.", "arquitecto", "auditor", "Parallelism: 1", "Limit: 500",
+                  "can pass it by that one phase"):
         assert shown in out
 
 

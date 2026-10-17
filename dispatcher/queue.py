@@ -272,6 +272,8 @@ def confirmation(cfg: Config, queue: Queue) -> str:
         "A task that fails is not retried; the tasks that depend on it are skipped.",
         f"Parallelism: {queue.parallel}",
         f"Limit: {queue.limit} measured tokens (input, output and cache, ADR 79)",
+        "  It is checked before each phase, so the phase running when it is reached "
+        "finishes and the spend can pass it by that one phase.",
         f"Automatic approve: {approve}",
     ]
     return "\n".join(lines)
