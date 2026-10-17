@@ -24,7 +24,10 @@
 #   - `ia_harness_net` is a plain network owned by this file, not split
 #     across two files joined via `external: true`.
 #   - Cloned project repos still bind-mount `<repo-root>/.data/projects`
-#     (see docker-compose.agents.yml's comment) rather than using a volume.
+#     (see docker-compose.agents.yml's comment) rather than using a volume, and
+#     so do the projects' SSH deploy keys, `<repo-root>/.data/credentials/
+#     projects` (writable in the dispatcher, :ro in the agents). The https://
+#     `git-credentials` file is not mounted here (docs/decisions.md ADR 91).
 #   - `dispatcher` is gated behind the `dispatcher` Compose profile so it
 #     never starts as part of the resource's default `up` — Coolify (or you,
 #     over SSH) runs it ad hoc. See the README's "Deploying with Coolify"
@@ -149,6 +152,9 @@ services:
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
+      # Writable so `project-keygen` can write a key pair; the agents get it
+      # :ro. See docker-compose.yml's dispatcher.
+      - ../../.data/credentials/projects:/run/secrets/projects
       - ../../config.yaml:/app/config.yaml:ro
     depends_on:
       - collector
@@ -176,6 +182,10 @@ services:
       - claude_creds_cuenta1:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
+      # Each project's SSH deploy key, read-only; see docker-compose.agents.yml's
+      # agent-cuenta1 comment. The https:// git-credentials file is not mounted
+      # here (ADR 91).
+      - ../../.data/credentials/projects:/run/secrets/projects:ro
     depends_on:
       - dind-cuenta1
     networks:
@@ -217,6 +227,8 @@ services:
       - claude_creds_cuenta2:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
+      # See agent-cuenta1 above: the deploy keys, read-only.
+      - ../../.data/credentials/projects:/run/secrets/projects:ro
     depends_on:
       - dind-cuenta2
     networks:

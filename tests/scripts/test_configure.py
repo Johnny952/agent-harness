@@ -176,7 +176,7 @@ def test_a_rendered_pool_holds_the_compose_invariants(tmp_path, monkeypatch, nam
     invariants.test_every_dind_sidecar_uses_sysbox_runc_and_nothing_is_privileged()
     invariants.test_every_agent_service_isolates_its_config_home("docker-compose.agents.yml")
     invariants.test_every_agent_service_has_collector_url_and_source_app()
-    invariants.test_every_agent_mounts_the_deploy_keys_read_only()
+    invariants.test_every_agent_mounts_the_deploy_keys_read_only("docker-compose.agents.yml")
     for check in (
         invariants.test_no_agent_service_gets_the_read_token,
         invariants.test_only_the_collector_gets_the_read_token,
@@ -196,9 +196,7 @@ def test_a_rendered_coolify_pool_holds_the_agents_file_invariants(
 ) -> None:
     """The checks the invariants module holds only docker-compose.agents.yml to
     -- the hive mount, sysbox sidecars, collector env -- run on the Coolify
-    render's agents, by handing it to them under that name. Not the read-only
-    deploy keys: the shipped Coolify file mounts no /run/secrets/projects at
-    all, a gap of its own and not the renderer's."""
+    render's agents, by handing it to them under that name."""
     compose_dir = tmp_path / "compose"
     compose_dir.mkdir()
     (compose_dir / "docker-compose.agents.yml").write_text(_render_coolify(*names))
@@ -208,6 +206,7 @@ def test_a_rendered_coolify_pool_holds_the_agents_file_invariants(
     invariants.test_every_agent_service_mounts_the_shared_hive_directory()
     invariants.test_every_dind_sidecar_uses_sysbox_runc_and_nothing_is_privileged()
     invariants.test_every_agent_service_has_collector_url_and_source_app()
+    invariants.test_every_agent_mounts_the_deploy_keys_read_only("docker-compose.agents.yml")
 
 
 def test_the_default_pool_renders_the_shipped_coolify_file() -> None:

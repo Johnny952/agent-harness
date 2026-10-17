@@ -385,6 +385,10 @@ render_coolify_compose() {
       - claude_creds_$name:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
+      # Each project's SSH deploy key, read-only; see docker-compose.agents.yml's
+      # agent-cuenta1 comment. The https:// git-credentials file is not mounted
+      # here (ADR 91).
+      - ../../.data/credentials/projects:/run/secrets/projects:ro
     depends_on:
       - dind-$name
     networks:
@@ -412,6 +416,8 @@ EOF
       - claude_creds_$name:/root/.claude-account
       - ../../.data/projects:/data/projects
       - ../../.hive:/data/.hive
+      # See agent-$first above: the deploy keys, read-only.
+      - ../../.data/credentials/projects:/run/secrets/projects:ro
     depends_on:
       - dind-$name
     networks:
