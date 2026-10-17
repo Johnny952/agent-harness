@@ -483,6 +483,14 @@ def main() -> None:
         "account means two writers in one container.",
     )
     release_parser.add_argument(
+        "--task",
+        dest="task_id",
+        default=None,
+        help="Free only this task's hold on the account, for an account that "
+        "runs several phases at once. The others keep running and a park stays. "
+        "Without it every hold is freed.",
+    )
+    release_parser.add_argument(
         "--clear-rate-limit",
         action="store_true",
         help="Also forget the recorded refusal. Separate from --force because it "
@@ -788,7 +796,8 @@ def main() -> None:
         _require_migrated(cfg, parser)
         try:
             outcome = operator.release_account(
-                cfg, args.name, force=args.force, clear_rate_limit=args.clear_rate_limit
+                cfg, args.name, force=args.force, clear_rate_limit=args.clear_rate_limit,
+                task_id=args.task_id,
             )
         except ValueError as exc:
             parser.error(str(exc))

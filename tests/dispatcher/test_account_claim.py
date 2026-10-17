@@ -1,5 +1,6 @@
 """Taking an account is atomic across processes (`docs/decisions.md` ADR 71)."""
 import fcntl
+import json
 import os
 import threading
 import time
@@ -347,3 +348,152 @@ def test_the_reaper_floor_covers_a_probe_at_its_worst_case(tmp_path) -> None:
     )
 
     assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
+
+
+# --- max_concurrent_phases (`docs/decisions.md` ADR 88) ---------------------
+
+
+def _slots_config(tmp_path, *capacities, primary=None):
+    accounts = [
+        AccountConfig(
+            name=f"cuenta{i}", container=f"agent-cuenta{i}", max_concurrent_phases=cap,
+        )
+        for i, cap in enumerate(capacities, start=1)
+    ]
+    extra = {}
+    if primary:
+        for a in accounts:
+            a.is_primary = a.name == primary
+        extra["primary_account"] = primary
+    return _make_config(tmp_path, accounts=accounts, **extra)
+
+
+def _holder_ids(cfg, account="cuenta1"):
+    return [h.task_id for h in sm.get_holders(cfg.state_dir, account)]
+
+
+def test_capacity_one_never_offers_a_busy_account(tmp_path) -> None:
+    cfg = _slots_config(tmp_path, 1, 1)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-1")
+
+    assert dispatcher_mod.pick_idle_account(cfg) == "cuenta2"
+    assert sm.claim(cfg.state_dir, "cuenta2", "T-2")
+    assert dispatcher_mod.pick_idle_account(cfg) is None
+
+
+def test_capacity_two_offers_a_second_slot_when_nothing_else_is_free(tmp_path) -> None:
+    cfg = _slots_config(tmp_path, 2)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-1", capacity=2)
+
+    assert dispatcher_mod.pick_idle_account(cfg) == "cuenta1"
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-2", capacity=2)
+    assert dispatcher_mod.pick_idle_account(cfg) is None
+
+
+def test_a_free_account_is_preferred_over_a_second_slot(tmp_path) -> None:
+    cfg = _slots_config(tmp_path, 2, 2)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-1", capacity=2)
+
+    assert dispatcher_mod.pick_idle_account(cfg) == "cuenta2"
+
+
+def test_a_workers_second_slot_is_picked_before_an_idle_primary(tmp_path) -> None:
+    cfg = _slots_config(tmp_path, 1, 2, primary="cuenta1")
+    assert sm.claim(cfg.state_dir, "cuenta2", "T-1", capacity=2)
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta2"
+
+
+def test_a_parked_account_with_a_free_slot_is_not_offered(tmp_path) -> None:
+    cfg = _slots_config(tmp_path, 2)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-1", capacity=2)
+    sm.park(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+
+    assert dispatcher_mod.pick_idle_account(cfg) is None
+
+
+def test_a_phase_ending_leaves_the_other_holder(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _slots_config(tmp_path, 2)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-other", capacity=2)
+    _install(monkeypatch, lambda container: None)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "T-A", "proj", "arquitecto", "p")
+
+    assert result.success is True
+    assert _holder_ids(cfg) == ["T-other"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+
+
+def test_a_phase_that_raises_releases_only_itself(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _slots_config(tmp_path, 2)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-other", capacity=2)
+
+    def boom(container):
+        raise RuntimeError("phase blew up")
+
+    _install(monkeypatch, boom)
+
+    with pytest.raises(RuntimeError):
+        dispatcher_mod.dispatch_phase(cfg, "T-A", "proj", "arquitecto", "p")
+
+    assert _holder_ids(cfg) == ["T-other"]
+
+
+def test_a_park_while_two_are_held_keeps_both_and_the_unpark_returns_them(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    cfg = _slots_config(tmp_path, 3)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-1", capacity=3)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-2", capacity=3)
+
+    def over_the_line(container, workdir, prompt, **kwargs):
+        return ClaudeResult(
+            session_id=None,
+            result_text=(
+                "Current session: 99% used · resets later\n"
+                "Current week (all models): 10% used · resets later"
+            ),
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", over_the_line)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "T-A", "proj", "arquitecto", "p")
+
+    assert result.no_account is True
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.PRE_COOLDOWN
+    assert _holder_ids(cfg) == ["T-1", "T-2"]  # the parking phase is gone, not these
+
+    def healthy(container, workdir, prompt, **kwargs):
+        return ClaudeResult(session_id=None, result_text=_HEALTHY, raw={})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", healthy)
+
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == ["cuenta1"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+    assert _holder_ids(cfg) == ["T-1", "T-2"]
+
+
+def test_the_reaper_frees_a_dead_holder_beside_a_live_one(tmp_path) -> None:
+    cfg = _slots_config(tmp_path, 2)
+    acquire_lock(cfg.hive_tasks_dir, "T-dead", owner="cuenta1")
+    acquire_lock(cfg.hive_tasks_dir, "T-live", owner="cuenta1")
+    _age_heartbeat(cfg, "T-dead", 999)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-live", capacity=2)
+    assert sm.claim(cfg.state_dir, "cuenta1", "T-dead", capacity=2)
+    # Only the first holder is mirrored at the top level; the second one's
+    # stamp is edited inside the list.
+    path = os.path.join(cfg.state_dir, "cuenta1.json")
+    with open(path) as fh:
+        data = json.load(fh)
+    old = time.time() - (cfg.heartbeat_ttl_seconds + dispatcher_mod._PROBE_WORST_CASE_SECONDS + 1)
+    data["holders"][0]["busy_since"] = old
+    data["holders"][1]["busy_since"] = old
+    data["busy_since"] = old
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
+
+    assert _holder_ids(cfg) == ["T-live"]
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY

@@ -387,3 +387,39 @@ def list_idle_accounts(state_dir: str, accounts: list[AccountConfig]) -> list[st
     """
     idle = [a for a in accounts if get_state(state_dir, a.name) == AccountState.IDLE]
     return [a.name for a in sorted(idle, key=lambda a: a.is_primary)]
+
+
+def list_shared_accounts(state_dir: str, accounts: list[AccountConfig]) -> list[str]:
+    """Every unparked account that holds a phase and still has a free slot.
+
+    Config order. With every `max_concurrent_phases` at 1 this is always empty,
+    so the picker behaves as it did before slots existed (`docs/decisions.md`
+    ADR 88).
+    """
+    shared = []
+    for a in accounts:
+        data = _read_state(state_dir, a.name)
+        if not data or _parked_of(data) is not None:
+            continue
+        if 0 < len(_holders_of(data)) < a.max_concurrent_phases:
+            shared.append(a.name)
+    return shared
+
+
+def stamp_holder(state_dir: str, account_name: str, task_id: str | None) -> bool:
+    """Give the holder of `task_id` that has no `busy_since` one, keeping a park.
+
+    False if no holder is in that case. This is how the reaper starts the clock
+    on a holder it found without one (an old-shape file).
+    """
+    with _locked(state_dir):
+        existing = _read_state(state_dir, account_name) or {}
+        holders = _holders_of(existing) if existing else []
+        for i, h in enumerate(holders):
+            if h.task_id == task_id and h.busy_since is None:
+                holders[i] = Holder(h.task_id, time.time())
+                _write_account(
+                    state_dir, account_name, existing, _parked_of(existing), holders,
+                )
+                return True
+        return False

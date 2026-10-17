@@ -406,3 +406,36 @@ def test_a_record_in_the_wrong_shape_reads_as_unreadable(tmp_path: Path, record)
 
     with pytest.raises(ValueError, match="last_probe"):
         get_last_probe(str(tmp_path), "cuenta1")
+
+
+def test_list_shared_accounts_wants_a_holder_a_free_slot_and_no_park(tmp_path: Path) -> None:
+    from dispatcher.state_machine import list_shared_accounts, park
+
+    state_dir = str(tmp_path)
+    accounts = [
+        AccountConfig(name="cuenta1", container="c1", max_concurrent_phases=2),
+        AccountConfig(name="cuenta2", container="c2", max_concurrent_phases=2),
+        AccountConfig(name="cuenta3", container="c3", max_concurrent_phases=2),
+        AccountConfig(name="cuenta4", container="c4"),
+    ]
+    assert claim(state_dir, "cuenta1", "T-1", capacity=2)
+    assert claim(state_dir, "cuenta2", "T-2", capacity=2)
+    assert claim(state_dir, "cuenta2", "T-3", capacity=2)  # full
+    assert claim(state_dir, "cuenta3", "T-4", capacity=2)
+    park(state_dir, "cuenta3", AccountState.COOLING_DOWN)  # parked
+    assert claim(state_dir, "cuenta4", "T-5")  # capacity 1, full
+
+    assert list_shared_accounts(state_dir, accounts) == ["cuenta1"]
+
+
+def test_stamp_holder_starts_the_clock_on_an_unstamped_holder(tmp_path: Path) -> None:
+    from dispatcher.state_machine import stamp_holder
+
+    state_dir = str(tmp_path)
+    (tmp_path / "cuenta1.json").write_text(json.dumps({"state": "BUSY"}))
+    assert get_busy_since(state_dir, "cuenta1") is None
+
+    assert stamp_holder(state_dir, "cuenta1", None) is True
+
+    assert get_busy_since(state_dir, "cuenta1") is not None
+    assert stamp_holder(state_dir, "cuenta1", None) is False

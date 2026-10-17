@@ -63,6 +63,9 @@ class AccountReport:
     #: listing otherwise shows one account measured against different numbers
     #: than the rest with nothing to say why.
     is_primary: bool = False
+    #: Every phase the account holds, in claim order. `current_task_id` is the
+    #: first of them, which is all the observability api shows.
+    task_ids: list[str] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -149,9 +152,9 @@ def _held_task_ids(cfg: Config, account: str) -> list[str]:
     leave the other behind.
     """
     held = []
-    current = state_machine.get_current_task(cfg.state_dir, account)
-    if current:
-        held.append(current)
+    for holder in state_machine.get_holders(cfg.state_dir, account):
+        if holder.task_id and holder.task_id not in held:
+            held.append(holder.task_id)
     for task_id in context_transfer.list_task_ids(cfg.hive_tasks_dir):
         if task_id in held:
             continue
@@ -183,6 +186,10 @@ def account_reports(cfg: Config, probe: bool = False, now: float | None = None) 
                 rate_limited_at, cfg.quota_cooldown_seconds, now
             ),
             is_primary=acc.is_primary,
+            task_ids=[
+                h.task_id for h in state_machine.get_holders(cfg.state_dir, acc.name)
+                if h.task_id
+            ],
         )
         if probe:
             _probe_into(cfg, report)
@@ -248,6 +255,7 @@ def release_account(
     force: bool = False,
     clear_rate_limit: bool = False,
     now: float | None = None,
+    task_id: str | None = None,
 ) -> ReleaseOutcome:
     """Hand one account back to the pool, and say when that would be wrong.
 
@@ -265,6 +273,10 @@ def release_account(
     `--force` overrides both. `--clear-rate-limit` answers only the second,
     and does it by forgetting the refusal, which is a separate decision from
     unsticking a crashed BUSY and so is a separate flag.
+
+    With `task_id` only that one holder is freed: the others keep running and a
+    park stays as it is, so the cooldown guard does not apply
+    (`docs/decisions.md` ADR 88).
     """
     account = _account(cfg, name)
     now = time.time() if now is None else now
@@ -274,13 +286,22 @@ def release_account(
     cooldown_left = _cooldown_remaining(rate_limited_at, cfg.quota_cooldown_seconds, now)
 
     held = _held_task_ids(cfg, name)
+    if task_id is not None:
+        if task_id not in held:
+            return ReleaseOutcome(
+                refused=True,
+                detail=f"{name} does not hold {task_id}; it holds "
+                f"{', '.join(held) or 'nothing'}.",
+            )
+        held = [task_id]
+        cooldown_left = 0.0
     live = []
     stale = []
-    for task_id in held:
-        task = _read_task(cfg, task_id)
+    for held_id in held:
+        task = _read_task(cfg, held_id)
         if task is None:
             continue  # the state file names a card that is not there any more
-        (live if _lock_is_live(task, cfg.heartbeat_ttl_seconds, now_dt) else stale).append(task_id)
+        (live if _lock_is_live(task, cfg.heartbeat_ttl_seconds, now_dt) else stale).append(held_id)
 
     refusals = []
     if live:
@@ -300,20 +321,34 @@ def release_account(
     if refusals and not force:
         return ReleaseOutcome(refused=True, detail="\n".join(refusals))
 
-    if state is AccountState.IDLE and not stale and not (clear_rate_limit and rate_limited_at):
+    if (
+        task_id is None and state is AccountState.IDLE and not stale
+        and not (clear_rate_limit and rate_limited_at)
+    ):
         return ReleaseOutcome(refused=False, detail=f"{name} is already IDLE; nothing to release.")
 
     lines = []
-    for task_id in stale + (live if force else []):
+    for locked_id in stale + (live if force else []):
         # The card, not just the account: nothing outside run_task_cycle
         # reaps these (reap_expired_locks is called from there and nowhere
         # else), so an account released without its card leaves the task
         # unstartable for the next cycle.
-        tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
-        lines.append(f"unlocked task {task_id} (owner and heartbeat cleared; status untouched)")
+        tasks.release_stale_lock(cfg.hive_tasks_dir, locked_id)
+        lines.append(f"unlocked task {locked_id} (owner and heartbeat cleared; status untouched)")
     if clear_rate_limit and rate_limited_at is not None:
         state_machine.clear_rate_limit(cfg.state_dir, name)
         lines.append(f"forgot the refusal recorded {_duration(now - rate_limited_at)} ago")
+    if task_id is not None:
+        state_machine.release(cfg.state_dir, name, task_id)
+        now_state = state_machine.get_state(cfg.state_dir, name)
+        lines.insert(
+            0, f"{name}: released {task_id}; now {now_state.value} ({account.container})",
+        )
+        return ReleaseOutcome(
+            refused=False, detail="\n".join(lines), lock_released=bool(lines[1:]),
+        )
+    # A whole-account write on purpose: it frees every holder and lifts a park
+    # in one step, which is what this command with no task id means (ADR 88).
     state_machine.set_state(cfg.state_dir, name, AccountState.IDLE)
     lines.insert(0, f"{name}: {state.value} -> IDLE ({account.container})")
     if state is AccountState.AUTH_EXPIRED:
@@ -380,8 +415,9 @@ def format_status(
         notes = []
         if acc.is_primary:
             notes.append("primary")
-        if acc.current_task_id:
-            notes.append(f"on {acc.current_task_id}")
+        on = acc.task_ids or ([acc.current_task_id] if acc.current_task_id else [])
+        if on:
+            notes.append(f"on {', '.join(on)}")
         if acc.cooldown_remaining > 0:
             notes.append(f"refused, {_duration(acc.cooldown_remaining)} of cooldown left")
         elif acc.rate_limited_at is not None:
