@@ -1,6 +1,17 @@
 # Review — a person approves a task's diff in the console before it merges
 
-**Status:** design, approved in outline by the user on 2026-10-11, not built.
+**Status:** design, approved in outline by the user on 2026-10-11. The console
+review is not built: no *awaiting review* state, no diff route, no screen, no
+line comments and no verdicts. Two pieces landed on the CLI side through
+`docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
+there say:
+
+- the merge and the base push of *approve*, run on an automatic approve
+  (ADR 77) or on `merge-task --push` (ADR 78, which is also the credential's
+  ADR);
+- step 1 of *Decisions*, 6, as a pre-merge check on every merge, with the
+  `conflict` status (autonomy A-2).
+
 It began as a stub on 2026-10-10 recording a goal the user set; the user
 answered its open questions on 2026-10-11, and those answers are under
 *Decisions*. It is built after `docs/plans/board-service.md`, on the same
@@ -30,6 +41,9 @@ becomes a person's decision, taken over a diff, in the console.
   whatever branch the project's checkout is on. Nothing in the dispatcher
   pushes yet; the push is the operator's. C-5 as amended on 2026-10-11 lets
   the dispatcher push task branches, and C-12 the base on *approve*.
+  (Since 2026-10-17 the dispatcher pushes the base after an automatic
+  approve or `merge-task --push`, per ADRs 77 and 78, and every merge runs
+  the pre-merge check first. The task branch is still never pushed.)
 - **A draft screen.** `front/src/routes/approvals.tsx` approves or rejects
   "pushes with diffs, merges, tool permissions and budget overrides" over mock
   data. It splits a raw unified diff in the browser and has no line comments.
@@ -124,6 +138,24 @@ How the dispatcher learns of a verdict the service wrote, by reading the hive
 as it reads tasks today or by a signal from the service, is decided when step
 4 is built.
 
+*Narrowed* 2026-10-17, from what `docs/plans/autonomy.md` built:
+
+- *The credential* is ADR 78: the push uses what the fetch already uses, the
+  project's deploy key or the mounted https:// token. The push is
+  fast-forward only and is never forced.
+- *The base push* runs after an automatic approve (ADR 77) or
+  `merge-task --push`. `merge_on_done` never pushes.
+- *A refused push does not move the task to Blocked.* The merge stays on the
+  local base and the task stays `done` with its `merged` block. After an
+  automatic approve, its `## automatic approve` comment says why the push
+  did not land. After `merge-task --push`, the reason goes to stderr and the
+  command exits 4. Reconciling with the remote is a person's decision, and
+  then `merge-task --push` pushes again (ADR 78, 5).
+- *A conflict is caught at the merge.* There is no *awaiting review* state
+  yet, so the pre-merge check (*Decisions*, 6, step 1) runs before every
+  merge, not when a task enters review.
+- *Pushing the task branch after each phase* (step 5 below) is not built.
+
 ### 5. *Request changes* goes back to the arquitecto
 
 A person's comments are a new requirement, so they get a plan before code:
@@ -178,6 +210,29 @@ work that is mostly mechanical. Three steps instead, decided by the user on
    review*, and the screen shows what changed since the person last looked.
    An approval given before the conflict does not carry over: it was on
    another diff.
+
+*Narrowed* 2026-10-17: step 1 is built as the pre-merge check
+(`docs/plans/autonomy.md` *Decisions*, 2, task A-2;
+`dispatcher.pre_merge_check`). It runs at each merge, from `merge_on_done`,
+`merge-task` or an automatic approve. It does not run when a task enters
+review, and it does not re-run on the other tasks after a merge, since
+neither the review state nor its queue exists.
+
+- The base is merged into the task branch in a detached pre-merge checkout.
+- If the base is already in the branch, nothing new came in, and the gate is
+  not run again.
+- A conflict, or a gate that goes red, drops the pre-merge and leaves the
+  base and the branch unchanged. The task moves to `conflict` with a
+  `## pre-merge check` note naming the files or the gate and the base commit.
+- A clean, green pre-merge is kept on the branch, and the merge lands it. A
+  pool with `gates_enabled: false` keeps a clean merge without running the
+  gate.
+- A check that cannot run stops the merge without changing the status.
+- A task in `conflict` that later passes goes back to `done`.
+
+The integrador (steps 2 and 3) is not built, so for now the operator
+resolves a conflict: they merge the base into the branch, never rebasing,
+and run `merge-task` again.
 
 ## The flow
 
