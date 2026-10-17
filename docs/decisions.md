@@ -5725,3 +5725,65 @@ task's. The comment on the mount in `docker/compose/docker-compose.agents.yml`
 A refused push is never retried by the dispatcher; reconciling the base with
 what the remote gained is a person's decision (C-1), after which
 `merge-task --push` pushes it.
+
+## ADR 79 — a queue runs its tasks once each, in dependency order, against a limit of measured tokens
+
+**Status:** Accepted (2026-10-17).
+
+**Context.** Charter C-4 (*Amended*) lets the owner start several tasks with
+one yes: each task in the list runs for one cycle, a failed task is not
+retried, and the queue stops at a limit set in measured tokens. Task A-5 of
+`docs/plans/autonomy.md` builds that queue (`dispatcher/queue.py`,
+`python -m dispatcher run-queue`). Several things the plan names had to be
+fixed to a single meaning: what a token is, when the limit is checked, what
+"out of quota" does to a task, and what happens across a kill.
+
+**Decision.**
+1. *The plan and the yes.* `run-queue --project P --task-id A B ... --limit N`
+   reads every task's description, orders the tasks by `depends_on` with a
+   stable topological sort (list order breaks ties), and refuses an empty
+   list, a duplicate, a missing or unparseable description, a non-positive
+   limit and a dependency cycle. It prints the order, the roles a cycle runs,
+   the parallelism (only 1; B-3 is not built and `--parallel` other than 1 is
+   refused), the limit and whether the project auto-approves, then asks for
+   the yes unless `--yes` is given. That yes is the authorization every cycle
+   in the queue receives (`authorized=True`).
+2. *Measured tokens.* The spend of one usage line is input + output +
+   cache_creation + cache_read tokens, unweighted, each field per call
+   (ADR 64); a null field counts zero. A line with `measured: false`, or with
+   all four fields null, adds nothing and is counted as unmeasured, and the
+   summary says how many there were. `total_cost_usd` is never read. A
+   task's spend is the usage-log lines written after the offset recorded
+   when it started.
+3. *When the limit is checked.* Before each task, and before each phase,
+   through a `may_start_phase` hook `run_task_cycle` now takes. A phase that
+   has started is let finish, so a queue can pass its limit by at most one
+   phase. A cycle stopped by the hook is held, not blocked, and its task is
+   recorded `limit_reached`; the queue stops with status `limit_reached`.
+4. *Once each, and out of quota.* No task is started twice. A cycle held
+   before it spent anything (no account was free) never began, so its task
+   goes back to pending and the queue waits for an account, looking every
+   five minutes, without spending. A cycle that spent and was then held,
+   blocked or split is recorded as such and not retried. A task whose
+   dependency failed is skipped with a comment; a task whose dependency is
+   merely unmerged (auto-approve off, or a person's merge pending) makes the
+   queue end `waiting`, and `--resume` takes it up later.
+5. *The file and a kill.* The queue lives in `<state_dir>/queues/<id>.json`,
+   written atomically before and after every task. `--resume <id>` reloads
+   it; a task found `running` was cut off mid-cycle and is recorded
+   `interrupted` with its spend counted, never restarted; the board is not
+   touched, and a lock the dead cycle left is a person's to clear.
+6. *A refused push.* The cycle hands its `ApproveResult` to an `on_approve`
+   hook. A refused push (ADR 78) stops the queue with status `push_refused`,
+   which a resume does not lift.
+7. *Exit codes.* 0 every task finished; 1 a task failed, the queue is
+   waiting, or the yes was declined; 4 a push was refused; 5 the limit was
+   reached (`EXIT_LIMIT`, new).
+
+**Consequences.** The owner's yes covers a bounded spend that the dispatcher
+measures from its own log rather than from anything a phase reports. The
+bound is soft by one phase, which the confirmation does not yet say. Without
+auto-approve, a queue of dependent tasks runs only the first of each chain
+and then waits for a person. Waiting for quota calls the cooling-account
+recheck, which runs a `/usage` probe and spends nothing. Parallel cycles
+(B-3) will need the spend read per cycle rather than from one offset.

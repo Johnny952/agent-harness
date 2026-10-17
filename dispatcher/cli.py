@@ -18,6 +18,7 @@ from dispatcher import (
     role_skills,
     tasks,
 )
+from dispatcher import queue as queue_mod
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     CycleOutcome,
@@ -59,6 +60,11 @@ EXIT_SPLIT = 3
 #: land, and it did; not 3 or 75, which mean other things; so a script can tell
 #: "merged, push again later" from both (`docs/decisions.md` ADR 78).
 EXIT_NOT_PUSHED = 4
+#: `run-queue` that stopped on its token limit with tasks left: nothing is
+#: wrong and no reset helps, the owner raises the limit or lets it be. Not 4,
+#: whose push did not land; a queue stopped on a refused push exits 4 as
+#: `merge-task --push` does (`docs/decisions.md` ADR 79).
+EXIT_LIMIT = 5
 
 
 def _epic_line(cfg: Config, task_id: str) -> str:
@@ -503,6 +509,33 @@ def main() -> None:
         ".data/credentials/projects.",
     )
 
+    queue_parser = sub.add_parser(
+        "run-queue",
+        help="Run a confirmed list of tasks, one cycle each, in dependency order, "
+        "until they are done or the token limit is reached",
+    )
+    queue_parser.add_argument("--project", help="Project slug")
+    queue_parser.add_argument(
+        "--task-id", nargs="+", action="extend", default=[], dest="task_ids",
+        help="The tasks to run, each with a stored description; repeatable",
+    )
+    queue_parser.add_argument(
+        "--limit", type=int,
+        help="The ceiling in measured tokens from the usage log (ADR 79)",
+    )
+    queue_parser.add_argument(
+        "--parallel", type=int, default=1,
+        help="Cycles at a time; only 1 for now (docs/plans/autonomy.md, B-3)",
+    )
+    queue_parser.add_argument(
+        "--yes", action="store_true",
+        help="Start without asking; the confirmation screen is still printed",
+    )
+    queue_parser.add_argument(
+        "--resume", metavar="QUEUE_ID",
+        help="Go on with a queue a kill or a stop left, under its own tasks and limit",
+    )
+
     sub.add_parser(
         "migrate",
         help="Move the description out of every task file that still carries it "
@@ -540,6 +573,9 @@ def main() -> None:
             # reads to know what to run next.
             print(_epic_line(cfg, args.task_id))
             raise SystemExit(EXIT_SPLIT)
+    elif args.command == "run-queue":
+        _require_migrated(cfg, parser)
+        _run_queue(args, cfg, parser)
     elif args.command == "file-split":
         _require_migrated(cfg, parser)
         outcome = file_saved_split(cfg, args.task_id, args.project)
@@ -733,6 +769,53 @@ def main() -> None:
         _run_learnings(args, cfg)
     elif args.command == "project-keygen":
         _run_project_keygen(args, cfg, parser)
+
+
+def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:
+    """`run-queue`: confirm a queue and run it, or go on with one (ADR 79).
+
+    The yes is the owner's authorization for every cycle of the queue, and the
+    only one: each cycle is passed `authorized=True` because of it, and a
+    resume carries the same, since it adds nothing that was not confirmed.
+    """
+    if args.parallel != 1:
+        parser.error("--parallel: only 1 is supported until parallel cycles land")
+    if args.resume:
+        if args.task_ids or args.limit is not None or args.project:
+            parser.error("--resume takes the queue's own project, tasks and limit")
+        try:
+            queue = queue_mod.resume(cfg, args.resume)
+        except queue_mod.QueueError as exc:
+            parser.error(str(exc))
+    else:
+        if not args.project or not args.task_ids or args.limit is None:
+            parser.error("run-queue needs --project, --task-id and --limit, or --resume")
+        try:
+            queue = queue_mod.plan(cfg, args.project, args.task_ids, args.limit)
+        except queue_mod.QueueError as exc:
+            parser.error(str(exc))
+        print(queue_mod.confirmation(cfg, queue))
+        if not args.yes:
+            try:
+                answer = input("Start this queue? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in ("y", "yes"):
+                print("not started", file=sys.stderr)
+                raise SystemExit(EXIT_BLOCKED)
+        queue.authorized = True
+        path = queue_mod.save(cfg, queue)
+        print(f"queue {queue.queue_id} saved in {path}; `--resume {queue.queue_id}` goes on from it")
+    queue = queue_mod.run(cfg, queue)
+    print(queue_mod.summary(queue))
+    if queue.status == queue_mod.Q_PUSH_REFUSED:
+        raise SystemExit(EXIT_NOT_PUSHED)
+    if queue.status == queue_mod.Q_LIMIT:
+        raise SystemExit(EXIT_LIMIT)
+    if queue.status == queue_mod.Q_WAITING or any(
+        e.state in queue_mod.FAILED for e in queue.entries
+    ):
+        raise SystemExit(EXIT_BLOCKED)
 
 
 def _run_project_keygen(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:

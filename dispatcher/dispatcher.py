@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 
 from dispatcher import (
     auto_approve,
@@ -2331,6 +2332,10 @@ class CycleContext:
     # of it before `run_phase` returns, so at the end of a blocked cycle the
     # file cannot say whether this run ever held it; this can.
     took_lock: bool = False
+    # Asked before each phase starts; False stops the run there, held, with
+    # nothing started and nothing marked. The queue's token limit (A-5, ADR
+    # 79) is the one caller: a limit reached mid-cycle starts no new phase.
+    may_start_phase: Callable[[], bool] | None = None
 
 
 def open_cycle(
@@ -2464,6 +2469,12 @@ def run_phase(
     `repeated_finding` is the cycle's signal for `Config.effort_for`.
     """
     cfg = ctx.cfg
+    if ctx.may_start_phase is not None and not ctx.may_start_phase():
+        logger.warning(
+            "task %s: %s not started, the caller's limit was reached", ctx.task_id, role
+        )
+        ctx.held = True
+        return None
     effort = cfg.effort_for(role, round_num, repeated_finding=repeated_finding)
     try:
         result = dispatch_phase(
@@ -2801,6 +2812,8 @@ def run_task_cycle(
     slug: str,
     description: str | None = None,
     authorized: bool = True,
+    on_approve: Callable[[ApproveResult], None] | None = None,
+    may_start_phase: Callable[[], bool] | None = None,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
 
@@ -2814,10 +2827,16 @@ def run_task_cycle(
     condition of the automatic approve (ADR 77). `run-task` is a command the
     operator typed, so it is the default; a caller that starts cycles on its
     own passes False and its tasks are never merged automatically.
+
+    `on_approve` is handed the ApproveResult when the automatic approve ran,
+    so a caller can read what the outcome does not carry: the queue (A-5)
+    stops on `push.refused`. `may_start_phase` is asked before every phase;
+    False stops the cycle HELD before that phase starts (CycleContext).
     """
     ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
         return CycleOutcome.BLOCKED
+    ctx.may_start_phase = may_start_phase
     # Every stop after a phase that returned None reads this: the phase knows
     # whether it was held, and the cycle only has to pass that on.
     def stopped() -> CycleOutcome:
@@ -2994,7 +3013,7 @@ def run_task_cycle(
         if cfg.auto_approves(slug):
             # The conditions win over `merge_on_done` (ADR 77): a project
             # with both on merges only what the automatic approve allows.
-            merged = _auto_approve_and_merge(
+            approve = _auto_approve_and_merge(
                 cfg, task_id, slug,
                 description=ctx.description,
                 implemented=implemented,
@@ -3002,7 +3021,10 @@ def run_task_cycle(
                 audited=audited,
                 filed=filed,
                 authorized=authorized,
-            ).merged
+            )
+            if on_approve is not None:
+                on_approve(approve)
+            merged = approve.merged
         else:
             # Never pushes: the push of the base belongs to an approve, a
             # person's or the automatic one (ADR 78), not to `merge_on_done`.

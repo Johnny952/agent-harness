@@ -7537,6 +7537,44 @@ def test_a_refused_push_leaves_the_task_done_and_says_why(tmp_path, monkeypatch,
     assert "nothing was reset" in task.body
 
 
+def test_on_approve_is_handed_the_refused_push(tmp_path, monkeypatch, aa_git) -> None:
+    """The queue (A-5) stops on this; the outcome alone cannot say it."""
+    de = dispatcher_mod.docker_exec
+    cfg = _aa_config(tmp_path)
+    aa_git.push_outcome = de.PushOutcome(de.PUSH_REFUSED, "main", "rejected")
+    seen = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _aa_dispatch_phase())
+
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_AA_DESCRIPTION, on_approve=seen.append,
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert len(seen) == 1 and seen[0].merged and seen[0].push.refused
+
+
+def test_may_start_phase_false_holds_the_cycle_before_the_phase(tmp_path, monkeypatch, fake_git) -> None:
+    """The queue's limit (ADR 79): no new phase starts, nothing is marked blocked."""
+    cfg = _make_config(tmp_path)
+    started = []
+
+    def fake(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        started.append(role)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="ok", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake)
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION,
+        may_start_phase=lambda: not started,
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.HELD
+    assert started == ["arquitecto"]
+    assert _task(cfg).status != "blocked"
+
+
 def test_a_push_that_raises_is_a_refusal_not_a_crash(tmp_path, monkeypatch, aa_git) -> None:
     cfg = _aa_config(tmp_path)
     aa_git.push_error = RuntimeError("docker went away")
