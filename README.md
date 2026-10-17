@@ -1173,6 +1173,13 @@ one-click import:
   Coolify's "Execute Command" on this resource, or plain SSH:
   `docker compose -f docker/compose/docker-compose.coolify.yml --profile dispatcher run --rm dispatcher --config /app/config.yaml run-task --task-id <id> --project <name>`.
 
+A private project is reached through its SSH deploy key: run
+`project-keygen` in the dispatcher, which writes the pair under
+`.data/credentials/projects` (mounted into the dispatcher and, read-only, into
+the agents), and add the public key to the repository with write access when
+the project pushes. This file does not mount the https:// `git-credentials`
+token file, so a project without a key reaches only public https:// remotes.
+
 Two things still can't be automated by any compose file, Coolify import
 included:
 

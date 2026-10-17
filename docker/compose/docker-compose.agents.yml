@@ -59,7 +59,9 @@ services:
       # mount with no source gets a directory created for it, so a file meant to
       # be read has to exist BEFORE these come up, and an empty directory left
       # at that path has to go first. It is gitignored (.gitignore ignores
-      # .data/), one line in git's `store` format, and needs no write scope.
+      # .data/), one line in git's `store` format. The token needs read access,
+      # and write (contents) access for a project the dispatcher pushes, since
+      # it pushes the base with the same credential as the fetch (ADR 78).
       - ../../.data/credentials/git-credentials:/run/secrets/git-credentials:ro
       # Each project's SSH deploy key, at <slug>/id_ed25519, made by the
       # dispatcher's `project-keygen` (docs/plans/projects.md, Decisions 2).

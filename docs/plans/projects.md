@@ -60,6 +60,8 @@ Checked on 2026-10-11.
   `url.git@github.com:.insteadOf`, never rewritten), and through the HTTPS
   store otherwise. The push of C-5 is not built yet, so it has no SSH path.
   `docker-compose.coolify.yml` mounts neither credential.
+  *Narrowed 2026-10-17:* since T-059 it mounts the deploy keys, not the
+  https:// file (`docs/decisions.md` ADR 91).
 - **Locks.** A task is locked to one dispatcher by `acquire_lock`
   (`dispatcher/context_transfer.py`), and a phase locks one account through
   `pick_account`. Nothing locks a project: two cycles of one project could
