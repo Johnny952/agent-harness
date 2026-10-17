@@ -118,7 +118,9 @@ on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
   writes through the forward; what keeps them from being cross-site is
   `docs/decisions.md` ADR 112 part 7: no CORS header is ever sent and OPTIONS and
   POST are a 405, so a foreign page cannot send a PUT or a DELETE here at all.
-  The Settings screen at `/models` reads it, read-only for now (ADR 113).
+  The Settings screen at `/models` reads it (ADR 113) and writes through it: a
+  save is a PUT and a reset a DELETE, each carrying the revision it was read at
+  (ADR 114).
 - **Query keys and intervals are central.** `src/lib/api/queries.ts` holds
   every key and every `refetchInterval`. `POLL_MS` is 2500 and **nothing polls
   faster than 2s** — the harness is four containers and a SQLite file, not a

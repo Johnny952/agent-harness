@@ -435,12 +435,18 @@ export interface SettingChange {
  * that is not a list with `Malformed` rather than trusting the type into a
  * `.map` that would take the page (`docs/decisions.md` ADR 29). `error` is the
  * config's own validation error, the one that makes the dispatcher refuse every
- * verb; `revision` is what the follow-up's save sends back.
+ * verb; `revision` is what a save or a reset sends back, verbatim.
+ *
+ * Three of them can be `null`, and the writer means each (`config_writer/app.py`
+ * `payload`): `base` is a `config.yaml` that does not read as a mapping,
+ * `overrides` is an overrides file that does not parse — every write is then a
+ * 422 — and `revision` is an overrides file that does not exist yet, which a
+ * save sends as `null` (ADR 110).
  */
 export interface Settings {
-  base: Record<string, unknown>;
-  overrides: Record<string, unknown>;
-  revision: string;
+  base: Record<string, unknown> | null;
+  overrides: Record<string, unknown> | null;
+  revision: string | null;
   rows: unknown;
   roles: Record<string, string[]>;
   recent_changes: unknown;
