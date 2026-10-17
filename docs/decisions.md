@@ -6255,3 +6255,69 @@ the deploy-key mounts.
 public https:// remote; there is no token fallback. Adding the
 `git-credentials` mount there later needs a way to create the file before the
 first `up`, and is a decision to revisit this ADR, not an oversight to fix.
+
+## ADR 94 — a draft run's arquitecto is a reader: a detached checkout of the base, never committed, removed when the run ends
+
+**Status:** accepted (T-060, decided by the owner 2026-10-17). It supersedes
+the part of ADR 82's *Consequences* about the worktree, the branch and the
+commits, and the words "the worktree (`agent/task/<draft id>`)" in its
+*Decision* 1. The rest of ADR 82 stands.
+
+**Context.** ADR 82 runs `draft-specs` as one arquitecto phase through
+`dispatch_phase`, and the arquitecto is in `docker_exec.WRITER_ROLES`. So a
+draft run checked out a new `agent/task/<draft id>` branch in a writer
+worktree, and `_should_commit` committed whatever the phase left there to a
+branch no task carries and nothing merges. The prompt asks for no repo
+changes; nothing enforced it, and nothing removed the worktree or the branch.
+
+**Decision.**
+
+1. *An explicit keyword, not a role.* `dispatch_phase` and
+   `docker_exec.create_worktree` take `at_base: bool = False`.
+   `run_draft_specs` passes `at_base=True`; nothing else does. It names what
+   the phase is given, a checkout of the project's base, and the reader
+   behavior follows from that: the base branch is already checked out in the
+   project clone and git will not check one branch out twice, so the checkout
+   is detached, and a detached checkout has no branch a commit could land on.
+   A flag on the call rather than a new role name keeps `WRITER_ROLES`,
+   `role_model`, the skills, the schema and the effort all keyed on
+   `arquitecto` as ADR 82 has them.
+2. *The checkout.* With `at_base=True`, `create_worktree` rebuilds
+   `worktrees/<draft id>/<role>` (so `worktrees/<draft id>/arquitecto`) as the
+   reviewing roles' checkout is rebuilt, `git worktree add --detach <path>
+   HEAD`, run in the project clone: the commit the clone's `HEAD` points at.
+   No branch is created or checked out, writer role or not.
+3. *No commit.* `dispatch_phase` skips the commit and the left-behind record
+   (`_should_commit`, `_record_left_behind`) when `at_base` is set, whatever
+   the role. `_should_commit` itself is unchanged.
+4. *The review-writes retry does not fire.* `_refuse_review_writes` stays
+   keyed on `WRITER_ROLES`, so it returns early for the arquitecto. Its
+   prompt (`handoff.discarded_writes_prompt`) asks for the change under
+   `findings` and speaks of the task branch; the arquitecto's schema has no
+   `findings` and a draft has no task branch, and a draft's output is the
+   files in the drafts dir, which no checkout holds. Instead, the cleanup
+   logs a WARNING naming the paths the phase left dirty in the checkout
+   before it removes them, so a draft that broke the prompt's rule is on
+   record.
+5. *Removed when the run ends.* `run_draft_specs` removes
+   `worktrees/<draft id>/` and prunes git's worktree bookkeeping
+   (`docker_exec.remove_task_worktrees`) in a `finally`, after success, after
+   a failed phase and after an exception, in `cleanup_container`'s container,
+   with ownership read before and restored after as `_drop_review_worktrees`
+   does. Best-effort: a failed removal is a WARNING and never the error the
+   run ends with. The one exit that skips it is `LockHeldError`: the lock is
+   taken before the checkout is made, so a run refused its lock made nothing,
+   and a checkout at that path belongs to the run holding the lock; removing
+   it would pull the tree out from under a live phase. That run removes its
+   own when it ends.
+6. *The task file stays.* `<hive tasks>/<draft id>.md` still ends `drafted`
+   on success, and its `usage/` log stays: it is how a draft set is found and
+   what the run cost. It is not part of the checkout and is not removed.
+
+**Consequences.** A draft run leaves no branch and no worktree, and commits
+nothing; its whole output is the drafts dir, the task file and the usage log.
+`tasks.check_drafts` and `accept-drafts` are untouched. A normal task's
+arquitecto is unchanged: the writer worktree on `agent/task/<task id>`, and
+its commit. Leftovers of runs made before this ADR are not reaped; nothing
+here looks for them. A failover inside one draft run rebuilds the checkout at
+the same path, so the resumed session finds the same working directory.
