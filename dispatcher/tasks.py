@@ -30,6 +30,13 @@ The epic format of `docs/plans/task-split.md` section 2 is written here too:
 epic on its last merged sub-task and `epic_problems` checks one written by
 hand. The dispatcher calls all of them; `file_split` only through
 `dispatcher._file_split` (`docs/implementations/T-031.md`).
+
+So are the drafts of `docs/plans/autonomy.md` *Decisions*, 9 (ADR 82): a
+`draft-specs` run writes a set of them under `<hive root>/board/drafts/<draft
+id>/`, `check_drafts` holds them to the section rules, and `accept_drafts`
+files the ones the owner accepts as pending tasks with fresh ids. A draft is
+not a task: no description is ever stored under a draft id, so nothing that
+runs tasks can be pointed at one.
 """
 from __future__ import annotations
 
@@ -48,7 +55,7 @@ from pathlib import Path
 
 import yaml
 
-from dispatcher import context_transfer
+from dispatcher import context_transfer, surface
 # By name: this module's own `handoff` is a task-file writer.
 from dispatcher.handoff import _SPLIT_MAX, _SPLIT_MIN, SubTask, split_problems
 
@@ -66,7 +73,21 @@ MIGRATE_COMMAND = "dispatch migrate"
 #: the sections existed: the old text goes whole under `## Goal`.
 LEGACY_DONE_WHEN = "Not stated separately; see Goal."
 
+#: Under the board, beside the task directories: `drafts/<draft id>/<name>.md`.
+DRAFTS_DIR_NAME = "drafts"
+#: The record of which drafts of a set were accepted, as which task ids.
+ACCEPTED_FILE = "accepted.yaml"
+#: The sections a draft must have on top of `REQUIRED`: a task nobody has
+#: scoped is the thing a draft exists to avoid (`docs/plans/autonomy.md`
+#: *Decisions*, 9), and a Surface naming no path means the whole repo.
+DRAFT_REQUIRED = ("Surface", "Out of scope")
+
 _LEGACY_KEY = "description"
+#: Shaped like a queue id (`queue._QUEUE_ID`), with its own prefix.
+_DRAFT_ID_RE = re.compile(r"^d-\d{8}T\d{6}Z-[0-9a-f]{4}$")
+#: A draft's name is its file's stem and what its siblings' `depends_on` say.
+_DRAFT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_TASK_NUMBER_RE = re.compile(r"^T-(\d+)$")
 _SECTION_RE = re.compile(
     r"^## (" + "|".join(re.escape(name) for name in REQUIRED + OPTIONAL) + r")[ \t]*$"
 )
@@ -86,6 +107,15 @@ class UnmigratedTaskError(ValueError):
         )
         self.task_id = task_id
         self.path = path
+
+
+class DraftError(ValueError):
+    """A draft set, or part of one, that will not be filed. One error, every problem."""
+
+    def __init__(self, draft_id: str, problems: list[str]) -> None:
+        super().__init__(f"drafts {draft_id}: " + "; ".join(problems))
+        self.draft_id = draft_id
+        self.problems = list(problems)
 
 
 class SplitError(ValueError):
@@ -249,9 +279,16 @@ def _write(hive_dir: str, task_id: str, text: str) -> str:
 def write_description(hive_dir: str, task_id: str, text: str) -> str:
     """Store a description verbatim, and return the file it went in.
 
-    Refuses an unmigrated task file (`UnmigratedTaskError`) and a text missing
-    a required section (`DescriptionError`), writing nothing in either case.
+    Refuses an unmigrated task file (`UnmigratedTaskError`), a text missing
+    a required section (`DescriptionError`) and a draft id (`ValueError`),
+    writing nothing in any case. The last is what keeps a draft from ever
+    being run: `open_cycle` and `queue.plan` refuse a task with no
+    description, and a draft id can never get one.
     """
+    if is_draft_id(task_id):
+        raise ValueError(
+            f"{task_id!r} names drafts, not a task; accept them with `dispatch accept-drafts`"
+        )
     _refuse_unmigrated(hive_dir, task_id)
     parse_description(text)
     return _write(hive_dir, task_id, text)
@@ -873,6 +910,334 @@ def file_split(hive_dir: str, parent_id: str, subtasks: list[SubTask]) -> list[s
         parent.status = "epic"
         parent.split_into = ids
         _write_task_file(parent_path, parent)
+    return ids
+
+
+# Drafts (`docs/plans/autonomy.md` *Decisions*, 9; ADR 82).
+
+
+@dataclasses.dataclass(frozen=True)
+class Draft:
+    """One drafted task: its name in the set, the siblings it waits for, its description."""
+
+    name: str
+    depends_on: list[str]
+    description: str
+
+
+def is_draft_id(task_id: str) -> bool:
+    """Is this a draft set's id, or the drafts directory itself, rather than a task id?"""
+    return task_id == DRAFTS_DIR_NAME or bool(_DRAFT_ID_RE.match(task_id))
+
+
+def new_draft_id(now: dt.datetime | None = None) -> str:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return f"d-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:4]}"
+
+
+def drafts_root(hive_dir: str) -> str:
+    return os.path.join(board_root(hive_dir), DRAFTS_DIR_NAME)
+
+
+def draft_set_dir(hive_dir: str, draft_id: str) -> str:
+    """Where a draft set's files live. `ValueError` for an id that is not a draft id."""
+    if not _DRAFT_ID_RE.match(draft_id):
+        raise ValueError(f"{draft_id!r} is not a draft id")
+    return os.path.join(drafts_root(hive_dir), draft_id)
+
+
+def _draft_text(draft: Draft) -> str:
+    fm = yaml.safe_dump({"depends_on": list(draft.depends_on)}, default_flow_style=True).strip()
+    delim = context_transfer._FRONTMATTER_DELIM
+    return f"{delim}\n{fm}\n{delim}\n{draft.description}"
+
+
+def write_draft(hive_dir: str, draft_id: str, draft: Draft) -> str:
+    """Store one draft in the format the phase is told to write, and return its path.
+
+    The `draft-specs` phase writes these files itself; this is the same
+    format from Python, for tests and for a set written by hand. Not checked
+    here: `check_drafts` is the one check, whoever wrote the file.
+    """
+    if not _DRAFT_NAME_RE.match(draft.name):
+        raise ValueError(f"draft name {draft.name!r} is not a plain name")
+    path = os.path.join(draft_set_dir(hive_dir, draft_id), f"{draft.name}.md")
+    context_transfer._makedirs_readable(
+        context_transfer.hive_root(hive_dir), os.path.dirname(path)
+    )
+    context_transfer._write_atomic(path, _draft_text(draft))
+    return path
+
+
+def _natural_key(name: str) -> list[object]:
+    """`D2` before `D10`: the order the phase numbered its steps in."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name)]
+
+
+def _read_draft(path: str, name: str) -> tuple[Draft | None, str | None]:
+    """One draft file as a `Draft`, or the reason it is not one."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"draft {name}: cannot be read: {exc}"
+    delim = context_transfer._FRONTMATTER_DELIM
+    if not text.startswith(delim):
+        return None, f"draft {name}: has no frontmatter; start it with `{delim}`"
+    try:
+        _, fm_text, body = text.split(delim, 2)
+        fm = yaml.safe_load(fm_text)
+    except (ValueError, yaml.YAMLError) as exc:
+        return None, f"draft {name}: its frontmatter does not parse: {exc}"
+    fm = {} if fm is None else fm
+    if not isinstance(fm, dict):
+        return None, f"draft {name}: its frontmatter is not a mapping"
+    deps = fm.get("depends_on")
+    deps = [] if deps is None else deps
+    if not isinstance(deps, list) or not all(isinstance(dep, str) for dep in deps):
+        return None, f"draft {name}: depends_on must be a list of draft names"
+    return Draft(name=name, depends_on=list(deps), description=body.lstrip("\n")), None
+
+
+def read_drafts(hive_dir: str, draft_id: str) -> tuple[list[Draft], list[str]]:
+    """Every draft of a set in name order, and why each file that is not one is not.
+
+    A `.md` file is a draft; nothing else in the directory is read
+    (`accepted.yaml` among them). A set with no directory has no drafts.
+    """
+    directory = draft_set_dir(hive_dir, draft_id)
+    try:
+        entries = os.listdir(directory)
+    except FileNotFoundError:
+        return [], []
+    drafts: list[Draft] = []
+    problems: list[str] = []
+    for entry in sorted(entries, key=_natural_key):
+        if not entry.endswith(".md"):
+            continue
+        name = entry[: -len(".md")]
+        if not _DRAFT_NAME_RE.match(name):
+            problems.append(f"{entry}: {name!r} is not a plain draft name")
+            continue
+        draft, problem = _read_draft(os.path.join(directory, entry), name)
+        if problem:
+            problems.append(problem)
+        else:
+            drafts.append(draft)
+    return drafts, problems
+
+
+def draft_problems(draft: Draft, names: set[str]) -> list[str]:
+    """What keeps one draft from being filed, given the names in its set.
+
+    The section rules of a description plus `DRAFT_REQUIRED`, a Surface that
+    names at least one path (`surface.parse`, *Decisions*, 5), and a
+    `depends_on` that names only other drafts of the same set.
+    """
+    problems: list[str] = []
+    try:
+        parsed: Description | None = parse_description(draft.description)
+    except DescriptionError as exc:
+        problems.append(f"draft {draft.name}: the task description {exc}")
+        parsed = None
+    if parsed is not None:
+        missing = [name for name in DRAFT_REQUIRED if getattr(parsed, _field(name)) is None]
+        if missing:
+            named = " and ".join(f"`## {name}`" for name in missing)
+            problems.append(
+                f"draft {draft.name}: is missing its {named} section"
+                f"{'s' if len(missing) > 1 else ''}"
+            )
+        elif surface.is_whole_repo(surface.parse(parsed.surface)):
+            # Empty is the whole repo, which no queue can run beside anything.
+            problems.append(
+                f"draft {draft.name}: its `## Surface` names no path; name the files or "
+                "directories it touches, in backticks"
+            )
+    if draft.name in draft.depends_on:
+        problems.append(f"draft {draft.name}: depends on itself")
+    unknown = [dep for dep in draft.depends_on if dep not in names]
+    if unknown:
+        problems.append(
+            f"draft {draft.name}: depends on {', '.join(unknown)}, which is not in this set"
+        )
+    return problems
+
+
+def _cycle(drafts: list[Draft]) -> list[str] | None:
+    """A dependency cycle among these drafts, as names, or None. Self-loops are left out:
+    `draft_problems` names them on their own."""
+    edges = {d.name: [dep for dep in d.depends_on if dep != d.name] for d in drafts}
+    done: set[str] = set()
+    path: list[str] = []
+
+    def visit(name: str) -> list[str] | None:
+        if name in path:
+            return path[path.index(name):] + [name]
+        if name in done or name not in edges:
+            return None
+        path.append(name)
+        for dep in edges[name]:
+            found = visit(dep)
+            if found:
+                return found
+        path.pop()
+        done.add(name)
+        return None
+
+    for name in edges:
+        found = visit(name)
+        if found:
+            return found
+    return None
+
+
+def check_drafts(hive_dir: str, draft_id: str) -> list[Draft]:
+    """Every draft of a set when the whole set holds, else `DraftError` naming every problem.
+
+    What `draft-specs` runs on what its phase wrote. `accept_drafts` holds
+    only the drafts it is filing to the rules, so one bad draft does not stop
+    the owner from accepting the others with `--only`.
+    """
+    drafts, problems = read_drafts(hive_dir, draft_id)
+    if not drafts and not problems:
+        raise DraftError(draft_id, [f"no drafts in {draft_set_dir(hive_dir, draft_id)}"])
+    names = {draft.name for draft in drafts}
+    for draft in drafts:
+        problems.extend(draft_problems(draft, names))
+    cycle = _cycle(drafts)
+    if cycle:
+        problems.append("the drafts depend on each other in a cycle: " + " -> ".join(cycle))
+    if problems:
+        raise DraftError(draft_id, problems)
+    return drafts
+
+
+def accepted_drafts(hive_dir: str, draft_id: str) -> dict[str, str]:
+    """Which drafts of a set were accepted, by name, as which task ids."""
+    path = os.path.join(draft_set_dir(hive_dir, draft_id), ACCEPTED_FILE)
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a mapping of draft name to task id")
+    return {str(name): str(task_id) for name, task_id in data.items()}
+
+
+def _next_task_number(hive_dir: str) -> tuple[int, int]:
+    """The number after the highest `T-<n>` on the board, and the width to pad it to.
+
+    The task files and the description directories are both read: either
+    can exist without the other, and a fresh id has to be fresh in both.
+    """
+    seen = list(context_transfer.list_task_ids(hive_dir))
+    with contextlib.suppress(FileNotFoundError, NotADirectoryError):
+        seen.extend(os.listdir(board_root(hive_dir)))
+    numbers = [match.group(1) for name in seen if (match := _TASK_NUMBER_RE.match(name))]
+    if not numbers:
+        return 1, 3
+    return max(int(n) for n in numbers) + 1, max(3, max(len(n) for n in numbers))
+
+
+def accept_drafts(
+    hive_dir: str, draft_id: str, only: list[str] | None = None
+) -> dict[str, str]:
+    """File drafts as `pending` tasks with fresh ids, and return draft name to task id.
+
+    Every draft not yet accepted, or only the ones `only` names. Each gets the
+    next free `T-<n>` in name order, its description stored as drafted, and
+    its `depends_on` rewritten from sibling names to their task ids. A
+    sibling it depends on has to be accepted in the same call or have been
+    accepted before: a dependency on a draft is one nothing can ever merge.
+
+    Everything is checked before anything is written, and every problem is
+    reported in one `DraftError`. The ids go into `accepted.yaml` before any
+    task is written, so a run that died part way is finished by running it
+    again, with the same ids, and an accepted draft whose task file exists is
+    never filed twice. An unmigrated file raises `UnmigratedTaskError`, as
+    from every other writer.
+    """
+    drafts, problems = read_drafts(hive_dir, draft_id)
+    by_name = {draft.name: draft for draft in drafts}
+    record = accepted_drafts(hive_dir, draft_id)
+
+    def filed(name: str) -> bool:
+        return name in record and os.path.exists(
+            context_transfer.task_file_path(hive_dir, record[name])
+        )
+
+    if only is None:
+        targets = [draft for draft in drafts if not filed(draft.name)]
+        if not targets and not problems:
+            problems.append(
+                "every draft is already accepted" if drafts
+                else f"no drafts in {draft_set_dir(hive_dir, draft_id)}"
+            )
+    else:
+        # A file nobody asked for is not judged: that is what `--only` is for.
+        problems = []
+        unknown = [name for name in only if name not in by_name]
+        if unknown:
+            problems.append(f"no draft named {', '.join(unknown)} in this set")
+        targets = [by_name[name] for name in sorted(set(only) & set(by_name), key=_natural_key)]
+        problems.extend(
+            f"draft {draft.name}: already accepted as {record[draft.name]}"
+            for draft in targets if filed(draft.name)
+        )
+    target_names = {draft.name for draft in targets}
+    for draft in targets:
+        problems.extend(draft_problems(draft, set(by_name)))
+        waiting = [
+            dep for dep in draft.depends_on
+            if dep in by_name and dep != draft.name
+            and dep not in target_names and dep not in record
+        ]
+        if waiting:
+            problems.append(
+                f"draft {draft.name}: depends on {', '.join(waiting)}, which is not accepted; "
+                "accept it in the same call or first"
+            )
+    cycle = _cycle(targets)
+    if cycle:
+        problems.append("the drafts depend on each other in a cycle: " + " -> ".join(cycle))
+    if problems:
+        raise DraftError(draft_id, problems)
+
+    number, width = _next_task_number(hive_dir)
+    for draft in targets:
+        # A draft already in the record is a run that died part way: same id.
+        if draft.name not in record:
+            record[draft.name] = f"T-{number:0{width}d}"
+            number += 1
+    ids = {draft.name: record[draft.name] for draft in targets}
+    for task_id in ids.values():
+        _refuse_unmigrated(hive_dir, task_id)
+    context_transfer._write_atomic(
+        os.path.join(draft_set_dir(hive_dir, draft_id), ACCEPTED_FILE),
+        yaml.safe_dump(record, sort_keys=False),
+    )
+
+    for draft in targets:
+        task_id = ids[draft.name]
+        # The description first, as `migrate` and `file_split` do.
+        if read_description(hive_dir, task_id) is None:
+            write_description(hive_dir, task_id, draft.description)
+        path = context_transfer.task_file_path(hive_dir, task_id)
+        if not os.path.exists(path):
+            _write_task_file(
+                path,
+                context_transfer.TaskFile(
+                    task_id=task_id,
+                    status="pending",
+                    owner=None,
+                    depends_on=[record[dep] for dep in draft.depends_on],
+                    heartbeat=None,
+                    body="",
+                    epic=None,
+                ),
+            )
     return ids
 
 

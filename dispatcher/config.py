@@ -55,6 +55,11 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 #: The roles a phase can run as, which are the keys `role_effort` and
 #: `role_model` may name.
 PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
+#: The `role_model` key for the arquitecto's `draft-specs` run (ADR 82):
+#: drafting a plan's specs is not designing one task, and may want another
+#: model. Not a role: the phase runs as the arquitecto, with its skills and
+#: its effort. Unset, the run takes the arquitecto's model.
+DRAFT_ROLE = "arquitecto-draft"
 
 
 @dataclasses.dataclass
@@ -135,7 +140,8 @@ class Config:
     #: A model per role over `default_model`, such as
     #: `{"implementador": "claude-sonnet-5-5"}` (`docs/decisions.md` ADR 65).
     #: A model the phase call names itself, the cartografo's `mapping_model`,
-    #: still wins over both. The effort escalation does not touch it.
+    #: still wins over both. The effort escalation does not touch it. Also
+    #: takes `DRAFT_ROLE`, the arquitecto's `draft-specs` run (ADR 82).
     role_model: dict[str, str] = dataclasses.field(default_factory=dict)
     #: How many times a phase that ended without its handoff is resumed with
     #: one "continue" line before it counts as failed. Unattended, a model can
@@ -179,7 +185,12 @@ class Config:
         return self.role_effort.get(role, self.default_effort)
 
     def model_for(self, role: str) -> str:
-        """The `--model` a phase of `role` runs on, every call of it included."""
+        """The `--model` a phase of `role` runs on, every call of it included.
+
+        `DRAFT_ROLE` falls back to the arquitecto's model before the default.
+        """
+        if role == DRAFT_ROLE and role not in self.role_model:
+            return self.model_for("arquitecto")
         return self.role_model.get(role, self.default_model)
 
 
@@ -271,7 +282,7 @@ def _load_role_model(raw: dict) -> dict[str, str]:
             f"by mapping_model, which wins over role_model; remove it from "
             f"role_model and set mapping_model instead"
         )
-    accepted = PHASE_ROLES - {project_docs.MAPPER_ROLE}
+    accepted = (PHASE_ROLES - {project_docs.MAPPER_ROLE}) | {DRAFT_ROLE}
     unknown = sorted(set(block) - accepted)
     if unknown:
         raise ValueError(

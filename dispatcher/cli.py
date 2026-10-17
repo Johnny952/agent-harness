@@ -30,6 +30,7 @@ from dispatcher.dispatcher import (
     pre_merge_check,
     push_base,
     record_merge,
+    run_draft_specs,
     run_single_phase,
     run_task_cycle,
 )
@@ -537,6 +538,28 @@ def main() -> None:
         help="Go on with a queue a kill or a stop left, under its own tasks and limit",
     )
 
+    draft_parser = sub.add_parser(
+        "draft-specs",
+        help="Have the arquitecto draft a plan's tasks as specs for the owner to accept; "
+        "nothing it drafts runs until `accept-drafts` files it (ADR 82)",
+    )
+    draft_parser.add_argument("--project", required=True, help="Project slug")
+    draft_parser.add_argument(
+        "--plan", required=True,
+        help="The plan to draft from, as a path inside the project, e.g. docs/plans/x.md",
+    )
+
+    accept_parser = sub.add_parser(
+        "accept-drafts",
+        help="File drafts as pending tasks with fresh ids, their depends_on rewritten "
+        "to those ids (ADR 82)",
+    )
+    accept_parser.add_argument("draft_id", metavar="DRAFT_ID", help="The set `draft-specs` printed")
+    accept_parser.add_argument(
+        "--only", nargs="+", action="extend", metavar="NAME",
+        help="Accept only these drafts, by name (D1, D2...); repeatable",
+    )
+
     sub.add_parser(
         "migrate",
         help="Move the description out of every task file that still carries it "
@@ -778,6 +801,75 @@ def main() -> None:
         _run_learnings(args, cfg)
     elif args.command == "project-keygen":
         _run_project_keygen(args, cfg, parser)
+    elif args.command == "draft-specs":
+        _require_migrated(cfg, parser)
+        _run_draft_specs(args, cfg, parser)
+    elif args.command == "accept-drafts":
+        _require_migrated(cfg, parser)
+        _run_accept_drafts(args, cfg)
+
+
+def _draft_line(draft: tasks.Draft) -> str:
+    goal = tasks.parse_description(draft.description).goal.splitlines()[0]
+    deps = f" (depends on {', '.join(draft.depends_on)})" if draft.depends_on else ""
+    return f"{draft.name}: {goal}{deps}"
+
+
+def _run_draft_specs(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:
+    """`draft-specs`: one arquitecto phase, then the section rules on what it wrote."""
+    try:
+        draft_id, result = run_draft_specs(cfg, args.project, args.plan)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if result is None:
+        print(f"drafts {draft_id}: locked by another owner; the log above says who", file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    if result.no_account:
+        print(
+            f"drafts {draft_id} are held: no account could take the arquitecto; "
+            "run it again once one resets",
+            file=sys.stderr,
+        )
+        raise SystemExit(EXIT_HELD)
+    if not result.success:
+        print(f"drafts {draft_id}: the arquitecto did not finish; the log above says why", file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    try:
+        drafts = tasks.check_drafts(cfg.hive_tasks_dir, draft_id)
+    except tasks.DraftError as exc:
+        # The set stays on disk: the owner can fix a file by hand and accept
+        # the rest with --only, rather than paying for the run again.
+        for problem in exc.problems:
+            print(problem, file=sys.stderr)
+        print(
+            f"drafts {draft_id} in {tasks.draft_set_dir(cfg.hive_tasks_dir, draft_id)} do not "
+            "hold to the section rules; fix them, or accept the ones that do with --only",
+            file=sys.stderr,
+        )
+        raise SystemExit(EXIT_BLOCKED)
+    for draft in drafts:
+        print(_draft_line(draft))
+    print(
+        f"drafts {draft_id}: {len(drafts)} in {tasks.draft_set_dir(cfg.hive_tasks_dir, draft_id)}; "
+        f"read them, then `accept-drafts {draft_id}` (or `--only NAME ...`)"
+    )
+
+
+def _run_accept_drafts(args: argparse.Namespace, cfg: Config) -> None:
+    """`accept-drafts`: file the accepted drafts and print which task id each became."""
+    try:
+        ids = tasks.accept_drafts(cfg.hive_tasks_dir, args.draft_id, only=args.only)
+    except tasks.DraftError as exc:
+        for problem in exc.problems:
+            print(problem, file=sys.stderr)
+        print(f"drafts {args.draft_id}: nothing was accepted", file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    except ValueError as exc:
+        # A malformed id, or an unmigrated task file in the way.
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    for name, task_id in ids.items():
+        print(f"{name} -> {task_id}")
 
 
 def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:

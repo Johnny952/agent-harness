@@ -29,7 +29,7 @@ from dispatcher import (
     surface,
     tasks,
 )
-from dispatcher.config import Config
+from dispatcher.config import DRAFT_ROLE, Config
 from dispatcher.state_machine import AccountState
 
 logger = logging.getLogger(__name__)
@@ -1036,6 +1036,92 @@ def _role_prompt(
                 "'VERDICT: CHANGES_REQUESTED' if it needs another revision round."
             )
     return prompt
+
+
+def _draft_prompt(draft_id: str, plan: str, drafts_dir: str, scratch_dir: str) -> str:
+    """The arquitecto's prompt for a `draft-specs` run (ADR 82).
+
+    Not `_role_prompt`: there is no task description to embed, and the
+    project-docs duties are a task's (an ADR, its implementation notes), while
+    this run must leave the repo as it found it. What it shares with every
+    phase is said the same way: the git rule, the Bash rule, the handoff.
+    """
+    sections = ", ".join(f"`## {name}`" for name in tasks.REQUIRED + tasks.OPTIONAL)
+    prompt = (
+        f"Role: arquitecto, in draft mode. Run: {draft_id}.\n\n"
+        f"Read the plan at {plan} in your worktree, and the code and docs it names, and "
+        "draft the tasks that would build it: one task per build step, each small enough "
+        "for one cycle of this harness. You are not building anything and not designing one "
+        "task; you are writing the specs the owner will read, correct and accept before any "
+        "of them runs. Nothing you write here is run: a draft is not a task until the owner "
+        "accepts it.\n\n"
+        f"Write each draft as its own file in {drafts_dir}/, named `D1.md`, `D2.md` and so on "
+        "in build order. That directory is outside the repo. Each file starts with YAML "
+        "frontmatter whose one key is `depends_on`, the list of the other drafts' names this "
+        "one waits for (`depends_on: [D1, D2]`, or `depends_on: []`), between two `---` "
+        f"lines. Under it is the task description, in the sections {sections}, each a "
+        "column-zero `## ` heading. A draft is refused unless it has Goal, Done when, "
+        "Surface and Out of scope: Goal says what and why, Done when says how a reviewer "
+        "tells it is finished, Surface lists every file or directory it touches as a "
+        "backticked path, and Out of scope says what it leaves to other drafts. Steps is "
+        "optional. Two drafts whose Surfaces overlap cannot run side by side, so split the "
+        "plan along its files where you can and say so in `depends_on` where you cannot. A "
+        "`depends_on` may name only drafts of this set, and never in a cycle.\n\n"
+        "Do not change, commit or stage anything in the repo: this run's whole output is the "
+        f"files in {drafts_dir}/. Working notes go in {scratch_dir}/."
+    )
+    prompt += f"\n\n{_REMOTE_IS_NOT_YOURS}"
+    prompt += f"\n\n{_ONE_OPERATION_PER_CALL}"
+    if handoff.schema_for("arquitecto") is not None:
+        prompt += (
+            "\n\nReturn the structured handoff your schema describes, short: the drafts you "
+            f"wrote, one line each, and anything in the plan you could not turn into a task. "
+            f"The drafts themselves are the detail; cite {drafts_dir}/ under `paths`."
+        )
+    return prompt
+
+
+def run_draft_specs(
+    cfg: Config, slug: str, plan: str, draft_id: str | None = None,
+) -> tuple[str, DispatchResult | None]:
+    """Run the arquitecto in draft mode on a plan, and return the set's id and the result.
+
+    The set's id is the run's task id: the account claim, the lock, the
+    worktree (`agent/task/<draft id>`), the usage records and the task file
+    all key on it as on any phase's. The task file ends `drafted`, a status
+    nothing runs. The result is None when another owner holds that lock.
+    What the phase wrote is not checked here: `tasks.check_drafts` is.
+    """
+    if os.path.isabs(plan) or ".." in plan.split("/"):
+        raise ValueError(f"plan {plan!r} must be a path inside the project, relative to its root")
+    draft_id = draft_id or tasks.new_draft_id()
+    hive = cfg.hive_tasks_dir
+    drafts_dir = tasks.draft_set_dir(hive, draft_id)
+    # Made here, not by the phase, as `open_cycle` makes the scratch dir: a
+    # phase told to write somewhere should find the somewhere already there.
+    context_transfer._makedirs_readable(context_transfer.hive_root(hive), drafts_dir)
+    scratch_dir = context_transfer.ensure_scratch_dir(hive, draft_id)
+    try:
+        result = dispatch_phase(
+            cfg, draft_id, slug, "arquitecto",
+            prompt=_draft_prompt(draft_id, plan, drafts_dir, scratch_dir),
+            model=cfg.model_for(DRAFT_ROLE),
+            effort=cfg.effort_for("arquitecto", None),
+        )
+    except context_transfer.LockHeldError as exc:
+        logger.warning("drafts %s are locked by another owner: %s", draft_id, exc)
+        return draft_id, None
+    if result.success:
+        tasks.handoff(
+            hive, draft_id, new_status="drafted",
+            body=handoff.body("arquitecto (draft)", result.result_text, result.handoff),
+        )
+    else:
+        logger.error(
+            "drafts %s: the arquitecto did not finish: %s",
+            draft_id, result.result_text or "no diagnosis: the phase produced no output",
+        )
+    return draft_id, result
 
 
 def reap_expired_locks(cfg: Config) -> list[str]:
@@ -2414,7 +2500,16 @@ def open_cycle(
     required section, a hive `dispatch migrate` has not been run on, an epic,
     a task with a dependency that is not merged, and a child of a malformed
     epic. Nothing is marked on a task refused here: it stays as it was.
+    A draft set's id is refused too: a draft runs only once accepted, under
+    the task id `accept-drafts` gives it (ADR 82).
     """
+    if tasks.is_draft_id(task_id):
+        logger.error(
+            "%s names drafts, not a task: accept them with `dispatch accept-drafts %s` "
+            "and run the task ids that prints",
+            task_id, task_id,
+        )
+        return None
     # The whole-hive rule (`docs/business.md` *Task descriptions*): one
     # unmigrated task file stops every cycle. `tasks.py`'s writer refuses such
     # a file itself, so the ask is safe either way; this check is what makes

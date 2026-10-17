@@ -179,7 +179,7 @@ def test_load_config_reads_a_model_for_each_of_the_four_other_roles(tmp_path: Pa
     assert cfg.role_model == {role: f"model-{role}" for role in roles}
 
 
-def test_the_unknown_role_message_lists_four_roles_and_not_the_cartografo(
+def test_the_unknown_role_message_lists_the_phase_roles_and_not_the_cartografo(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "config.yaml"
@@ -189,7 +189,8 @@ def test_the_unknown_role_message_lists_four_roles_and_not_the_cartografo(
         load_config(str(config_path))
 
     listed = str(excinfo.value).split("roles are: ")[1]
-    assert listed == "arquitecto, auditor, implementador, revisor"
+    # The four phase roles, and the arquitecto's draft mode (ADR 82).
+    assert listed == "arquitecto, arquitecto-draft, auditor, implementador, revisor"
 
 
 def test_a_phase_is_resumed_twice_for_its_handoff_by_default(tmp_path: Path) -> None:

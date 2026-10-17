@@ -101,8 +101,9 @@ default_model: claude-opus-5-5
 
 # A model per role over default_model, on every call that role's phase makes,
 # its handoff resumes included. Roles: arquitecto, implementador, revisor,
-# auditor. A cartografo entry is refused at load: the cartografo's model is
-# mapping_model, below. An unknown role, or a value that is not a non-empty
+# auditor, and arquitecto-draft for the arquitecto's `draft-specs` run (which
+# takes the arquitecto's model when unset). A cartografo entry is refused at
+# load: the cartografo's model is mapping_model, below. An unknown role, or a value that is not a non-empty
 # model ID, is refused at load too. Precedence: role_model, then
 # default_model. The effort escalation changes the effort, never the model.
 # Optional; defaults to none.

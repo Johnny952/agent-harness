@@ -5911,3 +5911,77 @@ is a guess (`autonomy.md`, *Open questions*); a task that needs a fourth ADR
 takes a number past its block and relies on the gate. The arquitecto's duty
 text in `project_docs` still says "the next number"; the prompt line, which
 comes later, is what names the numbers.
+
+## ADR 82 — the arquitecto drafts a plan's tasks into the board's drafts directory, and only `accept-drafts` turns a draft into a task
+
+**Status:** accepted (A-6 of `docs/plans/autonomy.md`, 2026-10-17).
+
+**Context.** `docs/plans/autonomy.md` *Decisions*, 9. Cutting a decided plan
+into tasks is work an agent can do. The owner's part is to read the cut and
+approve it, and until the owner does, nothing the agent wrote may run. A queue
+(ADR 79) needs tasks that carry descriptions, `depends_on` and, for B-3, a
+Surface it can read as paths. A draft has to come out in that shape or be
+refused, and accepting one must not need the owner to retype it.
+
+**Decision.**
+
+1. *One phase, a run like any other.* `dispatch draft-specs --project <slug>
+   --plan <path>` runs one arquitecto phase through `dispatch_phase`, under a
+   fresh draft id `d-<UTC timestamp>-<4 hex>`. That id is the run's task id,
+   so the account claim, the lock, the worktree (`agent/task/<draft id>`), the
+   usage records and the task file all key on it. On success the task file
+   ends `drafted`, a status nothing runs. The plan path must be relative to
+   the project's root and may not contain `..`. The prompt is its own
+   (`_draft_prompt`), not `_role_prompt`: there is no description to embed,
+   and the run must leave the repo as it found it. It still carries the git
+   rule, the Bash rule and the handoff note.
+2. *Where drafts live.* `<board>/drafts/<draft id>/<name>.md`, one file per
+   build step (`D1.md`, `D2.md` ...), outside every worktree. Each file opens
+   with YAML frontmatter whose one key is `depends_on`, a list of sibling
+   draft names, followed by the task description. `accepted.yaml` beside the
+   drafts records each accepted draft's name and the task id it became.
+3. *The section rules.* A draft is held to the rules every description is
+   held to (`## Goal` and `## Done when`), and also needs `## Surface` and
+   `## Out of scope` (`tasks.DRAFT_REQUIRED`). Its Surface has to name at
+   least one path as `surface.parse` reads it: an empty Surface means the
+   whole repo, which no queue can run beside anything. Its `depends_on` may
+   name only drafts of its own set, never itself, and never in a cycle.
+   `check_drafts` judges the whole set and names every problem at once.
+   `draft-specs` runs it on what the phase wrote and exits 1 on any problem.
+   The set stays on disk either way, so the owner can fix a file by hand
+   rather than pay for the run again.
+4. *Accepting.* `dispatch accept-drafts <draft id> [--only NAME ...]` files
+   each targeted draft as a `pending` task. It gives each one the next free
+   `T-<n>`, counting both the task files and the board's description
+   directories, in the drafts' name order. It stores the draft's description
+   as written and rewrites `depends_on` from sibling names to the new ids.
+   Without `--only`, every draft not yet filed is targeted, and the whole set
+   is held to the rules. With `--only`, only the named drafts are targeted and
+   judged, so one bad draft does not stop the rest. A targeted draft whose
+   sibling dependency is neither targeted in the same call nor accepted
+   before is refused: a dependency on a draft is one nothing can ever merge.
+   An unknown name or an already filed draft is refused. Everything is
+   checked before anything is written. The ids go into `accepted.yaml` before
+   any task file, so a call that died part way is finished by the same call
+   with the same ids, and no draft is ever filed twice.
+5. *A draft never runs.* `tasks.write_description` refuses a draft id (and
+   `drafts`), so a draft id can never carry a description. Because of that,
+   `queue.plan` refuses one ("has no description") and `run-queue` exits 2
+   before showing a queue. `open_cycle` refuses one before anything else and
+   names `accept-drafts`, so `run-task` exits blocked. A draft runs only under
+   the task id `accept-drafts` gives it.
+6. *Its model.* `role_model` accepts the key `arquitecto-draft`
+   (`config.DRAFT_ROLE`). When it is unset, a draft run uses the arquitecto's
+   model, and failing that the default. The effort is the arquitecto's.
+
+**Consequences.** A plan becomes tasks for the cost of one arquitecto phase
+plus the owner's reading, and accepted drafts go straight into `run-queue`.
+A draft run leaves behind a worktree, an `agent/task/<draft id>` branch and a
+`drafted` task file on the board, and nothing reaps them yet. Editing a draft
+before accepting it is editing the file; nothing records that it was edited,
+and `accepted.yaml` records only what was filed. The prompt asks for no repo
+changes, but nothing enforces that. The arquitecto is a writer role, so
+anything it leaves in its worktree is committed to the draft branch, and that
+branch is never merged: no task carries its id. A real `draft-specs` run, the check on the cut it
+produces (*Done when* of A-6), is still to be made and needs the owner's
+authorization.
