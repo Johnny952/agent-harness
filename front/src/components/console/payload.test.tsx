@@ -99,7 +99,7 @@ describe("PhasePill", () => {
   });
 
   // A word outside the table is still the role's own answer, so it is shown
-  // verbatim and muted — the way `StatusPill` treats a fifth status.
+  // verbatim and muted — the way `StatusPill` treats a sixth status.
   it("shows a word the harness does not know, verbatim", () => {
     const { container } = render(<PhasePill field="verdict" value="MAYBE" />);
     expect(container.textContent).toBe("MAYBE");

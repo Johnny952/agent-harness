@@ -18,12 +18,12 @@ import { cn } from "@/lib/utils";
 
 /**
  * The tone of a phase's own status, which is a second vocabulary and not the
- * task's four: `complete` finished, `partial` finished and left something,
+ * task's five: `complete` finished, `partial` finished and left something,
  * `blocked` is the one word both vocabularies share. A revisor's `verdict` reads
  * the same way, and `CHANGES_REQUESTED` is `warning` and not `destructive` —
  * sending a round back is the cycle working. `docs/ui.md` *The tone of a state*.
  *
- * Not in `primitives.tsx` beside `StatusPill`, where the task's four live: one
+ * Not in `primitives.tsx` beside `StatusPill`, where the task's five live: one
  * screen shows this one, and the move into this file bought a test, not a
  * second screen. The second screen that shows it is what promotes it.
  */
@@ -47,7 +47,7 @@ export function PhasePill({ field, value }: { field: string; value: unknown }) {
       className={cn(
         "inline-flex items-center rounded-sm border px-1.5 py-[1px] text-[10px] font-medium uppercase tracking-wide",
         // Anything the harness has not said is muted with the string verbatim,
-        // the same way `StatusPill` treats a status outside its four.
+        // the same way `StatusPill` treats a status outside its five.
         phaseTone[value] ?? "text-muted-foreground border-border-strong bg-surface-2",
       )}
     >

@@ -21,7 +21,8 @@
  *
  * The file also holds the description's absent arm, and the one render of the
  * whole route here: the Board's search lives in `BoardPage` and no component
- * takes it as a prop, so it is reached through `renderRoute`.
+ * takes it as a prop, so it is reached through `renderRoute`. The columns live
+ * in `BoardPage` too, so the `conflict` column is reached the same way.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -173,5 +174,52 @@ describe("the Board's search over a task with no description", () => {
     fireEvent.change(screen.getByPlaceholderText(/^Filter tasks/), { target: { value: "T-101" } });
     expect(await screen.findByText("no description")).toBeTruthy();
     expect(screen.queryByText("T-102")).toBeNull();
+  });
+});
+
+describe("a task the pre-merge check moved to conflict", () => {
+  // The status is cast for the same reason `depends_on` is above: the second
+  // test serves a word `TaskStatus` does not name, which the api can do.
+  const task = (task_id: string, status: string): Task => ({ ...TASK, task_id, status }) as Task;
+
+  // No wait here: a card in a column and a task in none are found by different
+  // text, so each test waits on its own.
+  async function board(...tasks: Task[]) {
+    await renderRoute(Route, "/", {
+      "/api/tasks": { data: tasks },
+      "/api/accounts": { data: [] },
+      "/api/debt": { data: [] },
+    });
+  }
+
+  /** Every column's title, left to right. */
+  function columnTitles(): (string | null)[] {
+    return Array.from(
+      document.querySelectorAll("section.panel > div:first-child > span:first-child"),
+    ).map((s) => s.textContent);
+  }
+
+  /** The title of the column a card sits in. */
+  function columnOf(taskId: string): string | null {
+    const section = screen.getByText(taskId).closest("section");
+    return section?.querySelector("div:first-child > span:first-child")?.textContent ?? null;
+  }
+
+  it("lands in the Conflict column, right after Blocked, with no warning", async () => {
+    await board(task("T-201", "conflict"), task("T-202", "blocked"));
+    await screen.findByText("T-201");
+    expect(columnTitles()).toEqual(["Pending", "In progress", "Blocked", "Conflict", "Done"]);
+    expect(columnOf("T-201")).toBe("Conflict");
+    expect(columnOf("T-202")).toBe("Blocked");
+    expect(screen.queryByText(/is in no column/)).toBeNull();
+  });
+
+  it("still names a status outside the five, and lists conflict among them", async () => {
+    await board(task("T-203", "queued"));
+    expect(
+      await screen.findByText(
+        /T-203: status "queued" is none of pending, in_progress, blocked, conflict or done/,
+      ),
+    ).toBeTruthy();
   });
 });

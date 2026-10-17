@@ -82,10 +82,13 @@ action. Anything the harness simply has not said is `muted`, and that is the
 next entry. A task that is `pending` is `muted` too: nothing has happened to it
 yet, which is not the same news as something that finished.
 
-The four task states are the four the harness writes — `pending`,
-`in_progress`, `blocked`, `done` — and not the four a fixture imagined;
-`docs/decisions.md` ADR 26 says why there is no `queued` and why
-`in_progress` carries no role. A status outside those four is possible, because
+The five task states are the five the harness writes — `pending`,
+`in_progress`, `blocked`, `conflict`, `done` — and not the four a fixture
+imagined; `docs/decisions.md` ADR 26 says why there is no `queued` and why
+`in_progress` carries no role. `conflict` is the pre-merge check stopping a
+merge (`docs/plans/autonomy.md` *Decisions*, 2) and is `destructive` like
+`blocked`: it already happened, and the operator resolves it. A status outside
+those five is possible, because
 the api serves what the task file says: it renders `muted` with the string
 verbatim rather than unstyled.
 

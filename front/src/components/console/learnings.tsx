@@ -27,7 +27,7 @@ import { cn } from "@/lib/utils";
  *
  * `status` is `str()`-derived on the api side, so a word outside the harness's
  * three is still the file's own answer and renders verbatim and muted, the way
- * `StatusPill` treats a fifth task status and `PhasePill` an unknown verdict
+ * `StatusPill` treats a sixth task status and `PhasePill` an unknown verdict
  * (`docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md`).
  *
  * The qualifier reads `(stale)` rather than recolouring the pill, because it is

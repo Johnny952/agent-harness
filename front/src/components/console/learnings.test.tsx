@@ -44,7 +44,7 @@ describe("LearningStatus", () => {
   });
 
   // A word outside the harness's three is still the file's own answer, so it is
-  // shown verbatim and muted, the way `StatusPill` treats a fifth task status.
+  // shown verbatim and muted, the way `StatusPill` treats a sixth task status.
   it("shows a status the harness does not know, verbatim", () => {
     const { container } = render(<LearningStatus entry={entry({ status: "promoted" })} />);
     expect(container.textContent).toBe("promoted");

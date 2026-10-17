@@ -28,7 +28,7 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Kanban of harness tasks over the four statuses a task file carries, with the api's lock-expiry judgement and declared debt per card.",
+          "Kanban of harness tasks over the five statuses a task file carries, with the api's lock-expiry judgement and declared debt per card.",
       },
       { property: "og:title", content: "Board — harness operations console" },
       {
@@ -40,11 +40,16 @@ export const Route = createFileRoute("/")({
   component: BoardPage,
 });
 
-/** The four columns, in the order a task moves through them. ADR 26. */
+/**
+ * The five columns, in the order a task moves through them. ADR 26. `conflict`
+ * sits beside `blocked`: both are a task stopped until someone acts, and a
+ * conflict is the pre-merge check's stop, on the way to `done`.
+ */
 const COLUMNS: { status: TaskStatus; title: string }[] = [
   { status: "pending", title: "Pending" },
   { status: "in_progress", title: "In progress" },
   { status: "blocked", title: "Blocked" },
+  { status: "conflict", title: "Conflict" },
   { status: "done", title: "Done" },
 ];
 
@@ -90,9 +95,9 @@ function BoardPage() {
 
   const byStatus = (status: TaskStatus) => filtered.filter((t) => t.status === status);
 
-  // A status outside the four appears in no column, so it is named rather than
+  // A status outside the five appears in no column, so it is named rather than
   // dropped: the api serves what the task file says and nothing validates it, and
-  // filtering on four literals loses a row silently. ADR 26.
+  // filtering on five literals loses a row silently. ADR 26.
   const unplaced = rows.filter((t) => !COLUMNS.some((c) => c.status === t.status));
 
   // A failed read carries no `warnings`, so the banner above stays silent for it:
@@ -116,7 +121,7 @@ function BoardPage() {
     ...(debt.data?.warnings ?? []),
     ...unplaced.map(
       (t) =>
-        `${t.task_id}: status ${JSON.stringify(t.status)} is none of pending, in_progress, blocked or done, ` +
+        `${t.task_id}: status ${JSON.stringify(t.status)} is none of pending, in_progress, blocked, conflict or done, ` +
         `so this task is in no column. The api serves what the task file says.`,
     ),
   ];
@@ -125,7 +130,7 @@ function BoardPage() {
     <AppShell>
       <PageHeader
         title="Board"
-        subtitle="The four statuses a task file carries. Lock expiry is the api's judgement, not this screen's."
+        subtitle="The five statuses a task file carries. Lock expiry is the api's judgement, not this screen's."
         right={
           <>
             <RefreshedAt at={tasks.dataUpdatedAt} />

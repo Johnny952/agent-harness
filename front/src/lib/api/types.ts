@@ -15,12 +15,15 @@ export interface ApiResult<T> {
 }
 
 /**
- * The four `dispatcher/context_transfer.py` writes into a task file. There is no
- * `queued` and `in_progress` carries no role: `docs/decisions.md` ADR 26. The api
- * serves what the file says, so a status outside these four is possible and the
- * screens render it verbatim rather than dropping the row.
+ * The five statuses the dispatcher writes into a task file. Four come from
+ * `dispatcher/context_transfer.py`; there is no `queued` and `in_progress` carries
+ * no role: `docs/decisions.md` ADR 26. The fifth, `conflict`, is
+ * `CONFLICT_STATUS` in `dispatcher/dispatcher.py`: the pre-merge check stopped a
+ * merge, and the operator resolves it (`docs/plans/autonomy.md` *Decisions*, 2).
+ * The api serves what the file says, so a status outside these five is possible
+ * and the screens render it verbatim rather than dropping the row.
  */
-export type TaskStatus = "pending" | "in_progress" | "blocked" | "done";
+export type TaskStatus = "pending" | "in_progress" | "blocked" | "conflict" | "done";
 
 export interface DebtEntry {
   id: string;
