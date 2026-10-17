@@ -289,7 +289,10 @@ def ensure_worktrees_ignored(container: str, project_dir: str) -> bool:
     return True
 
 
-def create_worktree(container: str, projects_root: str, slug: str, task_id: str, role: str) -> str:
+def create_worktree(
+    container: str, projects_root: str, slug: str, task_id: str, role: str,
+    *, at_base: bool = False,
+) -> str:
     """Create (or re-use) the worktree a role works in for one task.
 
     A task has one branch, agent/task/<task-id>, and the roles that write to it
@@ -300,6 +303,10 @@ def create_worktree(container: str, projects_root: str, slug: str, task_id: str,
     it is rebuilt from scratch on every call: git will not check one branch out
     in two worktrees at once, and a reused checkout is exactly how the revisor
     ended up reviewing a tree with none of the implementador's work in it.
+
+    `at_base` asks for the reader's checkout whatever the role: detached at the
+    project clone's HEAD (the base), with no branch made and nothing to share.
+    A draft run uses it for the arquitecto (`docs/decisions.md` ADR 94).
     """
     # The reviewing path rm -rf's a path built from these, so an empty component
     # must never be allowed to widen it.
@@ -309,6 +316,8 @@ def create_worktree(container: str, projects_root: str, slug: str, task_id: str,
     # Before the first worktree exists, so the directory is ignored from the
     # moment it shows up instead of after someone trips over it.
     ensure_worktrees_ignored(container, project_dir)
+    if at_base:
+        return _add_review_worktree(container, project_dir, task_id, role, "HEAD")
     branch = task_branch(task_id)
     if role in WRITER_ROLES:
         return _add_writer_worktree(container, project_dir, task_id, branch)

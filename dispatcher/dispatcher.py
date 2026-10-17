@@ -1100,8 +1100,10 @@ def run_draft_specs(
     """Run the arquitecto in draft mode on a plan, and return the set's id and the result.
 
     The set's id is the run's task id: the account claim, the lock, the
-    worktree (`agent/task/<draft id>`), the usage records and the task file
-    all key on it as on any phase's. The task file ends `drafted`, a status
+    worktree, the usage records and the task file all key on it as on any
+    phase's. The worktree is a detached checkout of the project's base, no
+    branch and no commit, removed when the run ends (ADR 94). The task file
+    ends `drafted`, a status
     nothing runs. The result is None when another owner holds that lock.
     What the phase wrote is not checked here: `tasks.check_drafts` is.
     """
@@ -1120,10 +1122,17 @@ def run_draft_specs(
             prompt=_draft_prompt(draft_id, plan, drafts_dir, scratch_dir),
             model=cfg.model_for(DRAFT_ROLE),
             effort=cfg.effort_for("arquitecto", None),
+            at_base=True,
         )
     except context_transfer.LockHeldError as exc:
+        # No cleanup: this run made no checkout, and one at that path belongs
+        # to the lock's live holder (ADR 94).
         logger.warning("drafts %s are locked by another owner: %s", draft_id, exc)
         return draft_id, None
+    except BaseException:
+        _drop_draft_worktree(cfg, draft_id, slug)
+        raise
+    _drop_draft_worktree(cfg, draft_id, slug)
     if result.success:
         tasks.handoff(
             hive, draft_id, new_status="drafted",
@@ -1611,6 +1620,7 @@ def dispatch_phase(
     effort: str | None = None,
     round_num: int | None = None,
     max_turns: int | None = None,
+    at_base: bool = False,
 ) -> DispatchResult:
     tried: set[str] = set()
     while True:
@@ -1684,7 +1694,12 @@ def dispatch_phase(
             # not after work has already started on disk.
             tasks.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account, ttl_seconds=cfg.heartbeat_ttl_seconds)
             lock_acquired = True
-            workdir = docker_exec.create_worktree(container, cfg.projects_root, slug, task_id, role)
+            # The keyword goes only when asked for: every other phase calls
+            # create_worktree exactly as it always did.
+            workdir = docker_exec.create_worktree(
+                container, cfg.projects_root, slug, task_id, role,
+                **({"at_base": True} if at_base else {}),
+            )
             with _HeartbeatLoop(cfg.hive_tasks_dir, task_id, cfg.heartbeat_interval_seconds):
                 # `prompt` itself is never rewritten: the note is recomputed
                 # from whichever session this attempt resumes, so a phase that
@@ -1734,7 +1749,8 @@ def dispatch_phase(
                 result = _shrink_over_budget(
                     cfg, container, workdir, role, result, model, effort, recorder,
                 )
-            if _should_commit(role, result):
+            # A checkout at the base has no branch to commit to (ADR 94).
+            if not at_base and _should_commit(role, result):
                 # The mapping commit is a base operation (ADR 80).
                 with (
                     _base_lock(cfg, slug, "mapping commit")
@@ -1953,6 +1969,39 @@ def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
         docker_exec.restore_owner(container, project_dir, owner)
     if removed:
         logger.info("task %s: removed review worktrees %s", task_id, ", ".join(removed))
+
+
+def _drop_draft_worktree(cfg: Config, draft_id: str, slug: str) -> None:
+    """Remove a draft run's checkout of the base, and never raise (ADR 94).
+
+    Best-effort like `_drop_review_worktrees`: it runs on the way out of a run
+    that may already have failed. A draft phase is a reader, so whatever it
+    left modified in the checkout is discarded, and said so.
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return
+    project_dir = f"{cfg.projects_root}/{slug}"
+    owner = None
+    try:
+        owner = docker_exec.read_owner(container, project_dir)
+        worktrees_dir = docker_exec.task_worktrees_dir(cfg.projects_root, slug, draft_id)
+        dirty = docker_exec.dirty_paths(container, f"{worktrees_dir}/arquitecto")
+        if dirty:
+            logger.warning(
+                "drafts %s: the draft phase changed the repo, and the changes are discarded: %s",
+                draft_id, ", ".join(dirty[:10]),
+            )
+        removed = docker_exec.remove_task_worktrees(container, cfg.projects_root, slug, draft_id)
+        if removed:
+            logger.info("drafts %s: removed checkout %s", draft_id, ", ".join(removed))
+    except Exception as exc:
+        logger.warning("could not clean up the checkout of drafts %s: %s", draft_id, exc)
+    finally:
+        try:
+            docker_exec.restore_owner(container, project_dir, owner)
+        except Exception as exc:
+            logger.warning("could not restore ownership after drafts %s: %s", draft_id, exc)
 
 
 def _record_left_behind(
