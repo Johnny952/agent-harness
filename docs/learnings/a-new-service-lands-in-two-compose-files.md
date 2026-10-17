@@ -29,6 +29,12 @@ over both — `tests/integration/test_compose_invariants.py` takes
 invariants are already parametrized before adding a new unparametrized one: the
 ones that are tell you which files a reader is expected to keep in step.
 
+One deliberate exception, added by T-062: the `caddy` TLS service is in the
+plain file only (`docs/decisions.md` ADR 100), because in Coolify its own proxy
+ends TLS and a second one would fight it for ports 80 and 443.
+`test_caddy_is_in_the_plain_file_only` holds that. A service whose job the
+platform already does is the case to check for before mirroring.
+
 ## Evidence
 
 T-009's F3: the `api` service mirrored into `docker-compose.coolify.yml` with

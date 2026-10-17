@@ -696,6 +696,10 @@ if [ "$setup_credentials" = "y" ]; then
             echo "# The collector's whole map, one agent-<name>=<token> entry per"
             echo "# account above, with the same values."
             echo "COLLECTOR_WRITE_TOKENS=$token_map"
+            echo "# TLS (docs/decisions.md ADR 100), plain compose only. Uncomment to serve"
+            echo "# a domain over HTTPS; unset, Caddy serves http://localhost."
+            echo "# HARNESS_DOMAIN=console.example.com"
+            echo "# ACME_EMAIL=you@example.com"
         } > "$ENV_OUT"
         echo "Wrote $ENV_OUT"
     fi

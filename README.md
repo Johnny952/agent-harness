@@ -534,11 +534,11 @@ operator's for `GET /events` (`curl -H "Authorization: Bearer $COLLECTOR_READ_TO
 127.0.0.1:8787/events`) and goes to no other service; each write token goes to
 its agent as `COLLECTOR_TOKEN` and to the collector, which stores the agent it
 is bound to whatever the event body claims.
-This step brings up four **persistent** control-plane services (`collector`,
-`api`, `console`, `registry-mirror`) plus, from the second file, one persistent
+This step brings up five **persistent** control-plane services (`collector`,
+`api`, `console`, `caddy`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account. The console answers at
 `http://127.0.0.1:8790` (from another machine, through an SSH tunnel: it is
-published on loopback only, and the TLS proxy is a later task). Its first
+published on loopback only; see *TLS* below for serving it on a domain). Its first
 `up` builds `front/` into an image, which takes a few minutes.
 
 The console's `CONSOLE_PROJECT` does what `BOARD_PROJECT` did here until
@@ -565,6 +565,28 @@ its profile and its volume declaration were removed with the board
 (`docs/decisions.md` ADR 59). Removing a declaration deletes no volume: a
 host that ran that profile keeps `vibe_kanban_data` until someone removes
 it by hand.
+
+### TLS
+
+The plain compose file (`docker/compose/docker-compose.yml`) has a `caddy`
+service in front of the console (`docs/decisions.md` ADR 100). It is the only
+service that publishes beyond loopback, on 80 and 443 (TCP, and 443 UDP for
+HTTP/3); the api and the collector stay unexposed. To serve a domain over HTTPS:
+
+1. Point a DNS A record (and AAAA, if the host has IPv6) for the domain at the
+   host, and open ports 80 and 443 to the internet before `up`: Let's
+   Encrypt's challenge arrives on them.
+2. Set `HARNESS_DOMAIN` in the .env file to the bare host name, no scheme
+   (`HARNESS_DOMAIN=console.example.com`), and optionally `ACME_EMAIL` for the
+   certificate account. `scripts/configure.sh` writes both as commented lines.
+3. `docker compose -f docker/compose/docker-compose.yml up -d`. Caddy gets the
+   certificate itself, redirects HTTP to HTTPS and sends HSTS. Certificates
+   live in the `caddy_data` volume, so a restart does not ask again.
+
+With `HARNESS_DOMAIN` unset, Caddy serves `http://localhost` over plain HTTP,
+with no certificate and no HSTS, for development. Sign-in is not built yet
+(`docs/plans/server-deployment.md`), so a public console is guarded only by the
+Basic auth the api checks.
 
 ### 5. Run a task
 
@@ -1175,6 +1197,12 @@ one-click import:
   so it never joins the resource's default running set. Run it ad hoc —
   Coolify's "Execute Command" on this resource, or plain SSH:
   `docker compose -f docker/compose/docker-compose.coolify.yml --profile dispatcher run --rm dispatcher --config /app/config.yaml run-task --task-id <id> --project <name>`.
+
+TLS here is Coolify's, not Caddy's: set the domain on the `console` service in
+Coolify's UI (port 8790) and let Coolify's proxy issue the certificate. Do not
+add a `caddy` service or set `HARNESS_DOMAIN` in this resource; the Caddy service
+exists in the plain compose only (`docs/decisions.md` ADR 100), and a second
+proxy would fight Coolify's for ports 80 and 443.
 
 A private project is reached through its SSH deploy key: run
 `project-keygen` in the dispatcher, which writes the pair under

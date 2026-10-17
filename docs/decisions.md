@@ -6399,3 +6399,73 @@ upgrade that stops reading `NITRO_PRESET` ahead of `defaultPreset`, or a
 Lovable config that starts deleting it outside the sandbox, silently brings
 the Cloudflare target back into the image: that is the thing to recheck on
 such an upgrade.
+
+## ADR 100 — TLS in the plain compose is a `caddy` service in front of the console; in Coolify it is Coolify's proxy
+
+**Status:** accepted (T-062, decided by the owner 2026-10-17, who authorized
+the edit of `docker/compose/**`).
+
+**Context.** `docs/plans/server-deployment.md` *Decisions* 1 ends TLS "at the
+server's proxy (Coolify's, or a Caddy service in the plain compose)", and *How
+it would be built* step 3 is that proxy. ADR 97 made the console a compose
+service on `127.0.0.1:8790`, so there is something to point at. Every service
+in the three compose files publishes on loopback only, and the api and the
+collector hold credentials a public port must never reach. A domain is not
+known in the repo, and a developer bringing the stack up on a laptop has none.
+
+**Decision.**
+
+1. *One service, plain file only.* `docker-compose.yml` gets `caddy`: the
+   official image pinned to one version (never `latest`), `restart:
+   unless-stopped`, `depends_on: [console]`, on `ia_harness_net`. It is the
+   one service in any compose file that publishes on every address: 80 and
+   443 over TCP and 443 over UDP, because Caddy serves HTTP/3 by default and
+   keeping it costs one line. `docker-compose.coolify.yml` and
+   `docker-compose.agents.yml` get nothing: in Coolify, its own proxy issues
+   the certificate for the domain set on the `console` service in its UI, and a
+   second proxy there would fight it for 80 and 443. This is a deliberate
+   exception to the rule that a service lands in both files.
+2. *Mounts.* Two named volumes, `caddy_data` at the image's data directory
+   (the certificates and the ACME account, so a restart does not ask Let's
+   Encrypt again) and `caddy_config` at its config directory, plus the
+   Caddyfile from `docker/caddy/Caddyfile` mounted read-only. Nothing else: no
+   docker socket, no hive, no state, no config file, no credential.
+3. *The site address is one placeholder with a fallback,* spelt the same in
+   two places so neither compose's nor Caddy's empty-variable rule matters.
+   The Caddyfile's site address is `{$HARNESS_DOMAIN:http://localhost}`, and
+   compose passes `HARNESS_DOMAIN=${HARNESS_DOMAIN:-http://localhost}`, which
+   also covers a variable present and empty in the .env file. A bare host name
+   (`console.example.com`) is a site Caddy serves over HTTPS with an automatic
+   certificate and an automatic HTTP-to-HTTPS redirect. The fallback carries
+   the `http://` scheme, which is what turns automatic HTTPS off for that site:
+   plain HTTP on port 80, no certificate, no ACME attempt and no local CA. No
+   `auto_https` global option is used, because it cannot differ per value.
+4. *The ACME email is optional:* `email "{$ACME_EMAIL}"` in the global
+   options, with compose passing `ACME_EMAIL=${ACME_EMAIL:-}`. The quotes keep
+   one argument when the variable is empty, so the directive parses and an
+   empty email means an ACME account without one. Not the runtime form
+   (`{env.ACME_EMAIL}`), which the ACME issuer expands with an error on empty.
+5. *Headers.* On every response: `X-Content-Type-Options nosniff`,
+   `X-Frame-Options DENY`, `Referrer-Policy strict-origin-when-cross-origin`
+   and the `Server` header removed. `Strict-Transport-Security` only behind a
+   matcher that is `protocol https` and not host `localhost`, so it is never
+   sent over plain HTTP and never for localhost, even if someone sets the
+   domain to it. No Content-Security-Policy: what the console's build needs is
+   not measured, and a wrong one breaks the console silently.
+6. *What it proxies.* `reverse_proxy console:8790` and nothing else. The api
+   (8789), the collector (8787) and the registry mirror (5000) are not routed,
+   and every other service keeps its `127.0.0.1` publish, the console's
+   included, so an SSH tunnel still works.
+
+**Consequences.** `docker compose -f docker/compose/docker-compose.yml up -d`
+now also binds 80 and 443 on every host address; a host where either is taken
+fails that one service. With no `HARNESS_DOMAIN` the console answers on
+`http://localhost` as well as on 8790. With one, the operator needs a DNS A
+record to the host and 80/443 open before `up`, or Let's Encrypt's challenge
+fails and Caddy retries. The console still has only Basic auth through the api;
+exposing it publicly before sign-in (plan step 4 ordering) is the operator's
+call, and this ADR does not make it safer than that.
+`tests/integration/test_compose_invariants.py` holds the shape: Caddy in the
+plain file only, the only non-loopback publisher, its exact mounts, and the
+Caddyfile text. Changing Caddy's version is an edit of the pin and a recheck of
+points 3 and 4, which rest on how that version reads env placeholders.

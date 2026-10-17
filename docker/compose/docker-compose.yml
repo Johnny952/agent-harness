@@ -97,8 +97,9 @@ services:
   # API_TOKEN is bare `${API_TOKEN}`: the console refuses to boot without it, so
   # compose should announce it missing rather than start a restart loop.
   # CONSOLE_PROJECT is optional (the console then asks for a project), so it is
-  # `:-`. Published on loopback only; the TLS proxy is a later task
-  # (docs/plans/server-deployment.md).
+  # `:-`. Published on loopback only: the `caddy` service below proxies to it
+  # (docs/decisions.md ADR 100), and the loopback publish stays for an SSH
+  # tunnel.
   console:
     build:
       context: ../..
@@ -112,6 +113,33 @@ services:
       - CONSOLE_PROJECT=${CONSOLE_PROJECT:-}
     depends_on:
       - api
+    networks:
+      - ia_harness_net
+
+  # TLS in front of the console (docs/decisions.md ADR 100). In this file only:
+  # in Coolify its own proxy ends TLS, and a second one would fight it for 80
+  # and 443. The one service in any compose file that publishes on every
+  # address, and the reason the others stay on 127.0.0.1. It gets no docker
+  # socket and no state: the Caddyfile read-only plus two volumes of its own
+  # (the certificates, so a restart does not ask Let's Encrypt again).
+  # HARNESS_DOMAIN unset serves http://localhost with no certificate;
+  # ACME_EMAIL is optional. Only the console is proxied, never the api.
+  caddy:
+    image: caddy:2.10.2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - HARNESS_DOMAIN=${HARNESS_DOMAIN:-http://localhost}
+      - ACME_EMAIL=${ACME_EMAIL:-}
+    depends_on:
+      - console
     networks:
       - ia_harness_net
 
@@ -181,5 +209,7 @@ networks:
 volumes:
   observability_data:
   registry_mirror_data:
+  caddy_data:
+  caddy_config:
   claude_shared:
     external: true

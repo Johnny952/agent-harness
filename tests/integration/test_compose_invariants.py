@@ -376,6 +376,82 @@ def test_the_console_reads_only_through_the_api(compose_file: str) -> None:
     assert "console:" in text
 
 
+CADDYFILE = Path(__file__).parent.parent.parent / "docker" / "caddy" / "Caddyfile"
+CADDY_PORTS = ["80:80", "443:443", "443:443/udp"]
+CADDY_VOLUMES = [
+    "../caddy/Caddyfile:/etc/caddy/Caddyfile:ro",
+    "caddy_data:/data",
+    "caddy_config:/config",
+]
+OTHER_COMPOSE_FILES = ["docker-compose.agents.yml", "docker-compose.coolify.yml"]
+
+
+def test_caddy_is_in_the_plain_file_only() -> None:
+    """Coolify's own proxy ends TLS there; a second would fight it for 80 and
+    443 (docs/decisions.md ADR 100)."""
+    assert "caddy" in _load("docker-compose.yml")["services"]
+    for name in OTHER_COMPOSE_FILES:
+        assert "caddy" not in _load(name).get("services", {})
+
+
+def test_caddy_is_the_only_service_publishing_beyond_loopback() -> None:
+    for name in ["docker-compose.yml", *OTHER_COMPOSE_FILES]:
+        for service_name, service in _load(name).get("services", {}).items():
+            ports = service.get("ports", [])
+            if name == "docker-compose.yml" and service_name == "caddy":
+                assert ports == CADDY_PORTS
+                continue
+            for port in ports:
+                assert isinstance(port, str) and port.startswith("127.0.0.1:"), (
+                    f"{name}: {service_name} publishes {port!r} beyond loopback"
+                )
+
+
+def test_caddy_gets_no_socket_and_no_state() -> None:
+    services = _load("docker-compose.yml")
+    caddy = services["services"]["caddy"]
+
+    # Exact list: pins the Caddyfile mount to :ro and allows no other mount.
+    assert caddy["volumes"] == CADDY_VOLUMES
+    assert "docker.sock" not in yaml.safe_dump(caddy)
+    assert re.fullmatch(r"caddy:\d+\.\d+\.\d+", caddy["image"])
+    assert "build" not in caddy
+    assert _environment(caddy) == {
+        "HARNESS_DOMAIN": "${HARNESS_DOMAIN:-http://localhost}",
+        "ACME_EMAIL": "${ACME_EMAIL:-}",
+    }
+    assert "console" in caddy["depends_on"]
+    assert "ia_harness_net" in caddy["networks"]
+    assert "caddy_data" in services["volumes"]
+    assert "caddy_config" in services["volumes"]
+
+
+def test_the_caddyfile_takes_its_site_from_harness_domain() -> None:
+    text = CADDYFILE.read_text()
+    placeholder = re.search(r"^\{\$HARNESS_DOMAIN:([^}]*)\}", text, re.MULTILINE)
+    assert placeholder, "the site address must be {$HARNESS_DOMAIN:<fallback>}"
+    compose_default = re.fullmatch(
+        r"\$\{HARNESS_DOMAIN:-([^}]*)\}",
+        _environment(_load("docker-compose.yml")["services"]["caddy"])["HARNESS_DOMAIN"],
+    )
+    assert compose_default
+    assert placeholder.group(1) == compose_default.group(1) == "http://localhost"
+
+    assert "reverse_proxy console:8790" in text
+    for exposed in ("8789", "8787", "api:"):
+        assert exposed not in text
+    assert 'email "{$ACME_EMAIL}"' in text
+
+    # HSTS rides on a named matcher that is HTTPS and not localhost.
+    hsts = re.search(r"header (@\w+) Strict-Transport-Security", text)
+    assert hsts
+    matcher = re.search(re.escape(hsts.group(1)) + r" \{([^}]*)\}", text)
+    assert matcher
+    assert "protocol https" in matcher.group(1)
+    assert "not host localhost" in matcher.group(1)
+    assert text.count("Strict-Transport-Security") == 1
+
+
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
