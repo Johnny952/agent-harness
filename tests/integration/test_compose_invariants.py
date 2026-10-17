@@ -532,7 +532,9 @@ def test_compose_passes_a_quoted_bcrypt_hash_through_intact(tmp_path: Path) -> N
     result = render(f"CONSOLE_AUTH_HASH='{bcrypt}'\n")
     assert result.returncode == 0, result.stderr
     caddy_env = json.loads(result.stdout)["services"]["caddy"]["environment"]
-    assert caddy_env["CONSOLE_AUTH_HASH"] == bcrypt
+    # `config` re-escapes its output so it reads back the same: every `$` is
+    # printed as `$$`, and the container gets the bare hash.
+    assert caddy_env["CONSOLE_AUTH_HASH"] == bcrypt.replace("$", "$$")
     assert caddy_env["CONSOLE_AUTH_USER"] == "console"
 
     # No hash: compose does not refuse; Caddy does, at its own start.
