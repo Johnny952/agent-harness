@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 
 from dispatcher import (
+    adr_numbers,
     auto_approve,
     context_transfer,
     debt,
@@ -1995,6 +1996,18 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
     gated = "test gate green"
     log_path = None
     try:
+        # Before the test gate and whatever `gates_enabled` says: a log the
+        # union merge left with one ADR number twice is broken as a record,
+        # not as code (ADR 81), and it costs one `cat`.
+        try:
+            duplicated = gates.decisions_log(container, outcome.workdir)
+        except Exception as exc:
+            return PreMergeVerdict(
+                False, f"task {task_id}: the pre-merge decisions-log gate did not finish: {exc}"
+            )
+        if duplicated:
+            why = f"{outcome.base} merged in leaves a broken decisions log: {duplicated[0].detail}"
+            return PreMergeVerdict(False, _stop_on_conflict(cfg, task_id, outcome, why))
         if cfg.gates_enabled:
             log_path = os.path.join(
                 context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id),
@@ -2501,6 +2514,27 @@ def open_cycle(
     )
 
 
+def _adr_block_note(cfg: Config, task_id: str, slug: str) -> str:
+    """The arquitecto's line naming its ADR numbers (ADR 81), or "" when the
+    block could not be taken: the phase runs anyway, and the pre-merge
+    check's decisions-log gate still stops a number used twice."""
+    container = cleanup_container(cfg)
+    if container is None:
+        return ""
+    try:
+        proc = docker_exec.run_docker_exec(
+            container, f"{cfg.projects_root}/{slug}", ["cat", "--", project_docs.DECISIONS],
+        )
+        block = adr_numbers.reserve(
+            cfg.state_dir, slug, task_id, proc.stdout if proc.returncode == 0 else None,
+        )
+    except Exception as exc:
+        logger.warning("task %s: no ADR numbers reserved: %s", task_id, exc)
+        return ""
+    logger.info("task %s: ADR numbers %d to %d", task_id, block.first, block.last)
+    return block.prompt_line()
+
+
 def run_phase(
     ctx: CycleContext,
     role: str,
@@ -2527,6 +2561,8 @@ def run_phase(
         ctx.held = True
         return None
     effort = cfg.effort_for(role, round_num, repeated_finding=repeated_finding)
+    if role == "arquitecto":
+        note = "\n\n".join(part for part in (_adr_block_note(cfg, ctx.task_id, ctx.slug), note) if part)
     try:
         result = dispatch_phase(
             cfg, ctx.task_id, ctx.slug, role,

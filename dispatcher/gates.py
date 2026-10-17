@@ -32,7 +32,7 @@ import re
 import subprocess
 import time
 
-from dispatcher import docker_exec, project_docs
+from dispatcher import adr_numbers, docker_exec, project_docs
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ TESTS_RUN = "tests-run"
 LINT = "lint"
 CONTRACT_DOCS = "contract-docs"
 POINTERS = "pointers"
+DECISIONS_LOG = "decisions-log"
 
 # git's tolerated-error checks elsewhere in the harness match English messages,
 # and so does the `ls` parsing below. Every command whose *output* this module
@@ -846,6 +847,55 @@ def _broken_pointers(
         POINTERS,
         "; ".join(shown) + " — those paths are not there. Fix the pointer or the path.",
         NOTE,
+    )]
+
+
+# --------------------------------------------------------------------------
+# The decisions log after a merge
+# --------------------------------------------------------------------------
+
+def decisions_duplicates(text: str) -> list[str]:
+    """What a decisions log holds twice: an ADR number, or a whole heading.
+
+    Both are what a union merge (ADR 81) leaves when two tasks appended the
+    same thing: two `## ADR 12`, or one entry appended by both sides. Each
+    duplicate is named once, in the order it first repeats.
+    """
+    found: list[str] = []
+    seen_numbers: set[int] = set()
+    for number in adr_numbers.adr_numbers(text):
+        if number in seen_numbers and f"ADR {number}" not in found:
+            found.append(f"ADR {number}")
+        seen_numbers.add(number)
+    seen_headings: set[str] = set()
+    for heading in adr_numbers.headings(text):
+        if heading in seen_headings and heading not in found:
+            found.append(heading)
+        seen_headings.add(heading)
+    return found
+
+
+def decisions_log(container: str, workdir: str) -> list[Finding]:
+    """A blocking finding when the checkout's `docs/decisions.md` repeats an
+    ADR number or a heading; nothing when it is clean or not there.
+
+    Not one of `run`'s gates: the phases append to the log one at a time, and
+    only a merge of two branches can put the same number in it twice. The
+    pre-merge check runs it on the merged result, before that lands.
+    """
+    proc = docker_exec.run_docker_exec(
+        container, workdir, ["cat", "--", project_docs.DECISIONS], env=_C_LOCALE,
+    )
+    if proc.returncode != 0:
+        return []
+    duplicates = decisions_duplicates(proc.stdout)
+    if not duplicates:
+        return []
+    return [Finding(
+        DECISIONS_LOG,
+        f"`{project_docs.DECISIONS}` holds {_sample(duplicates)} more than once "
+        "after the merge — renumber or drop the repeated entry on the branch.",
+        BLOCKING,
     )]
 
 

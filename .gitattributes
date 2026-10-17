@@ -1,0 +1,10 @@
+# The append-only logs (ADR 81): two branches that each appended an entry
+# merge by keeping both, instead of conflicting on the shared end of the file.
+# A duplicate the union leaves behind (two ADRs given one number) is caught by
+# the pre-merge decisions-log gate, not by git.
+# ROADMAP.md is only append-only in its Results log, but an attribute names a
+# whole file: a concurrent edit to its other sections also merges by union.
+docs/decisions.md merge=union
+docs/ROADMAP.md merge=union
+docs/implementations/** merge=union
+docs/learnings/** merge=union

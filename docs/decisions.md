@@ -5853,3 +5853,61 @@ so a stuck git holds the base until someone kills it, by design: breaking a
 live holder is how two writers end up on one checkout. The lock assumes one
 `state_dir` shared by everyone who moves the base; a second host with its own
 `state_dir` is not covered.
+
+## ADR 81 — the append-only logs merge by union, ADR numbers are handed out in blocks per task, and a number used twice stops the merge
+
+**Status:** accepted (B-2 of `docs/plans/autonomy.md`, 2026-10-17). ADR
+numbers 79 and 80 are held by the tasks planned beside this one,
+which is the scheme below applied by hand.
+
+**Context.** `docs/plans/autonomy.md` *Decisions*, 7. Two tasks that run at
+once both append to `docs/decisions.md`, `docs/ROADMAP.md`'s Results log,
+`docs/implementations/` and `docs/learnings/`. Each append lands at the end
+of the file, so git sees two edits to the same place and the second merge
+conflicts on what is not a conflict at all. And two arquitectos that each
+read the log, see ADR 12 as the highest and write ADR 13, produce two ADR 13s
+whatever git does.
+
+**Decision.**
+
+1. *Union merges.* `.gitattributes` marks the four logs `merge=union`: a
+   merge of two appends keeps both, ours first, with no conflict. A project
+   that wants the same carries the same attributes; the dispatcher does not
+   write them into a project.
+2. *A counter per project.* `dispatcher/adr_numbers.py` keeps
+   `state_dir/adr/<slug>.json`, `{"next": N, "blocks": {task: [first,
+   last]}}`, apart from the account state files. It is read and rewritten
+   under an `flock` on `<slug>.lock` and written to a temporary file in the
+   same directory and `os.replace`d, as `state_machine` writes the account
+   state: a crash leaves the old file or the new one, and two processes or
+   threads never hand out one block twice.
+3. *A block per task.* When a task's arquitecto starts (the cycle and
+   `run-phase` both go through `run_phase`), the dispatcher reads the
+   project's `docs/decisions.md` from its checkout and reserves a block of
+   3 numbers (`DEFAULT_BLOCK`) starting at `max(next, highest + 1)`, where
+   `highest` is the highest `## ADR N` heading in the log, struck-through
+   ones included and fenced code skipped. A re-run of the same task's
+   arquitecto is given the block it already holds. The prompt carries "Your
+   ADR numbers are N to N+2 ...". An unused number is a gap, and gaps are
+   allowed. When the block cannot be taken (no container, no readable
+   state), the phase runs without the line and step 4 still holds.
+4. *A gate after the merge.* The pre-merge check (ADR 76/77's), once its
+   merge of the base is clean, reads `docs/decisions.md` in the merged
+   worktree and fails when an ADR number or a whole `## ` heading appears
+   twice (`gates.decisions_log`). That is a broken record, not broken code,
+   so it runs before the test gate and whether or not `gates_enabled` is
+   set, and it sends the task to `conflict` with the duplicate named, the
+   same as a merge git refused. A branch already holding the base needs no
+   merge and is not checked.
+
+**Consequences.** This repository's own `docs/decisions.md` is under the
+scheme from here on: its merges are union merges and its duplicates are
+caught by a test (`test_this_repositorys_own_log_has_no_duplicates`) as well
+as by the gate when the harness merges itself. An attribute names a whole
+file, so `docs/ROADMAP.md` merges by union outside its Results log too: two
+branches that edit the same line of its other sections keep both lines
+instead of conflicting, and that is for the reviewer to see. The block size
+is a guess (`autonomy.md`, *Open questions*); a task that needs a fourth ADR
+takes a number past its block and relies on the gate. The arquitecto's duty
+text in `project_docs` still says "the next number"; the prompt line, which
+comes later, is what names the numbers.
