@@ -89,8 +89,9 @@ Tokens task, through the queue), apart from the settings.
 
 ### 11. **Autonomy: the automatic approve, the queue, drafted specs, parallel work.**
 
-**Status:** designed 2026-10-15 by the main thread at the user's word, not
-built. The design and its ten build tasks, in three priorities, are in
+**Status:** designed 2026-10-15 by the main thread at the user's word. Its
+ten build tasks were built by 2026-10-17 (`docs/plans/autonomy.md`, *Status*).
+The design and its ten build tasks, in three priorities, are in
 `docs/plans/autonomy.md`; the charter rulings are C-4, C-5 and C-12 as
 amended that day. Placed here, after item 0, because its first priority
 (tasks A-1 to A-6) removes the person's turn between tasks, which the

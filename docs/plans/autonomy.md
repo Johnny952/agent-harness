@@ -1,7 +1,13 @@
 # Autonomy — fewer stops for a person, and more than one task per project
 
-**Status:** design, written by the main thread on 2026-10-15 at the user's
-word, not built. The charter rulings it needs were given the same day:
+**Status:** built. Designed by the main thread on 2026-10-15 at the user's
+word; all ten build tasks have landed. A-1 to A-4 landed on 2026-10-15, and
+A-5, A-6 and B-1 to B-3 on 2026-10-17. B-4 landed on 2026-10-17 as T-057
+(ADR 85) and T-058 (ADR 88), after the measurement of *Decisions*, 8 (T-056,
+ADR 84, *go*). `max_concurrent_phases` defaults to 1, so a second phase on
+an account starts only when the owner raises it in the config. Priority 2
+is other backlog items and is not tracked here. The decisions below are the
+design as written, and the ADRs named narrow them. The charter rulings it needs were given the same day:
 C-4 (*Amended* 2026-10-15, the queue), C-5 and C-12 (*Amended* 2026-10-15,
 the automatic approve). It builds on `docs/plans/review.md` (the pre-merge
 check, the integrador), `docs/plans/board-service.md` (*Start epic*, the
@@ -390,6 +396,12 @@ authorization.
 
 **Builds.** *Decisions*, 8, only if the measurement shows a second phase does
 not throttle the first.
+
+**Built** 2026-10-17. The measurement is T-056 (ADR 84, *go*: +11% wall time
+per phase, no refusals, and the same quota as two phases in a row). The state
+file's holders are T-057 (ADR 85), and the dispatcher's wiring with
+`max_concurrent_phases` is T-058 (ADR 88). The pick order still keeps the
+primary for last: a worker's second slot ranks above an idle primary.
 
 ## Why this order
 
