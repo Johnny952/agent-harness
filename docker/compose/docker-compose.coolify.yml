@@ -46,15 +46,14 @@
 #     credentials wizard for a Coolify deploy). They keep their DASHBOARD_
 #     names although the dashboard is gone: renaming them means editing the
 #     environment of every running deploy to buy a spelling.
-#   - API_TOKEN, likewise, if the console is to reach the api: any long random
-#     string, the same value here and wherever front/ runs. Without it the api
-#     still starts and still serves a human's basic auth, and the console's
-#     every region shows its Error state saying so.
+#   - API_TOKEN, likewise: any long random string, shared by the api and the
+#     `console` service below. Required, since the console refuses to start
+#     without it (docs/decisions.md ADR 97). CONSOLE_PROJECT is optional.
 #   - COLLECTOR_READ_TOKEN and one COLLECTOR_WRITE_TOKEN_<ACCOUNT> per
 #     account (docs/decisions.md ADR 72; <ACCOUNT> is the account name
 #     uppercased, `-` as `_`): distinct long random strings, the ones
-#     collector's COLLECTOR_WRITE_TOKENS line below names. Unlike API_TOKEN
-#     these are not optional — the collector refuses to start without
+#     collector's COLLECTOR_WRITE_TOKENS line below names. Like API_TOKEN
+#     these are required — the collector refuses to start without
 #     them. The read token is what an
 #     operator sends to `GET /events`; each write token goes to its agent and
 #     the collector only.
@@ -116,14 +115,34 @@ services:
       - COLLECTOR_DB_PATH=/events/events.db
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
       - DASHBOARD_PASSWORD_HASH=${DASHBOARD_PASSWORD_HASH}
-      # A service's credential, not a human's, and optional: an api started
-      # without it rejects every bearer and keeps basic auth working. See
-      # docker-compose.yml and docs/decisions.md ADR 7.
-      - API_TOKEN=${API_TOKEN:-}
+      # A service's credential, not a human's. The api runs without it, the
+      # console does not, so it is bare in both. See docker-compose.yml and
+      # docs/decisions.md ADR 7 and ADR 97.
+      - API_TOKEN=${API_TOKEN}
     depends_on:
       - collector
     networks:
       - ia_harness_net
+
+  # The console, mirrored from docker-compose.yml (see its comment): no volume,
+  # no docker socket, API_TOKEN only. Published on loopback like the services
+  # around it; docs/decisions.md ADR 97.
+  console:
+    build:
+      context: ../..
+      dockerfile: docker/console/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      - API_BASE_URL=http://api:8789
+      - API_TOKEN=${API_TOKEN}
+      - CONSOLE_PROJECT=${CONSOLE_PROJECT:-}
+    depends_on:
+      - api
+    networks:
+      - ia_harness_net
+
   registry-mirror:
     image: registry:2
     restart: unless-stopped

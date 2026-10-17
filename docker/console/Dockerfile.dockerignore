@@ -1,0 +1,18 @@
+# BuildKit reads this file in place of the root .dockerignore for
+# docker/console/Dockerfile only. An allowlist: only front/ enters the context,
+# minus what must never reach the image.
+*
+!front/
+front/node_modules
+front/.lovable
+front/.output
+front/dist
+front/dist-ssr
+front/.nitro
+front/.tanstack
+front/.vinxi
+front/.wrangler
+front/.dev.vars
+**/.env*
+**/*.local
+**/__pycache__

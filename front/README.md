@@ -87,6 +87,10 @@ There is no compose service for this directory and the top-level
 deployed is a task of its own, and the forward lives in `src/server.ts`, which is
 the Node entry — a static build behind nginx cannot serve it.
 
+Since 2026-10-17 it does have one: the `console` service in both compose files,
+on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
+(`docs/decisions.md` ADR 97).
+
 ## How it is put together
 
 - **One client, one file.** Every read and write goes through

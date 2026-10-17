@@ -331,20 +331,55 @@ def _substitutions_of(variable: str, services: dict) -> set[str]:
 )
 def test_the_api_takes_the_token_a_service_authenticates_with(compose_file: str) -> None:
     """The api reads `API_TOKEN` from `docker/compose/.env` (docs/decisions.md
-    ADR 7), and in these files that is the whole of it: the holder is the
-    console's server half (`front/src/lib/api/forward.ts`), which runs outside
-    compose. A holder carrying a token the api was never given shows its Error
-    state in every region, which is a deployment that looks broken rather than
-    misconfigured."""
+    ADR 7), and the holder is the console's server half
+    (`front/src/lib/api/forward.ts`), the `console` service in these files
+    (docs/decisions.md ADR 97). A holder carrying a token the api was never
+    given shows its Error state in every region, which is a deployment that
+    looks broken rather than misconfigured, so the two take it spelt the same."""
     services = _load(compose_file)["services"]
 
     assert "API_TOKEN" in _environment(services["api"])
+    assert (
+        _environment(services["console"])["API_TOKEN"]
+        == _environment(services["api"])["API_TOKEN"]
+    )
 
 
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
-@pytest.mark.parametrize("variable", ["API_TOKEN"])
+def test_the_console_reads_only_through_the_api(compose_file: str) -> None:
+    """The console (docs/decisions.md ADR 15, ADR 97) reads through the api and
+    nothing else: no volume, no docker socket, no `COLLECTOR_*` variable, so a
+    compromised page holds one bearer and not the collector's read or write
+    tokens. Loopback-only publishing, like every service here."""
+    text = (COMPOSE_DIR / compose_file).read_text()
+    console = _load(compose_file)["services"]["console"]
+    api = _load(compose_file)["services"]["api"]
+
+    assert console.get("volumes", []) == []
+    assert "docker.sock" not in yaml.safe_dump(console)
+    assert "api" in console["depends_on"]
+    assert "ia_harness_net" in console["networks"]
+    assert console["build"] == {
+        "context": "../..",
+        "dockerfile": "docker/console/Dockerfile",
+    }
+    assert console["restart"] == "unless-stopped"
+    assert console["ports"] == ["127.0.0.1:8790:8790"]
+    env = _environment(console)
+    assert env["API_BASE_URL"] == "http://api:8789"
+    assert env["API_TOKEN"] == "${API_TOKEN}"
+    assert env["API_TOKEN"] == _environment(api)["API_TOKEN"]
+    assert not any(key.startswith("COLLECTOR_") for key in env)
+    assert not any(name.startswith("COLLECTOR_") for name in _variables_read_by(console))
+    assert "console:" in text
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
+)
+@pytest.mark.parametrize("variable", ["CONSOLE_PROJECT"])
 def test_an_optional_variable_carries_an_empty_default(
     compose_file: str, variable: str
 ) -> None:
@@ -365,7 +400,7 @@ def test_an_optional_variable_carries_an_empty_default(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
 @pytest.mark.parametrize(
-    "variable", ["DASHBOARD_USERNAME", "DASHBOARD_PASSWORD_HASH"]
+    "variable", ["DASHBOARD_USERNAME", "DASHBOARD_PASSWORD_HASH", "API_TOKEN"]
 )
 def test_a_required_credential_stays_bare_so_compose_says_it_is_missing(
     compose_file: str, variable: str
@@ -373,7 +408,9 @@ def test_a_required_credential_stays_bare_so_compose_says_it_is_missing(
     """The other half of the rule above: there is no sensible empty default for
     a credential, so the warning is the feature. A service started with an empty
     password hash is a service nobody can log in to, reported as a runtime
-    mystery instead of a line compose printed before it started."""
+    mystery instead of a line compose printed before it started. `API_TOKEN`
+    joined them with the `console` service, which refuses to boot without it
+    (docs/decisions.md ADR 97)."""
     services = _load(compose_file)["services"]
 
     assert _substitutions_of(variable, services) == {f"${{{variable}}}"}

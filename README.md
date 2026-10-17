@@ -311,7 +311,7 @@ the implementation task breakdown is in
 ```
 dispatcher/       Smart Dispatcher: config, state machine, docker exec, CLI
 observability/    Event collector (Flask/SQLite) + read API (Flask, JSON)
-front/            Operations console (TanStack Start) — C-8, no service yet
+front/            Operations console (TanStack Start) — C-8, the `console` service
 hooks/            Claude Code hooks that emit events to the collector
 docker/           Dockerfiles + compose files (control-plane and agents)
 scripts/          Volume setup, dind image pruning
@@ -328,9 +328,9 @@ required for the host-level steps — only the `dispatcher`/`collector`/`api`
 containers need Python, and they get it from their own images. None of those
 three needs Node, all three being on the same `python:3.11-slim` base. That was
 [`docs/charter.md`](docs/charter.md) C-7 and it survives C-8, which buys Node for
-`front/` alone — the console will be a fourth service on its own runtime, and the
-three above stay as they are. `front/` has no compose service yet, so none of the
-steps below needs it.
+`front/` alone — the console is a fourth service on its own runtime, and the
+three above stay as they are. It is the `console` compose service
+(`docs/decisions.md` ADR 97), built for Node by its own image.
 
 ### 1. Clone and configure
 
@@ -515,10 +515,11 @@ docker compose -f docker/compose/docker-compose.agents.yml up -d
 if `scripts/configure.sh` wrote one; otherwise pass them inline. The two
 credential variables keep their `DASHBOARD_` names although the dashboard they
 were written for is gone — renaming them means editing a `.env` that exists on
-every running host to buy a spelling. An `.env` written before `API_TOKEN`
-existed still starts everything: the api rejects every bearer and keeps
-serving a human's password, and the console says so in each region's Error state.
-The collector is stricter (`docs/decisions.md` ADR 72): it reads
+every running host to buy a spelling. `API_TOKEN` is required too, since the
+`console` service refuses to boot without it: an `.env` written before it
+existed makes compose warn that the variable is unset and the console exit at
+boot, so add a long random string (`scripts/configure.sh` writes one). The
+collector is stricter (`docs/decisions.md` ADR 72): it reads
 `COLLECTOR_READ_TOKEN` and its map of write tokens from the same `.env` and
 refuses to start, naming the variable, without them. `scripts/configure.sh`
 writes that map as `COLLECTOR_WRITE_TOKENS=agent-<name>=<token>,...`, one entry
@@ -533,20 +534,22 @@ operator's for `GET /events` (`curl -H "Authorization: Bearer $COLLECTOR_READ_TO
 127.0.0.1:8787/events`) and goes to no other service; each write token goes to
 its agent as `COLLECTOR_TOKEN` and to the collector, which stores the agent it
 is bound to whatever the event body claims.
-This step brings up three **persistent** control-plane services (`collector`,
-`api`, `registry-mirror`) plus, from the second file, one persistent
-`agent-<name>`/`dind-<name>` pair per configured account.
+This step brings up four **persistent** control-plane services (`collector`,
+`api`, `console`, `registry-mirror`) plus, from the second file, one persistent
+`agent-<name>`/`dind-<name>` pair per configured account. The console answers at
+`http://127.0.0.1:8790` (from another machine, through an SSH tunnel: it is
+published on loopback only, and the TLS proxy is a later task). Its first
+`up` builds `front/` into an image, which takes a few minutes.
 
 The console's `CONSOLE_PROJECT` does what `BOARD_PROJECT` did here until
-2026-10-04: it is optional, read by `front/` from its own environment, and worth
+2026-10-04: it is optional, read by the `console` service from `.env`, and worth
 setting on a host that holds more than one checkout. It names the slug under the
 dispatcher's `projects_root` whose debt the console asks for — `ia-harness` on a
 host that only works on this repo. Where `projects_root` holds several checkouts
 `/api/debt` has no default to fall back on and answers `400 project is
 required`, listing what it found, so the debt screen is an Error state until the
-variable is set; the tasks, task and tail screens are unaffected. Neither compose
-file sets it, because no service in either one reads it (`docs/decisions.md`
-ADR 24 for the name, ADR 32 for the retirement that freed it).
+variable is set; the tasks, task and tail screens are unaffected
+(`docs/decisions.md` ADR 24 for the name, ADR 32 for the retirement that freed it).
 `docs/decisions.md` ADR 9 says why `scripts/configure.sh` does not prompt for it.
 
 One service in those files is deliberately kept out of that default set,
@@ -1192,8 +1195,9 @@ that rendered this file instead (it is gitignored, so it does not travel
 with the repo).
   Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, `COLLECTOR_READ_TOKEN`,
   one `COLLECTOR_WRITE_TOKEN_<ACCOUNT>` per account (required: the collector
-  will not start without them), and `API_TOKEN` if the
-  console is to reach the api, through Coolify's own environment-variables UI on
+  will not start without them), and `API_TOKEN` (required: the resource now
+  includes the `console` service, which will not start without it) and
+  optionally `CONSOLE_PROJECT`, through Coolify's own environment-variables UI on
   the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
   compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based

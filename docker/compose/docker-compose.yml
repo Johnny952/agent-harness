@@ -78,14 +78,40 @@ services:
       # service authenticating with basic auth would need the plaintext in .env
       # beside the hash and make the hash decorative. The holder is the console's
       # server half (`front/src/lib/api/forward.ts`, docs/decisions.md ADR 15 and
-      # ADR 24), which is not a service in this file yet. Optional — an api
-      # started without it rejects every bearer and keeps basic auth working
-      # (docs/decisions.md ADR 7) — so it is spelt `:-`: a variable that is
-      # allowed to be unset should not be announced as a missing one every time
-      # compose reads this file.
-      - API_TOKEN=${API_TOKEN:-}
+      # ADR 24), the `console` service below. The api itself still runs without
+      # it — it then rejects every bearer and keeps basic auth working
+      # (docs/decisions.md ADR 7) — but the console does not, so the one value
+      # is spelt bare in both services (docs/decisions.md ADR 97): compose says
+      # it is missing instead of starting a console that exits at boot.
+      - API_TOKEN=${API_TOKEN}
     depends_on:
       - collector
+    networks:
+      - ia_harness_net
+
+  # The console (`front/`, docs/decisions.md ADR 15, ADR 24 and ADR 97): built
+  # for Node by docker/console/Dockerfile. It reads only through the api, so it
+  # has no volume and no docker socket, and it holds API_TOKEN alone: never
+  # COLLECTOR_READ_TOKEN or a write token.
+  #
+  # API_TOKEN is bare `${API_TOKEN}`: the console refuses to boot without it, so
+  # compose should announce it missing rather than start a restart loop.
+  # CONSOLE_PROJECT is optional (the console then asks for a project), so it is
+  # `:-`. Published on loopback only; the TLS proxy is a later task
+  # (docs/plans/server-deployment.md).
+  console:
+    build:
+      context: ../..
+      dockerfile: docker/console/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      - API_BASE_URL=http://api:8789
+      - API_TOKEN=${API_TOKEN}
+      - CONSOLE_PROJECT=${CONSOLE_PROJECT:-}
+    depends_on:
+      - api
     networks:
       - ia_harness_net
 

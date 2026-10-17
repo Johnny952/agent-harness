@@ -6321,3 +6321,81 @@ arquitecto is unchanged: the writer worktree on `agent/task/<task id>`, and
 its commit. Leftovers of runs made before this ADR are not reaped; nothing
 here looks for them. A failover inside one draft run rebuilds the checkout at
 the same path, so the resumed session finds the same working directory.
+
+## ADR 97 — the console is the `console` compose service, built for Node by `NITRO_PRESET` in its image
+
+**Status:** accepted (T-061, decided by the owner 2026-10-17, who authorized
+the edit of `docker/compose/**`).
+
+**Context.** The console (`front/`, ADR 15, ADR 24, `docs/charter.md` C-8) ran
+only as `bun run dev` on the host. `docs/plans/server-deployment.md` *How it
+would be built*, step 3, puts a TLS proxy in front of it, and a proxy needs a
+service to point at. `front/vite.config.ts` is protected and builds through
+`@lovable.dev/vite-tanstack-config`, which hands nitro `defaultPreset:
+"cloudflare-module"` — a fallback, not a `preset` — so an unconfigured build
+targets Cloudflare. nitro resolves its preset from the config's `preset`, then
+`NITRO_PRESET`, then `SERVER_PRESET`, and only then `defaultPreset`; the Lovable
+config deletes `NITRO_PRESET` only inside a Lovable sandbox (`LOVABLE_SANDBOX=1`
+or `DEV_SERVER__PROJECT_PATH` set). Both read from the installed packages on
+2026-10-17. `API_TOKEN` was spelt `${API_TOKEN:-}` because no service in the
+compose files needed it; the console needs it and refuses to boot without it
+(`front/src/lib/api/server-env.ts`).
+
+**Decision.**
+
+1. *One service, both files.* `docker-compose.yml` and
+   `docker-compose.coolify.yml` each get a `console` service, written right
+   after `api`: built from `docker/console/Dockerfile` with the repo root as
+   context, like every other image; `restart: unless-stopped`; `depends_on:
+   [api]`; on `ia_harness_net`; published on `127.0.0.1:8790:8790` in both
+   files, since the Coolify file publishes its other services on loopback as
+   well. 8790 is the retired Jinja board's port (ADR 32), freed by the service
+   this one replaces. No `volumes` at all and no docker socket: the console
+   reads only through the api (ADR 15).
+2. *The Node target is chosen by an environment variable in the image's build
+   stage*: `ENV NITRO_PRESET=node-server`, and nothing else. Not `nitro: {
+   preset }` in `vite.config.ts`, which is protected and would also change the
+   Lovable round-trip's own Cloudflare build (C-9); not a `nitro.config.*` in
+   `front/`, which the Lovable config looks for and which would retarget every
+   build, the host's `bun run build` and Lovable's included. The variable
+   exists only inside the image build, so every other build is untouched.
+3. *The image.* Multi-stage: a build stage on the same Node base as the agent
+   image with the same bun binary copied in (`docker/agent/Dockerfile`), which
+   copies `front/`'s manifests first and runs `bun install
+   --frozen-lockfile` (so `bunfig.toml`'s release-age floor holds), then the
+   sources by explicit path, then `bun run build`; and a runtime stage on the
+   same slim Node base that copies only `.output/` and runs
+   `node .output/server/index.mjs` as the image's `node` user, with
+   `HOST=0.0.0.0` and `PORT=8790`. The build context is filtered by
+   `docker/console/Dockerfile.dockerignore` (BuildKit's per-Dockerfile ignore,
+   which replaces the root `.dockerignore` for this build): an allowlist of
+   `front/`, minus `node_modules`, `.lovable/`, build outputs and any `.env*`
+   or `*.local`. The explicit `COPY` paths keep those out even under a builder
+   that ignores that file.
+4. *Spelling.* `API_TOKEN` is spelt bare, `${API_TOKEN}`, in the console **and
+   the api** of both files. One variable takes one spelling per file (the
+   invariant compares a set of one), and since a plain `up -d` now starts a
+   service that refuses to boot without it, an unset `API_TOKEN` is no longer a
+   state the file runs without: compose's warning is the feature, as for the
+   `DASHBOARD_` pair. The api's own behaviour without it (ADR 7) is unchanged;
+   only the warning is new. `API_BASE_URL=http://api:8789` is a literal.
+   `CONSOLE_PROJECT` is optional and spelt `${CONSOLE_PROJECT:-}`.
+   `tests/integration/test_compose_invariants.py` moves `API_TOKEN` from the
+   optional parametrization to the required one and puts `CONSOLE_PROJECT` in
+   its place.
+5. *The Coolify render needs no new heredoc.* `render_coolify_compose` in
+   `scripts/configure.sh` copies the Coolify file verbatim down to the first
+   `agent-` line, so a `console` written above the agent pairs is rendered as
+   it stands, and `tests/scripts/test_configure.py` holds it byte for byte.
+
+**Consequences.** `docker compose -f docker/compose/docker-compose.yml up -d`
+now starts the console at `http://127.0.0.1:8790`. An `.env` without
+`API_TOKEN` makes compose warn and the console exit at boot under its restart
+policy; the rest of the stack starts as before, and `scripts/configure.sh`
+already writes the token. The host `bun run dev` path is unchanged. The proxy,
+TLS and a domain are the next task (server-deployment step 3), as are sign-in
+and anything beyond loopback; nothing here exposes the console. A `nitro`
+upgrade that stops reading `NITRO_PRESET` ahead of `defaultPreset`, or a
+Lovable config that starts deleting it outside the sandbox, silently brings
+the Cloudflare target back into the image: that is the thing to recheck on
+such an upgrade.
