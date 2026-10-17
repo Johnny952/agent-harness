@@ -6,7 +6,8 @@ and your diff touches nothing under `dispatcher/` or that test file.
 
 **Status:** unconfirmed — seen by T-061's auditor (shared inbox, not filed
 then) and again by T-062's auditor, both on diffs with no `dispatcher/` file.
-Not diagnosed.
+T-065's implementador saw it a third time (failed, then 14 passed on the
+rerun), and it is now debt `T-065-D1` in `docs/debt/README.md`. Not diagnosed.
 
 ## Symptom
 

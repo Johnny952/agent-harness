@@ -49,6 +49,12 @@
 #   - API_TOKEN, likewise: any long random string, shared by the api and the
 #     `console` service below. Required, since the console refuses to start
 #     without it (docs/decisions.md ADR 97). CONSOLE_PROJECT is optional.
+#   - CONFIG_WRITER_TOKEN, likewise: a long random string shared by the
+#     `config-writer` service and the `console`. The writer exits 2 without
+#     it (docs/decisions.md ADR 75, ADR 109). `config.d/` next to config.yaml
+#     should exist before the first deploy (scripts/configure.sh makes it);
+#     otherwise docker creates it root-owned, which the root writer can still
+#     use (ADR 110).
 #   - COLLECTOR_READ_TOKEN and one COLLECTOR_WRITE_TOKEN_<ACCOUNT> per
 #     account (docs/decisions.md ADR 72; <ACCOUNT> is the account name
 #     uppercased, `-` as `_`): distinct long random strings, the ones
@@ -111,6 +117,7 @@ services:
       - ../../.hive:/data/.hive:ro
       - ../../.data/projects:/data/projects:ro
       - ../../config.yaml:/app/config.yaml:ro
+      - ../../config.d:/app/config.d:ro
     environment:
       - COLLECTOR_DB_PATH=/events/events.db
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
@@ -122,11 +129,15 @@ services:
     depends_on:
       - collector
     networks:
+      # ia_harness_net for the collector, console_net so the console reaches it.
       - ia_harness_net
+      - console_net
 
   # The console, mirrored from docker-compose.yml (see its comment): no volume,
-  # no docker socket, API_TOKEN only. Published on loopback like the services
-  # around it; docs/decisions.md ADR 97.
+  # no docker socket, API_TOKEN and CONFIG_WRITER_TOKEN only. Published on
+  # loopback like the services around it; docs/decisions.md ADR 97. On
+  # console_net only (ADR 109). Coolify's proxy reaches it over the network
+  # Coolify attaches itself, not ia_harness_net (ADR 109 *Coolify*).
   console:
     build:
       context: ../..
@@ -138,10 +149,30 @@ services:
       - API_BASE_URL=http://api:8789
       - API_TOKEN=${API_TOKEN}
       - CONSOLE_PROJECT=${CONSOLE_PROJECT:-}
+      - CONFIG_WRITER_URL=http://config-writer:8791
+      - CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}
     depends_on:
       - api
     networks:
-      - ia_harness_net
+      - console_net
+
+  # The settings writer, mirrored from docker-compose.yml (see its comment):
+  # config.yaml :ro and config.d the one writable mount, no socket, console_net
+  # only; docs/decisions.md ADR 75, ADR 109 and ADR 110.
+  config-writer:
+    build:
+      context: ../..
+      dockerfile: config_writer/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8791:8791"
+    volumes:
+      - ../../config.yaml:/app/config.yaml:ro
+      - ../../config.d:/app/config.d
+    environment:
+      - CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}
+    networks:
+      - console_net
 
   registry-mirror:
     image: registry:2
@@ -175,6 +206,8 @@ services:
       # :ro. See docker-compose.yml's dispatcher.
       - ../../.data/credentials/projects:/run/secrets/projects
       - ../../config.yaml:/app/config.yaml:ro
+      # The writer's overrides, read-only here; see docker-compose.yml.
+      - ../../config.d:/app/config.d:ro
     depends_on:
       - collector
     networks:
@@ -273,6 +306,7 @@ services:
 networks:
   ia_harness_net:
     name: ia_harness_net
+  console_net:
 
 volumes:
   observability_data:

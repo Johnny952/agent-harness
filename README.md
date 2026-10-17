@@ -378,9 +378,12 @@ whole value in `config.yaml`, maps and lists included. Only the keys that
 `CONFIG_KEYS` in `dispatcher/config.py` marks editable may appear, and a reset
 is deleting the key (`null` is refused). A bad overrides file stops every verb;
 the dispatcher never falls back to `config.yaml` alone. The directory is
-git-ignored. The console's `config-writer` will write it
-(`docs/plans/console-config.md` task 2, not built yet), and no container mounts
-it yet. See `docs/decisions.md` ADR 75.
+git-ignored. The `config-writer` service writes it (`docs/plans/console-config.md`
+task 2); the dispatcher and the api mount it `:ro`. `scripts/configure.sh`
+creates the directory beside `config.yaml`, so docker does not make it
+root-owned at the first `up` (a host that skips the script still works: the
+root writer writes it, and a hand repair then needs `sudo`). See
+`docs/decisions.md` ADR 75 and ADR 110.
 
 ### 2. Build the account-specific images
 
@@ -544,8 +547,13 @@ operator's for `GET /events` (`curl -H "Authorization: Bearer $COLLECTOR_READ_TO
 127.0.0.1:8787/events`) and goes to no other service; each write token goes to
 its agent as `COLLECTOR_TOKEN` and to the collector, which stores the agent it
 is bound to whatever the event body claims.
-This step brings up five **persistent** control-plane services (`collector`,
-`api`, `console`, `caddy`, `registry-mirror`) plus, from the second file, one persistent
+`CONFIG_WRITER_TOKEN` is required as well (`scripts/configure.sh` writes it): the
+`config-writer` service exits 2 naming it without one, and the `console` is
+given the same value. The writer listens on `127.0.0.1:8791`. The console,
+`caddy`, the api and the writer share `console_net`, which no agent joins
+(`docs/decisions.md` ADR 109).
+This step brings up six **persistent** control-plane services (`collector`,
+`api`, `console`, `config-writer`, `caddy`, `registry-mirror`) plus, from the second file, one persistent
 `agent-<name>`/`dind-<name>` pair per configured account. The console answers at
 `http://127.0.0.1:8790` (from another machine, through an SSH tunnel: it is
 published on loopback only; see *TLS* below for serving it on a domain; `caddy` needs `CONSOLE_AUTH_HASH`
@@ -1254,8 +1262,9 @@ with the repo).
   Set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD_HASH`, `COLLECTOR_READ_TOKEN`,
   one `COLLECTOR_WRITE_TOKEN_<ACCOUNT>` per account (required: the collector
   will not start without them), and `API_TOKEN` (required: the resource now
-  includes the `console` service, which will not start without it) and
-  optionally `CONSOLE_PROJECT`, through Coolify's own environment-variables UI on
+  includes the `console` service, which will not start without it),
+  `CONFIG_WRITER_TOKEN` (required: the `config-writer` service exits without it)
+  and optionally `CONSOLE_PROJECT`, through Coolify's own environment-variables UI on
   the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
   compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based

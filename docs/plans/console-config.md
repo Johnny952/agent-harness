@@ -129,6 +129,15 @@ the key table and `overrides_path` from task 1.
   - the dispatcher and the api mount `config.d` `:ro`.
 - `python3 -m pytest` is green.
 
+**Built 2026-10-17** by T-065: the `config_writer` package, its `Dockerfile`
+and `tests/config_writer/`; the `config-writer` service in both compose files
+with `console_net` and port 8791 in place of `config_writer_net` and 8790
+(`docs/decisions.md` ADR 109); the writer's edges and `config.d` made by
+`scripts/configure.sh` (ADR 110); the invariants above for both files.
+`CONFIG_WRITER_TOKEN` reaches the writer and the console, not only the writer
+(ADR 109 part 5). The Docker image build was not run from the phase; see
+`docs/implementations/T-065.md`.
+
 ## 3. The console's settings screen
 
 **Surface:** one screen, the Role models screen at
@@ -221,6 +230,16 @@ Reads `GET /settings` and the save and reset routes from task 2.
 This screen and its forward may be too large for one cycle. If so, that
 task's arquitecto may split it into a read-only screen first and the
 controls second.
+
+**Note, 2026-10-17 (T-065, `docs/decisions.md` ADR 109).** The writer listens
+on 8791, not 8790, which is the console's own port. The forward's host
+default for `CONFIG_WRITER_URL` is therefore `http://127.0.0.1:8791`. In
+compose, both files already give the `console` service
+`CONFIG_WRITER_URL=http://config-writer:8791` and `CONFIG_WRITER_TOKEN`, on
+`console_net`, so this task writes only the forward and the screen. The
+routes' edge cases that the screen meets are in ADR 110. A reset is allowed
+on any key the file holds, a 422 names the real overrides path, and
+`X-Actor` is required.
 
 ## 4. Credentials and the login (named, not designed here)
 

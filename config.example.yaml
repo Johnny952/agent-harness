@@ -14,9 +14,8 @@
 # maps and lists included. Only the keys CONFIG_KEYS in dispatcher/config.py
 # marks editable may appear. A reset is deleting the key; null is refused. A
 # bad overrides file stops every verb, and the dispatcher never falls back to
-# this file alone. config.d/ is git-ignored. The console's config-writer will
-# write it (docs/plans/console-config.md task 2, not built yet); no container
-# mounts it yet.
+# this file alone. config.d/ is git-ignored. The config-writer service writes it
+# (docs/plans/console-config.md task 2); the dispatcher and the api mount it :ro.
 
 # One entry per Claude Pro account the dispatcher can dispatch work to.
 # `container` must match a container_name in docker-compose.agents.yml.
