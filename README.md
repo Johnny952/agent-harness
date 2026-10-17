@@ -372,6 +372,16 @@ Prefer editing by hand? Copy the template instead:
 cp config.example.yaml config.yaml
 ```
 
+`config.yaml` holds the defaults. A `config.d/overrides.yaml` beside it, if
+present, is merged over it: each top-level key in the overrides replaces the
+whole value in `config.yaml`, maps and lists included. Only the keys that
+`CONFIG_KEYS` in `dispatcher/config.py` marks editable may appear, and a reset
+is deleting the key (`null` is refused). A bad overrides file stops every verb;
+the dispatcher never falls back to `config.yaml` alone. The directory is
+git-ignored. The console's `config-writer` will write it
+(`docs/plans/console-config.md` task 2, not built yet), and no container mounts
+it yet. See `docs/decisions.md` ADR 75.
+
 ### 2. Build the account-specific images
 
 `dispatcher`, `collector` and `api` have `build:` stanzas in

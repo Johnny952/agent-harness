@@ -8,6 +8,15 @@
 # Hostnames below use service names (collector) rather than 127.0.0.1
 # because the dispatcher container reaches them over the shared
 # ia_harness_net bridge network, not the host's loopback interface.
+#
+# This file holds the defaults. A config.d/overrides.yaml beside it, if present,
+# is merged over it: each top-level key there replaces this file's value whole,
+# maps and lists included. Only the keys CONFIG_KEYS in dispatcher/config.py
+# marks editable may appear. A reset is deleting the key; null is refused. A
+# bad overrides file stops every verb, and the dispatcher never falls back to
+# this file alone. config.d/ is git-ignored. The console's config-writer will
+# write it (docs/plans/console-config.md task 2, not built yet); no container
+# mounts it yet.
 
 # One entry per Claude Pro account the dispatcher can dispatch work to.
 # `container` must match a container_name in docker-compose.agents.yml.
