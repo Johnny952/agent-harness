@@ -1122,6 +1122,10 @@ def _role_prompt(
     # the dispatcher between phases, so it cannot come from `duties`.
     if note:
         prompt += f"\n\n{note}"
+    # Only the roles whose schema carries the field: the others have no way to
+    # file one, and being told of it would read as an invitation (ADR 117).
+    if handoff.files_command_requests(role):
+        prompt += f"\n\n{handoff.COMMAND_REQUESTS_PROMPT}"
     schema = handoff.schema_for(role)
     if schema is not None:
         # Says out loud what the schema can only imply: the handoff is the
@@ -1617,6 +1621,12 @@ def _run_gates(
     if not cfg.gates_enabled or role != "implementador":
         return result, None
     if not _exec_succeeded(result) or is_rate_limit_error(result):
+        return result, None
+    # A filed command request ends the cycle blocked (ADR 117): grading the
+    # worktree of a phase that stopped for a command it was denied is a cost
+    # spent on work the phase says it could not finish.
+    if handoff.command_requests(handoff.parse(result))[0]:
+        logger.info("task %s: no gates: the implementador filed a command request", task_id)
         return result, None
 
     report = _gate_report(cfg, container, workdir, project_dir, task_id, round_num)
@@ -2931,9 +2941,16 @@ def run_phase(
     # The denials ride along for the same reason: the envelope is the one
     # record of this phase's answer, and what it was refused is part of
     # reading that answer (`docs/decisions.md` ADR 116).
+    # The checked command requests too, for the roles that can file one, so
+    # the steps after this one read the verdict on each without checking it
+    # again (ADR 117).
+    requests: dict[str, object] = {}
+    if handoff.files_command_requests(role):
+        accepted, refused = handoff.command_requests(result.handoff)
+        requests["command_requests"] = {"accepted": accepted, "refused": refused}
     context_transfer.save_handoff(
         cfg.hive_tasks_dir, ctx.task_id, role, result.handoff, round_num=round_num,
-        permission_denials=result.permission_denials,
+        permission_denials=result.permission_denials, **requests,
     )
     return result
 
@@ -2964,7 +2981,7 @@ def close_cycle(ctx: CycleContext, completed: bool) -> None:
         learnings.mark_orphaned(ctx.cfg.hive_tasks_dir, ctx.task_id)
 
 
-def _mark_blocked(ctx: CycleContext) -> None:
+def _mark_blocked(ctx: CycleContext, reason: str | None = None) -> None:
     """Write `blocked` on the task of a cycle that stopped blocked, if it was this run's.
 
     The user's ruling of 2026-10-11 (`docs/business.md` *Task status*). Only a
@@ -2972,19 +2989,45 @@ def _mark_blocked(ctx: CycleContext) -> None:
     another owner's. An owner on the file now is a run that took the task
     since this one's last phase let go, and `tasks.mark_blocked` would release
     its lock, so that is left alone too. No task file means nothing to mark.
-    It never raises: the cycle has ended, and a traceback here would replace
-    the BLOCKED exit with a crash.
+    `reason` becomes the file's `blocked_reason` (ADR 117). It never raises:
+    the cycle has ended, and a traceback here would replace the BLOCKED exit
+    with a crash.
     """
     if not ctx.took_lock or ctx.foreign_lock:
         return
     try:
         if context_transfer.read_task_file(ctx.task_file).owner is not None:
             return
-        tasks.mark_blocked(ctx.cfg.hive_tasks_dir, ctx.task_id)
+        tasks.mark_blocked(ctx.cfg.hive_tasks_dir, ctx.task_id, reason=reason)
     except FileNotFoundError:
         return
     except Exception as exc:
         logger.warning("task %s: could not be marked blocked: %s", ctx.task_id, exc)
+
+
+def _filed_command_requests(ctx: CycleContext, result: DispatchResult | None) -> bool:
+    """Whether the phase filed a command request the cycle has to stop for.
+
+    One accepted request is enough (`docs/plans/command-requests.md`,
+    decision 2; ADR 117). Refused ones never block: they are logged here and
+    recorded in the envelope `run_phase` saved, and the cycle goes on as if
+    none had been filed. A phase that did not return files nothing.
+    """
+    if result is None:
+        return False
+    accepted, refused = handoff.command_requests(result.handoff)
+    if refused:
+        logger.warning(
+            "task %s: refused %d command request(s): %s",
+            ctx.task_id, len(refused), "; ".join(item["reason"] for item in refused),
+        )
+    if not accepted:
+        return False
+    logger.warning(
+        "task %s: blocked on %d command request(s): %s",
+        ctx.task_id, len(accepted), "; ".join(" ".join(item["argv"]) for item in accepted),
+    )
+    return True
 
 
 def _split_into(task: context_transfer.TaskFile) -> str:
@@ -3389,8 +3432,8 @@ def run_task_cycle(
     # Every stop that leaves the task blocked after a phase of this run took
     # its lock. `_mark_blocked` decides whether there is anything to write, so
     # a foreign lock goes through here too and marks nothing.
-    def blocked() -> CycleOutcome:
-        _mark_blocked(ctx)
+    def blocked(reason: str | None = None) -> CycleOutcome:
+        _mark_blocked(ctx, reason)
         return CycleOutcome.BLOCKED
     # Set once the auditor has filed what this task learned.
     completed = False
@@ -3429,6 +3472,7 @@ def run_task_cycle(
                 # branch until it merges, so asking again can still say no
                 # index; the queue has mapped once, and this task runs
                 # unmapped as a failed mapping would leave it.
+                mapped = None
                 with scheduler.mapping_lock:
                     if _needs_mapping(cfg, slug):
                         if scheduler.mapped_by is not None:
@@ -3439,7 +3483,7 @@ def run_task_cycle(
                             )
                         else:
                             scheduler.mapped_by = task_id
-                            run_phase(
+                            mapped = run_phase(
                                 ctx,
                                 project_docs.MAPPER_ROLE,
                                 fatal=False,
@@ -3448,12 +3492,14 @@ def run_task_cycle(
                             )
                 if ctx.foreign_lock:
                     return CycleOutcome.BLOCKED
+                if _filed_command_requests(ctx, mapped):
+                    return blocked(handoff.COMMAND_REQUEST)
         elif _needs_mapping(cfg, slug):
             # Before the arquitecto, because what it writes is what the
             # arquitecto reads. Optional in both directions: the operator has
             # to turn it on, and if it fails the task runs anyway on a project
             # that stays unmapped.
-            run_phase(
+            mapped = run_phase(
                 ctx,
                 project_docs.MAPPER_ROLE,
                 fatal=False,
@@ -3462,6 +3508,8 @@ def run_task_cycle(
             )
             if ctx.foreign_lock:
                 return CycleOutcome.BLOCKED
+            if _filed_command_requests(ctx, mapped):
+                return blocked(handoff.COMMAND_REQUEST)
 
         arquitecto = run_phase(ctx, "arquitecto")
         if arquitecto is None:
@@ -3527,6 +3575,10 @@ def run_task_cycle(
             )
             if implemented is None:
                 return stopped()
+            if _filed_command_requests(ctx, implemented):
+                # Before the gates' verdict and the revisor: the phase stopped
+                # for a command it was denied, so its work is not done.
+                return blocked(handoff.COMMAND_REQUEST)
             if stale_note and round_num == 1 and handoff.blocked(implemented.handoff):
                 # The block back the note offers: the plan no longer holds,
                 # and the arquitecto replans on the next run of the task.

@@ -224,7 +224,7 @@ def test_a_page_of_prose_over_is_worth_a_model_call() -> None:
 def test_the_margin_is_a_share_of_the_budget_not_a_flat_count() -> None:
     """A tight budget should tolerate fewer bytes than a loose one; a floor
     keeps the tightest budgets from spending a call on a few dozen."""
-    assert handoff.worth_shrinking("cartografo", 300)
+    assert handoff.worth_shrinking("cartografo", 340)
     assert not handoff.worth_shrinking("implementador", 300)
     assert not handoff.worth_shrinking("cartografo", 200), "the floor holds below the share"
 

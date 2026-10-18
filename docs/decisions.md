@@ -7132,3 +7132,91 @@ and the page says so rather than showing "none". The page shows refusals
 without the transcript open, which is what the plan's next steps need. The
 caps bound a line, not the log: a phase that is refused often still writes
 one line per call.
+
+## ADR 117 — a phase files a denied command as `command_requests`, checked by the dispatcher, and one accepted request ends the cycle blocked
+
+**Status:** accepted (T-070, 2026-10-17; the roles, the limit and the
+recording were decided by the owner in the task). Builds step 2 of
+`docs/plans/command-requests.md` (decision 2). The plan gains a *Built* note
+under decision 2 and a dated answer under its open question on roles; the
+rest of its text is not edited.
+
+**Context.** ADR 116 made the refusals visible. A phase that is refused a
+command it needs still has nowhere to say so: it either works around the
+refusal (another tool, another spelling, the job done by hand) or ends with
+the need buried in prose. The plan's decision 2 gives it a handoff field and
+ends the phase blocked, so a person can decide. Verdicts, running the command
+and resuming are later steps; this one only has to file, check, record and
+stop.
+
+**Decision.**
+1. *The field is on the implementador and the cartografo only.* Those two run
+   commands for the task; the arquitecto, the revisor and the auditor read, so
+   their schemas have no field and they cannot file. This answers the plan's
+   open question without a check on what a reading role's request would do.
+   `handoff.files_command_requests(role)` is the one test of it.
+2. *The shape.* `command_requests` is an array of at most 3 entries
+   (`maxItems`, `_COMMAND_REQUESTS_MAX`), each `argv` (a non-empty list of
+   strings, no shell), `reason`, `target` (`kind` one of `agent`, `dind`,
+   `service`, and `name`, empty unless the kind is `service`) and `cwd`
+   (relative to the worktree). Like every handoff field it is required, an
+   empty array when nothing is filed. No `minLength` in the schema: what the
+   CLI's validator enforces is the check's job, not the schema's.
+3. *A pure check, `handoff.command_requests(payload)`*, answers
+   `(accepted, refused)`. Each refused entry is `{"request", "reason"}`, the
+   reason naming every problem found (`command_request_problems`): not an
+   object, an empty or non-list `argv`, an `argv` item that is not a
+   non-empty string, a `reason` that is not a string, an unknown `kind`, a
+   `service` with no name, a `cwd` that is not a string, is absolute or has a
+   `..` segment. Entries past the third are refused "over the limit of 3
+   requests" whatever they hold, since a schema the CLI did not enforce is
+   not a reason to act on more. A missing field, `null` or a non-list files
+   nothing. Resolving a target to a container and the denylist are step 3.
+4. *One accepted request blocks.* `_filed_command_requests` runs after the
+   implementador (right after the phase returns, before the revisor) and
+   after the mapping phase (in both mapping branches, before the arquitecto).
+   It ends the cycle `Blocked` with the task file's new `blocked_reason:
+   command_request`. When every request is refused it does not block: the
+   refusals are logged as a warning and recorded, and the cycle goes on as if
+   none had been filed, because a malformed request is no reason to stop a
+   phase that may have finished.
+5. *No gates and no revisor after a filed request.* `_run_gates` returns
+   before grading when the implementador's return carries an accepted
+   request: grading a worktree the phase says it could not finish spends a
+   retry on a known answer. The revisor never runs because the cycle has
+   already ended.
+6. *`blocked_reason` is written only when set.* `TaskFile.blocked_reason`
+   defaults to `None` and `write_task_file` leaves the key out then, so every
+   existing task file reads and writes as before. `tasks.mark_blocked` takes
+   an optional `reason` and sets it (no reason clears a stale one);
+   `tasks.acquire_lock` clears it whenever it takes the task, since a task
+   taken again is running, whatever stopped it last.
+7. *The verdicts are recorded in the handoff envelope*, a sixth key
+   `command_requests: {"accepted": [...], "refused": [...]}`, written by
+   `run_phase` for the two filing roles only (`COMMAND_REQUESTS_ABSENT` is
+   `save_handoff`'s default, as in ADR 116). Not a separate file: the
+   envelope is already the one record of a phase's answer, written atomically
+   with it, read by `read_handoff_envelope`, and a second file per phase is a
+   second thing to keep in step with the first. The later steps read the
+   accepted list from there without checking it again.
+8. *The budget grows by 768 bytes for each filing role*: the cartografo's
+   from 2560 to 3328, the implementador's from 7168 to 7936. Three requests
+   of about 250 bytes each fit without eating the summary's room; the line
+   budget the prompt states follows (19 and 48 lines), and the shrinking
+   margin `worth_shrinking` keeps grows with it (332 bytes for the
+   cartografo).
+9. *The prompt.* Both roles get one paragraph (`COMMAND_REQUESTS_PROMPT`):
+   do not work around a denied command, file it (at most 3, argv with no
+   shell, cwd relative) and end the phase. The rendered handoff gains a
+   *Command requests* section, each entry shown as accepted or refused.
+
+Out of scope: target resolution, `accounts[].dind` and the denylist (step 3);
+verdicts, running the command and resuming (step 4); the allowlist (step 5);
+the Approvals card, any front or api change, and the notification (step 6);
+`--permission-prompt-tool` (decision 8).
+
+**Consequences.** A filed request leaves the task blocked until someone takes
+it again by hand: with no verdict yet, retrying is the operator's only answer,
+and the request stays readable in the envelope and the task file's handoff.
+Refused requests cost the phase nothing but a log line. Task files and
+envelopes written before this ADR have no key and read as before.

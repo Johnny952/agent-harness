@@ -243,13 +243,56 @@ _SPLIT_PROPERTY = {
     },
 }
 
+#: What a phase may file at once; entries past it are refused, not dropped.
+_COMMAND_REQUESTS_MAX = 3
+_TARGET_KINDS = ("agent", "dind", "service")
+
+#: A role's way out of a refused command: not a workaround, but a request the
+#: operator rules on (`docs/plans/command-requests.md`, decision 2;
+#: `docs/decisions.md` ADR 117). Only the roles that run commands in the
+#: task's tree carry it, the implementador and the cartografo: the revisor
+#: and the auditor read and report, and the arquitecto plans. `name` is in
+#: every target so the schema stays all-required; it only means something
+#: for a service.
+_COMMAND_REQUESTS_PROPERTY = {
+    "command_requests": {
+        "type": "array",
+        "maxItems": _COMMAND_REQUESTS_MAX,
+        "items": {
+            "type": "object",
+            "properties": {
+                "argv": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "description": "The command as an argument vector, no shell.",
+                },
+                "reason": {"type": "string", "description": "What the command is for, in one line."},
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": list(_TARGET_KINDS)},
+                        "name": {"type": "string", "description": "The service, when kind is service. Empty otherwise."},
+                    },
+                    "required": ["kind", "name"],
+                    "additionalProperties": False,
+                },
+                "cwd": {"type": "string", "description": "Relative to the task's worktree; . for its root."},
+            },
+            "required": ["argv", "reason", "target", "cwd"],
+            "additionalProperties": False,
+        },
+        "description": "Empty unless a command you need was denied. Then: that command, and end the phase.",
+    },
+}
+
 #: The roles that hand off at all. A role outside this gets no schema, which
 #: means no `--json-schema` flag and the free-text fallback below — the same
 #: way an unknown role gets no skills rather than an error.
 _ROLE_EXTRAS: dict[str, dict] = {
-    "cartografo": {},
+    "cartografo": _COMMAND_REQUESTS_PROPERTY,
     "arquitecto": _SPLIT_PROPERTY,
-    "implementador": _RESOLVED_DEBT_PROPERTY,
+    "implementador": {**_RESOLVED_DEBT_PROPERTY, **_COMMAND_REQUESTS_PROPERTY},
     "revisor": {**_VERDICT_PROPERTY, **_FINDINGS_PROPERTY, **_DEBT_RULINGS_PROPERTY},
     "auditor": {},
 }
@@ -289,16 +332,19 @@ _BUDGET_BYTES: dict[str, int] = {
     # The mapper's output is the docs it wrote, not its handoff: what the next
     # phase needs from it is a pointer to the index and how far it got. No run
     # has exercised it yet, so this one is still a guess; it moves only to keep
-    # the entry count it derives worth stating.
-    "cartografo": 2560,
+    # the entry count it derives worth stating. Plus 768 for the command
+    # requests it may file (ADR 117): three, at about 250 bytes each.
+    "cartografo": 3328,
     # Filed 32 entries on T-008 against the 30 it was given, and measured 4732
     # against a 4096 budget. Its entries run to a p90 of 161 bytes.
     "arquitecto": 5120,
     # The one role that pays for two structured lists on top of the common
     # fields, and the densest of them at 185 bytes an entry on the p90: a debt
     # declaration alone measures a median of 465, nearly three of these lines.
-    # Filed 40 entries on T-008 and measured 6294 against 5120.
-    "implementador": 7168,
+    # Filed 40 entries on T-008 and measured 6294 against 5120. Plus 768 for
+    # the command requests it may file (ADR 117): three, at about 250 bytes
+    # each, so filing them does not cost the report it ends the phase with.
+    "implementador": 7936,
     # It carries a verdict and a ruling per declaration on top of the common
     # fields, and ran the only phase that went over twice: 4028 on the first
     # round and 4280 on the second, both against 4096. Its entries are the
@@ -428,6 +474,17 @@ UNATTENDED_PHASE = (
     "phase with nothing handed on. So do not stop to report progress, to list "
     "what is left, to ask whether to go on, or to wait for a confirmation that "
     "will not come. If you cannot go on, say why in the handoff and send it."
+)
+
+
+#: Sent to the roles whose schema carries `command_requests` (ADR 117). The
+#: workaround is what this forbids: a denied command retried under another
+#: name, or the job done another way, is the call the operator never saw.
+COMMAND_REQUESTS_PROMPT = (
+    "When a command you need is denied, do not work around it: no other tool, "
+    "no other spelling, no doing its job by hand. File it in `command_requests` "
+    "(at most 3, argv with no shell, cwd relative to the worktree) and end the "
+    "phase with the handoff; the operator decides and the task resumes."
 )
 
 
@@ -627,6 +684,75 @@ def split_problems(subtasks: list[SubTask]) -> list[str]:
     return problems
 
 
+#: The `blocked_reason` a task file gets when a phase filed a command request.
+COMMAND_REQUEST = "command_request"
+
+
+def command_request_problems(entry: object) -> list[str]:
+    """What makes one command request unusable. Empty means it is accepted.
+
+    Every problem is reported, like `split_problems`: the refusal is all the
+    operator and the next run get to see of what the phase asked for.
+    """
+    if not isinstance(entry, dict):
+        return [f"the request is not an object but {type(entry).__name__}"]
+    problems = []
+    argv = entry.get("argv")
+    if not isinstance(argv, list) or not argv:
+        problems.append("argv is not a non-empty list")
+    elif not all(isinstance(item, str) and item for item in argv):
+        problems.append("argv has an item that is not a non-empty string")
+    if not isinstance(entry.get("reason"), str):
+        problems.append("reason is not a string")
+    target = entry.get("target")
+    kind = target.get("kind") if isinstance(target, dict) else None
+    if kind not in _TARGET_KINDS:
+        problems.append(f"target kind is {kind!r}, not one of {', '.join(_TARGET_KINDS)}")
+    elif kind == "service":
+        name = target.get("name")
+        if not isinstance(name, str) or not name.strip():
+            problems.append("a service target has no name")
+    cwd = entry.get("cwd")
+    if not isinstance(cwd, str):
+        problems.append("cwd is not a string")
+    elif cwd.startswith("/"):
+        problems.append(f"cwd {cwd!r} is absolute")
+    elif ".." in cwd.split("/"):
+        problems.append(f"cwd {cwd!r} has a .. segment")
+    return problems
+
+
+def command_requests(payload: dict | None) -> tuple[list[dict], list[dict]]:
+    """The phase's command requests, as accepted and refused.
+
+    Reads, never repairs, and never drops: an entry is either accepted as
+    stated or refused as `{"request": entry, "reason": ...}`. A missing field,
+    or one that is not a list, is no requests at all.
+    """
+    if not payload:
+        return [], []
+    entries = payload.get("command_requests")
+    if not isinstance(entries, list):
+        return [], []
+    accepted: list[dict] = []
+    refused: list[dict] = []
+    for position, entry in enumerate(entries, start=1):
+        if position > _COMMAND_REQUESTS_MAX:
+            problems = [f"over the limit of {_COMMAND_REQUESTS_MAX} requests"]
+        else:
+            problems = command_request_problems(entry)
+        if problems:
+            refused.append({"request": entry, "reason": "; ".join(problems)})
+        else:
+            accepted.append(entry)
+    return accepted, refused
+
+
+def files_command_requests(role: str) -> bool:
+    """Whether the role's schema offers `command_requests` at all."""
+    return "command_requests" in _ROLE_EXTRAS.get(role, {})
+
+
 def fallback_body(text: str, head: int = 500, tail: int = 1500) -> str:
     """Clamp a return that came back as prose instead of the schema.
 
@@ -737,6 +863,24 @@ def _split(payload: dict) -> list[str]:
     return rendered
 
 
+def _command_requests(payload: dict) -> list[str]:
+    """Each request on one line: the command, where it runs, and why.
+
+    Whitespace is collapsed for the reason `_split` gives: an argv item is the
+    model's text, and a newline in one would reach column zero.
+    """
+    accepted, refused = command_requests(payload)
+    rendered = []
+    for entry in accepted:
+        target = entry["target"]
+        where = f"service {target['name']}" if target["kind"] == "service" else target["kind"]
+        line = f"`{' '.join(entry['argv'])}` on {where} in `{entry['cwd']}` — {entry['reason']}"
+        rendered.append(" ".join(line.split()))
+    for item in refused:
+        rendered.append(" ".join(f"refused: {item['reason']}".split()))
+    return rendered
+
+
 def render(payload: dict) -> str:
     """The structured return as the markdown a later role reads.
 
@@ -766,6 +910,7 @@ def render(payload: dict) -> str:
     for key, title, items in (
         ("debt", "Proposed debt", _debt(payload)),
         ("debt_rulings", "Debt rulings", _rulings(payload)),
+        ("command_requests", "Command requests", _command_requests(payload)),
     ):
         if items:
             parts.append("\n".join([f"**{title}**", *(f"- {item}" for item in items)]))

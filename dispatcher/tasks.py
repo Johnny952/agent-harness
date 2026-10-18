@@ -346,6 +346,9 @@ def acquire_lock(
     # stay as they are.
     if task.status in ("pending", "blocked"):
         task.status = "in_progress"
+    # The block's reason goes with the block: a task taken again is running,
+    # whatever stopped it last time (ADR 117).
+    task.blocked_reason = None
     _write_task_file(path, task)
     return task
 
@@ -652,18 +655,20 @@ def handoff(
     _write_task_file(path, task)
 
 
-def mark_blocked(hive_dir: str, task_id: str) -> None:
+def mark_blocked(hive_dir: str, task_id: str, reason: str | None = None) -> None:
     """Record that this task stopped blocked, and release its lock.
 
     The body and every other field stay. A task with no file raises, as
     `refresh_heartbeat` does: there is nothing to mark, and creating one here
-    would invent a task. `acquire_lock` takes a blocked task again.
+    would invent a task. `acquire_lock` takes a blocked task again, and clears
+    `reason`. A block without one clears a stale reason too (ADR 117).
     """
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
     task.status = "blocked"
     task.owner = None
     task.heartbeat = None
+    task.blocked_reason = reason
     _write_task_file(path, task)
 
 
