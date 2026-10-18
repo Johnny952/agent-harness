@@ -7,6 +7,7 @@ import datetime as dt
 import enum
 import logging
 import os
+import posixpath
 import re
 import threading
 import time
@@ -15,6 +16,7 @@ from collections.abc import Callable
 from dispatcher import (
     adr_numbers,
     auto_approve,
+    command_targets,
     context_transfer,
     debt,
     docker_exec,
@@ -108,6 +110,10 @@ class DispatchResult:
     #: the "absent" default by a phase that made no call, so `save_handoff`
     #: writes no key for it (`docs/decisions.md` ADR 116).
     permission_denials: object = context_transfer.PERMISSION_DENIALS_ABSENT
+    #: The phase's command requests as `run_phase` checked and recorded them,
+    #: `(accepted, refused)`, so the cycle blocks on the same lists the
+    #: envelope holds. None for a role that cannot file one (ADR 118).
+    command_requests: tuple[list[dict], list[dict]] | None = None
 
 
 class CycleOutcome(enum.Enum):
@@ -1600,6 +1606,7 @@ def _run_gates(
     effort: str | None,
     round_num: int | None,
     recorder: _UsageRecorder,
+    account: str = "",
 ) -> tuple[docker_exec.ClaudeResult, gates.Report | None]:
     """The deterministic checks, and the one `--resume` they are worth.
 
@@ -1624,8 +1631,11 @@ def _run_gates(
         return result, None
     # A filed command request ends the cycle blocked (ADR 117): grading the
     # worktree of a phase that stopped for a command it was denied is a cost
-    # spent on work the phase says it could not finish.
-    if handoff.command_requests(handoff.parse(result))[0]:
+    # spent on work the phase says it could not finish. Only one that passes
+    # step 3 too (ADR 118): one it refuses does not block, and the cycle goes
+    # on to a revisor that should read a graded branch.
+    slug = posixpath.basename(project_dir.rstrip("/"))
+    if _command_request_lists(cfg, account, slug, task_id, handoff.parse(result))[0]:
         logger.info("task %s: no gates: the implementador filed a command request", task_id)
         return result, None
 
@@ -1870,7 +1880,7 @@ def dispatch_phase(
                 # that actually lands in the task file.
                 result, gate_report = _run_gates(
                     cfg, container, workdir, project_dir, task_id, role,
-                    result, model, effort, round_num, recorder,
+                    result, model, effort, round_num, recorder, account=account,
                 )
                 # Between the two for the same reason: it can rewrite the
                 # handoff as well, and the gates only ever run for the
@@ -2943,10 +2953,11 @@ def run_phase(
     # reading that answer (`docs/decisions.md` ADR 116).
     # The checked command requests too, for the roles that can file one, so
     # the steps after this one read the verdict on each without checking it
-    # again (ADR 117).
+    # again (ADR 117), resolved to a target and past the denylist (ADR 118).
     requests: dict[str, object] = {}
     if handoff.files_command_requests(role):
-        accepted, refused = handoff.command_requests(result.handoff)
+        accepted, refused = _checked_command_requests(ctx, result)
+        result.command_requests = (accepted, refused)
         requests["command_requests"] = {"accepted": accepted, "refused": refused}
     context_transfer.save_handoff(
         cfg.hive_tasks_dir, ctx.task_id, role, result.handoff, round_num=round_num,
@@ -3005,17 +3016,64 @@ def _mark_blocked(ctx: CycleContext, reason: str | None = None) -> None:
         logger.warning("task %s: could not be marked blocked: %s", ctx.task_id, exc)
 
 
+def _checked_command_requests(
+    ctx: CycleContext, result: DispatchResult,
+) -> tuple[list[dict], list[dict]]:
+    """The phase's command requests after step 2's check and step 3's.
+
+    Step 2 (`handoff.command_requests`) reads the shape; step 3
+    (`command_targets.check`) resolves each accepted one against the account
+    the phase ran on and the task's writer worktree, and runs the denylist.
+    What fails either is refused with its reason (ADR 117, ADR 118).
+    """
+    # Step 2 first: with nothing accepted there is nothing to resolve, and the
+    # context is not read.
+    accepted, refused = handoff.command_requests(result.handoff)
+    if not accepted:
+        return accepted, refused
+    return _command_request_lists(ctx.cfg, result.account, ctx.slug, ctx.task_id, result.handoff)
+
+
+def _command_request_lists(
+    cfg: Config, account_name: str, slug: str, task_id: str, parsed: dict | None,
+) -> tuple[list[dict], list[dict]]:
+    """Step 2's and step 3's checks on one handoff, from what both callers have.
+
+    Shared by the record `run_phase` writes and the gates' skip in
+    `_run_gates`, so the two never disagree on whether a request stands. The
+    project's running services are read from the dind only if a `service`
+    request asks for one.
+    """
+    accepted, refused = handoff.command_requests(parsed)
+    if not accepted:
+        return accepted, refused
+    account = next((acc for acc in cfg.accounts if acc.name == account_name), None)
+    project_dir = f"{cfg.projects_root}/{slug}"
+    return command_targets.check(
+        accepted, refused, account, cfg.accounts,
+        command_targets.writer_worktree(cfg.projects_root, slug, task_id),
+        lambda: command_targets.running_services(account.dind, project_dir),
+    )
+
+
 def _filed_command_requests(ctx: CycleContext, result: DispatchResult | None) -> bool:
     """Whether the phase filed a command request the cycle has to stop for.
 
     One accepted request is enough (`docs/plans/command-requests.md`,
     decision 2; ADR 117). Refused ones never block: they are logged here and
     recorded in the envelope `run_phase` saved, and the cycle goes on as if
-    none had been filed. A phase that did not return files nothing.
+    none had been filed. A phase that did not return files nothing. The lists
+    are the ones `run_phase` checked and recorded, so a request resolution or
+    the denylist refused (ADR 118) does not block either.
     """
     if result is None:
         return False
-    accepted, refused = handoff.command_requests(result.handoff)
+    # A result built by hand (a test's stand-in) may lack the field.
+    checked = getattr(result, "command_requests", None)
+    if checked is not None:
+        accepted, refused = checked
+    else:
+        accepted, refused = _checked_command_requests(ctx, result)
     if refused:
         logger.warning(
             "task %s: refused %d command request(s): %s",

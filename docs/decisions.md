@@ -7220,3 +7220,134 @@ it again by hand: with no verdict yet, retrying is the operator's only answer,
 and the request stays readable in the envelope and the task file's handoff.
 Refused requests cost the phase nothing but a log line. Task files and
 envelopes written before this ADR have no key and read as before.
+
+## ADR 118 — a filed command request is resolved to the phase's own account and checked against a denylist in code
+
+**Status:** accepted (T-073, 2026-10-17; the `dind` key, the pure resolver,
+where the check runs and deferring `--permission-prompt-tool` were decided by
+the owner in the task). Builds step 3 of `docs/plans/command-requests.md`
+(decisions 3 and 7). The plan gains *Built* notes under decisions 3 and 7 and
+a dated note under decision 8; the rest of its text is not edited.
+
+**Context.** ADR 117 lets the implementador and the cartografo file a command
+they were refused, and checks its shape. A request that passes says only a
+kind of target (`agent`, `dind`, `service`) and a `cwd` relative to the
+worktree. Before a person is asked to approve it (step 4), the dispatcher has
+to know which container it would run in, and has to refuse what no verdict
+may allow (decision 7), so a card never shows a command that could not run or
+must not.
+
+**Decision.**
+1. *`accounts[].dind`, an optional key.* The account's dind container's name,
+   validated like `container`: absent, or a non-empty string; anything else
+   fails the config load naming the account. It is never guessed from the
+   account's or the container's name. `config.example.yaml` carries
+   `dind: dind-cuenta1` and `dind: dind-cuenta2`; the host's `config.yaml` is
+   not tracked and gains the key by hand. An account with no `dind` refuses
+   the `dind` and `service` kinds with a reason ("account X has no dind, so a
+   dind target cannot be resolved"), never an error.
+2. *Resolution is pure, `command_targets.resolve`.* Given an accepted request,
+   the account the phase ran on, the task's writer worktree
+   (`{projects_root}/{slug}/worktrees/{task_id}/work`), the running services
+   and the account list, it answers `(resolved, None)` or `(None, reason)`.
+   `resolved` is `{"kind", "container", "cwd"}`, plus `"service"` for the
+   service kind. `agent` resolves to `accounts[].container`, `dind` and
+   `service` to `accounts[].dind`, the service named inside it. `cwd` is the
+   worktree joined with the request's `cwd` and normalized; it must stay
+   inside the worktree by whole path segment (so `work-evil` beside `work` is
+   outside), or the request is refused under the rule `cwd-outside-worktree`.
+3. *Never-targets, by construction and by check.* Only the phase's own
+   account's two names and the project's own services can come out. On top of
+   that, `_never_target` refuses a container that is another account's
+   `container` or `dind` (a config that hands two accounts one dind), a
+   container named like a harness service, and a service named like one. The
+   harness services are `HARNESS_SERVICES`: `dispatcher`, `api`, `collector`,
+   `console`, `config-writer`, `caddy`, `registry-mirror`, and `board` and
+   `board-service` for the planned board service, whose compose name is not
+   fixed yet. The host is never a target because no kind resolves to it.
+4. *The project's services are told apart by their compose label.* The one
+   reader, `running_services(dind, project_dir)`, runs `docker ps` inside the
+   dind (through `docker_exec.run_docker_exec`, 30 s timeout) with the labels
+   `com.docker.compose.project.working_dir` and `com.docker.compose.service`.
+   `project_services`, its pure parser, keeps a service only when its working
+   dir is the project's dir (`/data/projects/<slug>`) or under it by whole
+   segment, which covers a compose run from a worktree and excludes
+   `myproj-other` and containers with no compose labels. The project name
+   label is not used: compose derives it from the directory's basename, so
+   two worktrees of different projects can share it. If the reader fails
+   (no docker, a timeout, a nonzero exit) the request is refused "service
+   list unavailable", never accepted on a guess. It is called lazily, at most
+   once per check, and only when a service request needs it; tests stub it.
+5. *The denylist is `DENYLIST`, a tuple of named rules in code*, whose
+   docstring says it changes only under an ADR. `denylist_problems(argv,
+   kind, cwd, worktree)` answers every rule broken, each as
+   `"denylist rule <name>: <why>"`. Binaries are matched by basename at every
+   argv position, so `/usr/bin/sudo`, `timeout 60 git push` and
+   `docker compose exec app git push` are caught. The rules:
+   - `remote-git`: git's global options are skipped, with their values
+     (`-C x`, `-c k=v`, `--git-dir=...`), then `push`, `fetch`, `pull`,
+     `clone`, `ls-remote`, `send-pack` and `fetch-pack` are refused; `git
+     remote` with anything but nothing, `-v`, `--verbose` or `get-url`; and
+     `git submodule update`.
+   - `docker-socket`: `docker.sock`, `DOCKER_HOST` and `DOCKER_CONTEXT`
+     anywhere in argv, for every kind. For `agent`, any `docker`,
+     `docker-compose`, `podman` or `nerdctl` (file it for the dind). For
+     `dind` and `service`, docker is the point and is allowed, but not aimed
+     at another daemon: the global options `-H`, `--host`, `-c`,
+     `--context` and `--config` before the subcommand, and `docker context`,
+     are refused.
+   - `credential-path`: each argv item is split on `/`, `=` and `:` and its
+     segments compared whole: `.env`, any `.env.*` (`.env.example` too: a
+     name is not proof of its content), `.claude`, `.claude-account`,
+     `.ssh`, `git-credentials`, `.git-credentials`, `.netrc`, `id_rsa`,
+     `id_ed25519`, `id_ecdsa`, `id_dsa`, and the pairs `.data/credentials`
+     and `run/secrets`. Substrings pass: `README.env.md`, `my.env`,
+     `id_rsa.pub`, `docs/ssh.md`, `src/claude.py`.
+   - `privilege`: `sudo`, `su`, `doas`.
+   - `shell-command`: `sh`, `bash`, `zsh`, `dash`, `ksh`, `ash` or `fish`
+     with a leading option carrying `c` (`-c`, `-lc`, `-l -c`) or
+     `--command`, refused outright: the command string is one argv item no
+     rule can read. `bash script.sh` passes. Other interpreters' `-c`
+     (`python -c`) are not refused; the denylist is not a sandbox, and the
+     person still reads the argv before approving.
+   - `cwd-outside-worktree`: the resolved `cwd` (decision 2).
+   Matching every position means a bare word such as `grep docker` from the
+   agent kind is refused; that is the price of not parsing commands, and a
+   request can be filed again in another form.
+6. *Where it runs.* `_checked_command_requests` runs ADR 117's check, then
+   `command_targets.check(accepted, refused, account, accounts, worktree,
+   read_services)`, which resolves each accepted request and applies the
+   denylist. A request refused by either moves to the refused list as
+   `{"request", "reason"}`, after the step-2 refusals; the rest gain a
+   `resolved` key. A phase on no known account refuses every request. The
+   result is computed once in `run_phase`, kept on
+   `DispatchResult.command_requests`, recorded in the envelope and used by
+   `_filed_command_requests`, so the envelope stays the one place later steps
+   read. When nothing is left accepted the cycle does not block, as in ADR
+   117.
+7. *Step 4 runs the same denylist again.* `denylist_problems` and `resolve`
+   are exported for the step that runs the command, which re-resolves from
+   the account that resumes (decision 5) and re-applies the denylist before
+   `docker exec`.
+8. *`--permission-prompt-tool` (decision 8) is deferred.* The agent image
+   pins `ARG CLAUDE_CODE_VERSION=2.1.296` (`docker/agent/Dockerfile`),
+   installed with `npm install -g @anthropic-ai/claude-code@...`. Whether that
+   version's `--permission-prompt-tool` or permission-request hook fits is
+   not checked here (no container command in this task); the choice moves to
+   step 4 or later.
+
+Out of scope: verdicts, running commands, resuming, the allowlist, the
+Approvals card and the notification (steps 4 to 6); building
+`--permission-prompt-tool`.
+
+**Consequences.** A request reaches the envelope either refused with a reason
+or with a target a card can show. Two gaps stay. `_run_gates` still reads only
+ADR 117's check, so a request refused at this step still skips the gates; and
+the rendered handoff's *Command requests* section still shows the step-2
+verdict. The dind container (`docker/compose/docker-compose.agents.yml`)
+mounts only `/var/lib/docker`, not `/data/projects`, unlike the plan's *What
+exists today*: a `dind` or `service` target's `cwd` is recorded as the
+worktree path, and step 4 has to decide how a command run in the dind reaches
+the tree (a bind mount, or `docker compose --project-directory` from the agent
+side). The `board` names in `HARNESS_SERVICES` are a guess until the board
+service is built.

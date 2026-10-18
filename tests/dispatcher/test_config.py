@@ -771,6 +771,40 @@ def test_load_config_refuses_a_bad_max_concurrent_phases(tmp_path: Path, bad_val
         load_config(str(config_path))
 
 
+def test_load_config_reads_an_accounts_dind(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML.replace("container: agent-cuenta1", "container: agent-cuenta1\n    dind: dind-cuenta1")
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert [a.dind for a in cfg.accounts] == ["dind-cuenta1", None]
+
+
+def test_an_account_has_no_dind_unless_named(tmp_path: Path) -> None:
+    """Not guessed from `container`: `agent-cuenta1` says nothing about which
+    dind it talks to, and a wrong guess would aim a command at another
+    account's daemon (ADR 118)."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert [a.dind for a in cfg.accounts] == [None, None]
+
+
+@pytest.mark.parametrize("bad_value", ["''", "'   '", "3", "true", "[dind-cuenta1]"])
+def test_load_config_refuses_a_bad_dind(tmp_path: Path, bad_value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML.replace("container: agent-cuenta1", f"container: agent-cuenta1\n    dind: {bad_value}")
+    )
+
+    with pytest.raises(ValueError, match="cuenta1: dind"):
+        load_config(str(config_path))
+
+
 # --- config.d/overrides.yaml (docs/decisions.md ADR 75, ADR 106) ---
 
 

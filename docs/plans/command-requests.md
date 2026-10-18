@@ -99,6 +99,13 @@ service, the host, another account's containers and another project's
 services. A request that resolves to none of the three kinds is refused when
 it is filed, not when it is approved.
 
+**Built 2026-10-17** by T-073 (`docs/decisions.md` ADR 118). Accounts gain an
+optional `dind` key. A request the step-2 check accepted is resolved to the
+phase's own account (`agent` to its container, `dind` and `service` to its
+dind, a service only if the project's compose runs it there) with its `cwd`
+inside the worktree, and is refused otherwise; the accepted entries carry
+their `resolved` target in the envelope.
+
 ### 4. A person decides in Approvals
 
 The card shows the exact argv first. Under it come the resolved target (the
@@ -155,6 +162,13 @@ verdict:
 The list lives in the dispatcher's code, not in the config, and changes under
 an ADR.
 
+**Built 2026-10-17** by T-073 (`docs/decisions.md` ADR 118).
+`dispatcher/command_targets.py` holds the rules (`remote-git`,
+`docker-socket`, `credential-path`, `privilege`, `shell-command`,
+`cwd-outside-worktree`), applied when a request is filed; `sh -c` and the
+like are refused outright. `denylist_problems` is exported for step 4 to run
+again.
+
 ### 8. Capturing a request at the moment of denial, to be verified
 
 The CLI has `--permission-prompt-tool`, an MCP tool asked for each permission
@@ -164,6 +178,10 @@ of the phase, with the exact command the model tried. The phase still does
 not wait: the tool would deny, file the request and let the role finish.
 Whether to use it is decided at step 3, after checking which CLI version the
 agent image ships.
+
+**2026-10-17**, T-073 (`docs/decisions.md` ADR 118): the agent image pins
+Claude Code 2.1.296 (`docker/agent/Dockerfile`). Nothing was checked inside a
+container, and the choice moves to step 4 or later.
 
 ## How it would be built
 
