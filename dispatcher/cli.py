@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from dispatcher import (
+    allowlist,
     command_run,
     context_transfer,
     docker_exec,
@@ -317,6 +318,36 @@ def _configure_logging() -> str | None:
     return bad
 
 
+def _run_allowlist(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:
+    """`allowlist`: print a project's entries, or revoke one (ADR 121)."""
+    if not context_transfer._is_single_path_component(args.project):
+        parser.error(f"--project {args.project!r} is not a project slug")
+    if args.revoke is not None:
+        if not args.role:
+            parser.error("--revoke needs --role")
+        if not allowlist.revoke(cfg.state_dir, args.project, args.role, args.revoke):
+            print(
+                f"{args.project}: the {args.role} has no allowlist entry {args.revoke}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        print(f"{args.project}: revoked {args.revoke} for the {args.role}")
+        return
+    found = allowlist.entries(cfg.state_dir, args.project, args.role)
+    lines = []
+    for role in sorted(found):
+        for entry in found[role]:
+            source = entry.get("from") or {}
+            lines.append(
+                f"{role}\t{entry.get('pattern')}\tby {entry.get('by')} at {entry.get('at')}"
+                f"\tfrom {source.get('task_id')} request {source.get('n')}"
+            )
+    if not lines:
+        print(f"{args.project}: no allowlist entries" + (f" for the {args.role}" if args.role else ""))
+        return
+    print("\n".join(lines))
+
+
 def main() -> None:
     # Before the parser, so that even an unparseable invocation logs the way
     # a real run does.
@@ -408,13 +439,16 @@ def main() -> None:
 
     verdict_parser = sub.add_parser(
         "command-verdict",
-        help="Run or deny one command request a task is blocked on, then resume the "
+        help="Run, deny or allow one command request a task is blocked on, then resume the "
         "phase that filed it in its own session and carry the cycle on from there "
         "(gates, revisor, auditor; the arquitecto on after the cartografo). <n> "
         "counts from 1 over the requests the check accepted. Refused when the task "
         "is not blocked on command_request, <n> names no accepted request, the "
-        "block already has a verdict, or, on run, the request no longer passes "
-        "its check.",
+        "block already has a verdict, or, on run or allow, the request no longer passes "
+        "its check. allow runs it as run does and also adds it to the project's "
+        "allowlist for the filing role, so that role's later phases run it "
+        "themselves; it is refused for a command off the agent's own container "
+        "or one no Bash pattern can say exactly.",
     )
     verdict_parser.add_argument("task_id", metavar="task")
     verdict_parser.add_argument("n", type=int)
@@ -424,6 +458,14 @@ def main() -> None:
         "--comment",
         help="What the phase is told with the verdict. On deny it is the reason; "
         f"without one the phase reads \"{command_run.DENIED_NO_COMMENT}\".",
+    )
+    verdict_parser.add_argument(
+        "--prefix", type=int, metavar="N",
+        help="On allow only: write the entry as the argv's first N tokens followed "
+        "by anything (Bash(<tokens>:*)) instead of the exact command. Refused for a "
+        "prefix that could cover a denylisted command: fewer than 2 tokens, an "
+        "option in it, or a shell, interpreter, launcher, privilege or docker "
+        "command, or a git subcommand outside the local ones, at its head.",
     )
 
     resume_parser = sub.add_parser(
@@ -438,6 +480,18 @@ def main() -> None:
     )
     resume_parser.add_argument("task_id", metavar="task")
     resume_parser.add_argument("--project", required=True, help="Project slug")
+
+    allowlist_parser = sub.add_parser(
+        "allowlist",
+        help="List a project's allowlist, the Bash patterns allow verdicts added "
+        "to its phases' --allowed-tools, by role; or revoke one entry.",
+    )
+    allowlist_parser.add_argument("--project", required=True, help="Project slug")
+    allowlist_parser.add_argument("--role", help="Only this role's entries; required with --revoke")
+    allowlist_parser.add_argument(
+        "--revoke", metavar="PATTERN",
+        help="Remove the role's entry for this exact pattern, as the listing prints it",
+    )
 
     bootstrap_parser = sub.add_parser(
         "bootstrap-project",
@@ -729,9 +783,14 @@ def main() -> None:
         _require_migrated(cfg, parser)
         if args.n < 1:
             parser.error("<n> counts from 1")
+        if args.prefix is not None and args.verdict != command_run.ALLOW:
+            parser.error(f"--prefix is for {command_run.ALLOW} only")
+        if args.prefix is not None and args.prefix < 1:
+            parser.error("--prefix counts tokens from 1")
         try:
             outcome = command_run.run_command_request(
                 cfg, args.task_id, args.project, args.n, args.verdict, comment=args.comment,
+                prefix=args.prefix,
             )
         except command_run.VerdictRefused as exc:
             print(f"task {args.task_id}: verdict refused: {exc}", file=sys.stderr)
@@ -747,6 +806,8 @@ def main() -> None:
             raise SystemExit(EXIT_BLOCKED) from None
         _exit_on_resumed_outcome(cfg, args, outcome)
         print(f"task {args.task_id}: the verdict was resumed; the cycle finished")
+    elif args.command == "allowlist":
+        _run_allowlist(args, cfg, parser)
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
         # config schema has no repo-source field, so cloning the actual

@@ -7518,3 +7518,117 @@ the task `in_progress` with no owner and `resumed_at` unset; `command-resume`
 refuses it on status, and the operator moves it on with `run-phase`. That is
 the conservative side: the session may have partly run. The resume is still
 on the phase's own account only.
+
+## ADR 121 — *allow* runs a request once and writes it to a per-project, per-role allowlist outside every agent's reach, merged into that role's phases
+
+**Status:** accepted (T-077, 2026-10-18). Follows ADR 119 and ADR 120; builds
+step 5 of `docs/plans/command-requests.md` (decision 6). The plan gains a
+dated note under decision 6 and under step 5, and an *Answered* note under
+the open question on prefixes; the rest of its text is not edited.
+
+**Context.** ADR 119 built *run once* and *deny*. A command a role needs in
+every phase (`uv sync`, the project's test runner) would be filed, blocked on
+and run once in each cycle. Decision 6 says *allow* writes it to the
+project's list for that role, as the `Bash(...)` pattern the CLI takes, and
+the dispatcher merges that list with the global `allowed_tools`. Decision 7
+says no verdict overrides the denylist, so an entry must never let a phase
+run what filing would refuse.
+
+**Decision.**
+1. *`dispatch command-verdict <task> <n> allow [--prefix N]`.* *Allow* does
+   what *run* does (the re-check, one run, the log, the resume, ADR 119 and
+   120) and, before the run, writes one standing entry for the phase's role
+   in the task's project. The verdict entry on the task records the pattern
+   as `allowed`, and the resume prompt tells the phase it may run that
+   pattern itself from its next phase on. A held *allow* is resumed with
+   `command-resume` like a *run*, with the same prompt and no second run or
+   entry.
+2. *The pattern is the exact command by default.* `Bash(<argv joined by
+   spaces>)`. `--prefix N` writes `Bash(<first N tokens>:*)` instead. The
+   flag exists because some commands a role needs differ in their tail on
+   every call (`uv run pytest tests/x.py -q`, `npm test -- --grep y`): an
+   exact entry for each would be filed again every time, and the one way to
+   stop that would be widening the global list, which decision 6 forbids. It
+   is opt-in, with a count rather than a free-form pattern, so the prefix is
+   always a prefix of the argv the operator is looking at, and the operator
+   chooses how far it reaches. `--prefix` with any verdict but *allow*, or
+   below 1, is a parser error; above the argv's length it is refused.
+3. *Only the phase's own commands.* *Allow* is refused unless the request
+   resolved to kind `agent`: `--allowed-tools` governs the phase's own Bash,
+   in its own container, so a `dind` or `service` command has nothing it
+   could stand for. The refusal says to give *run* instead.
+4. *What can be written.* Every token must match `[A-Za-z0-9_./@%+=,:-]+`:
+   no whitespace, quote, parenthesis, glob, `*`, `$`, backtick, `~`, `#`,
+   `!`, braces, `;`, `&`, `|`, `<` or `>`, and no empty token, so the shell
+   the CLI matches against reads each one as the word the argv had, and `:*`
+   cannot occur inside one. The first token may not hold `=` (an assignment
+   to the shell) or start with `-`. The tokens must pass
+   `command_targets.denylist_problems` as kind `agent`, the rules of filing,
+   with the cwd rule given nothing to judge. An argv that fails any of these
+   is refused as `VerdictRefused`, before the verdict is recorded: nothing
+   runs and nothing is written. The operator can still give *run*.
+5. *What a prefix may be* (`allowlist.prefix_problems`), on top of 4, since
+   `:*` lets the phase append anything after it:
+   - at least two tokens, and none after the first is an option (its value
+     would be left open);
+   - the head is not a command that runs another one from its arguments: the
+     shells, `sudo`/`su`/`doas`, the docker binaries, `env`, `xargs`,
+     `timeout`, `nice`, `nohup`, `exec`, `eval`, `find`, `ssh`, `rsync`, the
+     interpreters (`python*`, `pypy*`, `node`, `deno`, `perl`, `ruby`, `php`,
+     `lua`, `Rscript`, `awk`, `sed`, ...), the editors and `npx`/`uvx`/`bunx`;
+   - a launcher spelt in more than one token (`uv run`, `npm exec`, `poetry
+     run`, `bundle exec`, ...) is judged by the program after it, and a prefix
+     that ends at the launcher is refused;
+   - a `git` prefix names one of its local subcommands (`status`, `diff`,
+     `log`, `add`, `commit`, ...), not `push`, `config`, `remote` or
+     `submodule`, so `git` alone and `git -c` never stand.
+   The whole argv is checked as in 4 as well, so a prefix is only offered on
+   a command that could itself be allowed.
+6. *Where the list lives.* `<state_dir>/allowlists/<slug>.json`, one file per
+   project, keyed by role, each entry `{pattern, by, at, from: {task_id,
+   role, n, filed_at}}` with `at` in UTC ISO. `state_dir` is the dispatcher's
+   own volume, which no agent container mounts. Not the hive: phases write to
+   it (`acceptEdits` and `--add-dir` on the hive root), so a phase could add
+   its own entry. Not the project's repo, for the same reason, and because a
+   clone would carry it. Writes take an `flock` on `<slug>.lock` and replace
+   the file atomically (a temp file and `os.replace`), as the ADR numbering
+   does. Allowing a pattern already on the role's list keeps the one entry.
+7. *The merge.* `_phase_permission_flags(cfg, role, slug)` builds the list a
+   phase is given: the global `allowed_tools` (and `mapping_allowed_tools`
+   for the cartografo, ADR 115) first, then the project's entries for that
+   role, with no repeat. Every call that runs a role's own work goes through
+   it with the task's slug, the fresh phase and its retries (a missing
+   handoff, a shrink, a gate fix, a review that wrote) alike, and a resume
+   with `resume_session_id` is a `dispatch_phase` call too, so it gets the
+   same list. A call with no slug gets the global list unchanged, and the
+   global list is never written to.
+8. *Each stored entry is checked again on the way in*
+   (`allowlist.stored_pattern_problems`): a pattern ending in `:*` by 5, any
+   other by 4. A hand-edited, corrupt or since-forbidden entry is skipped and
+   logged as a warning, and an unreadable file adds nothing; the phase still
+   runs with the global list.
+9. *`dispatch allowlist --project <slug> [--role R]`* prints the entries, one
+   per line: role, pattern, who and when, the task and request it came from.
+   `--role R --revoke <pattern>` removes one, under the same lock; an unknown
+   pattern exits 1, `--revoke` without `--role` is a parser error.
+10. `learnings.harness_fingerprint` still hashes the global list only: an
+    entry is project data, not a change to the harness.
+11. `test_an_unknown_verdict_is_refused` gave `allow` as its unknown verdict;
+    it now gives `approve`.
+
+**Consequences.** A command a role keeps needing is decided once per project
+and role, and the decision can be listed and revoked. What stays open:
+- An exact entry is the filing rule and no more: what an operator could run
+  once, they can allow. It runs exactly that argv.
+- A prefix cannot stop what the phase appends. `Bash(npm test:*)` runs a
+  `package.json` script the phase can edit, and `Bash(uv run pytest:*)` runs
+  any test file it writes, so a prefix on a project's own runner amounts to
+  letting the phase run its own code there. That is why the exact command is
+  the default and the prefix is the operator's explicit choice.
+- The lists are only in the CLI; the Approvals card (step 6) offers the same
+  choice.
+
+**Ruled out.** A free-form pattern on the CLI (it could name what the argv
+never was); storing the list in the hive or in the project's repo (a phase
+can write both); writing an entry into the global `allowed_tools`; allowing a
+`dind` or `service` command (the flag does not reach those containers).

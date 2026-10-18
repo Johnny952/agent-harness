@@ -161,6 +161,14 @@ prefix. The dispatcher merges the project's role list with the global
 when, and from which request. A request never widens the global list; that
 stays a config edit.
 
+**Built 2026-10-18** by T-077 (`docs/decisions.md` ADR 121), from the CLI:
+`dispatch command-verdict <task> <n> allow [--prefix N]` runs the request
+once, as *run* does, and writes `Bash(<argv>)`, or `Bash(<first N
+tokens>:*)`, for the phase's role to `<state_dir>/allowlists/<slug>.json`,
+which no agent mounts. Only a command on the phase's own container can be
+allowed, and an argv or a prefix that could cover a denied command is
+refused. `dispatch allowlist` lists and revokes the entries.
+
 ### 7. A denylist that no verdict overrides
 
 Some commands are refused when filed and again when run, whatever the
@@ -230,6 +238,11 @@ Each step is a single surface:
    `commands/<n>.log`; the command is not run again. `resumed_at` on the
    entry says the resume happened.
 5. The per-project, per-role allowlist and its merge into a phase's flags.
+
+   **Built 2026-10-18** by T-077 (`docs/decisions.md` ADR 121). Global
+   entries come first, then the project's entries for the role, with no
+   repeat; each stored entry is checked again and a bad one is skipped and
+   logged. Fresh phases, their retries and resumes get the same list.
 6. The card in Approvals. A front task, behind its own ask for a build.
 
 A filed request is also a notification of kind *command request*
@@ -247,6 +260,12 @@ A filed request is also a notification of kind *command request*
 - **A prefix in the allowlist.** `Bash(pytest:*)` is convenient and broad.
   Whether the screen offers prefixes or only exact commands is decided at
   step 6.
+  *Answered 2026-10-18* by T-077 (ADR 121), for the CLI: the exact command
+  is the default, and `--prefix N` keeps the argv's first N tokens with `:*`.
+  A prefix holds at least two tokens and no option, never starts with a
+  command that runs another (shells, `sudo`, docker, interpreters, `env`,
+  `xargs`, ...), and on `git` names a local subcommand. The screen offers the
+  same choice at step 6.
 - **When the same command is requested again.** Whether a command that was
   run once recently is approved without asking is left out. *Allow* exists
   for that.

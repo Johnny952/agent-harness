@@ -19,6 +19,12 @@ again. `resume_command_verdict` (T-076, ADR 120) resumes that session with the
 same prompt, rebuilt from what the verdict entry and `commands/<n>.log`
 recorded, and never runs the command again. `resumed_at` on the entry is what
 says a resume has already happened.
+
+*allow* (T-077, ADR 121; step 5, decision 6) is *run* plus a standing entry
+in the project's allowlist for the filing role (`allowlist`), so the next
+phase of that role runs the command itself. The entry is written only for a
+command on the agent's own container whose argv a `Bash(...)` pattern says
+faithfully; anything else refuses the verdict before anything runs.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ import json
 import logging
 import subprocess
 
-from dispatcher import command_targets, context_transfer, docker_exec, handoff, project_docs, tasks
+from dispatcher import allowlist, command_targets, context_transfer, docker_exec, handoff, project_docs, tasks
 from dispatcher.config import Config
 from dispatcher.dispatcher import (
     CycleContext,
@@ -62,7 +68,10 @@ DENIED_NO_COMMENT = "denied, no comment"
 
 RUN = "run"
 DENY = "deny"
-VERDICTS = (RUN, DENY)
+ALLOW = "allow"
+VERDICTS = (RUN, DENY, ALLOW)
+#: The verdicts that run the command.
+_RUNS = (RUN, ALLOW)
 
 #: Who gives the verdict when the CLI does. The board service will pass the
 #: person who decided in Approvals.
@@ -262,8 +271,8 @@ def run_request(cfg: Config, task_id: str, n: int, request: dict) -> CommandRun:
     return CommandRun(exit_code, timed_out, output, truncated, path)
 
 
-def run_prompt(n: int, request: dict, run: CommandRun) -> str:
-    """What the resumed phase is told after a *run*."""
+def run_prompt(n: int, request: dict, run: CommandRun, allowed: str | None = None) -> str:
+    """What the resumed phase is told after a *run*, or after an *allow* of `allowed`."""
     resolved = request["resolved"]
     target = f"{resolved['kind']} {resolved['container']}"
     if resolved.get("service"):
@@ -279,6 +288,11 @@ def run_prompt(n: int, request: dict, run: CommandRun) -> str:
         lines.append(f"The output passed {OUTPUT_CAP_BYTES} bytes; read it in full at {run.log_path}")
     else:
         lines += ["output:", "```", run.output.rstrip("\n"), "```"]
+    if allowed:
+        lines.append(
+            f"The operator also allowed it for your role in this project as {allowed}: "
+            "from the next phase on you may run it yourself, without filing it."
+        )
     lines.append("Go on with the phase from here, and end it with your return as before.")
     return "\n".join(lines)
 
@@ -291,6 +305,28 @@ def deny_prompt(n: int, request: dict, comment: str | None) -> str:
         "Do not run it another way. Go on with the phase without it, and end it "
         "with your return as before.",
     ])
+
+
+def _allow_pattern(task_id: str, request: dict, prefix: int | None) -> str:
+    """The pattern an *allow* writes for this checked request, or why it writes none.
+
+    Only for kind `agent`: an allowlist entry widens the phase's own Bash,
+    which runs in the agent container, and a dind or service command is not
+    one that Bash can run.
+    """
+    kind = request["resolved"]["kind"]
+    if kind != "agent":
+        raise VerdictRefused(
+            f"task {task_id}: {ALLOW} is for a command on the agent's own container; "
+            f"this one runs on {kind}, which a phase's Bash does not reach. Give {RUN} instead"
+        )
+    try:
+        return allowlist.pattern_for(list(request["argv"]), prefix)
+    except allowlist.AllowRefused as exc:
+        raise VerdictRefused(
+            f"task {task_id}: the command cannot stand on the allowlist: {exc}. "
+            f"Give {RUN} to run it once"
+        ) from None
 
 
 def _check_blocked(cfg: Config, task_id: str) -> context_transfer.TaskFile:
@@ -314,6 +350,7 @@ def run_command_request(
     verdict: str,
     comment: str | None = None,
     by: str = OPERATOR,
+    prefix: int | None = None,
 ) -> CycleOutcome:
     """Apply one verdict on a filed request, resume the phase, and carry the cycle on.
 
@@ -321,16 +358,23 @@ def run_command_request(
     verdict cannot apply: the task is not blocked on `command_request`, `n` is
     no accepted request, the request was refused at filing, the block already
     had a verdict, the phase's session is not on record, or — on *run* — the
-    request no longer passes step 3's check on the account that resumes.
+    request no longer passes step 3's check on the account that resumes; or —
+    on *allow* — the command is not on the agent's own container, or its argv,
+    or the `prefix` first tokens of it, cannot stand as a pattern
+    (`allowlist.pattern_for`). `prefix` is for *allow* alone.
 
     Otherwise the verdict is recorded on the task first, so a crash past this
     point can never run the command twice; *run* then runs it and writes the
     log; the phase's session resumes on its own account with the result; and
     what follows is the cycle after that phase: the gates and the revisor
     rounds for the implementador, the arquitecto on for the cartografo.
+    *allow* writes its allowlist entry before the verdict, so a verdict on
+    record that says *allow* always has its entry.
     """
     if verdict not in VERDICTS:
         raise VerdictRefused(f"verdict {verdict!r} is not one of {', '.join(VERDICTS)}")
+    if prefix is not None and verdict != ALLOW:
+        raise VerdictRefused(f"a prefix is given with {ALLOW} only, not {verdict}")
     task = _check_blocked(cfg, task_id)
     role, envelope = _filed_block(cfg, task_id)
     filed_at = envelope.get("saved_at")
@@ -348,18 +392,28 @@ def run_command_request(
             f"{first.get('verdict')} by {first.get('by')} at {first.get('at')}"
         )
     session_id, account = _session_of(cfg, task_id, role, envelope)
-    if verdict == RUN:
+    pattern: str | None = None
+    if verdict in _RUNS:
         request = _recheck(cfg, task_id, slug, account, request)
+    if verdict == ALLOW:
+        pattern = _allow_pattern(task_id, request, prefix)
 
     ctx = open_cycle(cfg, task_id, slug)
     if ctx is None:
         raise VerdictRefused(f"task {task_id} cannot be resumed; the log above says why")
     try:
-        tasks.record_command_verdict(cfg.hive_tasks_dir, task_id, {
-            "n": n, "verdict": verdict, "by": by, "at": _utc_now().isoformat(),
+        at = _utc_now().isoformat()
+        record = {
+            "n": n, "verdict": verdict, "by": by, "at": at,
             "comment": comment, "role": role, "filed_at": filed_at,
-        })
-        if verdict == RUN:
+        }
+        if pattern is not None:
+            allowlist.add(cfg.state_dir, slug, role, pattern, by, at, {
+                "task_id": task_id, "role": role, "n": n, "filed_at": filed_at,
+            })
+            record["allowed"] = pattern
+        tasks.record_command_verdict(cfg.hive_tasks_dir, task_id, record)
+        if verdict in _RUNS:
             run = run_request(cfg, task_id, n, request)
             # What the prompt is built from, kept on the verdict so that a
             # resume no account could take can be given the same prompt by
@@ -372,7 +426,7 @@ def run_command_request(
                     "resolved": dict(request["resolved"]),
                 },
             })
-            prompt = run_prompt(n, request, run)
+            prompt = run_prompt(n, request, run, pattern)
         else:
             prompt = deny_prompt(n, request, comment)
         return _resume(ctx, role, envelope.get("round"), session_id, account, prompt, filed_at)
@@ -466,7 +520,9 @@ def resume_command_verdict(cfg: Config, task_id: str, slug: str) -> CycleOutcome
     Raises `VerdictRefused` before anything happens when the task is not
     blocked on `command_request`, the block it is blocked on has no verdict,
     that verdict was already resumed, the phase's session is not on record,
-    or — on *run* — the log of what the command came to cannot be read.
+    or — on *run* or *allow* — the log of what the command came to cannot be
+    read. An *allow* is told its entry as well; the entry itself was written
+    with the verdict and is not written again.
 
     Otherwise the phase is told what `run_command_request` would have told
     it: the same `run_prompt`, from the run the verdict kept, or the same
@@ -493,9 +549,10 @@ def resume_command_verdict(cfg: Config, task_id: str, slug: str) -> CycleOutcome
     if not isinstance(n, int):
         raise VerdictRefused(f"task {task_id}: the verdict on record names no request")
     request = _pick_request(task_id, role, envelope, n)
-    if entry.get("verdict") == RUN:
+    if entry.get("verdict") in _RUNS:
         request, run = _logged_run(cfg, task_id, entry, request)
-        prompt = run_prompt(n, request, run)
+        allowed = entry.get("allowed") if entry.get("verdict") == ALLOW else None
+        prompt = run_prompt(n, request, run, allowed if isinstance(allowed, str) else None)
     elif entry.get("verdict") == DENY:
         prompt = deny_prompt(n, request, entry.get("comment"))
     else:
