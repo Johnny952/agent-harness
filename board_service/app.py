@@ -138,6 +138,13 @@ def board_list(
     id, the title and the description. A task file that will not read, or that
     `dispatch migrate` has not moved, costs a warning naming it and not the
     list. Never writes.
+
+    The board's rows come first, by id; then the backlog's, by bucket, then
+    rank, then id (ADR 130). `ready` names the listed tasks the next cycle may
+    take, in the Ready order: pending, every dependency merged, by effective
+    bucket (a dependency takes the highest bucket of what waits on it), rank
+    and id. It is worked out over every task read, not only the listed ones,
+    so a filter narrows it and does not reorder it.
     """
     if place is not None and place not in PLACES:
         raise ToolError(f"place must be one of {', '.join(PLACES)}, not {place!r}")
@@ -153,6 +160,7 @@ def board_list(
         )
         ids = ids[:MAX_LIST_TASKS]
     items = []
+    read: dict[str, context_transfer.TaskFile] = {}
     for task_id in ids:
         path = context_transfer.task_file_path(hive_dir, task_id)
         try:
@@ -170,6 +178,10 @@ def board_list(
                 # proposed it, None for one filed before the field (ADR 127).
                 "priority": task_store.effective_priority(task),
                 "source": task.source,
+                # Normalized as a write would store them; the position in the
+                # bucket, None for a task filed before the field (ADR 130).
+                "tags": task_store.normal_tags(task.tags),
+                "rank": task.rank,
             }
             problems = task_store.field_problems(task)
         except _UNREADABLE as exc:
@@ -178,6 +190,7 @@ def board_list(
         # Served as the file has them, and named: a hand edit got them wrong,
         # and `open_cycle` refuses the task until it is put right.
         warnings.extend(f"{path}: {problem}" for problem in problems)
+        read[task_id] = task
         if place is not None and row["place"] != place:
             continue
         if status is not None and row["status"] != status:
@@ -189,7 +202,17 @@ def board_list(
             if needle not in haystack.casefold():
                 continue
         items.append(_json_safe(row))
-    return {"items": items, "warnings": warnings}
+    listed = {row["id"] for row in items}
+    items.sort(key=lambda row: _list_key(row, read[row["id"]]))
+    ready = [task_id for task_id in task_store.ready_order(read) if task_id in listed]
+    return {"items": items, "ready": ready, "warnings": warnings}
+
+
+def _list_key(row: dict, task: context_transfer.TaskFile) -> tuple:
+    """The board by id, then the backlog by bucket, rank and id (ADR 130)."""
+    if row["place"] == "board":
+        return (0, row["id"])
+    return (1, task_store.order_key(row["id"], task_store.bucket_of(task), task_store.rank_of(task)))
 
 
 def board_get(hive_dir: str, task_id: str) -> dict:
@@ -305,7 +328,7 @@ def backlog_propose(hive_dir: str, role: str, **arguments) -> dict:
 
 
 def task_edit(hive_dir: str, role: str, task_id: str, **fields) -> dict:
-    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, while not started."""
+    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, `tags`, `rank`, while not started."""
     return _writing(task_store.edit_task, hive_dir, task_id, **fields)
 
 
@@ -331,6 +354,14 @@ _PRIORITY = {
     "description": "the bucket; the person confirms or changes it on accepting",
 }
 _IDS = {"type": "array", "items": _STRING}
+_TAGS = {
+    "type": "array",
+    "items": _STRING,
+    "description": (
+        f"free labels, at most {task_store.MAX_TAGS} of at most {task_store.MAX_TAG_CHARS} "
+        "characters; trimmed and kept once, in order"
+    ),
+}
 _WRITES = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
 _DESCRIPTION = {
     "type": "string",
@@ -345,7 +376,10 @@ TOOLS: dict[str, dict] = {
         "name": "board_list",
         "description": (
             "List the harness's tasks and epics: id, title, status, place, epic, merged, "
-            "priority, source. "
+            "priority, source, tags, rank. The board's rows come by id, the backlog's by "
+            "priority, then rank. `ready` lists the ids the next cycle may take, in order: "
+            "pending with every dependency merged, by priority (a dependency takes the "
+            "highest priority of what waits on it), then rank, then id. "
             "Filters combine; all are optional."
         ),
         "inputSchema": {
@@ -384,6 +418,7 @@ TOOLS: dict[str, dict] = {
                 "title": _STRING,
                 "description": _DESCRIPTION,
                 "priority": _PRIORITY,
+                "tags": _TAGS,
                 "depends_on": {**_IDS, "description": "task ids; not for an epic"},
                 "tasks": {
                     "type": "array",
@@ -412,8 +447,9 @@ TOOLS: dict[str, dict] = {
     "task_edit": {
         "name": "task_edit",
         "description": (
-            "Change a task's title, description, depends_on or priority, while it has not "
-            "started. Fields left out are kept."
+            "Change a task's title, description, depends_on, priority, tags or rank, while "
+            "it has not started. Fields left out are kept; tags [] clears them. A new "
+            "priority puts the task at the end of that bucket unless rank is given."
         ),
         "inputSchema": {
             "type": "object",
@@ -423,6 +459,16 @@ TOOLS: dict[str, dict] = {
                 "description": _DESCRIPTION,
                 "depends_on": _IDS,
                 "priority": _PRIORITY,
+                "tags": _TAGS,
+                "rank": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": task_store.MAX_RANK,
+                    "description": (
+                        "the position in its bucket, lower first; new items are spaced "
+                        f"{task_store.RANK_STEP} apart, so one fits between two"
+                    ),
+                },
             },
             "required": ["task_id"],
             "additionalProperties": False,
@@ -498,7 +544,8 @@ _JSON_TYPES = {
 def _check(schema: dict, value, where: str, top: bool = False) -> None:
     """`ToolError` unless `value` fits `schema`: the shapes `TOOLS` uses, and no more.
 
-    Types, `enum`, array items and object properties, `required` and
+    Types, `enum`, an integer's `minimum` and `maximum`, array items and
+    object properties, `required` and
     `additionalProperties: false`. A bool is not an integer, though Python
     says it is. What a value means — a known id, a valid description — is the
     writer's to check.
@@ -510,6 +557,10 @@ def _check(schema: dict, value, where: str, top: bool = False) -> None:
         raise ToolError(f"{where} must be {'an' if kind[0] in 'aeiou' else 'a'} {kind}")
     if "enum" in schema and value not in schema["enum"]:
         raise ToolError(f"{where} must be one of {', '.join(map(str, schema['enum']))}, not {value!r}")
+    if "minimum" in schema and value < schema["minimum"]:
+        raise ToolError(f"{where} must be at least {schema['minimum']}")
+    if "maximum" in schema and value > schema["maximum"]:
+        raise ToolError(f"{where} must be at most {schema['maximum']}")
     if kind == "array" and "items" in schema:
         for index, item in enumerate(value):
             _check(schema["items"], item, f"{where}[{index}]")

@@ -210,11 +210,14 @@ def test_list_rows(client, hive):
     assert out["warnings"] == []
     assert out["items"] == [
         {"id": "T-1", "title": "Serve the board over MCP, reads only.", "status": "pending",
-         "place": "board", "epic": "T-9", "merged": False, "priority": "normal", "source": None},
+         "place": "board", "epic": "T-9", "merged": False, "priority": "normal", "source": None,
+         "tags": [], "rank": None},
         {"id": "T-2", "title": "Serve the board over MCP, reads only.", "status": "done",
-         "place": "board", "epic": None, "merged": True, "priority": "normal", "source": None},
+         "place": "board", "epic": None, "merged": True, "priority": "normal", "source": None,
+         "tags": [], "rank": None},
         {"id": "T-3", "title": None, "status": "pending", "place": "board", "epic": None,
-         "merged": False, "priority": "normal", "source": None},
+         "merged": False, "priority": "normal", "source": None,
+         "tags": [], "rank": None},
     ]
 
 
@@ -304,7 +307,7 @@ def test_the_list_is_clamped(client, hive, monkeypatch):
 
 
 def test_an_empty_or_missing_hive(tmp_path):
-    assert service.board_list(str(tmp_path / "nowhere")) == {"items": [], "warnings": []}
+    assert service.board_list(str(tmp_path / "nowhere")) == {"items": [], "ready": [], "warnings": []}
 
 
 # --- board_get ----------------------------------------------------------------

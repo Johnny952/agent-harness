@@ -44,7 +44,10 @@ part of step 5 is built by T-084 (`docs/implementations/T-084.md`,
 and `backlog_accept`, written by `dispatcher/tasks.py` under `task_lock`,
 over MCP and the console's HTTP endpoints, with the source and author taken
 from the role; compose mounts the service's `.hive` read-write and puts it
-on `console_net` as well, approved 2026-10-18. Step 6 is
+on `console_net` as well, approved 2026-10-18. The third part of step 5 is
+built by T-085 (`docs/implementations/T-085.md`, `docs/decisions.md` ADR
+130): `tags`, `rank` inside the priority bucket, and the *Ready* order with
+its dependency rule, served by `board_list`. Step 6 is
 built by T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126).
 Step 7 is built by T-083 (`docs/implementations/T-083.md`, `docs/decisions.md`
 ADR 128): the arquitecto's phases get `--mcp-config` for the service at
@@ -558,6 +561,21 @@ Each step is a single surface, built in this order:
      the operator gets all four. Compose mounts `.hive` read-write (config
      stays `:ro`) and adds `console_net`. Not built: `tags` and `rank` (5c),
      and debt in the backlog (5d).
+   - **Built 2026-10-18** by T-085 (`docs/decisions.md` ADR 130), the third
+     bullet: `tags`, a free list validated on read and normalized on write
+     (trimmed, kept once, in order), set by `backlog_propose` and
+     `task_edit`; `rank`, a sparse integer spaced `RANK_STEP` (1024) apart,
+     handed out at the end of the bucket under `CREATE_LOCK` on a proposal,
+     on accepted drafts, and when `backlog_accept` or `task_edit` changes the
+     bucket, and set by `task_edit`; and the *Ready* order as pure functions
+     in `dispatcher/tasks.py` (`effective_buckets`, `ready_order`): pending
+     with every `depends_on` merged, by effective bucket, then rank, then id,
+     where a dependency and an epic's task are raised to the highest bucket
+     waiting on them. `board_list` serves `tags` and `rank` per row, lists
+     the backlog by bucket and rank, and adds `ready`, the listed ids in that
+     order. Not built: 5d, debt as backlog items with `tags: [debt]`, the
+     one-time import of the open entries in `docs/debt/`, and `impact` in
+     the debt index.
 6. **`phase` in the frontmatter.** The dispatcher writes and clears it around
    each phase, and the api serves it.
    **Built 2026-10-18** by T-081 (`docs/decisions.md` ADR 126): `phase` in

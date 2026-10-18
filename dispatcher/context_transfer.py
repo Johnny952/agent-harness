@@ -93,6 +93,13 @@ class TaskFile:
     # create is idempotent on, and what `task_edit` changes. A task without
     # one reads its title off its description. Written only when set.
     title: str | None = None
+    # The board's grouping and its order inside a bucket (ADR 130): `tags`, a
+    # free list of strings, and `rank`, an integer position inside the
+    # `priority` bucket, lower first. Read as YAML made them and checked by
+    # `tasks.field_problems`, as `priority` is. Each written only when set; a
+    # task with no `rank` sorts as rank 0, ahead of everything ranked since.
+    tags: list | None = None
+    rank: int | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -642,6 +649,8 @@ def read_task_file(path: str) -> TaskFile:
         priority=fm.get("priority"),
         source=fm.get("source"),
         title=fm.get("title"),
+        tags=fm.get("tags"),
+        rank=fm.get("rank"),
     )
 
 
@@ -775,6 +784,10 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["source"] = task.source
     if task.title is not None:
         fm["title"] = task.title
+    if task.tags is not None:
+        fm["tags"] = task.tags
+    if task.rank is not None:
+        fm["rank"] = task.rank
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

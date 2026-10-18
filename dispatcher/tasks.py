@@ -126,8 +126,7 @@ DRAFT_REQUIRED = ("Surface", "Out of scope")
 BACKLOG_STATUSES = ("proposed", "deferred", "dropped")
 #: The status a task has to be accepted into before it may run.
 ACCEPTED_STATUS = "pending"
-#: The priority buckets, highest first; `rank`, the order inside one, is later
-#: work (step 5 of the plan).
+#: The priority buckets, highest first; `rank` is the order inside one (ADR 130).
 PRIORITIES = ("high", "normal", "low")
 #: The bucket of a task that names none: every task filed before the field,
 #: and a debt entry filed with no impact (section 4).
@@ -138,6 +137,17 @@ SOURCES = ("operator", "arquitecto", "debt")
 #: (section 6's `backlog_accept`). `dropped` is final.
 ACCEPT_FROM = ("proposed", "deferred")
 ACCEPT_TO = (ACCEPTED_STATUS, "deferred", "dropped")
+#: The gap between two ranks a write hands out (ADR 130): a new item enters its
+#: bucket at the highest rank there plus this, so an item can later be put
+#: between two others with one write, at any rank in the gap.
+RANK_STEP = 1024
+#: The highest rank a write takes: the largest integer a JSON client holds
+#: exactly, so the console never reads back another number than it wrote.
+MAX_RANK = 2**53 - 1
+#: The most tags a task carries, and the longest one. A tag is a word to group
+#: by, `debt` among them (step 5d), not a sentence.
+MAX_TAGS = 20
+MAX_TAG_CHARS = 50
 #: The longest title a board write stores. A title is one line to scan.
 MAX_TITLE_CHARS = 200
 #: The longest comment `add_comment` appends. A comment is a note, not a file.
@@ -467,12 +477,188 @@ def field_problems(task: context_transfer.TaskFile) -> list[str]:
         )
     if task.source is not None and task.source not in SOURCES:
         problems.append(f"its source is {task.source!r}, not one of {', '.join(SOURCES)}")
+    if task.tags is not None:
+        problems.extend(f"its {problem}" for problem in tag_problems(task.tags))
+    if task.rank is not None and not _is_rank(task.rank):
+        problems.append(f"its rank is {task.rank!r}, not an integer from 0 to {MAX_RANK}")
     return problems
+
+
+def tag_problems(tags: object) -> list[str]:
+    """What is wrong with a `tags` value: empty when nothing.
+
+    A list of at most `MAX_TAGS` strings, each with text once stripped, on one
+    line and at most `MAX_TAG_CHARS` long. Surrounding blanks and repeats are
+    not problems: `normal_tags` drops them (ADR 130).
+    """
+    if not isinstance(tags, list):
+        return [f"tags is {tags!r}, not a list of strings"]
+    problems = []
+    if len(tags) > MAX_TAGS:
+        problems.append(f"tags has {len(tags)} entries, more than {MAX_TAGS}")
+    for tag in tags:
+        if not isinstance(tag, str):
+            problems.append(f"tags names {tag!r}, which is not a string")
+        elif not tag.strip():
+            problems.append("tags has a blank entry")
+        elif "\n" in tag or "\r" in tag:
+            problems.append(f"tags has {tag!r}, which is more than one line")
+        elif len(tag.strip()) > MAX_TAG_CHARS:
+            problems.append(f"tags has an entry longer than {MAX_TAG_CHARS} characters")
+    return problems
+
+
+def normal_tags(tags: object) -> list[str]:
+    """`tags` stripped, with repeats dropped in first-seen order; [] for none.
+
+    Entries that are not text, or are blank, are left out: they are named by
+    `tag_problems`, and a list is still served. Case is kept and counts, so
+    `Debt` and `debt` are two tags.
+    """
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    for tag in tags:
+        if isinstance(tag, str) and tag.strip() and tag.strip() not in out:
+            out.append(tag.strip())
+    return out
+
+
+def _is_rank(rank: object) -> bool:
+    # `type() is int`, so True is not rank 1.
+    return type(rank) is int and 0 <= rank <= MAX_RANK
 
 
 def effective_priority(task: context_transfer.TaskFile) -> str:
     """The task's bucket: its `priority`, or `DEFAULT_PRIORITY` when it names none."""
     return task.priority if task.priority is not None else DEFAULT_PRIORITY
+
+
+def bucket_of(task: context_transfer.TaskFile) -> str:
+    """The bucket a task sorts in: `effective_priority`, and `DEFAULT_PRIORITY` for a bad one.
+
+    A hand edit's `urgent` is warned about by `field_problems`; it does not
+    also move the task out of every bucket.
+    """
+    priority = effective_priority(task)
+    return priority if priority in PRIORITIES else DEFAULT_PRIORITY
+
+
+def rank_of(task: context_transfer.TaskFile) -> int:
+    """The task's position in its bucket: its `rank`, or 0 when it has none or a bad one.
+
+    Every task filed before ADR 130 has none, and sorts by id ahead of the
+    ones ranked since, which is the order they were filed in.
+    """
+    return task.rank if _is_rank(task.rank) else 0
+
+
+def _id_key(task_id: str) -> tuple:
+    """Ids in number order: `T-99` before `T-100`, `T-5-S2` before `T-5-S10`."""
+    return tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in re.split(r"(\d+)", task_id) if part
+    )
+
+
+def order_key(task_id: str, bucket: str, rank: int) -> tuple:
+    """The board's order (section 4): the bucket, highest first, then the rank, then the id."""
+    return (PRIORITIES.index(bucket), rank, _id_key(task_id))
+
+
+def effective_buckets(tasks: "dict[str, context_transfer.TaskFile]") -> dict[str, str]:
+    """Every task's bucket for the Ready order: its own, raised by what waits on it.
+
+    A dependency takes the highest bucket of the tasks that depend on it,
+    directly or through others, and a task of an epic takes its epic's
+    bucket when that is higher than its own: work a `high` item waits on is
+    `high` work (section 4, "dependencies come before priority"). Raised
+    only, never lowered. Pure: `tasks` is every task file read, by id, and a
+    `depends_on` or `epic` naming an id not in it is ignored.
+
+    Only a task out of the backlog lifts: a `proposed` item's bucket is the
+    proposer's guess until the person accepts it, and a `deferred` or
+    `dropped` one is not work anything waits for.
+
+    A worklist that only ever raises a task, and a task can be raised at most
+    `len(PRIORITIES) - 1` times, so a `depends_on` cycle a hand edit made ends
+    like any other graph: every task in it gets the cycle's highest bucket.
+    """
+    level = {task_id: PRIORITIES.index(bucket_of(task)) for task_id, task in tasks.items()}
+    # Who lifts whom: a dependent lifts each task it depends on, an epic
+    # lifts each of its tasks.
+    lifts: dict[str, list[str]] = {task_id: [] for task_id in tasks}
+    for task_id, task in tasks.items():
+        if is_backlog(task):
+            continue
+        if isinstance(task.depends_on, list):
+            lifts[task_id].extend(
+                dep for dep in task.depends_on if isinstance(dep, str) and dep in tasks
+            )
+        if isinstance(task.epic, str) and task.epic in tasks and not is_backlog(tasks[task.epic]):
+            lifts[task.epic].append(task_id)
+    work = list(tasks)
+    while work:
+        task_id = work.pop()
+        for lifted in lifts[task_id]:
+            if level[task_id] < level[lifted]:
+                level[lifted] = level[task_id]
+                work.append(lifted)
+    return {task_id: PRIORITIES[index] for task_id, index in level.items()}
+
+
+def ready_order(tasks: "dict[str, context_transfer.TaskFile]") -> list[str]:
+    """The Ready column, in the order work should be taken: ids. Pure; never reads a file.
+
+    A task is ready when it is `pending`, not merged, and every task in its
+    `depends_on` is in `tasks` and merged; an epic itself is never ready, its
+    tasks are. They are ordered by `effective_buckets`, then their own `rank`,
+    then id. `tasks` is every task file read, by id: the buckets need the
+    tasks that are not ready too, since they are what lifts the rest.
+    """
+    buckets = effective_buckets(tasks)
+    ready = []
+    for task_id, task in tasks.items():
+        if task.status != ACCEPTED_STATUS or task.merged:
+            continue
+        deps = task.depends_on
+        if not isinstance(deps, list) or not all(
+            isinstance(dep, str) and dep in tasks and tasks[dep].merged for dep in deps
+        ):
+            continue
+        ready.append(task_id)
+    return sorted(
+        ready, key=lambda task_id: order_key(task_id, buckets[task_id], rank_of(tasks[task_id]))
+    )
+
+
+def read_all_tasks(hive_dir: str) -> dict[str, context_transfer.TaskFile]:
+    """Every task file that reads, by id. One that does not is left out, as a check would."""
+    out = {}
+    for task_id in context_transfer.list_task_ids(hive_dir):
+        task, _ = _read_for_check(hive_dir, task_id)
+        if task is not None:
+            out[task_id] = task
+    return out
+
+
+def _end_of_bucket(
+    hive_dir: str, bucket: str, exclude: "set[str] | frozenset[str]" = frozenset()
+) -> int:
+    """The rank a task entering `bucket` gets: the highest rank there plus `RANK_STEP`.
+
+    Read across every task file, backlog and board, so one priority orders
+    everything (section 4); an unranked task counts as rank 0. The caller
+    holds `CREATE_LOCK`, as every write that hands out a rank does, so two
+    writes never take the same end (ADR 130). `exclude` is the tasks being
+    moved, whose old rank is not a place in the new bucket.
+    """
+    ranks = [
+        rank_of(task)
+        for task_id, task in read_all_tasks(hive_dir).items()
+        if task_id not in exclude and bucket_of(task) == bucket
+    ]
+    return min(max(ranks, default=0) + RANK_STEP, MAX_RANK)
 
 
 def is_backlog(task: context_transfer.TaskFile) -> bool:
@@ -1495,6 +1681,9 @@ def accept_drafts(
     # file: a `backlog_propose` meanwhile would otherwise take the same number.
     with task_lock(hive_dir, CREATE_LOCK):
         number, width = _next_task_number(hive_dir)
+        # Filed `pending` with no priority: at the end of `normal`, in name
+        # order, as a proposal enters its bucket (ADR 130).
+        rank = _end_of_bucket(hive_dir, DEFAULT_PRIORITY)
         for draft in targets:
             # A draft already in the record is a run that died part way: same id.
             if draft.name not in record:
@@ -1527,8 +1716,10 @@ def accept_drafts(
                         heartbeat=None,
                         body="",
                         epic=None,
+                        rank=rank,
                     ),
                 )
+                rank = min(rank + RANK_STEP, MAX_RANK)
     return ids
 
 
@@ -1793,6 +1984,8 @@ def _proposed(
     depends_on: list[str],
     epic: str | None = None,
     split_into: list[str] | None = None,
+    tags: list[str] | None = None,
+    rank: int | None = None,
 ) -> context_transfer.TaskFile:
     return context_transfer.TaskFile(
         task_id=task_id,
@@ -1806,7 +1999,19 @@ def _proposed(
         priority=priority,
         source=source,
         title=title,
+        tags=list(tags) if tags else None,
+        rank=rank,
     )
+
+
+def _tags_problems(tags: object) -> list[str]:
+    return [] if tags is None else tag_problems(tags)
+
+
+def _rank_problems(rank: object) -> list[str]:
+    if rank is not None and not _is_rank(rank):
+        return [f"rank is {rank!r}, not an integer from 0 to {MAX_RANK}"]
+    return []
 
 
 def _epic_entries(tasks: object) -> tuple[list[tuple[str, str, list[int]]], list[str]]:
@@ -1868,6 +2073,7 @@ def propose(
     priority: str | None = None,
     depends_on: list[str] | None = None,
     tasks: list[dict] | None = None,
+    tags: list[str] | None = None,
 ) -> dict:
     """Section 6's `backlog_propose`: a task, or an epic with its tasks, as `proposed`.
 
@@ -1876,7 +2082,9 @@ def propose(
     to 4 tasks are `<epic>-S<n>`, as `file_split` names them, each `proposed`
     with `epic` set and `depends_on` from its `after`. `source` is required
     (ADR 127, point 9) and `priority` is the proposer's suggestion; both go on
-    every file written.
+    every file written, as do `tags`, stripped and without repeats. Each file
+    written enters its bucket at the end, `_end_of_bucket` under the create
+    lock, an epic's tasks after the epic in their order (ADR 130).
 
     Everything is checked before anything is written, and every problem is
     reported in one `BoardWriteError`, so an epic is all or nothing. A create
@@ -1891,6 +2099,7 @@ def propose(
     if source not in SOURCES:
         problems.append(f"its source is {source!r}, not one of {', '.join(SOURCES)}")
     problems += _priority_problems(priority)
+    problems += _tags_problems(tags)
     deps: list[str] = [] if depends_on is None else depends_on
     entries: list[tuple[str, str, list[int]]] | None = None
     if tasks is not None:
@@ -1903,6 +2112,8 @@ def propose(
     if problems:
         raise BoardWriteError("the proposal", problems)
     title = title.strip()
+    tags = normal_tags(tags) if tags is not None else None
+    bucket = priority if priority is not None else DEFAULT_PRIORITY
 
     with task_lock(hive_dir, CREATE_LOCK):
         found = _find_titled(hive_dir, title, None)
@@ -1910,20 +2121,32 @@ def propose(
             return _propose_again(hive_dir, found, title, description, deps, entries, source, priority)
         number, width = _next_task_number(hive_dir)
         task_id = f"T-{number:0{width}d}"
+        rank = _end_of_bucket(hive_dir, bucket)
         if entries is None:
-            _write_new(hive_dir, _proposed(task_id, title, source, priority, deps), description)
+            _write_new(
+                hive_dir,
+                _proposed(task_id, title, source, priority, deps, tags=tags, rank=rank),
+                description,
+            )
             return {"id": task_id, "created": True, "tasks": []}
         ids = [f"{task_id}-S{n}" for n in range(1, len(entries) + 1)]
         # The parent's lock, then each child's: `close_epic` says why that
         # order is the only one.
         with task_lock(hive_dir, task_id):
             _write_new(
-                hive_dir, _proposed(task_id, title, source, priority, [], split_into=ids), description
+                hive_dir,
+                _proposed(
+                    task_id, title, source, priority, [], split_into=ids, tags=tags, rank=rank
+                ),
+                description,
             )
-            for child_id, (child_title, child_text, after) in zip(ids, entries):
+            for position, (child_id, (child_title, child_text, after)) in enumerate(
+                zip(ids, entries), start=1
+            ):
                 child = _proposed(
                     child_id, child_title, source, priority,
-                    [ids[i - 1] for i in after], epic=task_id,
+                    [ids[i - 1] for i in after], epic=task_id, tags=tags,
+                    rank=min(rank + position * RANK_STEP, MAX_RANK),
                 )
                 _write_new(hive_dir, child, child_text)
         return {"id": task_id, "created": True, "tasks": ids}
@@ -1995,9 +2218,14 @@ def _propose_again(
         if stored is None:
             _write_new(hive_dir, task, description)
         for child_id, child_title, child_text, child_deps in missing:
+            child_priority = task.priority or priority
+            # A child whose file was never written enters its bucket now, at
+            # the end; one whose description alone is missing keeps its rank,
+            # since `_write_new` keeps the file that is there.
             child = _proposed(
-                child_id, child_title, task.source or source, task.priority or priority,
-                child_deps, epic=task_id,
+                child_id, child_title, task.source or source, child_priority,
+                child_deps, epic=task_id, tags=task.tags,
+                rank=_end_of_bucket(hive_dir, child_priority or DEFAULT_PRIORITY),
             )
             _write_new(hive_dir, child, child_text)
     return {"id": task_id, "created": False, "tasks": ids}
@@ -2038,10 +2266,15 @@ def edit_task(
     description: str | None = None,
     depends_on: list[str] | None = None,
     priority: str | None = None,
+    tags: list[str] | None = None,
+    rank: int | None = None,
 ) -> dict:
-    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, while not started.
+    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, `tags`, `rank`.
 
-    `None` leaves a field as it is. The title stays unique within its epic,
+    While the task has not started. `None` leaves a field as it is. `tags`
+    replaces the list, stripped and without repeats; `[]` clears it. `rank`
+    puts the task at that position in its bucket, and a `priority` that moves
+    it to another bucket without one puts it at that bucket's end (ADR 130). The title stays unique within its epic,
     so a later propose cannot be confused about what it names. A task of an
     epic depends on its siblings only, and an epic on nothing; outside an
     epic, `depends_on` names tasks that exist and makes no cycle. Every
@@ -2049,21 +2282,33 @@ def edit_task(
     Returns `{"id", "changed"}`, the fields whose value changed.
     """
     task_id = _check_id(task_id)
-    if title is None and description is None and depends_on is None and priority is None:
+    given = (title, description, depends_on, priority, tags, rank)
+    if all(value is None for value in given):
         raise BoardWriteError(
-            f"task {task_id}", ["nothing to change: give title, description, depends_on or priority"]
+            f"task {task_id}",
+            ["nothing to change: give title, description, depends_on, priority, tags or rank"],
         )
     problems = [] if title is None else _title_problems(title, "the title")
     if description is not None:
         problems += _description_problems(description, "the description")
     problems += _priority_problems(priority)
+    problems += _tags_problems(tags)
+    problems += _rank_problems(rank)
     if problems:
         raise BoardWriteError(f"task {task_id}", problems)
     title = None if title is None else title.strip()
+    # `[]` clears the field, so the file says nothing rather than `tags: []`.
+    tags_given = tags is not None
+    tags = (normal_tags(tags) or None) if tags_given else None
 
     # The create lock before the task's, as `propose` takes them, when a title
-    # is to be checked against every other one.
-    create = task_lock(hive_dir, CREATE_LOCK) if title is not None else contextlib.nullcontext()
+    # is to be checked against every other one, or a rank is set: every rank
+    # write holds it, so the end of a bucket is read with none moving (ADR 130).
+    create = (
+        task_lock(hive_dir, CREATE_LOCK)
+        if title is not None or priority is not None or rank is not None
+        else contextlib.nullcontext()
+    )
     with create, task_lock(hive_dir, task_id):
         path, task = _board_task(hive_dir, task_id)
         why = _started(hive_dir, task)
@@ -2083,10 +2328,19 @@ def edit_task(
         if description is not None and read_description(hive_dir, task_id) != description:
             write_description(hive_dir, task_id, description)
             changed.append("description")
+        old_bucket = bucket_of(task)
         for field, value in (("title", title), ("depends_on", depends_on), ("priority", priority)):
             if value is not None and getattr(task, field) != value:
                 setattr(task, field, list(value) if field == "depends_on" else value)
                 changed.append(field)
+        if tags_given and task.tags != tags:
+            task.tags = tags
+            changed.append("tags")
+        if rank is None and bucket_of(task) != old_bucket:
+            rank = _end_of_bucket(hive_dir, bucket_of(task), exclude={task_id})
+        if rank is not None and task.rank != rank:
+            task.rank = rank
+            changed.append("rank")
         if set(changed) - {"description"}:
             _write_task_file(path, task)
     return {"id": task_id, "changed": changed}
@@ -2209,6 +2463,10 @@ def accept(
     deferred, it goes alone. A task of an epic is accepted on its own only once
     its epic is. Returns `{"id", "status", "changed", "children"}`, the last
     each of an epic's tasks with its status after the call.
+
+    A `priority` that moves an item to another bucket puts it at that
+    bucket's end, an epic's tasks after the epic (ADR 130); that read is under
+    the create lock, taken before the task's whenever a priority is given.
     """
     task_id = _check_id(task_id)
     problems = []
@@ -2217,7 +2475,8 @@ def accept(
     problems += _priority_problems(priority)
     if problems:
         raise BoardWriteError(f"task {task_id}", problems)
-    with task_lock(hive_dir, task_id):
+    create = task_lock(hive_dir, CREATE_LOCK) if priority is not None else contextlib.nullcontext()
+    with create, task_lock(hive_dir, task_id):
         path, task = _board_task(hive_dir, task_id)
         if task.split_into and not task.epic:
             return _accept_epic(hive_dir, task_id, path, task, to, priority)
@@ -2236,9 +2495,28 @@ def accept(
                 )
         task.status = to
         if priority is not None:
-            task.priority = priority
+            _rebucket(hive_dir, [task], priority)
         _write_task_file(path, task)
     return {"id": task_id, "status": to, "changed": True, "children": {}}
+
+
+def _rebucket(
+    hive_dir: str, moving: list[context_transfer.TaskFile], priority: str
+) -> None:
+    """Set `priority` on each task, and put the ones it moves at the new bucket's end, in order.
+
+    A task already in that bucket keeps its rank: confirming a bucket is not
+    a reorder. The caller holds `CREATE_LOCK`.
+    """
+    end = None
+    for task in moving:
+        if bucket_of(task) != priority:
+            if end is None:
+                end = _end_of_bucket(hive_dir, priority, exclude={t.task_id for t in moving})
+            else:
+                end = min(end + RANK_STEP, MAX_RANK)
+            task.rank = end
+        task.priority = priority
 
 
 def _refuse_priority_on_noop(
@@ -2300,16 +2578,17 @@ def _accept_epic(
             "dropped": {"proposed": "dropped", "deferred": "dropped"},
             "deferred": {},
         }[to]
-        for child_path, child in children.values():
-            if child.status in moves:
-                child.status = moves[child.status]
-                if priority is not None:
-                    child.priority = priority
-                _write_task_file(child_path, child)
+        moved = [
+            (child_path, child) for child_path, child in children.values() if child.status in moves
+        ]
+        if priority is not None:
+            # The epic first, then its tasks in their order, at the bucket's end.
+            _rebucket(hive_dir, [task] + [child for _, child in moved], priority)
+        for child_path, child in moved:
+            child.status = moves[child.status]
+            _write_task_file(child_path, child)
         # The parent last, so an epic is on the board only once its tasks are.
         task.status = "epic" if to == ACCEPTED_STATUS else to
-        if priority is not None:
-            task.priority = priority
         _write_task_file(path, task)
         return {
             "id": task_id, "status": task.status, "changed": True,
