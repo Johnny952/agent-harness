@@ -60,6 +60,7 @@ def exec_claude(
     permission_mode: str | None = None,
     add_dirs: Sequence[str] | None = None,
     allowed_tools: Sequence[str] | None = None,
+    mcp_config: str | None = None,
 ) -> ClaudeResult:
     if timeout_seconds is not None and timeout_seconds <= 0:
         # coreutils `timeout 0` disables the in-container timeout entirely, so
@@ -108,6 +109,14 @@ def exec_claude(
     # Compact separators because this travels as one argv element.
     if json_schema is not None:
         command += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
+    # The MCP servers this one process may reach, as inline JSON: today only
+    # the board service, for the roles that have its tools (ADR 128). Inline
+    # rather than a file, so there is nothing in the container to write,
+    # share between two roles, or go stale. A --resume restates it like every
+    # other flag here. Declared `--mcp-config <configs...>`, variadic like the
+    # two below, so it too sits ahead of the `-p` block.
+    if mcp_config:
+        command += ["--mcp-config", mcp_config]
     # Directories the file tools may touch besides the working directory.
     # Declared `--add-dir <directories...>`, so one flag carries them all and
     # the variadic stops at the next dash-prefixed token — which is why this

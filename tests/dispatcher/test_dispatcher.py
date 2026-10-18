@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
-from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills, subagents, tasks
+from dispatcher import board_mcp, debt, gates, handoff, learnings, project_docs, role_skills, subagents, tasks
 from dispatcher.config import PHASE_ROLES, AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
@@ -8239,7 +8239,9 @@ def test_every_other_role_keeps_exactly_allowed_tools(tmp_path, role) -> None:
     flags = dispatcher_mod._phase_permission_flags(cfg, role)
 
     assert flags == dispatcher_mod._phase_permission_flags(plain, role)
-    assert flags["allowed_tools"] == ["Bash(git status*)"]
+    # The board's own names follow for a role that has them (ADR 128); that
+    # grant is the board service's table, not mapping_allowed_tools.
+    assert flags["allowed_tools"] == ["Bash(git status*)", *board_mcp.allowed_tools(role)]
 
 
 def test_dispatch_phase_takes_no_base_lock_for_a_task_branch_commit(

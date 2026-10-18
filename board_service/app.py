@@ -31,23 +31,22 @@ from flask import Flask, jsonify, request
 
 from dispatcher import context_transfer
 from dispatcher import tasks as task_store
+from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS
 from dispatcher.config import PHASE_ROLES, load_config
 
 CONFIG_PATH = "/app/config.yaml"
 PORT = 8792
 
-#: The operator's session; every other caller is a phase, named by its role.
-OPERATOR = "operator"
 #: Every role the service knows. A role outside it is a misspelt URL, answered
-#: 400, rather than a role that silently gets no tools.
+#: 400, rather than a role that silently gets no tools. `OPERATOR` is the
+#: operator's session; every other caller is a phase, named by its role.
 KNOWN_ROLES = frozenset(PHASE_ROLES) | {OPERATOR}
 
-#: Section 6's table, the read rows. A role not named here gets no tools: the
-#: implementador, revisor, auditor and integrador "get no tools at first".
-ROLE_TOOLS: dict[str, tuple[str, ...]] = {
-    OPERATOR: ("board_list", "board_get"),
-    "arquitecto": ("board_list", "board_get"),
-}
+# `ROLE_TOOLS`, section 6's table of read rows, is imported from
+# `dispatcher/board_mcp.py`: the dispatcher reads the same table to decide
+# which phases get this server (step 7). A role not named there gets no
+# tools: the implementador, revisor, auditor and integrador "get no tools at
+# first".
 
 #: The backlog's statuses (section 4). Nothing writes them yet (step 5); a task
 #: with any other status is on the board.

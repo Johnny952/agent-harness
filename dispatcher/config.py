@@ -5,7 +5,7 @@ import os
 
 import yaml
 
-from dispatcher import docker_exec, project_docs, role_skills
+from dispatcher import board_mcp, docker_exec, project_docs, role_skills
 
 
 @dataclasses.dataclass
@@ -172,6 +172,10 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
     "hive_tasks_dir": _read_only("A path, the same as above."),
     "state_dir": _read_only("A path, the same as above."),
     "collector_url": _read_only("A service address on the compose network."),
+    "board_mcp_url": _read_only(
+        "A service address on the compose network, and a grant: it decides whether "
+        "the arquitecto's phases get the board's tools (ADR 128)."
+    ),
     "permission_mode": _read_only(
         "It widens or narrows what every phase may do. The api's boot-time harness "
         "fingerprint (ADR 41 part 8) reads it."
@@ -312,6 +316,11 @@ class Config:
     #: Per project, more repo paths or globs the automatic approve never
     #: merges a change to, over the fixed list in `dispatcher/auto_approve.py`.
     protected_paths: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    #: Where a phase reaches the board service's MCP endpoint, without the
+    #: `?role=` the dispatcher adds per phase (`docs/decisions.md` ADR 128).
+    #: None sends no `--mcp-config` and no board tool names to any phase,
+    #: which is exactly the behaviour before the service existed.
+    board_mcp_url: str | None = board_mcp.DEFAULT_URL
 
     def auto_approves(self, slug: str) -> bool:
         """Whether a finished task of `slug` goes through the automatic approve."""
@@ -477,6 +486,36 @@ def _load_allowed_tools(raw: dict, key: str = "allowed_tools") -> list[str]:
         if not isinstance(tool, str) or not tool.strip():
             raise ValueError(f"{key} entries must be non-empty strings")
     return [tool.strip() for tool in tools]
+
+
+def _load_board_mcp_url(raw: dict) -> str | None:
+    """Read the optional `board_mcp_url`: absent is the default, null is off.
+
+    Absent gives `board_mcp.DEFAULT_URL`, the service's name on ia_harness_net,
+    so a stack that runs the service needs no line for it. `null` or an empty
+    string turns it off, for a stack that does not run the service: a phase
+    told about a server that is not there spends its first turns finding out.
+
+    The URL must carry no query or fragment of its own. The dispatcher appends
+    `?role=<role>`, and the service answers 400 to any parameter but `role`,
+    so a query here would fail every call rather than load.
+    """
+    url = raw.get("board_mcp_url", board_mcp.DEFAULT_URL)
+    if url is None:
+        return None
+    if not isinstance(url, str):
+        raise ValueError("board_mcp_url must be a URL, or null to turn it off")
+    url = url.strip()
+    if not url:
+        return None
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"board_mcp_url {url!r} must be an http:// or https:// URL")
+    if "?" in url or "#" in url:
+        raise ValueError(
+            f"board_mcp_url {url!r} must have no query or fragment: the dispatcher "
+            "adds ?role= itself"
+        )
+    return url
 
 
 def _load_primary_account(raw: dict, accounts: list[AccountConfig]) -> str | None:
@@ -816,4 +855,5 @@ def _build_config(raw: dict) -> Config:
         pace_primary_week=bool(raw.get("pace_primary_week", True)),
         auto_approve=_load_auto_approve(raw),
         protected_paths=_load_protected_paths(raw),
+        board_mcp_url=_load_board_mcp_url(raw),
     )
