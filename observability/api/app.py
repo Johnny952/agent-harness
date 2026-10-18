@@ -7,7 +7,9 @@ task file into a `TaskFile`, `dispatcher/state_machine.py` answers what an
 account is doing, `observability/collector/db.py` lists events,
 `dispatcher/debt.py` parses the debt index, and `dispatcher/learnings.py` parses
 the hive's trap entries; `context_transfer.read_usage` reads a task's per-call
-usage log (ADR 54). This is an HTTP surface over those, and nothing more:
+usage log (ADR 54), and `observability/api/plans.py` reads a plan's frontmatter
+(T-072; it lives here and not in `dispatcher/` because no dispatcher code reads
+a plan, and its test imports it). This is an HTTP surface over those, and nothing more:
 every route is a `GET`, every mount is `:ro`, and there is no second copy of any
 file format here — a parser this service needs and does not have is one to make
 reachable in `dispatcher/`, not one to rewrite.
@@ -31,6 +33,7 @@ arrives as an import, for one frozenset, and is never called.
 """
 from __future__ import annotations
 
+import datetime as dt
 import os
 import sqlite3
 from pathlib import Path
@@ -50,6 +53,7 @@ from dispatcher import (
 from dispatcher import tasks as task_store
 from dispatcher.config import Config, load_config
 from observability import auth
+from observability.api import plans as plan_frontmatter
 from observability.collector import db
 
 #: Where the dispatcher's own config is mounted, matching the path the
@@ -144,6 +148,26 @@ MAX_LEARNINGS = 500
 #: stays a bounded read rather than one that grows with what a phase tried.
 #: `docs/decisions.md` ADR 54, ADR 68, ADR 116.
 MAX_USAGE_CALLS = 1000
+
+#: The most plans one `/api/roadmap` answer carries. Five hundred because a plan
+#: is one file a person writes under `docs/plans/` and this harness has 21 of
+#: them on 2026-10-17, so nothing is clamped: the cap exists so the route is not
+#: the next thing this service answers with no bound at all, on `MAX_PHASES`'
+#: model. Every plan past it would also be read from disk, so the clamp is
+#: taken on the sorted file names before any is opened, and reports itself in
+#: `warnings`. It bounds a count and not bytes, which is enough while a plan row
+#: is its title, four frontmatter values and the names of other plans.
+MAX_ROADMAP_PLANS = 500
+
+#: The most tasks one `/api/roadmap` answer carries, under plans and under
+#: `no_plan` together. Two thousand because the route reads every task file in
+#: the hive — tasks are per harness, not per project, today — and the hive holds
+#: about seventy on 2026-10-17, so nothing is clamped, while a harness that runs
+#: a few tasks a day for years still fits. The clamp is taken on the sorted task
+#: ids before any file is opened, so a hive past it costs a bounded read rather
+#: than one that grows with every task this harness has run, and it reports
+#: itself in `warnings`. A task row is four scalars, so a count is bound enough.
+MAX_ROADMAP_TASKS = 2000
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
@@ -650,6 +674,59 @@ def create_app(
             rows = rows[:MAX_LEARNINGS]
         return _envelope(rows, warnings)
 
+    @app.get("/api/roadmap")
+    @requires_auth
+    def roadmap():
+        """The project's plans in three bands, with the tasks under them.
+
+        The api piece of `docs/plans/roadmap-view.md`'s cheap form: plans from
+        their frontmatter, tasks from the hive, and no epics, backlog or ADR
+        relations yet. The plans are the checkout's own `docs/plans/`, chosen by
+        `?project=` the way `/api/debt` chooses it, because the image carries no
+        copy of this repository's docs. The tasks are per harness, not per
+        project: no task file carries a project key today, so every task in the
+        hive is read, and one is left out only when its file names a `project`
+        that is not this one.
+        """
+        rejected = _reject_unknown_parameters(frozenset({"project"}))
+        if rejected is not None:
+            return rejected
+        slug, rejected = _project(cfg, request.args.get("project") or None)
+        if rejected is not None:
+            return rejected
+        warnings: list[str] = []
+        plans_dir = os.path.join(cfg.projects_root, slug, project_docs.PLANS_DIR)
+        plan_rows = _roadmap_plans(plans_dir, warnings)
+        task_rows = []
+        task_ids = sorted(context_transfer.list_task_ids(cfg.hive_tasks_dir))
+        if len(task_ids) > MAX_ROADMAP_TASKS:
+            warnings.append(
+                f"{len(task_ids)} task files are in the hive and this service answers at "
+                f"most {MAX_ROADMAP_TASKS}: the first {MAX_ROADMAP_TASKS} by task id are "
+                f"read, and {len(task_ids) - MAX_ROADMAP_TASKS} are left out."
+            )
+            task_ids = task_ids[:MAX_ROADMAP_TASKS]
+        for task_id in task_ids:
+            path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+            try:
+                # The guard wraps the use of the values and the serialisation
+                # round, for the reasons `/api/tasks` gives.
+                task = context_transfer.read_task_file(path)
+                # `plan` and `project` are not `TaskFile` fields, so the
+                # frontmatter is read again raw for them.
+                front = _task_frontmatter(path)
+                project = front.get("project")
+                if project is not None and project != slug:
+                    continue
+                row, merged, month = _roadmap_task(task)
+                plan = front.get("plan")
+                app.json.dumps(row)
+            except _UNREADABLE as exc:
+                warnings.append(f"{path}: unreadable task file: {exc}")
+                continue
+            task_rows.append((row, plan, merged, month))
+        return _envelope(_roadmap(slug, plan_rows, task_rows, warnings), warnings)
+
     return app
 
 
@@ -1002,6 +1079,176 @@ def _project(cfg: Config, slug: str | None):
     return None, _error(
         "project is required: " + f"{cfg.projects_root} holds " + ", ".join(slugs), 400
     )
+
+
+# --- the roadmap ----------------------------------------------------------
+
+_FUTURE = {"idea", "design", "approved"}
+_NOW = {"building"}
+
+
+def _roadmap_plans(plans_dir: str, warnings: list[str]) -> list[dict]:
+    """One row per plan file, in file-name order, `superseded_by` filled in.
+
+    A plan whose frontmatter is missing or breaks a rule of
+    `observability/api/plans.py`, or that will not read at all, is still a row:
+    `status`, `approved` and `built` null, `supersedes` empty, and a warning
+    naming the file and the problem. Leaving it out would hide a plan because
+    its block is wrong, which is the damage the warning exists to report.
+    """
+    try:
+        names = sorted(name for name in os.listdir(plans_dir) if name.endswith(".md"))
+    except OSError as exc:
+        # A checkout that keeps no plans is a project with no roadmap, not a
+        # broken request: `/api/debt`'s model for a project with no index.
+        warnings.append(f"{plans_dir}: no readable plans directory: {exc}")
+        return []
+    # Every name, before the cap: a `supersedes` entry names a plan file, and
+    # one past the cap is still a plan file.
+    plan_names = set(names)
+    if len(names) > MAX_ROADMAP_PLANS:
+        warnings.append(
+            f"{len(names)} plans are in {plans_dir} and this service answers at most "
+            f"{MAX_ROADMAP_PLANS}: the first {MAX_ROADMAP_PLANS} by file name are read, "
+            f"and {len(names) - MAX_ROADMAP_PLANS} are left out."
+        )
+        names = names[:MAX_ROADMAP_PLANS]
+    rows = []
+    for name in names:
+        path = os.path.join(plans_dir, name)
+        data, title = None, None
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            # `ValueError` for a `UnicodeDecodeError`, as `/api/debt` has it.
+            warnings.append(f"{path}: unreadable plan, listed with no status: {exc}")
+        else:
+            data, problems = plan_frontmatter.read(text, plan_names)
+            title = plan_frontmatter.title(text)
+            if problems:
+                warnings.append(
+                    f"{path}: invalid plan frontmatter, listed with no status: "
+                    + "; ".join(problems)
+                )
+        data = data or {}
+        rows.append(
+            {
+                "file": name,
+                "title": title,
+                "status": data.get("status"),
+                "approved": _iso_date(data.get("approved")),
+                "built": _iso_date(data.get("built")),
+                # Strings once `read` has passed them: each is a plan file name.
+                "supersedes": list(data.get("supersedes") or []),
+                "superseded_by": [],
+                "tasks": [],
+            }
+        )
+    by_file = {row["file"]: row for row in rows}
+    for row in rows:
+        for name in row["supersedes"]:
+            # A plan past the cap has no row to carry the back link.
+            if name in by_file:
+                by_file[name]["superseded_by"].append(row["file"])
+    return rows
+
+
+def _iso_date(value: object) -> str | None:
+    """A frontmatter date as JSON carries it: YAML makes `2026-10-11` a `date`."""
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return value
+
+
+def _task_frontmatter(path: str) -> dict:
+    """A task file's frontmatter as a mapping, for keys `TaskFile` does not carry.
+
+    Split as `context_transfer.read_task_file` splits it. Raises what that
+    raises, and `TypeError` for a block that is not a mapping, so the caller's
+    `_UNREADABLE` guard catches all of it.
+    """
+    text = Path(path).read_text()
+    _, front, _ = text.split(context_transfer._FRONTMATTER_DELIM, 2)
+    data = yaml.safe_load(front) or {}
+    if not isinstance(data, dict):
+        raise TypeError(f"frontmatter is a {type(data).__name__}, not a mapping")
+    return data
+
+
+def _roadmap_task(task: context_transfer.TaskFile) -> tuple[dict, bool, str | None]:
+    """A task's row, whether it is merged, and the `YYYY-MM` it merged in.
+
+    Merged means the `merged` block `tasks.mark_merged` writes, not a status:
+    that block is what a dependency waits for (`docs/plans/task-split.md`,
+    section 3). `title` is null: neither a task file nor its description
+    carries one, and the description's first line is its `## Goal` heading.
+    The month is null when `merged.at` is missing or not an ISO timestamp.
+    """
+    merged = bool(task.merged)
+    at = task.merged.get("at") if isinstance(task.merged, dict) else None
+    if isinstance(at, (dt.date, dt.datetime)):
+        # An unquoted timestamp in a hand-edited card reads back as a datetime.
+        at = at.isoformat()
+    elif at is not None:
+        at = str(at)
+    month = None
+    if at is not None:
+        try:
+            parsed = dt.datetime.fromisoformat(at)
+        except ValueError:
+            pass
+        else:
+            month = f"{parsed.year:04d}-{parsed.month:02d}"
+    row = {"id": task.task_id, "title": None, "state": task.status, "merged_at": at}
+    return row, merged, month
+
+
+def _band_order(rows: list[dict]) -> list[dict]:
+    """Newest first by `built`, else `approved`; undated last; then by file name."""
+    rows = sorted(rows, key=lambda row: row["file"])
+    # Stable, and stable under `reverse` too, so equal dates keep file order;
+    # an undated row sorts as "", below every date.
+    return sorted(rows, key=lambda row: row["built"] or row["approved"] or "", reverse=True)
+
+
+def _roadmap(slug: str, plan_rows: list[dict], task_rows: list, warnings: list[str]) -> dict:
+    """The answer: plans banded and ordered, tasks under their plan or under `no_plan`."""
+    by_file = {row["file"]: row for row in plan_rows}
+    no_plan_now: list[dict] = []
+    months: dict[str | None, list[dict]] = {}
+    for row, plan, merged, month in task_rows:
+        if plan is not None:
+            if isinstance(plan, str) and plan in by_file:
+                by_file[plan]["tasks"].append(row)
+                continue
+            warnings.append(
+                f"task {row['id']}: plan {plan!r} is not a plan file of {slug}; "
+                "it is listed under no_plan"
+            )
+        if merged:
+            months.setdefault(month, []).append(row)
+        else:
+            no_plan_now.append(row)
+    bands: dict[str, list[dict]] = {"future": [], "now": [], "past": []}
+    for row in plan_rows:
+        status = row["status"]
+        # A plan with no readable status is in `future`: it is not known to be
+        # built, and the warning beside it says why it has none.
+        if status is None or status in _FUTURE:
+            bands["future"].append(row)
+        elif status in _NOW:
+            bands["now"].append(row)
+        else:
+            bands["past"].append(row)
+    dated = sorted((month for month in months if month is not None), reverse=True)
+    past = [{"month": month, "tasks": months[month]} for month in dated]
+    if None in months:
+        past.append({"month": None, "tasks": months[None]})
+    return {
+        "project": slug,
+        "bands": {band: _band_order(rows) for band, rows in bands.items()},
+        "no_plan": {"now": no_plan_now, "past": past},
+    }
 
 
 if __name__ == "__main__":
