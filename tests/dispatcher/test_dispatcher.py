@@ -4499,9 +4499,136 @@ def test_the_index_is_read_from_the_branch_the_task_is_being_built_on(
 
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
+    # Twice since T-086: once to number the entries, once after the auditor
+    # to mirror what it filed as backlog items. Both from the branch.
     assert debt_index.reads == [
         ("agent-cuenta1", f"{cfg.projects_root}/myproj/worktrees/task-1/work"),
-    ]
+    ] * 2
+
+
+def _auditor_writes_index(debt_index, inner, text):
+    """`inner`, with the auditor writing `text` as the index on its branch."""
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        result = inner(cfg_arg, task_id, slug, role, prompt, **kwargs)
+        if role == "auditor":
+            debt_index.text = text
+        return result
+
+    return fake_dispatch_phase
+
+
+_AUDITED_INDEX = (
+    "| id | what | where | fix | card | impact |\n"
+    "|---|---|---|---|---|---|\n"
+    "| `task-1-D1` | The retry loop has no test. | a task that changes the backoff "
+    "| a fake clock | none | risk |\n"
+)
+
+
+def _debt_items(cfg):
+    from dispatcher import tasks as tasks_mod
+    return {
+        task_id: task for task_id, task in tasks_mod.read_all_tasks(cfg.hive_tasks_dir).items()
+        if task.source == "debt"
+    }
+
+
+def test_the_debt_the_auditor_filed_becomes_a_backlog_item_at_its_impact(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """ADR 131: the row the auditor wrote, read back from the branch, is filed
+    as a `proposed` item tagged `debt`, its priority from the row's impact."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _auditor_writes_index(
+            debt_index, _debt_dispatch_phase([], declared=(_DEBT,)), _AUDITED_INDEX,
+        ),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    [(item_id, item)] = _debt_items(cfg).items()
+    assert item_id == "T-001"
+    assert (item.status, item.priority, item.tags, item.debt_id) == (
+        "proposed", "high", ["debt"], "task-1-D1",
+    )
+    assert item.title == "task-1-D1: The retry loop has no test."
+
+
+def test_a_re_run_files_no_second_backlog_item(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    cfg = _make_config(tmp_path)
+    filed = [("task-1-D1", debt.Declaration(what="The retry loop has no test."))]
+    debt_index.text = _AUDITED_INDEX
+    monkeypatch.setattr(dispatcher_mod, "cleanup_container", lambda cfg_arg: "agent-cuenta1")
+
+    first = dispatcher_mod._mirror_filed_debt(cfg, "task-1", "myproj", filed)
+    again = dispatcher_mod._mirror_filed_debt(cfg, "task-1", "myproj", filed)
+
+    assert [r["created"] for r in first + again] == [True, False]
+    assert list(_debt_items(cfg)) == ["T-001"]
+
+
+def test_an_entry_the_index_does_not_show_is_filed_from_its_declaration(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """The auditor wrote no row (or the read failed): the item still exists,
+    at the default priority, because only the auditor judges an impact."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], declared=(_DEBT,)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    [item] = _debt_items(cfg).values()
+    assert (item.priority, item.debt_id) == ("normal", "task-1-D1")
+
+
+def test_an_entry_the_index_shows_resolved_is_not_filed(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    cfg = _make_config(tmp_path)
+    debt_index.text = _AUDITED_INDEX.replace("The retry loop", "**Resolved 2026-10-18.** The retry loop")
+    monkeypatch.setattr(dispatcher_mod, "cleanup_container", lambda cfg_arg: "agent-cuenta1")
+    filed = [("task-1-D1", debt.Declaration(what="The retry loop has no test."))]
+
+    assert dispatcher_mod._mirror_filed_debt(cfg, "task-1", "myproj", filed) == []
+    assert _debt_items(cfg) == {}
+
+
+def test_a_failure_to_file_debt_does_not_fail_the_cycle(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """The index is still the record, and `dispatch import-debt` files later."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], declared=(_DEBT,)),
+    )
+
+    def boom(*args, **kwargs):
+        raise OSError("hive is read-only")
+
+    monkeypatch.setattr(dispatcher_mod.tasks, "file_debt", boom)
+
+    result = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert result is dispatcher_mod.CycleOutcome.FINISHED
+    assert _debt_items(cfg) == {}
+
+
+def test_a_cycle_with_no_debt_files_no_backlog_item(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([]))
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert _debt_items(cfg) == {}
 
 
 def test_the_entries_a_task_resolved_outlive_the_handoff_that_named_them(
@@ -4781,6 +4908,27 @@ def test_run_single_phase_final_closes_the_task_the_way_a_cycle_does(
     assert result is not None and result.success
     assert seen["carried"] == [("myproj", "task-1")]
     assert seen["orphaned"] == []
+
+
+def test_run_single_phase_final_mirrors_the_debt_it_filed(tmp_path, monkeypatch) -> None:
+    """A task closed with `run-phase --final` files its debt as backlog items
+    the way a cycle does (ADR 131)."""
+    cfg = _make_config(tmp_path)
+    _spy_learnings(monkeypatch)
+    filed = [("task-1-D1", debt.Declaration(what="The retry loop has no test."))]
+    mirrored = []
+    monkeypatch.setattr(dispatcher_mod, "_file_accepted_debt", lambda *a: filed)
+    monkeypatch.setattr(
+        dispatcher_mod, "_mirror_filed_debt",
+        lambda cfg_arg, task_id, slug, entries: mirrored.append((task_id, entries)) or [],
+    )
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", "auditor", final=True, description=_DESCRIPTION,
+    )
+
+    assert mirrored == [("task-1", filed)]
 
 
 def test_run_single_phase_does_not_act_on_the_verdict_it_got_back(tmp_path, monkeypatch) -> None:

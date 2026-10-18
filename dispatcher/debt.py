@@ -12,8 +12,10 @@ Two rules shape everything here:
 - **The index is the only record.** It is versioned with the code, so a clone
   has it. Nothing mirrors a row anywhere else (`docs/decisions.md` ADR 59);
   the index keeps its `card` column because the api and the console read it,
-  and the auditor writes `none` there until a backlog item's id has a place
-  to come from (`docs/plans/board-service.md`, step 5).
+  and the auditor writes `none` there. The link the other way is the backlog
+  item's `debt_id` (ADR 131): the dispatcher files each new open entry as a
+  `proposed` item naming it, so the index never has to be rewritten to point
+  at the board.
 - **The dispatcher assigns the ids, not an agent.** An agent re-run for a
   second review round would number the same entry twice.
 
@@ -44,9 +46,23 @@ BLOCKS = "blocks"
 RULINGS = (ACCEPTED, REJECTED, BLOCKS)
 
 #: The index's columns, in order. The dispatcher reads **what** back to dedupe
-#: and the api serves all five by name, so this is a contract, not a
-#: suggestion, and it is handed to the auditor as one.
-COLUMNS = ("id", "what", "where", "fix", "card")
+#: and the api serves them by name, so this is a contract, not a suggestion,
+#: and it is handed to the auditor as one. `impact` is last (ADR 131): a row
+#: written before it has five cells, and its `card` stays the fifth.
+COLUMNS = ("id", "what", "where", "fix", "card", "impact")
+
+#: What an entry costs if left, as the auditor judges it (ADR 131): `risk`, it
+#: can break or lose something; `cost`, it slows or costs work; `cosmetic`,
+#: wording or polish. A row with none of these, a row written before the
+#: column among them, reads as `NO_IMPACT`.
+IMPACTS = ("risk", "cost", "cosmetic")
+NO_IMPACT = "none"
+
+#: The backlog priority an entry's item is filed at. `NO_IMPACT` is the
+#: board's default bucket, the same as `cost`: an unjudged entry is neither
+#: raised nor buried.
+IMPACT_PRIORITY = {"risk": "high", "cost": "normal", "cosmetic": "low"}
+DEFAULT_IMPACT_PRIORITY = "normal"
 
 _VOLATILE_RE = re.compile(r"[0-9a-f]{6,}|\d+")
 _NOISE_RE = re.compile(r"[^a-z0-9]+")
@@ -273,6 +289,29 @@ def _column(cells: list[str], header: list[str], name: str, fallback: int) -> st
 _RESOLVED_RE = re.compile(r"^\*\*\s*resolved\b", re.IGNORECASE)
 
 
+def impact_of(cell: str) -> str:
+    """An impact cell read as one of `IMPACTS`, or `NO_IMPACT`.
+
+    Case and surrounding blanks and bold do not count; anything else, a typo
+    included, is no impact rather than a guess at one.
+    """
+    value = (cell or "").strip().strip("*").strip().lower()
+    return value if value in IMPACTS else NO_IMPACT
+
+
+def priority_for(impact: str) -> str:
+    """The backlog priority an entry with this impact is filed at (ADR 131)."""
+    return IMPACT_PRIORITY.get(impact, DEFAULT_IMPACT_PRIORITY)
+
+
+def _impact_cell(cells: list[str], header: list[str]) -> str:
+    # By name only: a five-column row has no impact, and its last cell is the
+    # card, which position would read as one.
+    if "impact" not in header:
+        return ""
+    return _column(cells, header, "impact", len(cells))
+
+
 def index_rows(text: str) -> list[dict]:
     """Every row of the index, by column name, in the order it is written.
 
@@ -290,11 +329,76 @@ def index_rows(text: str) -> list[dict]:
             "what": (what := _column(cells, header, "what", 1)),
             "where": _column(cells, header, "where", 2),
             "fix": _column(cells, header, "fix", 3),
-            "card": _column(cells, header, "card", -1),
+            "card": _column(cells, header, "card", 4),
+            "impact": impact_of(_impact_cell(cells, header)),
             "resolved": bool(_RESOLVED_RE.match(what)),
         }
         for cells, header in _rows(text)
     ]
+
+
+def open_rows(text: str) -> list[dict]:
+    """The index's open entries: rows with an id that are not marked resolved.
+
+    What the backlog mirrors (ADR 131). A resolved row is never filed as an
+    item; one already filed stays as it is, for the operator to drop.
+    """
+    return [row for row in index_rows(text) if row["id"] and not row["resolved"]]
+
+
+#: The longest title a backlog item takes (`tasks.MAX_TITLE_CHARS`), repeated
+#: so this module needs no import of the board's.
+_MAX_TITLE_CHARS = 200
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _one_line(text: str) -> str:
+    return " ".join(_BOLD_RE.sub(r"\1", text or "").split())
+
+
+def backlog_item(row: dict) -> tuple[str, str, str]:
+    """An index row as a backlog item: (title, description, priority).
+
+    The title is the entry's id and its **what**, on one line and cut to fit;
+    the id in it keeps two entries that say the same thing two titles. The
+    description is the entry's **what** and **where** as its goal and its
+    **fix** as what done means, with a pointer to the entry's own file, which
+    says the rest. The priority comes from the row's impact (`priority_for`).
+    """
+    entry = row["id"]
+    what = _one_line(row.get("what", "")) or "No description in the index."
+    title = f"{entry}: {what}"
+    if len(title) > _MAX_TITLE_CHARS:
+        title = title[: _MAX_TITLE_CHARS - 3].rstrip() + "..."
+    goal = [what, ""]
+    where = _one_line(row.get("where", ""))
+    if where:
+        goal += [f"Where: {where}", ""]
+    goal.append(
+        f"Filed from the debt index entry `{entry}`; its file is "
+        f"`{project_docs.DEBT_DIR}/{entry}.md`."
+    )
+    fix = _one_line(row.get("fix", "")) or (
+        f"The entry `{entry}` is marked resolved in `{project_docs.DEBT_INDEX}`."
+    )
+    description = "## Goal\n\n" + "\n".join(goal) + "\n\n## Done when\n\n" + fix + "\n"
+    return title, description, priority_for(row.get("impact", NO_IMPACT))
+
+
+def declared_row(entry: str, declaration: Declaration) -> dict:
+    """A filed entry the index does not show yet, as a row from its declaration.
+
+    Its impact is `NO_IMPACT`: only the auditor judges one.
+    """
+    return {
+        "id": entry,
+        "what": declaration.what,
+        "where": declaration.where,
+        "fix": declaration.fix,
+        "card": "none",
+        "impact": NO_IMPACT,
+        "resolved": False,
+    }
 
 
 def index_fingerprints(text: str) -> set[str]:
@@ -337,8 +441,11 @@ def filing_note(filed: list[tuple[str, Declaration]]) -> str:
     lines = [
         "The debt the revisor accepted in this task already has its ids. File one row per "
         f"entry in `{project_docs.DEBT_INDEX}`, with these columns in this order: {columns}. "
-        "Use the id given here, and write `none` in the `card` column: nothing mirrors an "
-        "entry outside the index. Then write the entry itself as a file under "
+        "Use the id given here, and write `none` in the `card` column. In the `impact` "
+        "column write one of `risk` (left as it is, it can break or lose something), "
+        "`cost` (it slows or costs work) or `cosmetic` (wording or polish): the dispatcher "
+        "files each entry as a backlog item and its impact sets the item's priority. "
+        "Then write the entry itself as a file under "
         f"`{project_docs.DEBT_DIR}/`, named after its id.",
         "",
     ]

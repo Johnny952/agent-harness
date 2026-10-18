@@ -92,7 +92,7 @@ from pathlib import Path
 
 import yaml
 
-from dispatcher import context_transfer, surface
+from dispatcher import context_transfer, debt, surface
 # By name: this module's own `handoff` is a task-file writer.
 from dispatcher.handoff import _SPLIT_MAX, _SPLIT_MIN, SubTask, split_problems
 
@@ -158,6 +158,8 @@ MAX_AUTHOR_CHARS = 64
 #: holds (ADR 129), so the scan for a free id or a clashing title and the write
 #: are one step. Not a task id: none starts with `_`.
 CREATE_LOCK = "_create"
+#: The tag every item filed from the debt index carries (ADR 131).
+DEBT_TAG = "debt"
 #: The comments' file, beside the description (section 2).
 COMMENTS_FILE = "comments.jsonl"
 
@@ -169,6 +171,8 @@ _DRAFT_ID_RE = re.compile(r"^d-\d{8}T\d{6}Z-[0-9a-f]{4}$")
 #: A draft's name is its file's stem and what its siblings' `depends_on` say.
 _DRAFT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _TASK_NUMBER_RE = re.compile(r"^T-(\d+)$")
+#: A debt index entry's id, `debt.entry_id`'s shape: a task id and `-D<n>`.
+_DEBT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*-D\d+$")
 _SECTION_RE = re.compile(
     r"^## (" + "|".join(re.escape(name) for name in REQUIRED + OPTIONAL) + r")[ \t]*$"
 )
@@ -481,7 +485,14 @@ def field_problems(task: context_transfer.TaskFile) -> list[str]:
         problems.extend(f"its {problem}" for problem in tag_problems(task.tags))
     if task.rank is not None and not _is_rank(task.rank):
         problems.append(f"its rank is {task.rank!r}, not an integer from 0 to {MAX_RANK}")
+    if task.debt_id is not None and not is_debt_id(task.debt_id):
+        problems.append(f"its debt_id is {task.debt_id!r}, not a debt entry id like T-001-D1")
     return problems
+
+
+def is_debt_id(value: object) -> bool:
+    """Is this a debt index entry's id, `T-<n>-D<m>` as `debt.entry_id` makes them?"""
+    return isinstance(value, str) and bool(_DEBT_ID_RE.match(value))
 
 
 def tag_problems(tags: object) -> list[str]:
@@ -2150,6 +2161,87 @@ def propose(
                 )
                 _write_new(hive_dir, child, child_text)
         return {"id": task_id, "created": True, "tasks": ids}
+
+
+def find_debt_item(hive_dir: str, debt_id: str) -> str | None:
+    """The id of the task filed from this debt entry, if one is (ADR 131).
+
+    Any status counts, `dropped` and done included: an entry is filed once,
+    and what became of its item is the operator's, not a reason to file again.
+    """
+    for task_id, task in sorted(read_all_tasks(hive_dir).items()):
+        if task.debt_id == debt_id:
+            return task_id
+    return None
+
+
+def propose_debt(
+    hive_dir: str, *, debt_id: str, title: str, description: str, priority: str
+) -> dict:
+    """A debt index entry as a backlog item: `proposed`, `source: debt` (ADR 131).
+
+    The dispatcher's own write, never a service caller's (ADR 129): it is what
+    mirrors an entry the auditor filed, and what `dispatch import-debt` files
+    the index with. The item gets the next free `T-<n>`, `tags: [debt]`,
+    `debt_id`, and the end of its `priority` bucket, under `CREATE_LOCK` as
+    every create is. Idempotent on `debt_id`, not on the title: an entry
+    already filed, under any status, is answered with its item and
+    `created: false`, and a description a run that died part way did not
+    write is written then. Returns `{"id", "created"}`.
+    """
+    problems = [] if is_debt_id(debt_id) else [f"its debt_id {debt_id!r} is not a debt entry id"]
+    problems += _title_problems(title, "its title")
+    problems += _description_problems(description, "its description")
+    if priority not in PRIORITIES:
+        problems.append(f"priority is {priority!r}, not one of {', '.join(PRIORITIES)}")
+    if problems:
+        raise BoardWriteError(f"the debt entry {debt_id!r}", problems)
+    with task_lock(hive_dir, CREATE_LOCK):
+        found = find_debt_item(hive_dir, debt_id)
+        if found is not None:
+            path = context_transfer.task_file_path(hive_dir, found)
+            if read_description(hive_dir, found) is None:
+                _write_new(hive_dir, context_transfer.read_task_file(path), description)
+            return {"id": found, "created": False}
+        number, width = _next_task_number(hive_dir)
+        task_id = f"T-{number:0{width}d}"
+        task = dataclasses.replace(
+            _proposed(
+                task_id, title.strip(), "debt", priority, [],
+                tags=[DEBT_TAG], rank=_end_of_bucket(hive_dir, priority),
+            ),
+            debt_id=debt_id,
+        )
+        _write_new(hive_dir, task, description)
+        return {"id": task_id, "created": True}
+
+
+def file_debt(hive_dir: str, rows: list[dict], *, dry_run: bool = False) -> list[dict]:
+    """Each open index row as a backlog item, through `propose_debt` (ADR 131).
+
+    `rows` are `debt.index_rows`; resolved ones and ones with no entry id
+    are skipped. One result per row filed or already filed, in the rows'
+    order: `{"debt_id", "id", "created", "priority", "title"}`. With
+    `dry_run` nothing is written: `id` is the existing item's or None, and
+    `created` says whether a real run would make one.
+    """
+    results = []
+    for row in rows:
+        if not row.get("id") or row.get("resolved"):
+            continue
+        title, description, priority = debt.backlog_item(row)
+        if dry_run:
+            existing = find_debt_item(hive_dir, row["id"])
+            result = {"id": existing, "created": existing is None}
+        else:
+            result = propose_debt(
+                hive_dir, debt_id=row["id"], title=title,
+                description=description, priority=priority,
+            )
+        results.append(
+            {"debt_id": row["id"], **result, "priority": priority, "title": title}
+        )
+    return results
 
 
 def _propose_again(

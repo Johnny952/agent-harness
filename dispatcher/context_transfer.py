@@ -100,6 +100,10 @@ class TaskFile:
     # task with no `rank` sorts as rank 0, ahead of everything ranked since.
     tags: list | None = None
     rank: int | None = None
+    # The debt index entry a `source: debt` item was filed from (ADR 131), its
+    # `T-<n>-D<m>` id: what filing it again is idempotent on. Checked by
+    # `tasks.field_problems`; written only when set.
+    debt_id: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -651,6 +655,7 @@ def read_task_file(path: str) -> TaskFile:
         title=fm.get("title"),
         tags=fm.get("tags"),
         rank=fm.get("rank"),
+        debt_id=fm.get("debt_id"),
     )
 
 
@@ -788,6 +793,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["tags"] = task.tags
     if task.rank is not None:
         fm["rank"] = task.rank
+    if task.debt_id is not None:
+        fm["debt_id"] = task.debt_id
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

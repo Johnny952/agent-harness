@@ -8333,3 +8333,83 @@ at the end of the new bucket. The tuples in `changed` gain `tags` and
   list `board_list` already has to read.
 - Renumbering when a gap runs out: left to the console's drag (step 8),
   which knows the neighbours.
+
+## ADR 131 — Debt entries as `proposed` backlog items, linked by `debt_id`, with their priority from the auditor's `impact`
+
+**Status:** accepted (T-086, 2026-10-18). Step 5d of
+`docs/plans/board-service.md`, the last part of step 5: debt in the backlog,
+the one-time import of `docs/debt/`, and `impact`. Builds on ADR 127
+(`priority`, `task_lock`), ADR 129 (`source`, the writers, `CREATE_LOCK`)
+and ADR 130 (`tags`, the rank at the end of the bucket). Keeps ADR 59: no
+index row is mirrored onto a board card, and `card` stays `none`.
+
+**Context.** Section 4 of the plan puts known debt in the backlog next to
+proposed work, tagged `debt`, so it is ranked and picked like the rest
+instead of living only in `docs/debt/README.md`. It asks for an `impact`
+that sets the item's priority, and a one-time import of the entries the
+index already holds. It leaves open who judges the impact, where it is
+written, how an item points at its entry, when a new entry is filed, and
+what a second filing or a resolved entry does.
+
+**Decision.**
+
+1. *`impact` is a debt index column, written by the auditor.* It is the last
+   column, after `card`, and it holds `risk`, `cost` or `cosmetic`. It is
+   read by header name only, so a row from before the column, or a short
+   row, reads as `none`, and so does any other value. The auditor's prompt
+   and the filing note ask for it. The board does not judge it: the auditor
+   has just read the code the entry is about.
+2. *The impact maps to a priority.* `risk` is `high`, `cost` is `normal`,
+   `cosmetic` is `low`, and `none` is `normal` (`debt.IMPACT_PRIORITY`,
+   `DEFAULT_IMPACT_PRIORITY`). An item lands at the end of that bucket, as
+   any proposal does (ADR 130).
+3. *An item points at its entry with `debt_id`.* The task frontmatter gains
+   `debt_id`, an entry id like `T-065-D1`, checked on read
+   (`tasks.is_debt_id`) and served by `board_list` and `board_get`, where a
+   bad value is a warning and is served as written. `card` is kept, with its
+   meaning: ADR 59 retired the board link, and the link now runs the other
+   way, from the item to the entry.
+4. *One writer files an entry, idempotent on `debt_id`.*
+   `tasks.propose_debt` holds `CREATE_LOCK`, looks for a task with that
+   `debt_id` at any status, and creates one only if none exists: status
+   `proposed`, `source: debt`, `tags: [debt]`, the priority from the impact.
+   An item the operator dropped stays dropped and is not filed again. A
+   lost description is written again. `tasks.file_debt` files a list of
+   rows, skips resolved ones, and has a dry run.
+5. *The item says what the entry says.* `debt.backlog_item` builds the
+   title from the id and the **what** (cut to `MAX_TITLE_CHARS`), the
+   `## Goal` from the **what**, the **where** and a pointer to the entry's
+   file, and `## Done when` from the **fix**.
+6. *The dispatcher files new entries after the auditor.* Once the auditor's
+   round is done, in a cycle and in a final `run-phase`, the dispatcher
+   reads the index from the writer's worktree and files each entry the
+   dispatcher numbered in that task (`_mirror_filed_debt`). An entry the
+   index does not show is filed from its declaration with no impact, and a
+   warning. A resolved row is not filed. A failure is a warning and never
+   fails the cycle: the index stays the record.
+7. *`dispatch import-debt` files what is already there.* It reads a
+   project's index in a container, as the dispatcher reads it
+   (`--project`), or a file on the host (`--index`), and files every open
+   entry through the same writer. `--dry-run` prints what it would file and
+   writes nothing. Because the writer is idempotent, the import can run
+   before or after cycles have mirrored entries, and twice.
+
+**Consequences.** Debt shows in the backlog with a priority, a rank and the
+`debt` tag, and the operator accepts or drops it like any proposal. Each
+auditor round adds one index read. The 36 rows of this repository's index
+gained an `impact` cell; the only open one, `T-065-D1`, is `cost`. Resolving
+an entry does not close its item: the operator drops it.
+
+**Ruled out.**
+- Writing the item's id into the index's `card` cell: the index lives in the
+  project's branch and the hive outside it, so a cycle would have to commit
+  to the project for a board write. `debt_id` keeps the link on the side the
+  board owns.
+- Judging the impact on the board, or from keywords in the row: the auditor
+  has the context, and a guess would set priorities nobody chose.
+- Filing at `numbering` time, before the auditor: the row and its impact do
+  not exist yet.
+- Closing or dropping an item when its entry is marked resolved: a status
+  change the operator did not make, from a cell any task can edit.
+- A `debt` status or a separate debt list: `source`, `tags` and `debt_id`
+  carry it, and the backlog's order already applies.

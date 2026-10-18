@@ -211,13 +211,13 @@ def test_list_rows(client, hive):
     assert out["items"] == [
         {"id": "T-1", "title": "Serve the board over MCP, reads only.", "status": "pending",
          "place": "board", "epic": "T-9", "merged": False, "priority": "normal", "source": None,
-         "tags": [], "rank": None},
+         "tags": [], "rank": None, "debt_id": None},
         {"id": "T-2", "title": "Serve the board over MCP, reads only.", "status": "done",
          "place": "board", "epic": None, "merged": True, "priority": "normal", "source": None,
-         "tags": [], "rank": None},
+         "tags": [], "rank": None, "debt_id": None},
         {"id": "T-3", "title": None, "status": "pending", "place": "board", "epic": None,
          "merged": False, "priority": "normal", "source": None,
-         "tags": [], "rank": None},
+         "tags": [], "rank": None, "debt_id": None},
     ]
 
 
@@ -236,6 +236,34 @@ def test_a_bad_backlog_field_is_served_as_written_and_warned(client, hive):
     assert len(out["warnings"]) == 2
     assert "'urgent'" in out["warnings"][0] and "T-1.md" in out["warnings"][0]
     assert "'someone'" in out["warnings"][1]
+
+
+def test_a_debt_item_carries_its_debt_id_in_list_and_get(client, hive):
+    task(hive, "T-1", status="proposed", source="debt", tags=["debt"], debt_id="T-065-D1")
+    task(hive, "T-2")
+    out = ok(client, "board_list")
+    assert out["warnings"] == []
+    assert {r["id"]: r["debt_id"] for r in out["items"]} == {"T-1": "T-065-D1", "T-2": None}
+    got = ok(client, "board_get", {"task_id": "T-1"})
+    assert got["warnings"] == []
+    assert got["item"]["frontmatter"]["debt_id"] == "T-065-D1"
+
+
+def test_a_bad_debt_id_is_served_as_written_and_warned(client, hive):
+    task(hive, "T-1", status="proposed", source="debt", debt_id="not a debt id")
+    out = ok(client, "board_list")
+    assert out["items"][0]["debt_id"] == "not a debt id"
+    assert len(out["warnings"]) == 1
+    assert "debt_id" in out["warnings"][0] and "T-1.md" in out["warnings"][0]
+    got = ok(client, "board_get", {"task_id": "T-1"})
+    assert got["item"]["frontmatter"]["debt_id"] == "not a debt id"
+    assert len(got["warnings"]) == 1 and "debt_id" in got["warnings"][0]
+
+
+def test_get_warns_on_a_bad_backlog_field_as_list_does(client, hive):
+    task(hive, "T-1", priority="urgent")
+    warnings = ok(client, "board_get", {"task_id": "T-1"})["warnings"]
+    assert len(warnings) == 1 and "'urgent'" in warnings[0]
 
 
 def test_the_backlog_statuses_are_the_dispatchers(client):

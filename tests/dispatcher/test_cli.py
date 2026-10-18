@@ -2,6 +2,7 @@ import datetime as dt
 import io
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1577,3 +1578,125 @@ def test_cli_merge_task_is_refused_while_the_base_is_locked(
     assert "task task-1: not merged" in err
     assert "the base is locked by elsewhere:1:feedface" in err
     assert _cli_base_lock(tmp_path)["owner"] == "elsewhere:1:feedface"
+
+
+# --- `dispatch import-debt`, the one-time filing of the index (ADR 131) -----
+
+
+_DEBT_INDEX = """# Debt
+
+| id | what | where | fix | card | impact |
+|---|---|---|---|---|---|
+| `T-1-D1` | The retry loop is untested | cli.py | a fake clock | none | risk |
+| `T-1-D2` | **Resolved 2026-10-01 by T-3.** A race | anything | a lock | none | none |
+| `T-2-D1` | The loader guesses | config.py | read the schema | none | cosmetic |
+"""
+
+
+def _debt_items(tmp_path: Path) -> dict:
+    return {
+        task_id: (task.debt_id, task.status, task.priority, task.source, task.tags)
+        for task_id, task in tasks.read_all_tasks(str(tmp_path / "hive")).items()
+    }
+
+
+def test_cli_import_debt_files_every_open_entry_once_from_a_file(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    index = tmp_path / "README.md"
+    index.write_text(_DEBT_INDEX)
+
+    _run_command(monkeypatch, config_path, "import-debt", "--index", str(index))
+
+    assert _debt_items(tmp_path) == {
+        "T-001": ("T-1-D1", "proposed", "high", "debt", ["debt"]),
+        "T-002": ("T-2-D1", "proposed", "low", "debt", ["debt"]),
+    }
+    out = capsys.readouterr().out
+    assert "T-1-D1: filed as T-001 (priority high)" in out
+    assert "2 open entries" in out and "2 filed, 0 already filed" in out
+
+    _run_command(monkeypatch, config_path, "import-debt", "--index", str(index))
+
+    assert sorted(_debt_items(tmp_path)) == ["T-001", "T-002"]
+    out = capsys.readouterr().out
+    assert "T-1-D1: already T-001" in out and "0 filed, 2 already filed" in out
+
+
+def test_cli_import_debt_dry_run_writes_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_config(tmp_path)
+    index = tmp_path / "README.md"
+    index.write_text(_DEBT_INDEX)
+
+    _run_command(monkeypatch, config_path, "import-debt", "--index", str(index), "--dry-run")
+
+    assert _debt_items(tmp_path) == {}
+    out = capsys.readouterr().out
+    assert "T-1-D1: would file (priority high)" in out
+    assert "dry run: 2 open entries" in out and "2 to file" in out
+
+
+def test_cli_import_debt_reads_the_project_index_in_a_container(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(cli_mod, "cleanup_container", lambda cfg: "agent-cuenta1")
+
+    def fake_exec(container, workdir, command):
+        calls.append((container, workdir, command))
+        return subprocess.CompletedProcess(command, 0, stdout=_DEBT_INDEX, stderr="")
+
+    monkeypatch.setattr(cli_mod.docker_exec, "run_docker_exec", fake_exec)
+
+    _run_command(monkeypatch, config_path, "import-debt", "--project", "myproj")
+
+    assert calls == [("agent-cuenta1", "/data/projects/myproj", ["cat", "docs/debt/README.md"])]
+    assert sorted(_debt_items(tmp_path)) == ["T-001", "T-002"]
+    assert "myproj:docs/debt/README.md" in capsys.readouterr().out
+
+
+def test_cli_import_debt_blocks_when_the_project_index_cannot_be_read(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    monkeypatch.setattr(cli_mod, "cleanup_container", lambda cfg: "agent-cuenta1")
+    monkeypatch.setattr(
+        cli_mod.docker_exec, "run_docker_exec",
+        lambda container, workdir, command: subprocess.CompletedProcess(
+            command, 1, stdout="", stderr="cat: docs/debt/README.md: No such file or directory",
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "import-debt", "--project", "myproj")
+
+    assert excinfo.value.code == cli_mod.EXIT_BLOCKED
+    assert "No such file" in capsys.readouterr().err
+    assert _debt_items(tmp_path) == {}
+
+
+def test_cli_import_debt_blocks_on_an_index_file_that_is_not_there(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "import-debt", "--index", str(tmp_path / "nope.md"))
+
+    assert excinfo.value.code == cli_mod.EXIT_BLOCKED
+    assert "cannot read" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [
+    ["import-debt"],
+    ["import-debt", "--project", "myproj", "--index", "x.md"],
+])
+def test_cli_import_debt_takes_exactly_one_source(tmp_path: Path, monkeypatch, argv) -> None:
+    config_path = _write_config(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, *argv)
+
+    assert excinfo.value.code == 2

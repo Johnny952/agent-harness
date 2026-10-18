@@ -384,3 +384,9 @@ def test_the_arquitecto_numbers_an_adr_from_its_block() -> None:
     duties = project_docs.duties("arquitecto", "task-1")
     assert "block of ADR numbers your note names" in duties
     assert "only when no block is named" in duties
+
+
+def test_the_auditor_is_told_every_debt_row_carries_an_impact() -> None:
+    """The column the dispatcher sets the backlog item's priority from (ADR 131)."""
+    assert "`impact`" in project_docs._AUDITOR
+    assert all(f"`{impact}`" in project_docs._AUDITOR for impact in ("risk", "cost", "cosmetic"))

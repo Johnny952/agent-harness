@@ -1249,6 +1249,7 @@ def test_debt_rows_come_back_as_the_index_writes_them(tmp_path: Path) -> None:
         "where": "two dispatch processes",
         "fix": "a lock per card",
         "card": "none",
+        "impact": "none",
         "resolved": False,
     }
     assert body["data"][1]["resolved"] is True

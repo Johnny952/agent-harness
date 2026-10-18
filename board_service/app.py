@@ -182,6 +182,9 @@ def board_list(
                 # bucket, None for a task filed before the field (ADR 130).
                 "tags": task_store.normal_tags(task.tags),
                 "rank": task.rank,
+                # The debt index entry a `source: debt` item was filed from,
+                # None for any other task (ADR 131).
+                "debt_id": task.debt_id,
             }
             problems = task_store.field_problems(task)
         except _UNREADABLE as exc:
@@ -231,12 +234,15 @@ def board_get(hive_dir: str, task_id: str) -> dict:
     if not os.path.isfile(path):
         raise NotFoundError(f"no task {task_id}")
     try:
-        context_transfer.read_task_file(path)
+        task = context_transfer.read_task_file(path)
         frontmatter = _frontmatter(path)
         description = task_store.read_description(hive_dir, task_id)
     except _UNREADABLE as exc:
         raise ToolError(f"{path}: unreadable task file: {exc}") from exc
-    warnings: list[str] = []
+    # The frontmatter is served as the file has it, `debt_id` among it; what
+    # a hand edit got wrong in the backlog fields is named, as `board_list`
+    # names it (ADR 131).
+    warnings: list[str] = [f"{path}: {problem}" for problem in task_store.field_problems(task)]
     comments = _comment_count(hive_dir, task_id, warnings)
     return {
         "item": _json_safe(
@@ -376,7 +382,8 @@ TOOLS: dict[str, dict] = {
         "name": "board_list",
         "description": (
             "List the harness's tasks and epics: id, title, status, place, epic, merged, "
-            "priority, source, tags, rank. The board's rows come by id, the backlog's by "
+            "priority, source, tags, rank, debt_id (the debt index entry a source-debt "
+            "item was filed from). The board's rows come by id, the backlog's by "
             "priority, then rank. `ready` lists the ids the next cycle may take, in order: "
             "pending with every dependency merged, by priority (a dependency takes the "
             "highest priority of what waits on it), then rank, then id. "

@@ -195,6 +195,7 @@ def test_index_rows_reads_every_row_by_column_name() -> None:
             "where": "a task touching `cli.py`",
             "fix": "a fake clock",
             "card": "card-aaa",
+            "impact": "none",
             "resolved": False,
         },
         {
@@ -203,6 +204,7 @@ def test_index_rows_reads_every_row_by_column_name() -> None:
             "where": "a task adding a config key",
             "fix": "read the schema",
             "card": "-",
+            "impact": "none",
             "resolved": False,
         },
     ]
