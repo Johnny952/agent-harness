@@ -7796,3 +7796,79 @@ before the pitch, and copies the line to answer it. What stays open:
 reason first or beside the argv; joining the argv on spaces; fetching any
 part of a run's log; a copy button with no pattern for one in the console;
 scoping the read to `CONSOLE_PROJECT` in the forward.
+
+## ADR 126 — `phase` on the task file rides on the lock: written with it, cleared with it, and a stale one is the reaper's
+
+**Status:** accepted (T-081, 2026-10-18). Step 6 of
+`docs/plans/board-service.md`. Narrows ADR 26 and ADR 28 and reverses neither:
+ADR 28 named the record that was missing and said the fix was dispatcher
+state, and this is that state, for the role only. ADR 26's refusal to grow a
+role field on `/api/tasks` stood on the file having none; the file now has
+one, so serving it is `_task` serving `TaskFile`'s fields, as ADR 59 has it.
+The card stays refused.
+
+**Context.** The board's five role lanes need to know which role is running
+on an `in_progress` task. ADR 28 found that nothing records it: the dispatcher
+holds the role while a phase runs and writes only a heartbeat, and the
+handoff files name the phase that *ended*. The plan puts a `phase` key in the
+task file, written as each phase starts and cleared as it ends. The question
+this task had to answer is what clears it when the phase does not end
+normally, including a dispatcher that is killed with the phase running.
+
+**Decision.**
+1. *The key.* `TaskFile.phase`, a role name or `None`. `read_task_file`
+   reads it and `write_task_file` writes it only when set, after
+   `command_verdicts`, so a file without one keeps its bytes.
+2. *It goes with the lock, not on writers of its own.* `tasks.acquire_lock`
+   takes `phase` and writes it with `owner` and `heartbeat`, replacing
+   whatever was there, so a lock taken without one leaves none.
+   `release_stale_lock`, `handoff` and `mark_blocked`, the three writers that
+   drop the lock, clear it. `refresh_heartbeat`, `set_resolved_debt` and
+   `mark_merged` leave it.
+3. *The dispatcher.* `dispatch_phase` passes `phase=role` to the
+   `acquire_lock` it already makes. Every way out of that function already
+   drops the lock: the exception handler, a rate limit, an expired login and
+   a failed exec call `release_stale_lock`. A phase that succeeds returns
+   with the lock held, and the caller's `tasks.handoff` (`run_phase`,
+   `run_draft_specs`) drops it. So no new call site exists, and none can be
+   forgotten.
+4. *A killed dispatcher.* It leaves `owner`, `heartbeat` and `phase` together,
+   and what clears the lock clears the role: `reap_expired_locks` at the next
+   `open_cycle` for an `in_progress` task whose heartbeat is past the TTL,
+   `dispatch release-account` by hand, or the next `acquire_lock`, which
+   writes its own role. Until then the api's `lock_expired` is `true` beside
+   it, and that is how a reader tells a dead phase from a running one. No
+   second clock and no startup sweep: a role with a separate lifetime from
+   the lock would be a second answer to "is this task held".
+5. *The api.* `/api/tasks` and `/api/tasks/<id>` serve `phase` on every row,
+   `null` when the file has none. It is read through `read_task_file`, and
+   nothing is derived.
+
+**Consequences.**
+- The board can split In progress into its lanes from
+  `status == "in_progress"` and `phase`. That is step 8, a front task.
+- A task between two phases of one cycle is `pending` with no `phase`, since
+  `run_phase` hands off to `pending`. A reaped task is `in_progress` with no
+  `phase` and no heartbeat
+  (`docs/learnings/a-reaped-lock-is-in-progress-with-no-heartbeat.md`). The
+  board needs a place for the second one that is not a role lane.
+- `reap_expired_locks` only reaps `in_progress`. A phase killed on a task in
+  any other status keeps its stale lock and role until `release-account` or
+  the next lock, as its lock already did. This entry does not change that.
+- Of ADR 28's list, only the role is now written. The phase's start time,
+  model and duration are still nowhere. The heartbeat is refreshed, so it is
+  not a start time.
+- A draft set's file carries `phase: arquitecto` while `draft-specs` runs,
+  through the same lock.
+
+**Ruled out.**
+- A `set_phase` / `clear_phase` pair of writers called around each phase.
+  That is two more call sites per exit path, and one missed is a role that
+  never clears.
+- Clearing a stale role on the api side, or hiding it when `lock_expired` is
+  true. The api serves the file.
+- A startup sweep that clears every `phase`. That would wipe the role of a
+  phase another dispatcher process is running.
+- Recording the role in `state_machine` instead. The board reads the task
+  file, and `owner` is already there.
+- Writing it to a board card (ADR 26).

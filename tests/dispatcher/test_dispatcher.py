@@ -1511,6 +1511,105 @@ def test_dispatch_phase_takes_over_lock_with_no_heartbeat_via_ttl_pass_through(t
     assert task.owner == "cuenta1"
 
 
+def _phase_seen_by(cfg, ran: list, result_text: str = "phase done", is_error: bool = False):
+    """An `exec_claude` that answers /usage, and records the task's `phase`
+    while the phase itself runs: what a reader of the task file sees then."""
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(
+                session_id=None,
+                result_text=(
+                    "Current session: 10% used · resets later\n"
+                    "Current week (all models): 10% used · resets later"
+                ),
+                raw={},
+            )
+        ran.append(read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).phase)
+        return ClaudeResult(session_id="sess-9", result_text=result_text, raw={"is_error": is_error})
+
+    return fake_exec_claude
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "implementador", "revisor", "auditor", "integrador"])
+def test_dispatch_phase_writes_the_role_as_the_tasks_phase_while_it_runs(
+    tmp_path, monkeypatch, role,
+) -> None:
+    """ADR 126: the role is on the task for as long as the phase holds it. A
+    phase that succeeds keeps it with the lock, which the caller's `handoff`
+    then drops (`tests/dispatcher/test_tasks.py`)."""
+    cfg = _make_config(tmp_path)
+    ran: list = []
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", _phase_seen_by(cfg, ran))
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+    monkeypatch.setattr(dispatcher_mod, "_record_left_behind", lambda *a, **k: None)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "commit_worktree", lambda *a, **k: None)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", role, "do the thing")
+
+    assert result.success is True
+    assert ran == [role]
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert (task.owner, task.phase) == ("cuenta1", role)
+
+
+def test_dispatch_phase_clears_the_phase_when_the_phase_fails(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    ran: list = []
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_seen_by(cfg, ran, result_text="claude timed out", is_error=True),
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do the thing")
+
+    assert result.success is False
+    assert ran == ["implementador"]
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert (task.owner, task.heartbeat, task.phase) == (None, None, None)
+
+
+def test_dispatch_phase_clears_the_phase_when_it_raises(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    seen: list = []
+
+    def raising_create_worktree(container, projects_root, slug, task_id, role):
+        seen.append(read_task_file(task_file_path(cfg.hive_tasks_dir, task_id)).phase)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", _phase_seen_by(cfg, []))
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "create_worktree", raising_create_worktree)
+
+    with pytest.raises(RuntimeError):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "do the thing")
+
+    assert seen == ["revisor"]
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).phase is None
+
+
+def test_reap_expired_locks_clears_the_phase_a_killed_dispatcher_left(tmp_path) -> None:
+    """ADR 126: what clears a stale `phase` is what clears the stale lock."""
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1", phase="implementador")
+    path = task_file_path(cfg.hive_tasks_dir, "task-1")
+    task = read_task_file(path)
+    task.heartbeat = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=999)).isoformat()
+    write_task_file(path, task)
+    assert read_task_file(path).phase == "implementador"
+
+    assert dispatcher_mod.reap_expired_locks(cfg) == ["task-1"]
+
+    after = read_task_file(path)
+    assert (after.status, after.owner, after.phase) == ("in_progress", None, None)
+
+
 def test_dispatch_phase_exception_during_busy_window_leaves_account_idle(tmp_path, monkeypatch) -> None:
     cfg = _make_config(tmp_path)
 
