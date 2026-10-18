@@ -8855,3 +8855,56 @@ screen count does not change.
   already reads every field an epic has.
 - Reading each child's `/api/tasks/<id>`: one list read holds every row.
 - An author field in the form: the service, not the browser, says who wrote.
+
+## ADR 140 — The board: Ready in the dispatcher's order, role lanes from the phase, one swimlane per epic
+
+**Status:** accepted (T-095, 2026-10-18). Step 8 of
+`docs/plans/board-service.md`, the Board row. Builds on ADR 126 (the phase on
+the lock), ADR 133 (`/api/ready`), ADR 137 (the epic fields) and ADR 139 (the
+epic progress rule). Replaces ADR 26's five status columns and ADR 28's
+banner. No new route.
+
+**Context.** `front/src/routes/index.tsx` drew the five statuses as columns,
+backlog and epic rows included, with In progress as one column and a banner
+saying the role lanes had no record behind them. ADR 126 put the running
+phase on the lock and ADR 133 served the Ready order, so both now exist.
+
+**Decision.**
+1. *Board items only.* A backlog status (`proposed`, `deferred`, `dropped`)
+   is not drawn, and an epic row (`status: epic` or `isEpic`) heads a
+   swimlane instead of being a card.
+2. *Placement* is `front/src/lib/board.ts:columnOf`, first match wins:
+   `merged: true` is Merged; `pending` is Ready when `/api/ready` names it,
+   else Waiting; `in_progress` with a phase in `ROLES` and a lock not expired
+   is that role's lane; any other `in_progress` (no phase, an expired lock, a
+   phase no role names) is "No live phase", with a chip saying "between
+   phases", "stale <role>" or the phase; `blocked` and `conflict` are their
+   own columns; anything else (`done` not merged, `drafted`, an unknown word)
+   is Other, shown only when used, with the status on the card. A status the
+   dispatcher does not write is also a warning.
+3. *Awaiting review* is a column with no status behind it
+   (`docs/plans/review.md` is unbuilt), so it is always empty and says "not
+   built". There is no integrador lane: neither the dispatcher nor `ROLES`
+   has that role.
+4. *A failed ready read is not Waiting.* An error, or the api's envelope with
+   a "no ready order" warning, folds Ready and Waiting into one "Pending,
+   ready unknown" column, with a broken-read line.
+5. *Order.* Ready keeps `/api/ready`'s order; every other column, and the
+   epic lanes, use `compareTasks`. The no-epic lane is last.
+6. *Lanes.* A card's lane is its `epic` field, else the epic whose
+   `split_into` lists it. An accepted epic keeps its lane when empty; an
+   epic the read did not serve still gets a lane, its head named as missing.
+   The header links to the epic and shows "n of m merged" by ADR 139's rule.
+7. *Reads.* One `tasksQuery` and one `readyQuery`, beside the accounts and
+   debt reads the board already had. A client-side column filter, which
+   covers the roles, joins the search and the account filter.
+
+**Consequences.** The banner is gone: the lanes it said could not exist now
+do. A card shows the title, falling back to the description.
+
+**Ruled out.**
+- Computing Ready in the browser from `depends_on`: the dispatcher's order
+  is served, and a second copy could disagree with it.
+- Treating a failed ready read as an empty one: every pending task would
+  look blocked on a dependency.
+- A *Start development* button: that is step 9.

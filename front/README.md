@@ -168,13 +168,16 @@ filed or carries. What that region still cannot show is which table a phase was
 *handed* — that is recomputed at every dispatch and written down nowhere — so it
 names the missing record rather than a route.
 
-The Board is no longer waiting on a route, and its banner no longer says it is.
-Its five role lanes wanted the role of the phase *running*, and no file in the
-harness records that — the dispatcher knows it while the phase runs and persists
-only a heartbeat, while `/api/phases` answers phases that have **ended**. So In
-progress stays one column, the banner names the missing record rather than a
-route, and the card carries `owner` and the api's `lock_expired` instead.
-`docs/decisions.md` ADR 28.
+The Board draws accepted tasks only, in one swimlane per epic and a no-epic
+lane last, each lane's header linking to its epic with "n of m merged". Its
+columns are Ready, in `/api/ready`'s order, and Waiting, the pending tasks
+Ready does not name; one lane per role, from the `phase` an `in_progress` task
+carries (ADR 126); No live phase, for an `in_progress` task with no phase or an
+expired lock, which says which; Awaiting review, which no status fills yet;
+Conflict, Blocked and Merged; and Other, when some card has a status none of
+those place. A failed ready read folds Ready and Waiting into one Pending
+column and says so. Backlog items are the Backlog screen's, not cards here.
+`docs/decisions.md` ADR 140, which replaces ADR 26's columns and ADR 28's banner.
 
 The console authenticates as a service, not as a human: a bearer token read
 server-side, never under a `VITE_` prefix, so Vite cannot inline it into the

@@ -21,8 +21,10 @@
  *
  * The file also holds the description's absent arm, and the one render of the
  * whole route here: the Board's search lives in `BoardPage` and no component
- * takes it as a prop, so it is reached through `renderRoute`. The columns live
- * in `BoardPage` too, so the `conflict` column is reached the same way.
+ * takes it as a prop, so it is reached through `renderRoute`. The columns and
+ * the epic swimlanes live in `BoardPage` too, so they are reached the same way;
+ * their arithmetic is `lib/board.test.ts`'s, and this file checks the screen
+ * draws it (ADR 140).
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -167,6 +169,7 @@ describe("the Board's search over a task with no description", () => {
   async function board() {
     await renderRoute(Route, "/", {
       "/api/tasks": { data: [task("T-101", null), task("T-102", "the pool screen")] },
+      "/api/ready": { data: [] },
       "/api/accounts": { data: [] },
       "/api/debt": { data: [] },
     });
@@ -187,49 +190,207 @@ describe("the Board's search over a task with no description", () => {
   });
 });
 
-describe("a task the pre-merge check moved to conflict", () => {
-  // The status is cast for the same reason `depends_on` is above: the second
-  // test serves a word `TaskStatus` does not name, which the api can do.
-  const task = (task_id: string, status: string): Task => ({ ...TASK, task_id, status }) as Task;
+describe("the board's columns and swimlanes", () => {
+  // The status is cast for the same reason `depends_on` is above: some tests
+  // serve a word `TaskStatus` does not name, which the api can do.
+  const task = (task_id: string, over: Record<string, unknown> = {}): Task =>
+    ({ ...TASK, task_id, status: "pending", ...over }) as Task;
 
-  // No wait here: a card in a column and a task in none are found by different
-  // text, so each test waits on its own.
-  async function board(...tasks: Task[]) {
-    await renderRoute(Route, "/", {
+  type ReadyAnswer = { data: string[]; warnings?: string[] } | { status: number; error: string };
+
+  async function board(tasks: Task[], ready: ReadyAnswer = { data: [] }) {
+    return renderRoute(Route, "/", {
       "/api/tasks": { data: tasks },
+      "/api/ready": ready,
       "/api/accounts": { data: [] },
       "/api/debt": { data: [] },
     });
   }
 
-  /** Every column's title, left to right. */
+  /** The key of the column a card sits in. */
+  function columnOf(taskId: string): string | null {
+    return screen.getByText(taskId).closest("[data-column]")?.getAttribute("data-column") ?? null;
+  }
+
+  /** The lane a card sits in: an epic's id, or `none`. */
+  function laneOf(taskId: string): string | null {
+    return screen.getByText(taskId).closest("[data-lane]")?.getAttribute("data-lane") ?? null;
+  }
+
+  /** The column titles of the first lane, left to right. */
   function columnTitles(): (string | null)[] {
+    const lane = document.querySelector("[data-lane]");
     return Array.from(
-      document.querySelectorAll("section.panel > div:first-child > span:first-child"),
+      lane?.querySelectorAll("section.panel > div:first-child > span:first-child") ?? [],
     ).map((s) => s.textContent);
   }
 
-  /** The title of the column a card sits in. */
-  function columnOf(taskId: string): string | null {
-    const section = screen.getByText(taskId).closest("section");
-    return section?.querySelector("div:first-child > span:first-child")?.textContent ?? null;
+  /** The cards of one column in one lane, top to bottom. */
+  function cardsIn(lane: string, column: string): string[] {
+    return Array.from(
+      document.querySelectorAll(`[data-lane="${lane}"] [data-column="${column}"] a`),
+    ).map((a) => a.getAttribute("href") ?? "");
   }
 
-  it("lands in the Conflict column, right after Blocked, with no warning", async () => {
-    await board(task("T-201", "conflict"), task("T-202", "blocked"));
+  it("draws Ready, Waiting, a lane per role, the stops and Merged", async () => {
+    await board([task("T-201")], { data: ["T-201"] });
     await screen.findByText("T-201");
-    expect(columnTitles()).toEqual(["Pending", "In progress", "Blocked", "Conflict", "Done"]);
-    expect(columnOf("T-201")).toBe("Conflict");
-    expect(columnOf("T-202")).toBe("Blocked");
-    expect(screen.queryByText(/is in no column/)).toBeNull();
+    expect(columnTitles()).toEqual([
+      "Ready",
+      "Waiting",
+      "Cartografo",
+      "Arquitecto",
+      "Implementador",
+      "Revisor",
+      "Auditor",
+      "No live phase",
+      "Awaiting review",
+      "Conflict",
+      "Blocked",
+      "Merged",
+    ]);
+    expect(screen.getByText("not built: no status says this yet")).toBeTruthy();
   });
 
-  it("still names a status outside the five, and lists conflict among them", async () => {
-    await board(task("T-203", "queued"));
+  it("places every card in its column", async () => {
+    await board(
+      [
+        task("T-211"),
+        task("T-212"),
+        task("T-213", { status: "in_progress", phase: "revisor", lock_expired: false }),
+        task("T-214", { status: "blocked" }),
+        task("T-215", { status: "conflict" }),
+        task("T-216", { status: "done", merged: true }),
+      ],
+      { data: ["T-211"] },
+    );
+    await screen.findByText("T-211");
+    expect(columnOf("T-211")).toBe("ready");
+    expect(columnOf("T-212")).toBe("waiting");
+    expect(columnOf("T-213")).toBe("phase:revisor");
+    expect(columnOf("T-214")).toBe("blocked");
+    expect(columnOf("T-215")).toBe("conflict");
+    expect(columnOf("T-216")).toBe("merged");
+    expect(screen.queryByText(/is in Other/)).toBeNull();
+  });
+
+  it("keeps a stale phase and a task between phases on the board, and says which", async () => {
+    await board([
+      task("T-221", { status: "in_progress", phase: "implementador", lock_expired: true }),
+      task("T-222", { status: "in_progress", phase: null }),
+      task("T-223", { status: "in_progress", phase: "arquitecto", lock_expired: false }),
+    ]);
+    await screen.findByText("T-221");
+    expect(columnOf("T-221")).toBe("no_phase");
+    expect(columnOf("T-222")).toBe("no_phase");
+    expect(columnOf("T-223")).toBe("phase:arquitecto");
+    expect(screen.getByText("stale implementador")).toBeTruthy();
+    expect(screen.getByText("between phases")).toBeTruthy();
+  });
+
+  it("makes no card of a backlog item or an epic", async () => {
+    await board([
+      task("T-231", { status: "proposed" }),
+      task("T-232", { status: "deferred" }),
+      task("T-233", { status: "dropped" }),
+      task("T-234", { status: "epic", split_into: ["T-235"], title: "the epic" }),
+      task("T-235", { epic: "T-234" }),
+    ]);
+    await screen.findByText("T-235");
+    expect(screen.queryByText("T-231")).toBeNull();
+    expect(screen.queryByText("T-232")).toBeNull();
+    expect(screen.queryByText("T-233")).toBeNull();
+    // The epic's id is its lane's header, not a card in any column.
+    expect(screen.getByText("T-234").closest("[data-column]")).toBeNull();
+  });
+
+  it("gives each epic a lane linked to it with its progress, and the rest a no-epic lane", async () => {
+    await board([
+      task("T-240", { status: "epic", split_into: ["T-241", "T-242"], title: "the console" }),
+      task("T-241", { epic: "T-240", status: "done", merged: true }),
+      task("T-242", { epic: "T-240" }),
+      task("T-243"),
+    ]);
+    await screen.findByText("T-243");
+    expect(laneOf("T-241")).toBe("T-240");
+    expect(laneOf("T-242")).toBe("T-240");
+    expect(laneOf("T-243")).toBe("none");
+    const lanes = Array.from(document.querySelectorAll("[data-lane]")).map((l) =>
+      l.getAttribute("data-lane"),
+    );
+    expect(lanes).toEqual(["T-240", "none"]);
+    const head = screen.getByText("the console").closest("a");
+    expect(head?.getAttribute("href")).toBe("/tasks/T-240");
+    expect(screen.getByText("1 of 2 merged")).toBeTruthy();
+    expect(screen.getByText("No epic")).toBeTruthy();
+  });
+
+  it("keeps the ready order inside Ready, and the dispatcher's order elsewhere", async () => {
+    await board(
+      [
+        task("T-251"),
+        task("T-252"),
+        task("T-253"),
+        task("T-254", { status: "blocked", priority: "low" }),
+        task("T-255", { status: "blocked", priority: "high" }),
+      ],
+      { data: ["T-253", "T-251", "T-252"] },
+    );
+    await screen.findByText("T-251");
+    expect(cardsIn("none", "ready")).toEqual(["/tasks/T-253", "/tasks/T-251", "/tasks/T-252"]);
+    expect(cardsIn("none", "blocked")).toEqual(["/tasks/T-255", "/tasks/T-254"]);
+  });
+
+  it("reads /api/tasks and /api/ready once each", async () => {
+    const { sent } = await board([task("T-256")], { data: ["T-256"] });
+    await screen.findByText("T-256");
+    expect(sent.filter((r) => r.path === "/api/tasks")).toHaveLength(1);
+    expect(sent.filter((r) => r.path === "/api/ready")).toHaveLength(1);
+  });
+
+  it.each([
+    ["an error", { status: 500, error: "boom" }],
+    ["no ready order", { data: [], warnings: ["/hive/tasks: no ready order: bad field"] }],
+  ] as const)(
+    "says so when the ready read gives %s, rather than calling it Waiting",
+    async (_n, ready) => {
+      await board([task("T-261")], ready as ReadyAnswer);
+      await screen.findByText("T-261");
+      expect(columnOf("T-261")).toBe("pending");
+      expect(screen.getByText(/\/api\/ready gave no ready order/)).toBeTruthy();
+      expect(columnTitles()).not.toContain("Waiting");
+      expect(columnTitles()[0]).toBe("Pending, ready unknown");
+    },
+  );
+
+  it("shows a status it has no column for in Other, and names an unknown one", async () => {
+    await board([
+      task("T-271", { status: "done" }),
+      task("T-272", { status: "drafted" }),
+      task("T-273", { status: "queued" }),
+    ]);
+    await screen.findByText("T-271");
+    expect(columnOf("T-271")).toBe("other");
+    expect(columnOf("T-272")).toBe("other");
+    expect(columnOf("T-273")).toBe("other");
     expect(
-      await screen.findByText(
-        /T-203: status "queued" is none of pending, in_progress, blocked, conflict or done/,
-      ),
+      screen.getByText(/T-273: status "queued" is not one the dispatcher writes/),
     ).toBeTruthy();
+    expect(screen.queryByText(/T-272: status/)).toBeNull();
+  });
+
+  it("filters by column", async () => {
+    await board([task("T-281"), task("T-282", { status: "blocked" })], { data: ["T-281"] });
+    await screen.findByText("T-281");
+    fireEvent.change(screen.getByLabelText(/column/), { target: { value: "blocked" } });
+    expect(await screen.findByText("1 of 2 cards")).toBeTruthy();
+    expect(screen.queryByText("T-281")).toBeNull();
+    expect(screen.getByText("T-282")).toBeTruthy();
+  });
+
+  it("shows the card's title", async () => {
+    await board([task("T-291", { title: "the board's lanes", description: "long text" })]);
+    expect(await screen.findByText("the board's lanes")).toBeTruthy();
+    expect(screen.getByText("T-291").closest("a")?.getAttribute("href")).toBe("/tasks/T-291");
   });
 });
