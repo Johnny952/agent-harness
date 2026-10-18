@@ -40,6 +40,13 @@ turns.
 - **To verify:** the CLI version in the agent image (≥ 2.1.145), and that
   bringing a project up inside the agent's dind works under `-p`.
 
+**Built 2026-10-17** by T-068 (`docs/decisions.md` ADR 115). The mapper runs
+the generator first and stages the skill under `docs/run-skill/`; the
+dispatcher moves it to `.claude/skills/` under the mapping commit's lock. The
+gates still read only the index frontmatter, which the mapper fills from what
+the generator verified: ADR 115 narrows the second bullet above. The CLI
+version holds (2.1.296); bringing a project up in the dind is not verified yet.
+
 ## What replica-skill offers
 
 replica-skill is eleven chained skills that map an existing app from

@@ -314,6 +314,45 @@ def test_load_config_rejects_an_empty_allowed_tools_entry(tmp_path: Path, bad_en
         load_config(str(config_path))
 
 
+def test_mapping_allowed_tools_is_empty_until_the_owner_fills_it(tmp_path: Path) -> None:
+    """The cartografo's extra grant (ADR 115) is a decision about the projects
+    under projects_root, so nothing is granted until the owner writes it."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    assert load_config(str(config_path)).mapping_allowed_tools == []
+
+
+def test_load_config_honours_mapping_allowed_tools(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        CONFIG_YAML + '\nmapping_allowed_tools:\n  - "Bash(docker compose*)"\n  - "Bash(make*)"\n'
+    )
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.mapping_allowed_tools == ["Bash(docker compose*)", "Bash(make*)"]
+    assert cfg.allowed_tools == []
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('"Bash(make*)"', "mapping_allowed_tools must be a list"),
+        ('\n  - ""', "mapping_allowed_tools entries must be non-empty strings"),
+    ],
+    ids=["one-string", "empty-entry"],
+)
+def test_mapping_allowed_tools_is_validated_like_allowed_tools(
+    tmp_path: Path, value: str, message: str,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + f"\nmapping_allowed_tools: {value}\n")
+
+    with pytest.raises(ValueError, match=message):
+        load_config(str(config_path))
+
+
 def test_mapping_is_off_until_it_is_asked_for(tmp_path: Path) -> None:
     """Mapping a project spends quota on a phase that ships no code, so it is
     opt-in per harness — never something a first run discovers by being
@@ -868,6 +907,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "collector_url": "http://c",
         "permission_mode": "plan",
         "allowed_tools": ["Bash(ls*)"],
+        "mapping_allowed_tools": ["Bash(make*)"],
         "update_project_before_task": True,
         "git_credentials_path": "/g",
         "project_keys_dir": "/k",
@@ -885,7 +925,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         22,
-        15,
+        16,
         2,
     )
     for spec in CONFIG_KEYS.values():

@@ -175,6 +175,11 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "A standing grant to every phase. docs/plans/command-requests.md is where "
         "grants are given."
     ),
+    "mapping_allowed_tools": _read_only(
+        "A grant to the cartografo alone, on top of allowed_tools, so the run-skill "
+        "generator can run the project's build (ADR 115). A permission is the "
+        "operator's to grant by hand."
+    ),
     "update_project_before_task": _read_only(
         "Turning it on needs a credential or deploy key on the host that the console "
         "cannot see. That is the second task's ground."
@@ -228,6 +233,8 @@ class Config:
     #: and without one every task would open with a warning it cannot act on.
     #: False is the shape every config had before this existed, and it is the
     #: behaviour they all got: the base is whatever the clone was last left at.
+    #: Added to allowed_tools for the cartografo's call only (ADR 115).
+    mapping_allowed_tools: list[str] = dataclasses.field(default_factory=list)
     update_project_before_task: bool = False
     #: Where that credential is read from, inside the container.
     git_credentials_path: str = docker_exec.GIT_CREDENTIALS_PATH
@@ -431,7 +438,7 @@ def _load_role_model(raw: dict) -> dict[str, str]:
     return dict(block)
 
 
-def _load_allowed_tools(raw: dict) -> list[str]:
+def _load_allowed_tools(raw: dict, key: str = "allowed_tools") -> list[str]:
     """Tool patterns every phase is allowed outright, on top of the mode.
 
     The mode and this list are two independent grants, measured separately on
@@ -452,15 +459,18 @@ def _load_allowed_tools(raw: dict) -> list[str]:
 
     Empty by default, which sends no flag: what a project's phases may run is
     a decision about that project, and guessing it would be worse than asking.
+
+    `mapping_allowed_tools` is read through here too, under its own `key`: the
+    same shape, granted to the cartografo's call alone (ADR 115).
     """
-    tools = raw.get("allowed_tools", [])
+    tools = raw.get(key, [])
     if tools is None:
         return []
     if isinstance(tools, str) or not isinstance(tools, list):
-        raise ValueError("allowed_tools must be a list of tool patterns")
+        raise ValueError(f"{key} must be a list of tool patterns")
     for tool in tools:
         if not isinstance(tool, str) or not tool.strip():
-            raise ValueError("allowed_tools entries must be non-empty strings")
+            raise ValueError(f"{key} entries must be non-empty strings")
     return [tool.strip() for tool in tools]
 
 
@@ -739,6 +749,7 @@ def _build_config(raw: dict) -> Config:
         default_model=raw.get("default_model", "claude-opus-5-5"),
         permission_mode=_load_permission_mode(raw),
         allowed_tools=_load_allowed_tools(raw),
+        mapping_allowed_tools=_load_allowed_tools(raw, "mapping_allowed_tools"),
         max_revision_rounds=raw.get("max_revision_rounds", 3),
         escalate_effort_after_round=raw.get("escalate_effort_after_round", 2),
         escalated_effort=_check_effort("escalated_effort", raw.get("escalated_effort", "high")),

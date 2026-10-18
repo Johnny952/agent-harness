@@ -6969,3 +6969,98 @@ overrides file. The forward (ADR 112) already passes both writes through.
 last repeating) for a refetch, and records every request's method, path and
 body as `sent`, so a write's body is asserted as `fetch` received it. Plan
 task 3 is built; its *Done when* tests are in `front/src/routes/-models.test.tsx`.
+
+## ADR 115 — the run skill is generated in mapping, staged by the phase and moved by the dispatcher; the gates still read only the frontmatter
+
+**Status:** accepted (T-068, 2026-10-17; the staging, the move's rules and
+`mapping_allowed_tools` were decided by the owner in the task, after a probe).
+Builds step 1 of `docs/plans/skills-adoption.md` and narrows that plan's
+second bullet of section 1. The plan's text is not edited.
+
+**Context.** The plan has the cartografo run Claude Code's bundled
+`/run-skill-generator` and the gates read their commands from the skill "when
+the project's config names none". Config never names a project's commands:
+the gates read them from the YAML frontmatter of the project's
+`docs/README.md` (`project_docs.read_commands`), which the cartografo already
+writes (ADR 66, ADR 80). A `SKILL.md` is prose for a model, and a gate runs
+with no model in the loop. A probe on 2026-10-17 (`claude -p` in
+agent-cuenta1, Haiku, `acceptEdits`, the standing allowlist, a toy project)
+found:
+- the CLI is 2.1.296 (`docker/agent/Dockerfile`, `ARG CLAUDE_CODE_VERSION`),
+  past the generator's 2.1.145;
+- the generator runs under `-p` when the prompt starts with
+  `/run-skill-generator`;
+- a phase's Write anywhere under `.claude/` is refused, while `docs/` is not;
+  told to write the skill to `docs/run-skill/run-toy/`, the generator did so
+  (`SKILL.md` and a `driver.mjs`) and its text named the staging path;
+- with the standing allowlist only `node --test` ran; `npm test`,
+  `node <script>`, `npm --version` and compound commands were refused, and
+  the skill marked what it could not verify as unverified.
+
+**Decision.**
+1. *The frontmatter stays the only thing a gate reads.* `dispatcher/gates.py`
+   is unchanged and never parses a skill. The mapper runs the generator first,
+   then fills `build:`, `test:` and, where a fresh checkout needs one,
+   `install:` from the commands the generator actually ran and saw succeed. A
+   key it did not verify, or that was refused, is omitted, never guessed.
+2. *`MAPPED_KEYS` gains `install`*, because the mapper is now asked to
+   establish it: the generator runs the install and sees it succeed. `lint`
+   stays out of it.
+3. *The skill is for the roles.* `.claude/skills/run-<name>/` is committed to
+   the project, so the arquitecto and the implementador get it as a project
+   skill from their worktree. The index's table of docs gains a row for it.
+4. *The phase stages it, the dispatcher moves it.* The cartografo's prompt
+   opens with `project_docs.mapper_lead()`: `/run-skill-generator` followed
+   by the staging terms, before `Role:` and every duty. The generator is
+   user-invocable only. Named inside `_MAPPER`, a second probe showed the
+   model reach for the Skill tool and be refused, so it never ran; as the
+   prompt's leading slash command it runs, and a third probe with the whole
+   mapping prompt after it wrote the skill and then the docs. The lead line
+   has the generator write to `docs/run-skill/run-<name>/`
+   (`project_docs.RUN_SKILL_STAGING`). Every path inside the skill is its
+   final `.claude/skills/run-<name>/...` path, and the skill never mentions
+   the staging directory. After the phase returns,
+   `project_docs.move_staged_run_skills` runs inside the mapping branch of
+   `dispatch_phase`, under the same `_base_lock` as the mapping commit
+   (ADR 80) and before it, with no model in the loop:
+   - each `docs/run-skill/<dir>/` moves whole to `.claude/skills/<dir>/`;
+   - an entry that is not a directory, or whose name does not match
+     `run-[a-z0-9-]+`, is not moved, and is logged;
+   - an existing `.claude/skills/<dir>/` is never overwritten: it is logged,
+     and the staged copy is left out of the commit;
+   - `docs/run-skill/` is then removed, so nothing staged is ever committed;
+   - with nothing staged it is a no-op, and mapping commits as before.
+   No other phase gets the move. The cartografo's commit has no scope
+   (`commit_scope` returns None) and excludes only the charter; nothing in
+   the dispatcher excludes `.claude/`, so the moved skill is in the commit.
+   No other role's scope is widened.
+5. *It is generated once*: only when the mapping phase runs, which is only
+   when the project has no index (`_needs_mapping`). Nothing regenerates it on
+   its own. A task that changes how the project is built or run updates it,
+   as any task updates the docs it makes stale.
+6. *`mapping_allowed_tools`*, a list of tool patterns validated like
+   `allowed_tools` (`_load_allowed_tools`), default `[]`, read-only in
+   `CONFIG_KEYS`: a permission is the operator's to grant, by hand, in
+   `config.yaml`. `_phase_permission_flags(cfg, role)` appends it to
+   `allowed_tools` for the cartografo's call only; every other role's flags
+   are exactly what they were, and a test asserts it. `permission_mode` does
+   not change for mapping: no `bypassPermissions`. With the list empty
+   mapping still runs, and records only what it verified.
+7. *The fingerprint stays on `allowed_tools`.* The two
+   `learnings.harness_fingerprint(cfg.permission_mode, cfg.allowed_tools,
+   docker_exec.WRITER_ROLES)` readers in `dispatcher.py` (and the one in
+   `cli.py`) are unchanged. They describe the grants a task's cycle phases run
+   under, and those are unchanged; `mapping_allowed_tools` reaches the
+   cartografo alone, a one-time phase that writes the docs and the staged
+   skill and whose grant is not one a later phase holds.
+
+**Consequences.** The owner fills `mapping_allowed_tools` per the projects in
+`projects_root` (for example `Bash(docker compose*)`, `Bash(npm *)`,
+`Bash(make*)`) and turns `mapping_enabled` on; until then the generator can
+verify little more than `node --test`, and the frontmatter is thin. Projects
+already mapped, this harness included, get no skill: nothing regenerates one.
+A project whose own `.gitignore` excludes `.claude/` would drop the moved
+skill from the mapping commit; the dispatcher does not override it. Still
+unverified: bringing a project up in the agent's dind under `-p`. A resumed
+mapping phase is not told to run the generator again: the leading command
+belongs to the first call of the session.

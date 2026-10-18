@@ -43,7 +43,7 @@ _USAGE_PROBE_TIMEOUT_SECONDS = 120
 _PROBE_WORST_CASE_SECONDS = _USAGE_PROBE_TIMEOUT_SECONDS + docker_exec.HOST_BACKSTOP_SECONDS
 
 
-def _phase_permission_flags(cfg: Config) -> dict:
+def _phase_permission_flags(cfg: Config, role: str) -> dict:
     """What every call that runs a role's own work has to carry.
 
     Three flags. The first two are the two halves of one measured failure
@@ -66,13 +66,20 @@ def _phase_permission_flags(cfg: Config) -> dict:
     own `.claude/settings.local.json` is refused too. It is empty unless the
     project's config names patterns, so this adds no flag by default.
 
+    `mapping_allowed_tools` is added for the cartografo alone (ADR 115): its
+    run-skill generator has to run the project's own build to say what works,
+    and every other role keeps exactly the standing grant above.
+
     The /usage probes do not get these: a probe runs a built-in command, uses
     no tools and touches no files.
     """
     return {
         "permission_mode": cfg.permission_mode,
         "add_dirs": [context_transfer.hive_root(cfg.hive_tasks_dir)],
-        "allowed_tools": cfg.allowed_tools,
+        "allowed_tools": (
+            [*cfg.allowed_tools, *cfg.mapping_allowed_tools]
+            if role == project_docs.MAPPER_ROLE else cfg.allowed_tools
+        ),
     }
 
 
@@ -943,8 +950,11 @@ def _role_prompt(
     if role == project_docs.MAPPER_ROLE:
         # The mapper runs before the first phase, so there is no handoff to
         # read and the task is context, not its job: it is told what is coming
-        # so it maps the parts of the project that task will touch first.
+        # so it maps the parts of the project that task will touch first. The
+        # generator's line goes before everything else: it is a slash command,
+        # and only the prompt's first one runs (ADR 115).
         prompt = (
+            f"{project_docs.mapper_lead()}\n\n"
             f"Role: {role}. Task: {task_id}.\n\n"
             f"The task about to run on this project is:\n{_ask(parsed)}\n\n"
             "You are not doing that task. You run once, ahead of it, because this project has "
@@ -1308,7 +1318,7 @@ def _resume_missing_handoff(
             # The session already read its skills; the schema has to travel,
             # or the return it is being asked for comes back as prose.
             json_schema=handoff.schema_for(role),
-            **_phase_permission_flags(cfg),
+            **_phase_permission_flags(cfg, role),
         )
         recorder.record("handoff-resume", retry)
         if not _exec_succeeded(retry) or is_rate_limit_error(retry):
@@ -1396,7 +1406,7 @@ def _shrink_over_budget(
         json_schema=handoff.schema_for(role),
         # A resume is a new `claude` process and inherits no flags, so the
         # permissions have to be restated here too.
-        **_phase_permission_flags(cfg),
+        **_phase_permission_flags(cfg, role),
     )
     # Before the branch below, not after: a retry this discards as a *result*
     # still cost the account a turn, and the log is about what was spent.
@@ -1515,7 +1525,7 @@ def _run_gates(
         json_schema=handoff.schema_for(role),
         # Restated for the same reason as the shrink retry's: new process,
         # no inherited flags.
-        **_phase_permission_flags(cfg),
+        **_phase_permission_flags(cfg, role),
     )
     # Recorded whether or not it is kept, for the shrink retry's reason.
     recorder.record("gate-retry", retry)
@@ -1593,7 +1603,7 @@ def _refuse_review_writes(
         # as the shrink retry's, and the corrected return is the one that has
         # to land in the task file.
         json_schema=handoff.schema_for(role),
-        **_phase_permission_flags(cfg),
+        **_phase_permission_flags(cfg, role),
     )
     # Recorded whether or not it is kept, for the shrink retry's reason.
     recorder.record("review-retry", retry)
@@ -1721,7 +1731,7 @@ def dispatch_phase(
                     plugin_dirs=role_skills.plugin_dirs(role),
                     append_system_prompt=_phase_system_prompt(role),
                     json_schema=handoff.schema_for(role),
-                    **_phase_permission_flags(cfg),
+                    **_phase_permission_flags(cfg, role),
                 )
                 # Here, before the retries: each of them *replaces* `result`,
                 # so a record taken afterwards would describe the last retry
@@ -1756,6 +1766,11 @@ def dispatch_phase(
                     _base_lock(cfg, slug, "mapping commit")
                     if role == project_docs.MAPPER_ROLE else contextlib.nullcontext()
                 ):
+                    if role == project_docs.MAPPER_ROLE:
+                        # Staged because a phase cannot write under .claude/
+                        # (ADR 115); moved here, with no model in the loop,
+                        # so the skill lands in the mapping commit.
+                        project_docs.move_staged_run_skills(container, workdir)
                     docker_exec.commit_worktree(
                         container, workdir,
                         message=_commit_message(role, task_id, account, result.session_id, round_num),
