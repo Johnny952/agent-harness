@@ -246,6 +246,93 @@ describe("the usage region's models", () => {
   });
 });
 
+describe("the usage region's denials", () => {
+  const BASH = {
+    tool_name: "Bash",
+    tool_use_id: "toolu_01",
+    tool_input: { command: "npm i left-pad", description: "Install a package" },
+  };
+
+  /** The denied row of the one call line; the calls disclosure is opened first. */
+  async function denied(over: Record<string, unknown>, calls = [line(over)]): Promise<string> {
+    await taskPage(TASK, [], { data: [group(calls)] });
+    await screen.findByText("first call");
+    fireEvent.click(screen.getByRole("button", { name: /calls \(\d+\)/ }));
+    return screen.getAllByText("denied", { exact: true })[0]!.parentElement!.textContent ?? "";
+  }
+
+  it("reads a missing key as written before denials were logged", async () => {
+    const row = await denied({});
+    expect(row).toContain("written before denials were logged");
+    expect(row).not.toContain("not recorded");
+    expect(row).not.toContain("none");
+  });
+
+  it("reads null as absent", async () => {
+    const row = await denied({ permission_denials: null });
+    expect(row).toContain("not recorded");
+    expect(row).not.toContain("written before denials were logged");
+  });
+
+  it("reads [] as none", async () => {
+    const row = await denied({ permission_denials: [] });
+    expect(row).toContain("none");
+    expect(row).not.toContain("not recorded");
+    expect(screen.queryByText(/^\d+ denied$/)).toBeNull();
+  });
+
+  it("lists each denial with its tool and its input on one line, whole in the title", async () => {
+    const long = { ...BASH, tool_input: { command: "x".repeat(200) } };
+    const row = await denied({ permission_denials: [BASH, long] });
+    expect(row).toContain("Bash");
+    expect(row).toContain('"command":"npm i left-pad"');
+    const short = screen.getByText(/^\{"command":"x+…$/);
+    expect(short.textContent!.length).toBe(80);
+    expect(short.parentElement!.getAttribute("title")).toContain("x".repeat(200));
+  });
+
+  it("names a malformed entry, the dispatcher's marker or a wrong type", async () => {
+    const row = await denied({
+      permission_denials: [BASH, { malformed: "str" }, 7, { tool_use_id: "toolu_02" }],
+    });
+    expect(row).toContain("Bash");
+    expect(row).toMatch(/denial — a string, not a refused tool call/);
+    expect(row).toMatch(/denial — a number, not a refused tool call/);
+    expect(row).toMatch(/denial — an object, not a refused tool call/);
+  });
+
+  it("names a permission_denials that is not a list", async () => {
+    const row = await denied({ permission_denials: "Bash" });
+    expect(row).toMatch(/not a list or null/);
+  });
+
+  it("says how many more were counted and not kept", async () => {
+    const row = await denied({ permission_denials: [BASH], permission_denials_dropped: 12 });
+    expect(row).toContain("+12 more not recorded");
+  });
+
+  it("counts an attempt's denials on its header", async () => {
+    await taskPage(TASK, [], {
+      data: [
+        group(
+          [
+            line({ permission_denials: [BASH, BASH] }),
+            line({ call: "gate-retry", permission_denials: [BASH], permission_denials_dropped: 2 }),
+          ],
+          { call_count: 2, call_kinds: ["phase", "gate-retry"] },
+        ),
+      ],
+    });
+    expect(await screen.findByText("5 denied")).toBeTruthy();
+  });
+
+  it("puts no badge on an attempt with no denial", async () => {
+    await taskPage(TASK, [], { data: [group([line({ permission_denials: [] })])] });
+    await screen.findByText("first call");
+    expect(screen.queryByText(/^\d+ denied$/)).toBeNull();
+  });
+});
+
 describe("the usage region's states", () => {
   it("is an error, not an empty state, for a log it could not read", async () => {
     await taskPage(TASK, [], { data: null, warnings: ["T-101: unreadable usage log: boom"] });

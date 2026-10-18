@@ -699,6 +699,127 @@ function ModelFields({ line }: { line: Rec }) {
   );
 }
 
+const NO_DENIALS_KEY = "written before denials were logged";
+
+/** How long the one-line rendering of a refused call's input may run before it is shortened. */
+const DENIAL_INPUT_CHARS = 80;
+
+/**
+ * What the dispatcher's `{ malformed: <type name> }` marker names, as a value of the matching
+ * JavaScript type, so `Malformed` says it in the same words as everywhere else on this page.
+ */
+const PY_TYPE_STANDIN: Record<string, unknown> = {
+  str: "",
+  list: [],
+  dict: {},
+  NoneType: null,
+  int: 0,
+  float: 0,
+  bool: false,
+};
+
+/** A served `tool_input` as text: whole for `title`, or on one line and shortened. */
+function inputText(value: unknown, whole: boolean): string {
+  let text: string;
+  try {
+    text =
+      typeof value === "string"
+        ? value
+        : (JSON.stringify(value, null, whole ? 2 : undefined) ?? String(value));
+  } catch {
+    text = String(value);
+  }
+  if (whole) return text;
+  const flat = text.replace(/\s+/g, " ");
+  return flat.length > DENIAL_INPUT_CHARS ? `${flat.slice(0, DENIAL_INPUT_CHARS - 1)}…` : flat;
+}
+
+/** One entry of `permission_denials`: a tool and what it was asked to do, or what is wrong with it. */
+function DenialEntry({ entry }: { entry: unknown }) {
+  if (isRec(entry) && "malformed" in entry) {
+    const kind = (entry as { malformed?: unknown }).malformed;
+    return typeof kind === "string" && kind in PY_TYPE_STANDIN ? (
+      <Malformed label="denial" got={PY_TYPE_STANDIN[kind]} want="a refused tool call" />
+    ) : (
+      <Malformed label="denial" got={entry} want="a refused tool call" />
+    );
+  }
+  const tool = isRec(entry) ? (entry as { tool_name?: unknown }).tool_name : undefined;
+  if (!isRec(entry) || typeof tool !== "string") {
+    return <Malformed label="denial" got={entry} want="a refused tool call" />;
+  }
+  const input = (entry as { tool_input?: unknown }).tool_input;
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <Mono className="rounded-sm border border-border px-1 text-[10px]">{tool}</Mono>
+      {input === null || input === undefined ? (
+        <Absent label="no input" />
+      ) : (
+        <span className="min-w-0 truncate" title={inputText(input, true)}>
+          <Mono className="text-[10px] text-muted-foreground">{inputText(input, false)}</Mono>
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * `permission_denials` of one line as served (ADR 116): a missing key, `null` and `[]` read as
+ * three different things, as `ModelFields` reads its two. The input is the one the transcript
+ * holds, already cut to 500 characters a string by the dispatcher; here it is only put on one line.
+ */
+function DeniedFields({ line }: { line: Rec }) {
+  const denials = line.permission_denials;
+  const dropped = line.permission_denials_dropped;
+  return (
+    <div className="text-[11px]">
+      <span className="label-xs mr-1">denied</span>
+      {denials === undefined ? (
+        <MutedText>{NO_DENIALS_KEY}</MutedText>
+      ) : denials === null ? (
+        <Absent />
+      ) : !Array.isArray(denials) ? (
+        <Malformed label="permission_denials" got={denials} want="a list or null" />
+      ) : denials.length === 0 ? (
+        <span className="text-[11px] text-muted-foreground">none</span>
+      ) : (
+        <ul className="mt-0.5 space-y-0.5 pl-2">
+          {denials.map((d: unknown, i: number) => (
+            <li key={i}>
+              <DenialEntry entry={d} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {dropped !== undefined &&
+        (typeof dropped === "number" && Number.isInteger(dropped) && dropped >= 0 ? (
+          <span className="ml-2 text-[11px] italic text-muted-foreground">
+            +{dropped} more not recorded
+          </span>
+        ) : (
+          <Malformed label="permission_denials_dropped" got={dropped} want="a count" />
+        ))}
+    </div>
+  );
+}
+
+/**
+ * How many refused calls an attempt's lines name: entries kept plus entries counted. A count of
+ * records, like the card's other two, not a figure; zero for lines that recorded none or could
+ * not say.
+ */
+function deniedCount(calls: unknown): number {
+  if (!Array.isArray(calls)) return 0;
+  let n = 0;
+  for (const c of calls as unknown[]) {
+    if (!isRec(c)) continue;
+    if (Array.isArray(c.permission_denials)) n += c.permission_denials.length;
+    const dropped = c.permission_denials_dropped;
+    if (typeof dropped === "number" && Number.isInteger(dropped) && dropped > 0) n += dropped;
+  }
+  return n;
+}
+
 /** The figures of one line; `costLabel` heads the cost, which is never summed here. */
 function LineFigures({ line, costLabel }: { line: Rec; costLabel: string }) {
   if (line.measured === false) {
@@ -758,6 +879,7 @@ function UsageGroupRow({
       : 0;
   const calls = group.calls;
   const phaseCall = group.phase_call;
+  const denied = deniedCount(calls);
 
   return (
     <li className="panel px-3 py-2">
@@ -797,6 +919,14 @@ function UsageGroupRow({
           <Malformed label="unmeasured_calls" got={unmeasured} want="a number" />
         )}
         {neither > 0 && <span>{neither} lines carry a measured that is neither</span>}
+        {denied > 0 && (
+          <span
+            className={cn("rounded-sm border px-1 text-[10px]", gateTone.warning)}
+            title="tool calls the CLI refused in this attempt; the calls below list them"
+          >
+            {denied} denied
+          </span>
+        )}
       </div>
       {prev !== null && failedOver && <FailedOverEnding previous={prev} />}
 
@@ -894,6 +1024,7 @@ function CallLine({ line }: { line: unknown }) {
       </div>
       <ModelFields line={line} />
       <LineFigures line={line} costLabel="session cost so far" />
+      <DeniedFields line={line} />
     </li>
   );
 }

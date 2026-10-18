@@ -46,6 +46,11 @@ lists them. This is small, touches only the dispatcher, spends no quota, and
 shows which permissions are missing in real runs before any allowlist is
 widened.
 
+**Built 2026-10-17** by T-069 (`docs/decisions.md` ADR 116). Every usage line
+carries the call's `permission_denials`, reduced and capped, the handoff
+envelope carries the final call's list, and the task page's usage region
+lists them per call with a count on each attempt.
+
 ### 2. A request is a handoff field, and the phase ends blocked
 
 A role that needs a command ends its phase with this field in its handoff:

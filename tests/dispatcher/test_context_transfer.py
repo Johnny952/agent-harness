@@ -452,6 +452,53 @@ def test_save_handoff_keeps_the_round_it_came_from(tmp_path: Path) -> None:
     assert dt.datetime.fromisoformat(envelope["saved_at"]).tzinfo is not None
 
 
+def test_save_handoff_without_denials_writes_the_four_keys_it_always_did(tmp_path: Path) -> None:
+    """Every caller that does not pass `permission_denials` is unchanged: the
+    key is absent, which is not the same as `null` (ADR 116)."""
+    path = save_handoff(str(tmp_path), "task-1", "revisor", {"verdict": "APPROVED"}, round_num=1)
+
+    envelope = json.loads(Path(path).read_text())
+    assert sorted(envelope) == ["handoff", "role", "round", "saved_at"]
+
+
+@pytest.mark.parametrize(
+    "denials",
+    [
+        [{"tool_name": "Bash", "tool_use_id": "toolu_01", "tool_input": {"command": "npm i"}}],
+        [],
+        None,
+    ],
+)
+def test_save_handoff_keeps_the_denials_it_was_given(tmp_path: Path, denials) -> None:
+    hive_dir = str(tmp_path)
+
+    path = save_handoff(
+        hive_dir, "task-1", "implementador", {"summary": "ok"}, round_num=2,
+        permission_denials=denials,
+    )
+
+    envelope = json.loads(Path(path).read_text())
+    assert sorted(envelope) == ["handoff", "permission_denials", "role", "round", "saved_at"]
+    assert envelope["permission_denials"] == denials
+    # The fifth key does not change what a reader of the payload gets.
+    assert read_handoff(hive_dir, "task-1", "implementador") == {"summary": "ok"}
+
+
+def test_an_envelope_written_before_denials_were_kept_still_reads(tmp_path: Path) -> None:
+    hive_dir = str(tmp_path)
+    path = Path(handoff_path(hive_dir, "task-1", "revisor"))
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "role": "revisor", "round": 1,
+        "saved_at": "2026-10-01T00:00:00+00:00", "handoff": {"verdict": "APPROVED"},
+    }))
+
+    envelope = read_handoff_envelope(hive_dir, "task-1", "revisor")
+
+    assert "permission_denials" not in envelope, "not recorded, not an empty list"
+    assert read_handoff(hive_dir, "task-1", "revisor") == {"verdict": "APPROVED"}
+
+
 def test_save_handoff_lives_under_the_task_scratch_dir_not_beside_the_task_file(
     tmp_path: Path,
 ) -> None:

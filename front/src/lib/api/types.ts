@@ -211,7 +211,20 @@ export interface UsageLine {
   model?: string | null;
   /** ADR 68: sorted `modelUsage` key names; `null` = CLI reported none, `[]` = an empty `modelUsage`. Missing before ADR 68. */
   models_used?: string[] | null;
+  /** ADR 116: what the CLI refused during the call; `null` = not reported, `[]` = none. Missing on lines written before ADR 116. */
+  permission_denials?: PermissionDenial[] | null;
+  /** ADR 116: how many denials past the first 50 were counted and not kept. Present only when some were. */
+  permission_denials_dropped?: number;
 }
+
+/**
+ * One refused tool call as the usage log keeps it (`docs/decisions.md` ADR 116):
+ * three keys, every string in `tool_input` cut to 500 characters, or a
+ * `{ malformed: <type name> }` for an entry the CLI printed in a shape the
+ * dispatcher did not recognise.
+ */
+export type PermissionDenial =
+  { tool_name: string; tool_use_id: string | null; tool_input: unknown } | { malformed: string };
 
 /** One dispatch attempt of one role: the api's group block (ADR 54), same caveat. */
 export interface UsageGroup {
