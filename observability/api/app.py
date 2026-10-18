@@ -262,9 +262,14 @@ def create_app(
                 description = task_store.read_description(cfg.hive_tasks_dir, task_id)
                 row = _task(task, description, cfg.heartbeat_ttl_seconds)
                 app.json.dumps(row)
+                # A bad backlog field is named, and the row is still served:
+                # the file reads, and one hand edit's `urgent` is not a reason
+                # to hide the task (ADR 133).
+                problems = task_store.field_problems(task)
             except _UNREADABLE as exc:
                 warnings.append(f"{path}: unreadable task file: {exc}")
                 continue
+            warnings.extend(f"{path}: {problem}" for problem in problems)
             data.append(row)
         return _envelope(data, warnings)
 
@@ -302,6 +307,8 @@ def create_app(
             # since what is serialised twice is now at most `MAX_BODY_BYTES`.
             row["body"], body_warnings = _bounded_body(path, found.body)
             app.json.dumps(row)
+            # As on `/api/tasks`: named, and the row still served (ADR 133).
+            problems = task_store.field_problems(found)
         except _UNREADABLE as exc:
             # A 404 here would say the task does not exist, which is a lie
             # about a file that does: the caller gets `null` and the reason.
@@ -310,7 +317,43 @@ def create_app(
         # `body_warnings` only on the path that serves the row: a truncation
         # note beside `data: null` would describe a record the caller did not
         # get.
-        return _envelope(row, warnings + body_warnings)
+        field_warnings = [f"{path}: {problem}" for problem in problems]
+        return _envelope(row, warnings + field_warnings + body_warnings)
+
+    @app.get("/api/ready")
+    @requires_auth
+    def ready():
+        """The Ready column, in the order work should be taken: task ids.
+
+        `dispatcher/tasks.py:ready_order` over every task file that reads, the
+        one function the board service's `ready` list and the queue use, so
+        the order is never computed twice (ADR 133). Its own loop and not
+        `read_all_tasks`, which drops a file that will not read in silence:
+        here that file is a warning, as on `/api/tasks`, and so is a bad
+        backlog field, which `ready_order` already sorts as the default.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        warnings: list[str] = []
+        read: dict[str, context_transfer.TaskFile] = {}
+        for task_id in sorted(context_transfer.list_task_ids(cfg.hive_tasks_dir)):
+            path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+            try:
+                task = context_transfer.read_task_file(path)
+                problems = task_store.field_problems(task)
+            except _UNREADABLE as exc:
+                warnings.append(f"{path}: unreadable task file: {exc}")
+                continue
+            warnings.extend(f"{path}: {problem}" for problem in problems)
+            read[task_id] = task
+        try:
+            order = task_store.ready_order(read)
+        except _UNREADABLE as exc:
+            # `ready_order` is written to take any field shape; this is the
+            # guard's rule kept, so a shape it missed is a warning, not a 500.
+            return _envelope([], warnings + [f"{cfg.hive_tasks_dir}: no ready order: {exc}"])
+        return _envelope(order, warnings)
 
     @app.get("/api/accounts")
     @requires_auth
@@ -969,6 +1012,20 @@ def _task(
         # `lock_expired: true` is a dead dispatcher's, not a running phase.
         "phase": task.phase,
         "lock_expired": _lock_expired(task, ttl_seconds),
+        # The backlog fields, shaped as `board_service/app.py:board_list` shapes
+        # them, so the two services answer one task the same way (ADR 133).
+        # `priority` is the bucket, `normal` when the file names none, and a
+        # bad value is served as written beside a warning, never mended here.
+        # `rank` only orders inside its bucket, which is why the bucket rides
+        # with it; `debt_id` pairs with `source: debt`. `tags` is the cleaned
+        # list, [] for none; `rank` and `debt_id` are the file's, `null` when
+        # absent. What is wrong with any of them is `field_problems`'s answer,
+        # which the routes add to `warnings`.
+        "priority": task_store.effective_priority(task),
+        "source": task.source,
+        "tags": task_store.normal_tags(task.tags),
+        "rank": task.rank,
+        "debt_id": task.debt_id,
     }
 
 

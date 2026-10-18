@@ -44,6 +44,7 @@ ROUTES = [
     "/api/learnings",
     "/api/roadmap",
     "/api/command-requests",
+    "/api/ready",
 ]
 
 
@@ -287,6 +288,13 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         # holder stopped writing. The three values of this field have their own
         # tests below, against heartbeats relative to now.
         "lock_expired": True,
+        # The backlog fields of a task filed before them (ADR 133): the
+        # default bucket, and nothing else.
+        "priority": "normal",
+        "source": None,
+        "tags": [],
+        "rank": None,
+        "debt_id": None,
         # No `body`, and the fixture above wrote one: it is the detail route's
         # alone (`docs/decisions.md` ADR 21). Asserting the whole dict is what
         # makes moving it into `_task` fail here rather than pass quietly.
@@ -429,6 +437,11 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
         "resolved_debt": [],
         "phase": None,
         "lock_expired": None,
+        "priority": "normal",
+        "source": None,
+        "tags": [],
+        "rank": None,
+        "debt_id": None,
     }
 
     assert _get(harness, "/api/tasks").get_json() == {"data": [row], "warnings": []}
@@ -436,6 +449,137 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
         "data": {**row, "body": "body\n"},
         "warnings": [],
     }
+
+
+# --- backlog fields (ADR 133) --------------------------------------------
+
+
+def test_both_task_routes_serve_the_backlog_fields_the_file_carries(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(
+        harness.tasks_dir,
+        "T-1",
+        status="pending",
+        priority="high",
+        source="debt",
+        tags=[" api ", "debt", "api"],
+        rank=2048,
+        debt_id="T-008-D1",
+    )
+    served = {
+        "priority": "high",
+        "source": "debt",
+        # Stripped and deduplicated, as the board service serves them.
+        "tags": ["api", "debt"],
+        "rank": 2048,
+        "debt_id": "T-008-D1",
+    }
+
+    listed = _get(harness, "/api/tasks").get_json()
+    detail = _get(harness, "/api/tasks/T-1").get_json()
+
+    assert listed["warnings"] == [] and detail["warnings"] == []
+    [row] = listed["data"]
+    assert {key: row[key] for key in served} == served
+    assert {key: detail["data"][key] for key in served} == served
+
+
+def test_a_bad_backlog_field_is_a_warning_and_the_row_is_still_served(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _task(
+        harness.tasks_dir,
+        "T-1",
+        priority="urgent",
+        tags=["ok", 3],
+        rank="first",
+        debt_id="D1",
+    )
+    _task(harness.tasks_dir, "T-2")
+    path = context_transfer.task_file_path(harness.tasks_dir, "T-1")
+
+    listed = _get(harness, "/api/tasks").get_json()
+    detail = _get(harness, "/api/tasks/T-1").get_json()
+
+    assert [row["task_id"] for row in listed["data"]] == ["T-1", "T-2"]
+    row = listed["data"][0]
+    # Served as written, not mended: the warning is where the fix is named.
+    assert row["priority"] == "urgent"
+    assert row["tags"] == ["ok"]
+    assert row["rank"] == "first"
+    assert row["debt_id"] == "D1"
+    assert detail["data"]["priority"] == "urgent"
+    # One warning per bad field, `field_problems`'s words behind the path, and
+    # the same on both routes; T-2 is clean and costs none.
+    for body in (listed, detail):
+        assert body["warnings"] == [
+            f"{path}: {problem}"
+            for problem in task_store.field_problems(
+                context_transfer.read_task_file(path)
+            )
+        ]
+        assert [warning.split(": its ")[1].split()[0] for warning in body["warnings"]] == [
+            "priority", "tags", "rank", "debt_id",
+        ]
+
+
+# --- /api/ready ------------------------------------------------------------
+
+
+def test_ready_lists_the_ready_tasks_in_bucket_then_rank_then_id_order(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="pending")
+    _task(harness.tasks_dir, "T-2", status="pending", priority="low")
+    _task(harness.tasks_dir, "T-3", status="pending", priority="high", rank=2048)
+    _task(harness.tasks_dir, "T-4", status="pending", priority="high", rank=1024)
+    # Not ready: one waits on an unmerged task, one is running, one is done.
+    _task(harness.tasks_dir, "T-5", status="pending", depends_on=["T-6"])
+    _task(harness.tasks_dir, "T-6", status="in_progress")
+    _task(harness.tasks_dir, "T-7", status="done", merged=True)
+    # Ready: its one dependency is merged.
+    _task(harness.tasks_dir, "T-8", status="pending", depends_on=["T-7"])
+
+    body = _get(harness, "/api/ready").get_json()
+
+    assert body == {"data": ["T-4", "T-3", "T-1", "T-8", "T-2"], "warnings": []}
+
+
+def test_ready_is_the_order_the_dispatcher_computes(tmp_path: Path) -> None:
+    """One order, never a second: what the route answers is `ready_order`
+    over the same files."""
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="pending", priority="low")
+    _task(harness.tasks_dir, "T-2", status="pending", depends_on=["T-1"])
+    _task(harness.tasks_dir, "T-3", status="pending", priority="high")
+
+    served = _get(harness, "/api/ready").get_json()["data"]
+
+    assert served == task_store.ready_order(task_store.read_all_tasks(harness.tasks_dir))
+
+
+def test_ready_warns_about_an_unreadable_file_and_a_bad_field(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="pending", priority="urgent")
+    _task(harness.tasks_dir, "T-2", status="pending")
+    broken = Path(context_transfer.task_file_path(harness.tasks_dir, "T-3"))
+    broken.write_text("---\n: : not yaml\n---\n")
+
+    body = _get(harness, "/api/ready").get_json()
+
+    # A bad priority sorts as the default bucket; it does not leave the column.
+    assert body["data"] == ["T-1", "T-2"]
+    assert len(body["warnings"]) == 2
+    assert any(str(broken) in warning for warning in body["warnings"])
+    assert any("'urgent'" in warning for warning in body["warnings"])
+
+
+def test_ready_with_no_task_files_is_an_empty_list(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    assert _get(harness, "/api/ready").get_json() == {"data": [], "warnings": []}
 
 
 # --- lock_expired ---------------------------------------------------------
@@ -1253,6 +1397,41 @@ def test_debt_rows_come_back_as_the_index_writes_them(tmp_path: Path) -> None:
         "resolved": False,
     }
     assert body["data"][1]["resolved"] is True
+
+
+_INDEX_WITH_IMPACT = """# Debt
+
+| id | what | where | fix | card | impact |
+|---|---|---|---|---|---|
+| `T-1-D1` | a | b | c | none | risk |
+| `T-1-D2` | a | b | c | none | cost |
+| `T-1-D3` | a | b | c | none | cosmetic |
+| `T-1-D4` | a | b | c | none | none |
+| `T-1-D5` | a | b | c | none | riks |
+"""
+
+
+def test_debt_rows_serve_the_impact_column(tmp_path: Path) -> None:
+    """ADR 131's column, through `index_rows` and no second parser here: a
+    typo reads as `none`, as the index's own README says it does."""
+    harness = _harness(tmp_path)
+    _debt_index(harness.projects_root, "ia-harness", _INDEX_WITH_IMPACT)
+
+    body = _get(harness, "/api/debt").get_json()
+
+    assert body["warnings"] == []
+    assert [row["impact"] for row in body["data"]] == [
+        "risk", "cost", "cosmetic", "none", "none",
+    ]
+
+
+def test_an_index_from_before_the_impact_column_reads_as_none(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _debt_index(harness.projects_root, "ia-harness", _INDEX)
+
+    body = _get(harness, "/api/debt").get_json()
+
+    assert {row["impact"] for row in body["data"]} == {"none"}
 
 
 def test_project_is_optional_with_one_checkout_and_required_with_two(tmp_path: Path) -> None:
