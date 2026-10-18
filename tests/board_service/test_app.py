@@ -169,12 +169,14 @@ def test_an_unknown_query_parameter_is_refused(client):
 
 
 @pytest.mark.parametrize("role", ["operator", "arquitecto"])
-def test_the_read_roles_see_both_tools(client, role):
+def test_the_board_roles_see_their_tools(client, role):
     tools = rpc(client, "tools/list", role=role).get_json()["result"]["tools"]
-    assert [t["name"] for t in tools] == ["board_list", "board_get"]
+    assert [t["name"] for t in tools] == list(service.ROLE_TOOLS[role])
+    assert [t["name"] for t in tools][:2] == ["board_list", "board_get"]
     for t in tools:
         assert t["inputSchema"]["type"] == "object"
-        assert t["annotations"]["readOnlyHint"] is True
+        reads = t["name"] in ("board_list", "board_get")
+        assert t["annotations"]["readOnlyHint"] is reads
 
 
 @pytest.mark.parametrize("role", sorted(PHASE_ROLES - {"arquitecto"}))

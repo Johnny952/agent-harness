@@ -1,0 +1,741 @@
+"""The board's write tools in `dispatcher.tasks` (T-084, ADR 129): propose,
+edit_task, add_comment and accept, under the per-task write lock."""
+
+import json
+import os
+import threading
+from pathlib import Path
+
+import pytest
+
+from dispatcher import tasks
+from dispatcher.context_transfer import (
+    TaskFile,
+    read_task_file,
+    task_file_path,
+    write_task_file,
+)
+
+_DESCRIPTION = "## Goal\n\nAdd a /healthz endpoint.\n\n## Done when\n\nGET /healthz answers 200.\n"
+_OTHER = "## Goal\n\nSomething else.\n\n## Done when\n\nIt is done.\n"
+_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _hive(tmp_path: Path) -> str:
+    hive = tmp_path / "hive" / "tasks"
+    hive.mkdir(parents=True)
+    return str(hive)
+
+
+def _task(hive: str, task_id: str, status: str = "pending", **fields) -> None:
+    write_task_file(
+        task_file_path(hive, task_id),
+        TaskFile(
+            task_id=task_id, status=status, owner=fields.pop("owner", None),
+            depends_on=fields.pop("depends_on", []), heartbeat=None,
+            body=fields.pop("body", ""), **fields,
+        ),
+    )
+    tasks.write_description(hive, task_id, _DESCRIPTION)
+
+
+def _read(hive: str, task_id: str) -> TaskFile:
+    return read_task_file(task_file_path(hive, task_id))
+
+
+def _epic(hive: str, n: int = 2) -> dict:
+    entries = [
+        {"title": f"Part {i}", "description": _DESCRIPTION, **({"after": [i - 1]} if i > 1 else {})}
+        for i in range(1, n + 1)
+    ]
+    return tasks.propose(
+        hive, title="The epic", description=_DESCRIPTION, source="arquitecto", tasks=entries
+    )
+
+
+def _problems(excinfo) -> str:
+    return "; ".join(excinfo.value.problems)
+
+
+def _blocks_while_locked(hive: str, lock_id: str, write) -> None:
+    """`write` waits while another holder has `lock_id`, and runs once it is let go."""
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            write()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+        finally:
+            done.set()
+
+    with tasks.task_lock(hive, lock_id):
+        thread = threading.Thread(target=run)
+        thread.start()
+        assert not done.wait(0.3)
+    thread.join(5)
+    assert done.is_set()
+    assert errors == []
+
+
+# -- propose -------------------------------------------------------------------
+
+
+def test_propose_files_a_proposed_task_with_the_next_number(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-007")
+    _task(hive, "T-007-S1")  # a split's id does not count
+
+    result = tasks.propose(
+        hive, title="  Health check  ", description=_DESCRIPTION, source="arquitecto",
+        priority="high", depends_on=["T-007"],
+    )
+
+    assert result == {"id": "T-008", "created": True, "tasks": []}
+    task = _read(hive, "T-008")
+    assert (task.status, task.title, task.source, task.priority) == (
+        "proposed", "Health check", "arquitecto", "high",
+    )
+    assert task.depends_on == ["T-007"]
+    assert (task.owner, task.epic, task.split_into) == (None, None, [])
+    assert tasks.read_description(hive, "T-008") == _DESCRIPTION
+
+
+def test_propose_on_an_empty_hive_starts_at_one(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    assert tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")["id"] == "T-001"
+
+
+def test_propose_is_idempotent_on_its_title(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    first = tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+    again = tasks.propose(hive, title="A ", description=_DESCRIPTION, source="operator")
+
+    assert again == {"id": first["id"], "created": False, "tasks": []}
+    assert sorted(os.listdir(hive)) == [f"{first['id']}.md"]
+
+
+def test_propose_again_with_another_ask_is_refused_pointing_at_task_edit(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+
+    with pytest.raises(tasks.BoardWriteError) as excinfo:
+        tasks.propose(hive, title="A", description=_OTHER, source="operator")
+
+    assert "task_edit" in str(excinfo.value)
+    assert "description" in str(excinfo.value)
+
+
+def test_propose_again_finishes_a_proposal_whose_description_was_lost(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    first = tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+    os.remove(tasks.description_path(hive, first["id"]))
+
+    again = tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+
+    assert again["created"] is False
+    assert tasks.read_description(hive, first["id"]) == _DESCRIPTION
+
+
+def test_a_task_with_the_title_inside_an_epic_does_not_count(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+
+    result = tasks.propose(hive, title="Part 1", description=_DESCRIPTION, source="operator")
+
+    assert result["created"] is True
+    assert result["id"] != epic["tasks"][0]
+
+
+@pytest.mark.parametrize(
+    "fields, needle",
+    [
+        ({"title": ""}, "its title is blank"),
+        ({"title": "a\nb"}, "more than one line"),
+        ({"title": "x" * (tasks.MAX_TITLE_CHARS + 1)}, "longer than"),
+        ({"description": "no sections"}, "its description"),
+        ({"description": "## Goal\n\nOnly a goal.\n"}, "its description"),
+        ({"source": "revisor"}, "its source is 'revisor'"),
+        ({"source": None}, "its source is None"),
+        ({"priority": "urgent"}, "priority is 'urgent'"),
+        ({"depends_on": ["T-404"]}, "depends_on"),
+        ({"depends_on": "T-001"}, "not a list"),
+        ({"depends_on": ["T-001", "T-001"]}, "more than once"),
+        ({"depends_on": ["d-20261018T120000Z-abcd"]}, "drafts"),
+    ],
+)
+def test_propose_refuses_and_writes_nothing(tmp_path: Path, fields: dict, needle: str) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    before = sorted(os.listdir(hive))
+    args = {"title": "A", "description": _DESCRIPTION, "source": "operator", **fields}
+
+    with pytest.raises(tasks.BoardWriteError) as excinfo:
+        tasks.propose(hive, **args)
+
+    assert needle in str(excinfo.value)
+    assert sorted(os.listdir(hive)) == before
+
+
+def test_propose_reports_every_problem_at_once(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+
+    with pytest.raises(tasks.BoardWriteError) as excinfo:
+        tasks.propose(hive, title="", description="x", source="nobody", priority="urgent")
+
+    assert len(excinfo.value.problems) == 4
+
+
+def test_propose_an_epic(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-004")
+
+    result = tasks.propose(
+        hive, title="The epic", description=_DESCRIPTION, source="arquitecto", priority="low",
+        tasks=[
+            {"title": "One", "description": _DESCRIPTION},
+            {"title": "Two", "description": _OTHER, "after": [1]},
+            {"title": "Three", "description": _DESCRIPTION, "after": [1, 2]},
+        ],
+    )
+
+    assert result == {
+        "id": "T-005", "created": True, "tasks": ["T-005-S1", "T-005-S2", "T-005-S3"],
+    }
+    parent = _read(hive, "T-005")
+    assert (parent.status, parent.split_into, parent.epic) == ("proposed", result["tasks"], None)
+    for child_id, title, deps in [
+        ("T-005-S1", "One", []), ("T-005-S2", "Two", ["T-005-S1"]),
+        ("T-005-S3", "Three", ["T-005-S1", "T-005-S2"]),
+    ]:
+        child = _read(hive, child_id)
+        assert (child.status, child.title, child.epic, child.depends_on) == ("proposed", title, "T-005", deps)
+        assert (child.source, child.priority) == ("arquitecto", "low")
+    assert tasks.read_description(hive, "T-005-S2") == _OTHER
+
+
+@pytest.mark.parametrize(
+    "entries, needle",
+    [
+        ([{"title": "One", "description": _DESCRIPTION}], "2 to 4 tasks"),
+        ([{"title": f"P{i}", "description": _DESCRIPTION} for i in range(5)], "2 to 4 tasks"),
+        ([{"title": "One", "description": _DESCRIPTION}, {"title": "One", "description": _DESCRIPTION}],
+         "another task of the epic"),
+        ([{"title": "One", "description": _DESCRIPTION},
+          {"title": "Two", "description": _DESCRIPTION, "after": [2]}], "not a task before it"),
+        ([{"title": "One", "description": _DESCRIPTION},
+          {"title": "Two", "description": _DESCRIPTION, "after": [True]}], "not an integer"),
+        ([{"title": "One", "description": _DESCRIPTION},
+          {"title": "Two", "description": "bad"}], "task 2: its description"),
+        ([{"title": "One", "description": _DESCRIPTION, "rank": 1},
+          {"title": "Two", "description": _DESCRIPTION}], "unknown field 'rank'"),
+        ("not a list", "tasks is not a list"),
+    ],
+)
+def test_an_epic_is_all_or_nothing(tmp_path: Path, entries, needle: str) -> None:
+    hive = _hive(tmp_path)
+
+    with pytest.raises(tasks.BoardWriteError) as excinfo:
+        tasks.propose(hive, title="E", description=_DESCRIPTION, source="operator", tasks=entries)
+
+    assert needle in str(excinfo.value)
+    assert os.listdir(hive) == []
+
+
+def test_an_epic_takes_no_depends_on(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+
+    with pytest.raises(tasks.BoardWriteError, match="an epic takes no depends_on"):
+        tasks.propose(
+            hive, title="E", description=_DESCRIPTION, source="operator", depends_on=["T-001"],
+            tasks=[{"title": "A", "description": _DESCRIPTION}, {"title": "B", "description": _DESCRIPTION}],
+        )
+
+
+def test_propose_an_epic_again_answers_it_and_finishes_a_missing_task(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    first = _epic(hive, 3)
+    os.remove(task_file_path(hive, first["tasks"][2]))
+
+    again = _epic(hive, 3)
+
+    assert again == {**first, "created": False}
+    child = _read(hive, first["tasks"][2])
+    assert (child.status, child.epic, child.depends_on) == ("proposed", first["id"], [first["tasks"][1]])
+
+
+def test_propose_an_epic_again_with_other_tasks_is_refused(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive, 2)
+
+    with pytest.raises(tasks.BoardWriteError, match="3 tasks, not 2|2 tasks, not 3"):
+        _epic(hive, 3)
+
+
+def test_a_task_and_an_epic_do_not_share_a_title(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    with pytest.raises(tasks.BoardWriteError, match="an epic already has the title"):
+        tasks.propose(hive, title="The epic", description=_DESCRIPTION, source="operator")
+
+    tasks.propose(hive, title="Single", description=_DESCRIPTION, source="operator")
+    with pytest.raises(tasks.BoardWriteError, match="not an epic already has the title"):
+        tasks.propose(
+            hive, title="Single", description=_DESCRIPTION, source="operator",
+            tasks=[{"title": "A", "description": _DESCRIPTION}, {"title": "B", "description": _DESCRIPTION}],
+        )
+
+
+def test_propose_waits_for_the_create_lock(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _blocks_while_locked(
+        hive, tasks.CREATE_LOCK,
+        lambda: tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator"),
+    )
+    assert _read(hive, "T-001").status == "proposed"
+
+
+def test_concurrent_proposals_get_distinct_ids(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    results: list[dict] = []
+
+    def run(i: int) -> None:
+        results.append(tasks.propose(hive, title=f"Task {i}", description=_DESCRIPTION, source="operator"))
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert sorted(r["id"] for r in results) == [f"T-{n:03d}" for n in range(1, 9)]
+
+
+def test_accept_drafts_waits_for_the_create_lock(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    draft_id = tasks.new_draft_id()
+    text = _DESCRIPTION + "\n## Surface\n\n`api/`\n\n## Out of scope\n\nThe rest.\n"
+    tasks.write_draft(hive, draft_id, tasks.Draft(name="1", description=text, depends_on=[]))
+    _blocks_while_locked(hive, tasks.CREATE_LOCK, lambda: tasks.accept_drafts(hive, draft_id))
+
+
+def test_the_title_round_trips_and_an_old_file_has_none(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    assert "title:" not in Path(task_file_path(hive, "T-001")).read_text()
+    assert _read(hive, "T-001").title is None
+
+    tasks.propose(hive, title="Has one", description=_DESCRIPTION, source="operator")
+    assert "title: Has one" in Path(task_file_path(hive, "T-002")).read_text()
+
+
+# -- edit_task -----------------------------------------------------------------
+
+
+def test_edit_changes_only_what_differs(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+
+    result = tasks.edit_task(
+        hive, "T-002", title="B", description=_OTHER, depends_on=["T-001"], priority="normal",
+    )
+
+    assert result == {"id": "T-002", "changed": ["description", "title", "depends_on", "priority"]}
+    task = _read(hive, "T-002")
+    assert (task.title, task.depends_on, task.priority, task.status) == ("B", ["T-001"], "normal", "proposed")
+    assert tasks.read_description(hive, "T-002") == _OTHER
+
+    assert tasks.edit_task(hive, "T-002", title="B", description=_OTHER)["changed"] == []
+
+
+def test_edit_with_nothing_to_change_is_refused(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    with pytest.raises(tasks.BoardWriteError, match="nothing to change"):
+        tasks.edit_task(hive, "T-001")
+
+
+def test_edit_a_missing_task_is_no_task(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    with pytest.raises(tasks.NoTaskError):
+        tasks.edit_task(hive, "T-404", priority="low")
+
+
+@pytest.mark.parametrize("task_id", ["../x", "a/b", "", 7, "d-20261018T120000Z-abcd"])
+def test_a_write_refuses_what_is_not_a_task_id(tmp_path: Path, task_id) -> None:
+    hive = _hive(tmp_path)
+    for write in (
+        lambda: tasks.edit_task(hive, task_id, priority="low"),
+        lambda: tasks.add_comment(hive, task_id, "operator", "hi"),
+        lambda: tasks.accept(hive, task_id),
+    ):
+        with pytest.raises(tasks.BoardWriteError):
+            write()
+
+
+@pytest.mark.parametrize(
+    "status, fields, needle",
+    [
+        ("pending", {"owner": "cuenta1"}, "a dispatcher holds it"),
+        ("pending", {"merged": "main"}, "it is merged"),
+        ("pending", {"body": "## arquitecto\n\nDone.\n"}, "handoffs"),
+        ("in_progress", {}, "its status is in_progress"),
+        ("review", {}, "its status is review"),
+        ("blocked", {}, "its status is blocked"),
+    ],
+)
+def test_edit_refuses_a_task_that_has_started(tmp_path: Path, status, fields, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status, **fields)
+    before = Path(task_file_path(hive, "T-001")).read_bytes()
+
+    with pytest.raises(tasks.BoardWriteError) as excinfo:
+        tasks.edit_task(hive, "T-001", priority="high", description=_OTHER)
+
+    assert needle in str(excinfo.value)
+    assert Path(task_file_path(hive, "T-001")).read_bytes() == before
+    assert tasks.read_description(hive, "T-001") == _DESCRIPTION
+
+
+@pytest.mark.parametrize("status", ["pending", "proposed", "deferred", "dropped"])
+def test_edit_takes_a_task_not_yet_started(tmp_path: Path, status) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status)
+    assert tasks.edit_task(hive, "T-001", priority="low")["changed"] == ["priority"]
+
+
+def test_an_epic_is_editable_until_one_of_its_tasks_starts(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    tasks.accept(hive, epic["id"])
+    assert tasks.edit_task(hive, epic["id"], priority="high")["changed"] == ["priority"]
+
+    child = _read(hive, epic["tasks"][0])
+    child.status = "in_progress"
+    write_task_file(task_file_path(hive, epic["tasks"][0]), child)
+
+    with pytest.raises(tasks.BoardWriteError, match=f"its task {epic['tasks'][0]} has started"):
+        tasks.edit_task(hive, epic["id"], priority="low")
+
+
+def test_edit_keeps_the_title_unique_within_its_scope(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+    tasks.propose(hive, title="B", description=_DESCRIPTION, source="operator")
+    epic = _epic(hive)
+
+    with pytest.raises(tasks.BoardWriteError, match="T-001 already has the title 'A'"):
+        tasks.edit_task(hive, "T-002", title="A")
+    with pytest.raises(tasks.BoardWriteError, match=f"in epic {epic['id']}"):
+        tasks.edit_task(hive, epic["tasks"][1], title="Part 1")
+    # A title taken inside an epic is free outside it, and the reverse.
+    assert tasks.edit_task(hive, "T-002", title="Part 1")["changed"] == ["title"]
+    assert tasks.edit_task(hive, epic["tasks"][1], title="A")["changed"] == ["title"]
+
+
+def test_edit_with_a_title_waits_for_the_create_lock_and_the_task_lock(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    tasks.propose(hive, title="A", description=_DESCRIPTION, source="operator")
+    _blocks_while_locked(hive, tasks.CREATE_LOCK, lambda: tasks.edit_task(hive, "T-001", title="B"))
+    _blocks_while_locked(hive, "T-001", lambda: tasks.edit_task(hive, "T-001", priority="low"))
+    task = _read(hive, "T-001")
+    assert (task.title, task.priority) == ("B", "low")
+
+
+def test_edit_depends_on_refuses_a_cycle_and_unknown_tasks(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    _task(hive, "T-002", status="proposed", depends_on=["T-001"])
+    _task(hive, "T-003", status="proposed", depends_on=["T-002"])
+
+    with pytest.raises(tasks.BoardWriteError, match="that is a cycle"):
+        tasks.edit_task(hive, "T-001", depends_on=["T-003"])
+    with pytest.raises(tasks.BoardWriteError, match="the task itself"):
+        tasks.edit_task(hive, "T-001", depends_on=["T-001"])
+    with pytest.raises(tasks.BoardWriteError, match="depends_on"):
+        tasks.edit_task(hive, "T-001", depends_on=["T-404"])
+    assert tasks.edit_task(hive, "T-003", depends_on=[])["changed"] == ["depends_on"]
+    assert tasks.edit_task(hive, "T-001", depends_on=["T-003"])["changed"] == ["depends_on"]
+
+
+def test_edit_depends_on_inside_an_epic(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-100", status="proposed")
+    epic = _epic(hive, 3)
+    s1, s2, s3 = epic["tasks"]
+
+    with pytest.raises(tasks.BoardWriteError, match="an epic takes no depends_on"):
+        tasks.edit_task(hive, epic["id"], depends_on=["T-100"])
+    with pytest.raises(tasks.BoardWriteError, match="not a sibling"):
+        tasks.edit_task(hive, s2, depends_on=["T-100"])
+    with pytest.raises(tasks.BoardWriteError, match="that is a cycle"):
+        tasks.edit_task(hive, s1, depends_on=[s3])
+    with pytest.raises(tasks.BoardWriteError, match="more than once"):
+        tasks.edit_task(hive, s3, depends_on=[s1, s1])
+    assert tasks.edit_task(hive, s3, depends_on=[s1])["changed"] == ["depends_on"]
+
+
+@pytest.mark.parametrize(
+    "fields, needle",
+    [
+        ({"title": " "}, "the title is blank"),
+        ({"description": "no sections"}, "the description"),
+        ({"priority": "urgent"}, "priority is 'urgent'"),
+    ],
+)
+def test_edit_validates_its_fields(tmp_path: Path, fields, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    with pytest.raises(tasks.BoardWriteError, match=needle):
+        tasks.edit_task(hive, "T-001", **fields)
+
+
+# -- add_comment ---------------------------------------------------------------
+
+
+def _comments(hive: str, task_id: str) -> list[dict]:
+    return [json.loads(line) for line in Path(tasks.comments_path(hive, task_id)).read_text().splitlines()]
+
+
+def test_comments_append_and_count(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="merged")  # any status: comments are kept for good
+
+    first = tasks.add_comment(hive, "T-001", "operator", "Looks right.")
+    second = tasks.add_comment(
+        hive, "T-001", "arquitecto", "This line.", file="src/a.py", line=12, commit=_COMMIT[:7],
+    )
+
+    assert (first["comment_count"], second["comment_count"]) == (1, 2)
+    assert first["comment"]["author"] == "operator"
+    stored = _comments(hive, "T-001")
+    assert stored == [first["comment"], second["comment"]]
+    assert {k: stored[1][k] for k in ("file", "line", "commit")} == {
+        "file": "src/a.py", "line": 12, "commit": _COMMIT[:7],
+    }
+    assert "file" not in stored[0]
+    assert tasks.comments_path(hive, "T-001") == str(tmp_path / "hive" / "board" / "T-001" / "comments.jsonl")
+
+
+@pytest.mark.parametrize(
+    "author, text, anchor, needle",
+    [
+        ("operator", " ", {}, "the text is blank"),
+        ("operator", "x" * (tasks.MAX_COMMENT_CHARS + 1), {}, "longer than"),
+        ("the operator", "hi", {}, "not a role"),
+        ("", "hi", {}, "not a role"),
+        ("operator", "hi", {"file": "a.py"}, "all three"),
+        ("operator", "hi", {"file": "a.py", "line": 1}, "all three"),
+        ("operator", "hi", {"file": "/etc/passwd", "line": 1, "commit": _COMMIT}, "not a path inside"),
+        ("operator", "hi", {"file": "../x.py", "line": 1, "commit": _COMMIT}, "not a path inside"),
+        ("operator", "hi", {"file": "a.py", "line": 0, "commit": _COMMIT}, "not a line number"),
+        ("operator", "hi", {"file": "a.py", "line": True, "commit": _COMMIT}, "not a line number"),
+        ("operator", "hi", {"file": "a.py", "line": 1, "commit": "main"}, "not a commit hash"),
+    ],
+)
+def test_a_bad_comment_is_refused_and_nothing_is_written(tmp_path: Path, author, text, anchor, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    with pytest.raises(tasks.BoardWriteError, match=needle):
+        tasks.add_comment(hive, "T-001", author, text, **anchor)
+    assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+def test_a_comment_on_no_task_is_no_task_and_makes_no_directory(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    with pytest.raises(tasks.NoTaskError):
+        tasks.add_comment(hive, "T-404", "operator", "hi")
+    assert not (tmp_path / "hive" / "board" / "T-404").exists()
+
+
+def test_a_comment_waits_for_the_task_lock(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    _blocks_while_locked(hive, "T-001", lambda: tasks.add_comment(hive, "T-001", "operator", "hi"))
+    assert len(_comments(hive, "T-001")) == 1
+
+
+def test_concurrent_comments_never_interleave(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    text = "y" * 5000
+    threads = [
+        threading.Thread(target=tasks.add_comment, args=(hive, "T-001", "operator", f"{i}{text}"))
+        for i in range(10)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert sorted(c["text"][0] for c in _comments(hive, "T-001")) == [str(i) for i in range(10)]
+
+
+# -- accept --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "start, to", [("proposed", "pending"), ("deferred", "pending"), ("proposed", "deferred"),
+                  ("proposed", "dropped"), ("deferred", "dropped")],
+)
+def test_accept_moves_a_backlog_item(tmp_path: Path, start, to) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=start, priority="low")
+
+    result = tasks.accept(hive, "T-001", to=to, priority="high")
+
+    assert result == {"id": "T-001", "status": to, "changed": True, "children": {}}
+    assert (_read(hive, "T-001").status, _read(hive, "T-001").priority) == (to, "high")
+
+
+def test_accept_to_the_status_it_has_is_a_no_op(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="pending", priority="low")
+    before = Path(task_file_path(hive, "T-001")).read_bytes()
+
+    assert tasks.accept(hive, "T-001", priority="low")["changed"] is False
+    with pytest.raises(tasks.BoardWriteError, match="change its priority with task_edit"):
+        tasks.accept(hive, "T-001", priority="high")
+    assert Path(task_file_path(hive, "T-001")).read_bytes() == before
+
+
+@pytest.mark.parametrize("status", ["in_progress", "review", "blocked", "merged", "done", "epic"])
+def test_accept_never_moves_a_task_on_the_board(tmp_path: Path, status) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status)
+    for to in ("pending", "deferred", "dropped"):
+        if to == status:
+            continue
+        with pytest.raises(tasks.BoardWriteError, match="on the board"):
+            tasks.accept(hive, "T-001", to=to)
+    assert _read(hive, "T-001").status == status
+
+
+def test_pending_cannot_go_back_to_the_backlog(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="pending")
+    with pytest.raises(tasks.BoardWriteError, match="on the board"):
+        tasks.accept(hive, "T-001", to="deferred")
+
+
+def test_dropped_is_final(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="dropped")
+    with pytest.raises(tasks.BoardWriteError, match="dropped, which is final"):
+        tasks.accept(hive, "T-001")
+    assert tasks.accept(hive, "T-001", to="dropped")["changed"] is False
+
+
+@pytest.mark.parametrize("fields, needle", [({"to": "merged"}, "to is 'merged'"),
+                                            ({"priority": "urgent"}, "priority is 'urgent'")])
+def test_accept_validates_its_arguments(tmp_path: Path, fields, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    with pytest.raises(tasks.BoardWriteError, match=needle):
+        tasks.accept(hive, "T-001", **fields)
+
+
+def test_accept_a_missing_task_is_no_task(tmp_path: Path) -> None:
+    with pytest.raises(tasks.NoTaskError):
+        tasks.accept(_hive(tmp_path), "T-404")
+
+
+def test_accept_an_epic_moves_its_proposed_tasks_and_keeps_a_deferred_one(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive, 3)
+    s1, s2, s3 = epic["tasks"]
+    tasks.accept(hive, s3, to="deferred")
+
+    result = tasks.accept(hive, epic["id"], priority="high")
+
+    assert result == {
+        "id": epic["id"], "status": "epic", "changed": True,
+        "children": {s1: "pending", s2: "pending", s3: "deferred"},
+    }
+    assert _read(hive, epic["id"]).status == "epic"
+    assert [_read(hive, c).priority for c in (s1, s2, s3)] == ["high", "high", None]
+    # Again: a no-op, the epic counting as pending.
+    assert tasks.accept(hive, epic["id"])["changed"] is False
+    # Its deferred task is accepted on its own now that its epic is.
+    assert tasks.accept(hive, s3)["status"] == "pending"
+
+
+def test_a_task_of_an_epic_waits_for_its_epic(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    with pytest.raises(tasks.BoardWriteError, match="accept the epic"):
+        tasks.accept(hive, epic["tasks"][0])
+    # Deferring or dropping it alone is fine.
+    assert tasks.accept(hive, epic["tasks"][0], to="dropped")["status"] == "dropped"
+
+
+def test_dropping_an_epic_drops_its_backlog_tasks(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive, 3)
+    s1, s2, s3 = epic["tasks"]
+    tasks.accept(hive, s2, to="deferred")
+
+    result = tasks.accept(hive, epic["id"], to="dropped")
+
+    assert result["children"] == {s1: "dropped", s2: "dropped", s3: "dropped"}
+    with pytest.raises(tasks.BoardWriteError, match="final"):
+        tasks.accept(hive, epic["id"])
+
+
+def test_deferring_an_epic_leaves_its_tasks(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    result = tasks.accept(hive, epic["id"], to="deferred")
+    assert result["status"] == "deferred"
+    assert set(result["children"].values()) == {"proposed"}
+
+
+def test_accept_an_epic_with_a_missing_task_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    os.remove(task_file_path(hive, epic["tasks"][1]))
+    before = Path(task_file_path(hive, epic["tasks"][0])).read_bytes()
+
+    with pytest.raises(tasks.BoardWriteError, match="propose the epic again"):
+        tasks.accept(hive, epic["id"])
+
+    assert _read(hive, epic["id"]).status == "proposed"
+    assert Path(task_file_path(hive, epic["tasks"][0])).read_bytes() == before
+
+
+def test_accept_waits_for_the_task_lock_and_an_epic_for_each_childs(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-100", status="proposed")
+    _blocks_while_locked(hive, "T-100", lambda: tasks.accept(hive, "T-100"))
+    epic = _epic(hive)
+    _blocks_while_locked(hive, epic["tasks"][1], lambda: tasks.accept(hive, epic["id"]))
+    assert _read(hive, epic["id"]).status == "epic"
+
+
+# -- unmigrated files ----------------------------------------------------------
+
+
+_UNMIGRATED = {
+    "edit_task": lambda hive: tasks.edit_task(hive, "task-1", priority="low"),
+    "add_comment": lambda hive: tasks.add_comment(hive, "task-1", "operator", "hi"),
+    "accept": lambda hive: tasks.accept(hive, "task-1"),
+}
+
+
+@pytest.mark.parametrize("writer", sorted(_UNMIGRATED))
+def test_the_board_writers_refuse_an_unmigrated_file(tmp_path: Path, writer: str) -> None:
+    hive = _hive(tmp_path)
+    legacy = Path(task_file_path(hive, "task-1"))
+    legacy.write_text(
+        "---\ntask_id: task-1\nstatus: proposed\nowner: null\ndepends_on: []\nheartbeat: null\n"
+        "description: Old style.\n---\n\n"
+    )
+    before = legacy.read_bytes()
+
+    with pytest.raises(tasks.UnmigratedTaskError):
+        _UNMIGRATED[writer](hive)
+
+    assert legacy.read_bytes() == before
+    assert not (tmp_path / "hive" / "board").exists()

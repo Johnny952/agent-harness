@@ -1,14 +1,18 @@
-"""The board service, reads only: `board_list` and `board_get` over MCP.
+"""The board service: section 6's tools over MCP, and the console's writes over HTTP.
 
-Step 4 of `docs/plans/board-service.md`. The plan makes this process the
-board's write side and the agents' MCP server (section 5); this first part
-serves the two read tools of section 6 and writes nothing, anywhere. The write
-tools come with step 5, on this same process (`docs/decisions.md` ADR 124).
+Steps 4 and 5 of `docs/plans/board-service.md`. The plan makes this process the
+board's write side and the agents' MCP server (section 5, `docs/decisions.md`
+ADR 124). It serves the two read tools, `board_list` and `board_get`, and the
+four write tools, `backlog_propose`, `task_edit`, `task_comment` and
+`backlog_accept` (ADR 129); the same four are under `/api/` for the console,
+as the operator. None moves a task once it is on the board, and none
+dispatches.
 
-Everything here reads through `dispatcher/tasks.py` and
+Everything here reads and writes through `dispatcher/tasks.py` and
 `dispatcher/context_transfer.py`, so there is no second copy of the task file
-or the description format: a parser this service needs and does not have is
-one to make reachable in `dispatcher/`. It holds no docker socket and no git
+or the description format, and no write that skips `task_lock`: a parser or a
+writer this service needs and does not have is one to make reachable in
+`dispatcher/`. It holds no docker socket and no git
 credential; the push of `review.md`'s *approve* stays on the dispatcher's side
 (ADR 124).
 
@@ -49,8 +53,8 @@ KNOWN_ROLES = frozenset(PHASE_ROLES) | {OPERATOR}
 # first".
 
 #: The backlog's statuses (section 4), as `dispatcher/tasks.py` defines them
-#: (ADR 127). Nothing here writes them yet (step 5b); a task with any other
-#: status is on the board.
+#: (ADR 127). `backlog_propose` files into the first and `backlog_accept` moves
+#: between them and out; a task with any other status is on the board.
 BACKLOG_STATUSES = frozenset(task_store.BACKLOG_STATUSES)
 PLACES = ("backlog", "board")
 
@@ -67,7 +71,7 @@ MAX_TEXT_CHARS = 200
 #: What a task's files can fail with; the api's `_UNREADABLE`, for its reasons.
 _UNREADABLE = (OSError, TypeError, ValueError, KeyError, yaml.YAMLError)
 
-COMMENTS_FILE = "comments.jsonl"
+COMMENTS_FILE = task_store.COMMENTS_FILE
 
 #: The MCP revisions this endpoint answers the handshake of: the ones whose
 #: lifecycle starts with `initialize`. The client's own is echoed when it is one
@@ -86,6 +90,10 @@ class ToolError(ValueError):
     """A tool call that ran and failed: answered as an `isError` result, for the model to read."""
 
 
+class NotFoundError(ToolError):
+    """A tool call naming a task there is none of: a 404 on the HTTP side."""
+
+
 # --- the tools --------------------------------------------------------------
 
 
@@ -97,9 +105,9 @@ def place_of(status: object) -> str:
 def _title(frontmatter: dict, description: str | None) -> str | None:
     """A frontmatter `title` when there is one, else the Goal's first line, else None.
 
-    No task file carries a title yet: section 3 gives an epic one and step 5's
-    `task_edit` writes it. Until then the Goal's first non-blank line stands in,
-    cut to `TITLE_CHARS`, so a list of ids reads as a list of asks (ADR 125).
+    `backlog_propose` and `task_edit` write one (ADR 129); a task filed before
+    them has none, and the Goal's first non-blank line stands in, cut to
+    `TITLE_CHARS`, so a list of ids reads as a list of asks (ADR 125).
     """
     title = frontmatter.get("title")
     if isinstance(title, str) and title.strip():
@@ -189,8 +197,8 @@ def board_get(hive_dir: str, task_id: str) -> dict:
 
     The description is served verbatim, as `read_description` returns it, and
     `null` when the task has none. The comment count is the lines of
-    `comments.jsonl`, 0 when the file is absent; nothing writes that file yet
-    (step 5). Raises `ToolError` for an id that names no task. Never writes.
+    `comments.jsonl`, 0 when the file is absent; `task_comment` appends to it.
+    Raises `ToolError` for an id that names no task. Never writes.
     """
     if not isinstance(task_id, str) or not context_transfer._is_single_path_component(task_id):
         raise ToolError(f"{task_id!r} is not a task id")
@@ -198,7 +206,7 @@ def board_get(hive_dir: str, task_id: str) -> dict:
         raise ToolError(f"{task_id!r} names drafts, not a task")
     path = context_transfer.task_file_path(hive_dir, task_id)
     if not os.path.isfile(path):
-        raise ToolError(f"no task {task_id}")
+        raise NotFoundError(f"no task {task_id}")
     try:
         context_transfer.read_task_file(path)
         frontmatter = _frontmatter(path)
@@ -239,9 +247,7 @@ def _comment_count(hive_dir: str, task_id: str, warnings: list[str]) -> int | No
     Counted, not parsed: a count is what section 6 serves, and the comments
     themselves are the file a phase is pointed to (section 2).
     """
-    path = os.path.join(
-        os.path.dirname(task_store.description_path(hive_dir, task_id)), COMMENTS_FILE
-    )
+    path = task_store.comments_path(hive_dir, task_id)
     try:
         with open(path, "rb") as fh:
             return sum(1 for line in fh if line.strip())
@@ -270,9 +276,69 @@ def _json_safe(value):
     return str(value)
 
 
+# The write tools. Each is one call into `dispatcher/tasks.py`, which checks
+# everything, takes the locks and writes; what is left here is who is asking.
+
+
+def _writing(write, *args, **kwargs) -> dict:
+    """Run one `tasks` writer, its refusals made `ToolError`s for the caller to read."""
+    try:
+        return write(*args, **kwargs)
+    except task_store.NoTaskError as exc:
+        raise NotFoundError(str(exc)) from exc
+    except (task_store.BoardWriteError, task_store.UnmigratedTaskError) as exc:
+        raise ToolError(str(exc)) from exc
+    except OSError as exc:
+        # A hive mounted read-only, a full disk: the write did not happen.
+        raise ToolError(f"the hive could not be written: {exc}") from exc
+    except _UNREADABLE as exc:
+        raise ToolError(f"unreadable task file: {exc}") from exc
+
+
+def backlog_propose(hive_dir: str, role: str, **arguments) -> dict:
+    """Section 6's `backlog_propose`: a task or an epic into the backlog, as `proposed`.
+
+    `source` is the caller's role, not an argument: who proposed an item is
+    what the role says, and a phase cannot pass for the operator by naming it.
+    """
+    return _writing(task_store.propose, hive_dir, source=role, **arguments)
+
+
+def task_edit(hive_dir: str, role: str, task_id: str, **fields) -> dict:
+    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, while not started."""
+    return _writing(task_store.edit_task, hive_dir, task_id, **fields)
+
+
+def task_comment(hive_dir: str, role: str, task_id: str, text: str, **anchor) -> dict:
+    """Section 6's `task_comment`: one comment on a task, or on a line of its diff.
+
+    The author is the caller's role, as the source of a proposal is.
+    """
+    return _writing(task_store.add_comment, hive_dir, task_id, role, text, **anchor)
+
+
+def backlog_accept(hive_dir: str, role: str, task_id: str, **arguments) -> dict:
+    """Section 6's `backlog_accept`: the person's word, taking an item out of the backlog."""
+    return _writing(task_store.accept, hive_dir, task_id, **arguments)
+
+
 # --- what MCP is told about the tools ---------------------------------------
 
 _STRING = {"type": "string"}
+_PRIORITY = {
+    "type": "string",
+    "enum": list(task_store.PRIORITIES),
+    "description": "the bucket; the person confirms or changes it on accepting",
+}
+_IDS = {"type": "array", "items": _STRING}
+_WRITES = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
+_DESCRIPTION = {
+    "type": "string",
+    "description": (
+        "Markdown in sections: ## Goal and ## Done when, and optionally ## Surface, "
+        "## Steps and ## Out of scope"
+    ),
+}
 
 TOOLS: dict[str, dict] = {
     "board_list": {
@@ -305,6 +371,114 @@ TOOLS: dict[str, dict] = {
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    "backlog_propose": {
+        "name": "backlog_propose",
+        "description": (
+            "Propose a task, or an epic with 2 to 4 tasks, into the backlog as `proposed`. "
+            "Nothing runs until the operator accepts it. Idempotent on the title: the same "
+            "proposal again answers the task it made, with created false."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": _STRING,
+                "description": _DESCRIPTION,
+                "priority": _PRIORITY,
+                "depends_on": {**_IDS, "description": "task ids; not for an epic"},
+                "tasks": {
+                    "type": "array",
+                    "description": "an epic's tasks; given, the proposal is an epic",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": _STRING,
+                            "description": _DESCRIPTION,
+                            "after": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "1-based positions of earlier tasks it depends on",
+                            },
+                        },
+                        "required": ["title", "description"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["title", "description"],
+            "additionalProperties": False,
+        },
+        "annotations": {**_WRITES, "idempotentHint": True},
+    },
+    "task_edit": {
+        "name": "task_edit",
+        "description": (
+            "Change a task's title, description, depends_on or priority, while it has not "
+            "started. Fields left out are kept."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": _STRING,
+                "title": _STRING,
+                "description": _DESCRIPTION,
+                "depends_on": _IDS,
+                "priority": _PRIORITY,
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+        "annotations": {**_WRITES, "idempotentHint": True},
+    },
+    "task_comment": {
+        "name": "task_comment",
+        "description": (
+            "Comment on a task, or on one line of its diff with file, line and commit "
+            "together. Comments are kept for good."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": _STRING,
+                "text": _STRING,
+                "file": {**_STRING, "description": "a path inside the repository"},
+                "line": {"type": "integer", "description": "1-based"},
+                "commit": {**_STRING, "description": "the commit hash the line is in"},
+            },
+            "required": ["task_id", "text"],
+            "additionalProperties": False,
+        },
+        "annotations": {**_WRITES, "idempotentHint": False},
+    },
+    "backlog_accept": {
+        "name": "backlog_accept",
+        "description": (
+            "On the person's word only: move a proposed or deferred item to pending (an epic "
+            "with its proposed tasks), or to deferred or dropped. Never moves a task already "
+            "on the board."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": _STRING,
+                "to": {
+                    "type": "string",
+                    "enum": list(task_store.ACCEPT_TO),
+                    "description": "where it goes; pending when left out",
+                },
+                "priority": _PRIORITY,
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+        "annotations": {**_WRITES, "idempotentHint": True},
+    },
+}
+
+_WRITERS = {
+    "backlog_propose": backlog_propose,
+    "task_edit": task_edit,
+    "task_comment": task_comment,
+    "backlog_accept": backlog_accept,
 }
 
 
@@ -313,21 +487,57 @@ def tools_for(role: str) -> list[dict]:
     return [TOOLS[name] for name in ROLE_TOOLS.get(role, ())]
 
 
-def _call(hive_dir: str, name: str, arguments: dict) -> dict:
-    """Run one tool on checked arguments. `ToolError` for arguments the tool does not take."""
-    schema = TOOLS[name]["inputSchema"]
-    unknown = sorted(set(arguments) - set(schema["properties"]))
-    if unknown:
-        raise ToolError(f"{name} takes no argument {unknown[0]!r}")
-    for key in schema.get("required", ()):
-        if key not in arguments:
-            raise ToolError(f"{name} needs {key!r}")
-    for key, value in arguments.items():
-        if value is not None and not isinstance(value, str):
-            raise ToolError(f"{key} must be a string")
+_JSON_TYPES = {
+    "string": (str,),
+    "integer": (int,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def _check(schema: dict, value, where: str, top: bool = False) -> None:
+    """`ToolError` unless `value` fits `schema`: the shapes `TOOLS` uses, and no more.
+
+    Types, `enum`, array items and object properties, `required` and
+    `additionalProperties: false`. A bool is not an integer, though Python
+    says it is. What a value means — a known id, a valid description — is the
+    writer's to check.
+    """
+    kind = schema.get("type")
+    if kind is not None and (
+        not isinstance(value, _JSON_TYPES[kind]) or isinstance(value, bool)
+    ):
+        raise ToolError(f"{where} must be {'an' if kind[0] in 'aeiou' else 'a'} {kind}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ToolError(f"{where} must be one of {', '.join(map(str, schema['enum']))}, not {value!r}")
+    if kind == "array" and "items" in schema:
+        for index, item in enumerate(value):
+            _check(schema["items"], item, f"{where}[{index}]")
+    if kind == "object":
+        properties = schema.get("properties", {})
+        unknown = sorted(set(value) - set(properties), key=str)
+        if unknown and schema.get("additionalProperties") is False:
+            raise ToolError(f"{where} takes no argument {unknown[0]!r}")
+        for key in schema.get("required", ()):
+            if value.get(key) is None:
+                raise ToolError(f"{where} needs {key!r}")
+        for key, item in value.items():
+            if item is not None and key in properties:
+                _check(properties[key], item, key if top else f"{where}.{key}")
+
+
+def _call(hive_dir: str, role: str, name: str, arguments: dict) -> dict:
+    """Run one tool on checked arguments. `ToolError` for arguments the tool does not take.
+
+    An argument given as null is one left out.
+    """
+    _check(TOOLS[name]["inputSchema"], arguments, name, top=True)
+    arguments = {key: value for key, value in arguments.items() if value is not None}
     if name == "board_list":
         return board_list(hive_dir, **arguments)
-    return board_get(hive_dir, arguments["task_id"])
+    if name == "board_get":
+        return board_get(hive_dir, arguments["task_id"])
+    return _WRITERS[name](hive_dir, role, **arguments)
 
 
 # --- the app ----------------------------------------------------------------
@@ -379,7 +589,54 @@ def create_app(config_path: str) -> Flask:
             return "", 202
         return _dispatch(hive_dir, role, message)
 
+    # The console's writes (section 6: "the console calls the same functions
+    # over HTTP"), as the operator, whose role table they follow. The same
+    # guards as `/mcp`: no browser Origin, no query; and a JSON object body.
+
+    @app.post("/api/backlog")
+    def http_propose():
+        return _http(hive_dir, "backlog_propose", None, created_status=201)
+
+    @app.patch("/api/tasks/<task_id>")
+    def http_edit(task_id: str):
+        return _http(hive_dir, "task_edit", task_id)
+
+    @app.post("/api/tasks/<task_id>/comments")
+    def http_comment(task_id: str):
+        return _http(hive_dir, "task_comment", task_id, created_status=201)
+
+    @app.post("/api/tasks/<task_id>/accept")
+    def http_accept(task_id: str):
+        return _http(hive_dir, "backlog_accept", task_id)
+
     return app
+
+
+def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 200):
+    """One console write as the operator: the tool's result, or `{"error"}` and 400 or 404.
+
+    `created_status` answers a write that made something: a proposal with
+    `created: true`, every comment. The task id is the path's, never the body's.
+    """
+    if request.headers.get("Origin"):
+        return jsonify({"error": "no browser origin may call this service"}), 403
+    if request.args:
+        return jsonify({"error": f"unknown query parameter {sorted(request.args)[0]!r}"}), 400
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "the body is not a JSON object"}), 400
+    if task_id is not None:
+        if "task_id" in body:
+            return jsonify({"error": "the task id is the path's; the body takes none"}), 400
+        body = {"task_id": task_id, **body}
+    try:
+        result = _call(hive_dir, OPERATOR, name, body)
+    except NotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ToolError as exc:
+        return jsonify({"error": str(exc)}), 400
+    made = name == "task_comment" or result.get("created") is True
+    return jsonify(result), created_status if made else 200
 
 
 def _dispatch(hive_dir: str, role: str, message: dict):
@@ -413,7 +670,7 @@ def _dispatch(hive_dir: str, role: str, message: dict):
         if not isinstance(arguments, dict):
             return _rpc_error(msg_id, INVALID_PARAMS, "arguments must be an object")
         try:
-            result = _call(hive_dir, name, arguments)
+            result = _call(hive_dir, role, name, arguments)
         except ToolError as exc:
             return _rpc_result(
                 msg_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True}

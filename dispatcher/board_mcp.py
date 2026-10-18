@@ -23,11 +23,21 @@ SERVER_NAME = "board"
 #: launches it, so nothing here writes a config for it.
 OPERATOR = "operator"
 
-#: Which tools each role may list and call (section 6). A role not named gets
-#: none, and the dispatcher gives its phases no server either.
+#: Which tools each role may list and call (section 6), reads and writes. A
+#: role not named gets none, and the dispatcher gives its phases no server
+#: either. `backlog_accept` and `task_edit` are the operator's alone: accepting
+#: is a person's act (section 4), and an arquitecto that wants a task changed
+#: says so in a comment (ADR 129).
 ROLE_TOOLS: dict[str, tuple[str, ...]] = {
-    OPERATOR: ("board_list", "board_get"),
-    "arquitecto": ("board_list", "board_get"),
+    OPERATOR: (
+        "board_list",
+        "board_get",
+        "backlog_propose",
+        "task_edit",
+        "task_comment",
+        "backlog_accept",
+    ),
+    "arquitecto": ("board_list", "board_get", "backlog_propose", "task_comment"),
 }
 
 #: Where the phases reach the service: by its compose name on ia_harness_net,

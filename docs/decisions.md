@@ -8144,3 +8144,117 @@ of a task some phase already holds); a lock file beside the task in
 are removed after use (the first is per process, so a thread in the same
 process would not wait; the second leaves a stale file behind a crash);
 requiring a `source` on every backlog item before 5b's tools set one.
+
+## ADR 129 — The board's write tools: four writers in `dispatcher/tasks.py` under `task_lock`, served over MCP and HTTP, with the source and author taken from the role
+
+**Status:** accepted (T-084, 2026-10-18). Step 5b of
+`docs/plans/board-service.md`: `backlog_propose`, `task_edit`,
+`task_comment` and `backlog_accept` (section 6). Builds on ADR 124 (the write
+side is this service), ADR 125 (stateless MCP), ADR 127 (the backlog
+statuses, `priority`, `source` and `task_lock`) and ADR 128 (one role table).
+Reverses none of them. `tags` and `rank` (5c) and debt in the backlog (5d)
+are not part of it.
+
+**Context.** Until now the service only read. Section 6 gives it four writes
+and says who may call each. Section 5 says one module writes the hive and
+every write takes the per-task lock. The plan leaves open a few points: where
+a title lives, what makes a create idempotent, what `backlog_accept` does to
+an epic, what "not started" means for `task_edit`, and the shape of the
+console's endpoints.
+
+**Decision.**
+1. *One module writes.* The writers are `tasks.propose`, `tasks.edit_task`,
+   `tasks.add_comment` and `tasks.accept`. `board_service/app.py` checks the
+   arguments against each tool's schema, calls the writer, and maps its
+   errors. It writes no file itself.
+2. *Every problem at once, nothing written.* A writer checks everything
+   before it writes and raises one `BoardWriteError` listing every problem.
+   An epic is all or nothing. `NoTaskError` is its subclass for an id with
+   no task file. A write the filesystem refuses (`OSError`, such as a
+   read-only mount) becomes a tool error naming the hive, not a 500.
+3. *The source and the author come from the role.* `backlog_propose` sets
+   `source` to the caller's role, and `task_comment` sets `author` the same
+   way. Neither takes them as arguments: a schema with
+   `additionalProperties: false` refuses one. `source` is therefore always
+   set on a proposal, as ADR 127 left for this step. `debt` is set only by
+   the dispatcher's own call to the module (5d).
+4. *The title is a frontmatter field.* `TaskFile.title`, written only when
+   set. A create is idempotent on it within its scope: outside any epic for
+   a proposal, among the siblings for an epic's task. A proposal whose title
+   an existing task has answers that task with `created: false` when it asks
+   for the same thing. It finishes a run that died part way: a missing
+   description, or a missing task of an epic. It is refused when it asks for
+   something else. `task_edit` keeps titles unique in the same scope.
+5. *Creates are serialized.* `propose` holds `task_lock` on the reserved
+   name `_create` (`CREATE_LOCK`) while it checks the title, picks the next
+   free `T-<n>` and writes. `accept_drafts` takes the same lock, so the two
+   never pick one id. The order is `_create`, then the parent, then each
+   child. A new task's file is written before its description, so a retry
+   finds it and fills in the description.
+6. *An epic.* `tasks` of 2 to 4 entries, each with a title, a description
+   and `after` (1-based positions of earlier entries). The parent is
+   `T-<n>` with `split_into`. Its tasks are `T-<n>-S<k>`, as `file_split`
+   names them, each `proposed` with `epic` set. An epic takes no
+   `depends_on`.
+7. *Descriptions.* A proposal and an edit need the sections *Goal* and
+   *Done when*, the same check the module already makes. They need no
+   *Surface* or *Out of scope*: those belong to the drafts of
+   `accept_drafts`, not to a backlog item.
+8. *`task_edit` before start only.* A backlog item has not started. A
+   `pending` task has not started while no dispatcher holds it, nothing is
+   merged and its task file has no handoff. An epic has not started while
+   none of its tasks has. Anything else is refused. `depends_on` names tasks
+   that exist, without a cycle. A task of an epic depends only on its
+   siblings, and an epic depends on nothing.
+9. *`backlog_accept`.* It moves a task from `proposed` or `deferred` to
+   `pending`, `deferred` or `dropped`, with an optional `priority`. Asking
+   for the status a task already has is a no-op, so a retry is safe. A no-op
+   that would change the priority is refused, since that belongs to
+   `task_edit`. `dropped` is final: proposing again makes a new item. A task
+   on the board is refused.
+   - An epic accepted becomes `status: epic`. Its `proposed` tasks become
+     `pending`, and a `deferred` one stays out.
+   - An epic dropped drops its backlog tasks.
+   - An epic deferred goes alone.
+   - A task of an epic is accepted on its own only once its epic is.
+10. *Comments.* One JSON line `{"at", "author", "text"}` per comment is
+    appended to `<hive root>/board/<id>/comments.jsonl`. A comment on a diff
+    also carries `file`, `line` and `commit`: all three, or none. The append
+    is one `write` on an `O_APPEND` file under the task's lock. Any task with
+    a task file may be commented on, whatever its status.
+11. *Who.* The operator gets all six tools. The arquitecto gets the reads,
+    `backlog_propose` and `task_comment`; when it wants a task changed, it
+    says so in a comment. Every other role gets none. A tool the role
+    lacks is -32602 on every call, as for the reads.
+12. *The console's endpoints.* `POST /api/backlog` answers 201 for a create
+    and 200 for an idempotent repeat. `PATCH /api/tasks/<id>` edits.
+    `POST /api/tasks/<id>/comments` answers 201. `POST /api/tasks/<id>/accept`
+    accepts. They call the same tool functions as the operator, with the
+    same schemas. The id comes from the path only, and a `task_id` in the
+    body is refused. Refusals return `{"error": ...}`:
+    - 403 for any `Origin`;
+    - 400 for any query parameter, a body that is not a JSON object, or a
+      tool refusal;
+    - 404 for no such task.
+
+**Consequences.** The service now writes the hive, so compose mounts its
+`.hive` read-write, `locks/` included (ADR 127), with config still `:ro`, and
+puts it on `console_net` as well as `ia_harness_net`, for the console's
+writes. Both were approved by the user on 2026-10-18. The arquitecto's phases get
+`mcp__board__backlog_propose` and `mcp__board__task_comment` in their
+allowed tools through ADR 128's table. The console screens, the api serving
+`priority`, `source` and `title`, and `tags` and `rank` come later.
+
+**Ruled out.**
+- A `source` or `author` argument: an agent could claim to be the operator.
+- `backlog_accept` or `task_edit` for the arquitecto: accepting is a
+  person's act (section 4).
+- Writing the title only into the description's heading: it would leave
+  idempotency to parsing prose.
+- A create lock per title: the id allocation needs one lock across all
+  titles anyway.
+- Undropping a dropped item.
+- Editing a task after it started.
+- An HTTP route that takes the role from the request: the console is the
+  operator's.
+- Writing directly from `board_service`.

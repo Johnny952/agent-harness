@@ -89,6 +89,10 @@ class TaskFile:
     # with no `priority` is `normal`.
     priority: str | None = None
     source: str | None = None
+    # The task's title, set by the board's write tools (ADR 129): what a
+    # create is idempotent on, and what `task_edit` changes. A task without
+    # one reads its title off its description. Written only when set.
+    title: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -637,6 +641,7 @@ def read_task_file(path: str) -> TaskFile:
         phase=fm.get("phase") or None,
         priority=fm.get("priority"),
         source=fm.get("source"),
+        title=fm.get("title"),
     )
 
 
@@ -768,6 +773,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["priority"] = task.priority
     if task.source is not None:
         fm["source"] = task.source
+    if task.title is not None:
+        fm["title"] = task.title
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

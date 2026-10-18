@@ -175,8 +175,8 @@ services:
       - console_net
 
   # The board service, mirrored from docker-compose.yml (see its comment):
-  # every mount :ro, no socket, ia_harness_net only, loopback 8792;
-  # docs/decisions.md ADR 124 and ADR 125.
+  # the hive read-write and config :ro, no socket, ia_harness_net and
+  # console_net, loopback 8792; docs/decisions.md ADR 124, ADR 125 and ADR 129.
   board-service:
     build:
       context: ../..
@@ -185,11 +185,12 @@ services:
     ports:
       - "127.0.0.1:8792:8792"
     volumes:
-      - ../../.hive:/data/.hive:ro
+      - ../../.hive:/data/.hive
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
     networks:
       - ia_harness_net
+      - console_net
 
   registry-mirror:
     image: registry:2
