@@ -27,9 +27,10 @@ The epic format of `docs/plans/task-split.md` section 2 is written here too:
 `file_split` files a split's sub-tasks and turns their parent into an epic,
 `mark_merged` records a merge on the task and `unmet_dependencies` reads it.
 `mark_blocked` records a task that stopped blocked. `close_epic` closes an
-epic on its last merged sub-task and `epic_problems` checks one written by
-hand. The dispatcher calls all of them; `file_split` only through
-`dispatcher._file_split` (`docs/implementations/T-031.md`).
+epic once every sub-task is settled, merged or dropped (ADR 134), and
+`epic_problems` checks one written by hand. The dispatcher calls all of
+them; `file_split` only through `dispatcher._file_split`
+(`docs/implementations/T-031.md`).
 
 So are the drafts of `docs/plans/autonomy.md` *Decisions*, 9 (ADR 82): a
 `draft-specs` run writes a set of them under `<hive root>/board/drafts/<draft
@@ -1244,16 +1245,35 @@ def epic_problems(hive_dir: str, task: context_transfer.TaskFile) -> list[str]:
     return problems
 
 
+#: The status `close_epic` gives an epic none of whose sub-tasks merged (ADR 134).
+EPIC_ALL_DROPPED_STATUS = "dropped"
+
+
+def is_settled(task: context_transfer.TaskFile) -> bool:
+    """Whether a sub-task no longer holds its epic open: merged, or dropped.
+
+    ADR 134. Every other status waits, a `deferred` one included: it is an
+    open decision of the person's, and closing its epic under it would strand
+    it, since `accept` takes a task of an epic only while the epic is `epic`
+    and `epic_problems` refuses to run one under a closed epic.
+    """
+    return bool(task.merged) or task.status == "dropped"
+
+
 def close_epic(hive_dir: str, task_id: str) -> str | None:
-    """Close the epic this task is part of, if it was the last one to merge.
+    """Close the epic this task is part of, if it was the last one to settle.
 
     `docs/plans/task-split.md` section 3, the epic check both merge paths run
-    after `mark_merged`. The parent is set to `status: done` when this task
-    has `epic`, the parent is `status: epic` and names it in `split_into`, and
-    every id there has a task file with a `merged` block; its lock, body and
-    other fields stay. Returns the parent's id when it closed it and None
-    when it wrote nothing: a parent already `done` is left alone, and a file
-    that is missing or will not read closes nothing.
+    after `mark_merged`, and `accept` runs after it drops a task of an epic
+    (ADR 134). The parent is closed when this task has `epic`, the parent is
+    `status: epic` and names it in `split_into`, and every id there has a task
+    file that `is_settled`: merged, or dropped. It becomes `status: done` when
+    at least one of them merged, and `EPIC_ALL_DROPPED_STATUS` when none did,
+    since nothing of it shipped; its lock, body and other fields stay.
+    Returns the parent's id when it closed it and None when it wrote nothing:
+    a parent already closed is left alone, a child still pending, running,
+    blocked or deferred keeps it open, and a file that is missing or will not
+    read closes nothing.
     """
     task, _ = _read_for_check(hive_dir, task_id)
     if task is None or not task.epic:
@@ -1264,10 +1284,12 @@ def close_epic(hive_dir: str, task_id: str) -> str | None:
     children = parent.split_into
     if not isinstance(children, list) or task_id not in children:
         return None
+    merged = False
     for child_id in children:
         child, _ = _read_for_check(hive_dir, child_id)
-        if child is None or not child.merged:
+        if child is None or not is_settled(child):
             return None
+        merged = merged or bool(child.merged)
     # The parent's lock, and only that: no writer takes a parent's lock while
     # holding a child's, so `file_split`, which holds its parent's while it
     # writes the children, cannot meet this one the other way round. The
@@ -1277,7 +1299,7 @@ def close_epic(hive_dir: str, task_id: str) -> str | None:
         parent = context_transfer.read_task_file(parent_path)
         if parent.status != "epic":
             return None
-        parent.status = "done"
+        parent.status = "done" if merged else EPIC_ALL_DROPPED_STATUS
         _write_task_file(parent_path, parent)
     return task.epic
 
@@ -2556,6 +2578,10 @@ def accept(
     its epic is. Returns `{"id", "status", "changed", "children"}`, the last
     each of an epic's tasks with its status after the call.
 
+    Dropping a task of an epic on the board runs `close_epic` once the locks
+    are let go, so the drop that settles an epic's last open task closes it
+    (ADR 134); the result then also has `epic_closed`, the epic's id.
+
     A `priority` that moves an item to another bucket puts it at that
     bucket's end, an epic's tasks after the epic (ADR 130); that read is under
     the create lock, taken before the task's whenever a priority is given.
@@ -2573,23 +2599,33 @@ def accept(
         if task.split_into and not task.epic:
             return _accept_epic(hive_dir, task_id, path, task, to, priority)
         status = task.status
-        if status == to:
+        changed = status != to
+        if not changed:
             _refuse_priority_on_noop(task_id, task, to, priority)
-            return {"id": task_id, "status": to, "changed": False, "children": {}}
-        _refuse_from(task_id, status)
-        if to == ACCEPTED_STATUS and task.epic:
-            parent, why = _read_for_check(hive_dir, task.epic)
-            if parent is None or parent.status != "epic":
-                raise BoardWriteError(
-                    f"task {task_id}",
-                    [f"its epic {task.epic} is not accepted yet ({why or 'status ' + parent.status});"
-                     " accept the epic"],
-                )
-        task.status = to
-        if priority is not None:
-            _rebucket(hive_dir, [task], priority)
-        _write_task_file(path, task)
-    return {"id": task_id, "status": to, "changed": True, "children": {}}
+        else:
+            _refuse_from(task_id, status)
+            if to == ACCEPTED_STATUS and task.epic:
+                parent, why = _read_for_check(hive_dir, task.epic)
+                if parent is None or parent.status != "epic":
+                    raise BoardWriteError(
+                        f"task {task_id}",
+                        [f"its epic {task.epic} is not accepted yet "
+                         f"({why or 'status ' + parent.status}); accept the epic"],
+                    )
+            task.status = to
+            if priority is not None:
+                _rebucket(hive_dir, [task], priority)
+            _write_task_file(path, task)
+    result = {"id": task_id, "status": to, "changed": changed, "children": {}}
+    # A dropped task of an epic may be the last one holding it open (ADR 134).
+    # After both locks are let go: `close_epic` takes the parent's, which is
+    # never taken under a child's. A retry of the drop runs it too, so a
+    # close that a crash cut off is made then.
+    if to == "dropped" and task.epic:
+        closed = close_epic(hive_dir, task_id)
+        if closed:
+            result["epic_closed"] = closed
+    return result
 
 
 def _rebucket(

@@ -1065,6 +1065,45 @@ def test_close_epic_refuses_an_unmigrated_parent_like_every_writer(tmp_path: Pat
     assert _tree(hive) == before
 
 
+@pytest.mark.parametrize(
+    "s1, s2, closed_as",
+    [
+        ("merged", "dropped", "done"),
+        ("dropped", "merged", "done"),
+        ("dropped", "dropped", "dropped"),
+    ],
+)
+def test_close_epic_counts_a_dropped_child_as_settled(
+    tmp_path: Path, s1: str, s2: str, closed_as: str,
+) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    for child, settled in (("task-1-S1", s1), ("task-1-S2", s2)):
+        if settled == "merged":
+            tasks.mark_merged(hive, child, "main")
+        else:
+            _edit(hive, child, status="dropped")
+
+    assert tasks.close_epic(hive, "task-1-S2") == "task-1"
+
+    # Done when one of them shipped; dropped, a final backlog status, when none did.
+    assert read_task_file(task_file_path(hive, "task-1")).status == closed_as
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress", "blocked", "deferred", "proposed", "done"])
+def test_close_epic_waits_for_a_child_that_is_not_merged_or_dropped(
+    tmp_path: Path, status: str,
+) -> None:
+    hive = _hive(tmp_path)
+    _epic(hive)
+    _edit(hive, "task-1-S1", status="dropped")
+    _edit(hive, "task-1-S2", status=status)
+    before = _tree(hive)
+
+    assert tasks.close_epic(hive, "task-1-S1") is None
+    assert _tree(hive) == before
+
+
 def _problems(hive: str, task_id: str = "task-1-S2") -> list[str]:
     before = _tree(hive)
     problems = tasks.epic_problems(hive, read_task_file(task_file_path(hive, task_id)))
