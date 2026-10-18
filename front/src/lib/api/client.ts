@@ -1,8 +1,9 @@
 /**
  * Typed API client. One function per endpoint.
  *
- * **Eight of them are real.** `listTasks`, `getTask`, `listAccounts`,
- * `listEvents`, `listDebt`, `listPhases`, `listLearnings` and `listUsage` read
+ * **Nine of them are real.** `listTasks`, `getTask`, `listAccounts`,
+ * `listEvents`, `listDebt`, `listPhases`, `listLearnings`, `listUsage` and
+ * `getRoadmap` read
  * `observability/api/` through the console's own
  * origin — `lib/api/forward.ts` is the server half that holds the bearer, so
  * nothing here carries a credential and every URL below is relative. They resolve
@@ -17,12 +18,12 @@
  * dock. A screen reading one of those says so on itself rather than looking
  * finished; `docs/ui.md` *A region with no route says which route, and when*.
  *
- * Relative URLs mean these eight may only be called from the browser: a relative
+ * Relative URLs mean these nine may only be called from the browser: a relative
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
  * `useEffect` today, and ADR 24 names moving one into a route loader as the case
  * that has to answer the base-URL question again.
  *
- * **A ninth is real through another forward.** `getSettings` reads
+ * **A tenth is real through another forward.** `getSettings` reads
  * `/api/settings`, which `lib/api/forward.ts` sends to the config writer rather
  * than the api, under the writer's own token (`docs/decisions.md` ADR 112). It goes
  * through the same `readEnvelope`, so a writer that refused, timed out or was never
@@ -42,6 +43,7 @@ import type {
   LearningEntry,
   Phase,
   QueuedAction,
+  Roadmap,
   Settings,
   Task,
   TaskDetail,
@@ -73,8 +75,8 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  */
 const actionBackendDown = false;
 
-/* ── The eight wired reads ────────────────────────────────────────────────
- * One boundary function, and every one of the eight goes through it: ADR 7's
+/* ── The nine wired reads ─────────────────────────────────────────────────
+ * One boundary function, and every one of the nine goes through it: ADR 7's
  * "one boundary function per call", inherited by the console under ADR 16.
  */
 
@@ -269,6 +271,20 @@ export function listLearnings(): Promise<ApiResult<LearningEntry[]>> {
  */
 export function listUsage(taskId: string): Promise<ApiResult<UsageGroup[] | null>> {
   return readEnvelope<UsageGroup[] | null>(`/api/tasks/${encodeURIComponent(taskId)}/usage`);
+}
+
+/**
+ * The project's plans in three bands, future, now and past, with each plan's
+ * tasks and the tasks no plan names.
+ *
+ * One read and no mapping: the bands, their order and the month groups of
+ * `no_plan.past` are the api's (`observability/api/app.py`, T-072), and which
+ * of them a screen hides is the Roadmap screen's decision. The project slug is
+ * added by the forward, server-side, from `CONSOLE_PROJECT`, the way
+ * `/api/debt`'s is. ADR 24.
+ */
+export function getRoadmap(): Promise<ApiResult<Roadmap>> {
+  return readEnvelope<Roadmap>("/api/roadmap");
 }
 
 /**

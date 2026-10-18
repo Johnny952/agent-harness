@@ -36,6 +36,13 @@ export const debtQuery = queryOptions({
   refetchInterval: POLL_MS * 2,
 });
 
+/** Plans change on a merge, not every second: the debt index's pace. */
+export const roadmapQuery = queryOptions({
+  queryKey: ["roadmap"],
+  queryFn: () => api.getRoadmap(),
+  refetchInterval: POLL_MS * 2,
+});
+
 export const learningsQuery = queryOptions({
   queryKey: ["learnings"],
   queryFn: () => api.listLearnings(),

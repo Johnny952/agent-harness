@@ -13,6 +13,7 @@ import {
   LayoutGrid,
   ListOrdered,
   MessageSquare,
+  Milestone,
   Server,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -30,6 +31,7 @@ const NAV = [
   { to: "/tail", key: "l", label: "Live tail", icon: Activity },
   { to: "/debt", key: "d", label: "Debt", icon: AlertTriangle },
   { to: "/learnings", key: "n", label: "Learnings", icon: BookOpen },
+  { to: "/roadmap", key: "r", label: "Roadmap", icon: Milestone },
   { to: "/queue", key: "q", label: "Queue", icon: ListOrdered },
   { to: "/backlog", key: "k", label: "Backlog", icon: Layers },
   { to: "/models", key: "m", label: "Settings", icon: Cpu },

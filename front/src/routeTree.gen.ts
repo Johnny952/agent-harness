@@ -17,6 +17,7 @@ import { Route as LearningsRouteImport } from './routes/learnings'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as PoolRouteImport } from './routes/pool'
 import { Route as QueueRouteImport } from './routes/queue'
+import { Route as RoadmapRouteImport } from './routes/roadmap'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as TailRouteImport } from './routes/tail'
 import { Route as TokensRouteImport } from './routes/tokens'
@@ -62,6 +63,11 @@ const QueueRoute = QueueRouteImport.update({
   path: '/queue',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RoadmapRoute = RoadmapRouteImport.update({
+  id: '/roadmap',
+  path: '/roadmap',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsRoute = SessionsRouteImport.update({
   id: '/sessions',
   path: '/sessions',
@@ -92,6 +98,7 @@ export interface FileRoutesByFullPath {
   '/models': typeof ModelsRoute
   '/pool': typeof PoolRoute
   '/queue': typeof QueueRoute
+  '/roadmap': typeof RoadmapRoute
   '/sessions': typeof SessionsRoute
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
@@ -106,6 +113,7 @@ export interface FileRoutesByTo {
   '/models': typeof ModelsRoute
   '/pool': typeof PoolRoute
   '/queue': typeof QueueRoute
+  '/roadmap': typeof RoadmapRoute
   '/sessions': typeof SessionsRoute
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
@@ -121,6 +129,7 @@ export interface FileRoutesById {
   '/models': typeof ModelsRoute
   '/pool': typeof PoolRoute
   '/queue': typeof QueueRoute
+  '/roadmap': typeof RoadmapRoute
   '/sessions': typeof SessionsRoute
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
@@ -137,6 +146,7 @@ export interface FileRouteTypes {
     | '/models'
     | '/pool'
     | '/queue'
+    | '/roadmap'
     | '/sessions'
     | '/tail'
     | '/tokens'
@@ -151,6 +161,7 @@ export interface FileRouteTypes {
     | '/models'
     | '/pool'
     | '/queue'
+    | '/roadmap'
     | '/sessions'
     | '/tail'
     | '/tokens'
@@ -165,6 +176,7 @@ export interface FileRouteTypes {
     | '/models'
     | '/pool'
     | '/queue'
+    | '/roadmap'
     | '/sessions'
     | '/tail'
     | '/tokens'
@@ -180,6 +192,7 @@ export interface RootRouteChildren {
   ModelsRoute: typeof ModelsRoute
   PoolRoute: typeof PoolRoute
   QueueRoute: typeof QueueRoute
+  RoadmapRoute: typeof RoadmapRoute
   SessionsRoute: typeof SessionsRoute
   TailRoute: typeof TailRoute
   TokensRoute: typeof TokensRoute
@@ -244,6 +257,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof QueueRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/roadmap': {
+      id: '/roadmap'
+      path: '/roadmap'
+      fullPath: '/roadmap'
+      preLoaderRoute: typeof RoadmapRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions': {
       id: '/sessions'
       path: '/sessions'
@@ -284,6 +304,7 @@ const rootRouteChildren: RootRouteChildren = {
   ModelsRoute: ModelsRoute,
   PoolRoute: PoolRoute,
   QueueRoute: QueueRoute,
+  RoadmapRoute: RoadmapRoute,
   SessionsRoute: SessionsRoute,
   TailRoute: TailRoute,
   TokensRoute: TokensRoute,
