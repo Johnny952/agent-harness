@@ -8812,3 +8812,46 @@ front `Task` type carries `epic`, `split_into` (as `unknown`, narrowed by
 - Moving dropped rows: dropped is final, and its rank decides nothing.
 - Parallel rank writes: a refusal mid-renumber would leave an order nobody
   chose; in sequence it stops at the first refusal.
+
+## ADR 139 — The task page shows the description's sections, the comments, the phase and the epic view
+
+**Status:** accepted (T-094, 2026-10-18). Step 8 of
+`docs/plans/board-service.md`. Builds on ADR 136 (the forward), ADR 137 (the
+epic fields) and ADR 138 (`splitInto`, `isEpic`). No new route.
+
+**Context.** `front/src/routes/tasks.$taskId.tsx` showed the description as
+one block of text in the header and no comments, phase or epic.
+
+**Decision.**
+1. *The description's sections.* `front/src/lib/description.ts:parseDescription`
+   mirrors `parse_description`: the same five headers, a duplicate or text
+   before the first section refused, a blank required section missing, the
+   dispatcher's wording for each reason. Parsed, each section is a heading
+   over `Markdown`, in the dataclass order; unparsed, the raw text is shown
+   as written with the reason above it.
+2. *Comments.* The thread reads `commentsQuery` and shows author, time,
+   text and the `file:line@commit` anchor when all three are set. The form
+   posts `{text}` only: the board-service sets the author. It refuses a blank
+   text and one over `MAX_COMMENT_CHARS` (20,000) before the post, counting
+   code points as the dispatcher does; a refusal from the service goes to
+   `toast.error`.
+3. *The header* carries the title and, when `epic` is set, a link to the
+   epic. The description moved to its own region.
+4. *Phase.* A field shows the running phase, flagged `stale` when the api
+   serves `lock_expired: true`, and "between phases" when none is set.
+5. *The epic view.* On a task with `isEpic(t)` or `status: epic`, the page
+   lists the children in `splitInto` order from one `tasksQuery` read, no
+   read per child: title, status, merged or not, and "after T-x" for each
+   `depends_on`. A child the list does not hold is shown as missing.
+   Progress is "n of m merged", m being the children less the dropped ones;
+   the dropped and the missing are counted apart, and a missing child stays
+   in m, since nothing says it settled.
+
+**Consequences.** The task detail carries everything step 8 asked of it; the
+screen count does not change.
+
+**Ruled out.**
+- A separate epic route: `routeTree.gen.ts` is generated, and the task page
+  already reads every field an epic has.
+- Reading each child's `/api/tasks/<id>`: one list read holds every row.
+- An author field in the form: the service, not the browser, says who wrote.

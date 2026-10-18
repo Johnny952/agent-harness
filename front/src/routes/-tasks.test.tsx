@@ -2,22 +2,28 @@
  * The task page's header, read off the mounted route. `TaskDetailPage` builds
  * the subtitle itself and hands it to no component of its own, so there is
  * nothing to export and render alone: the page is mounted with `renderRoute`
- * and the header is read where the operator reads it. Three arms, one test
- * each: a task with no `description.md` says *no description*, a task with a
- * description shows it, and a card the api could not read claims neither.
- * `docs/debt/T-034-D1.md`.
+ * and the header is read where the operator reads it. A card the api could not
+ * read claims nothing under its id (`docs/debt/T-034-D1.md`); since ADR 139 the
+ * header carries the title and the epic, and the description has its region.
  *
- * The page asks for five paths and all five are served, because one left out
+ * Then ADR 139's regions: the description's sections, the comment thread and
+ * its form, the running phase, and the epic view over one `/api/tasks` read.
+ *
+ * The page asks for seven paths and all are served, because one left out
  * answers 404 and the page draws that region's error state:
  * `docs/implementations/T-035.md` *Every read the page makes*.
  *
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { toast } from "sonner";
 import { Route } from "./tasks.$taskId";
-import { renderRoute } from "@/test/render-route";
-import type { TaskDetail } from "@/lib/api/types";
+import { renderRoute, type Served } from "@/test/render-route";
+import type { Task, TaskComment, TaskDetail } from "@/lib/api/types";
+
+// `renderRoute` draws no Toaster, so the toast is asserted at its call.
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
 // never runs, and every render would stack in one document.
@@ -56,8 +62,9 @@ async function taskPage(
   data: TaskDetail | null,
   warnings: string[] = [],
   usage: { data: unknown; warnings?: string[] } = { data: [] },
+  extra: Served = {},
 ) {
-  await renderRoute(
+  return renderRoute(
     Route,
     "/tasks/$taskId",
     {
@@ -66,6 +73,9 @@ async function taskPage(
       "/api/debt": { data: [] },
       "/api/phases": { data: [] },
       "/api/learnings": { data: [] },
+      "/api/tasks/T-101/comments": { data: { task_id: "T-101", comments: [] } },
+      "/api/tasks": { data: [] },
+      ...extra,
     },
     "/tasks/T-101",
   );
@@ -117,22 +127,62 @@ function header(): HTMLElement {
   return screen.getByRole("heading", { level: 1, name: "T-101" }).parentElement as HTMLElement;
 }
 
-describe("the task page's header for a task with no description", () => {
-  it("says so under the task id", async () => {
-    await taskPage({ ...TASK, description: null });
-    // The title is drawn before the read lands; this is drawn after it.
+/** The panel a region's `h2` heads. */
+function region(name: string): HTMLElement {
+  return screen.getByRole("heading", { level: 2, name }).parentElement as HTMLElement;
+}
+
+describe("the task page's header", () => {
+  it("names the title and the epic a sub-task belongs to, linked", async () => {
+    await taskPage({ ...TASK, title: "pool lock owner", epic: "T-100" });
     await screen.findByText("task body");
-    expect(header().textContent).toContain("no description");
+    expect(header().textContent).toContain("pool lock owner");
+    const link = within(header()).getByRole("link", { name: "T-100" });
+    expect(link.getAttribute("href")).toBe("/tasks/T-100");
+  });
+
+  it("says no title, never null, and names no epic on a plain task", async () => {
+    await taskPage(TASK);
+    await screen.findByText("task body");
+    expect(header().textContent).toContain("no title");
     expect(header().textContent).not.toContain("null");
+    expect(header().textContent).not.toContain("part of");
   });
 });
 
-describe("the task page's header for a task with a description", () => {
-  it("shows the description and does not call it absent", async () => {
+describe("the description region for a task with no description", () => {
+  it("says so", async () => {
+    await taskPage({ ...TASK, description: null });
+    // The title is drawn before the read lands; this is drawn after it.
+    await screen.findByText("task body");
+    expect(region("description").textContent).toContain("no description");
+    expect(region("description").textContent).not.toContain("null");
+  });
+});
+
+describe("the description region for a description that does not parse", () => {
+  it("shows the raw text with the dispatcher's reason", async () => {
     await taskPage(TASK);
     await screen.findByText("task body");
-    expect(header().textContent).toContain(DESCRIPTION);
+    const raw = within(region("description")).getByTestId("description-raw");
+    expect(raw.textContent).toContain(DESCRIPTION);
+    expect(raw.textContent).toContain("has text before its first section");
     expect(screen.queryByText("no description")).toBeNull();
+  });
+});
+
+describe("the description region for a sectioned description", () => {
+  it("draws each section under its heading, in the dataclass's order", async () => {
+    const description =
+      "## Done when\nthe owner shows\n## Goal\nname the owner\n## Steps\n- read it";
+    await taskPage({ ...TASK, description });
+    await screen.findByText("task body");
+    const sections = within(region("description")).getByTestId("description-sections");
+    const headings = within(sections).getAllByRole("heading", { level: 3 });
+    expect(headings.map((h) => h.textContent)).toEqual(["Goal", "Done when", "Steps"]);
+    expect(sections.textContent).toContain("name the owner");
+    expect(sections.textContent).toContain("read it");
+    expect(sections.textContent).not.toContain("## Goal");
   });
 });
 
@@ -363,5 +413,178 @@ describe("the usage region's states", () => {
     await screen.findByText("attempt 1 of 2");
     expect(screen.getByText("attempt 2 of 2")).toBeTruthy();
     expect(screen.getByText("failover from cuenta1")).toBeTruthy();
+  });
+});
+
+function comment(over: Partial<TaskComment> = {}): TaskComment {
+  return { at: "2026-10-14T10:00:00Z", author: "operator", text: "looks right", ...over };
+}
+
+function served(comments: TaskComment[]): Served {
+  return { "/api/tasks/T-101/comments": { data: { task_id: "T-101", comments } } };
+}
+
+const POSTED = {
+  id: "T-101",
+  comment: comment({ text: "ship it" }),
+  comment_count: 1,
+};
+
+describe("the comment thread", () => {
+  it("lists each comment with its author, time, text and anchor", async () => {
+    await taskPage(TASK, [], undefined, {
+      ...served([
+        comment(),
+        comment({
+          author: "revisor",
+          text: "off by one",
+          file: "dispatcher/tasks.py",
+          line: 42,
+          commit: "abc1234",
+        }),
+      ]),
+    });
+    const rows = await screen.findAllByTestId("comment");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.textContent).toContain("operator");
+    expect(rows[0]!.textContent).toContain("2026-10-14");
+    expect(rows[0]!.textContent).toContain("looks right");
+    expect(rows[0]!.textContent).not.toContain("@");
+    expect(rows[1]!.textContent).toContain("revisor");
+    expect(within(rows[1]!).getByText("dispatcher/tasks.py:42@abc1234")).toBeTruthy();
+  });
+
+  it("says a task with none has none", async () => {
+    await taskPage(TASK);
+    await screen.findByText("No comments on this task yet.");
+  });
+});
+
+describe("the comment form", () => {
+  it("posts the text as the board-service takes it", async () => {
+    const { sent } = await taskPage(TASK, [], undefined, {
+      "POST /api/tasks/T-101/comments": { data: POSTED },
+    });
+    const box = await screen.findByLabelText("new comment");
+    fireEvent.change(box, { target: { value: "ship it" } });
+    fireEvent.click(screen.getByRole("button", { name: "post comment" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("comment added to T-101"));
+    expect(sent.find((s) => s.method === "POST")).toEqual({
+      method: "POST",
+      path: "/api/tasks/T-101/comments",
+      body: { text: "ship it" },
+    });
+  });
+
+  it("will not post blank text or text over the limit", async () => {
+    const { sent } = await taskPage(TASK);
+    const box = await screen.findByLabelText("new comment");
+    const button = screen.getByRole("button", { name: "post comment" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(box, { target: { value: "x".repeat(20_001) } });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("20,001 characters, over the 20,000 a comment can hold")).toBeTruthy();
+    fireEvent.submit(box.closest("form")!);
+    fireEvent.change(box, { target: { value: "x".repeat(20_000) } });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(sent.some((s) => s.method === "POST")).toBe(false);
+  });
+
+  it("shows a refusal in a toast", async () => {
+    await taskPage(TASK, [], undefined, {
+      "POST /api/tasks/T-101/comments": { status: 400, error: "the text is blank" },
+    });
+    fireEvent.change(await screen.findByLabelText("new comment"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByRole("button", { name: "post comment" }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("the text is blank")),
+    );
+  });
+});
+
+/** The field panel's cell under `label`. */
+function field(label: string): HTMLElement {
+  return screen.getByText(label, { selector: "p.label-xs" }).parentElement as HTMLElement;
+}
+
+describe("the running phase", () => {
+  it("names the phase a live lock holds", async () => {
+    await taskPage({ ...TASK, status: "in_progress", phase: "revisor", lock_expired: false });
+    await screen.findByText("task body");
+    expect(field("phase").textContent).toContain("revisor");
+    expect(field("phase").textContent).not.toContain("stale");
+  });
+
+  it("flags the phase stale when the api says the lock expired", async () => {
+    await taskPage({ ...TASK, status: "in_progress", phase: "revisor", lock_expired: true });
+    await screen.findByText("task body");
+    expect(field("phase").textContent).toContain("revisor");
+    expect(within(field("phase")).getByText("stale")).toBeTruthy();
+  });
+
+  it("says between phases when none runs", async () => {
+    await taskPage(TASK);
+    await screen.findByText("task body");
+    expect(field("phase").textContent).toBe("phasebetween phases");
+  });
+});
+
+function row(id: string, over: Partial<Task> = {}): Task {
+  const { body: _body, ...base } = TASK;
+  return { ...base, task_id: id, epic: "T-101", ...over };
+}
+
+const EPIC_VIEW = "the tasks this epic was split into";
+
+describe("the epic view", () => {
+  const epic: TaskDetail = {
+    ...TASK,
+    status: "epic",
+    split_into: ["T-104", "T-102", "T-109", "T-103"],
+  };
+  const list = [
+    row("T-101", { status: "epic", split_into: epic.split_into, epic: null }),
+    row("T-102", { title: "second", status: "done", merged: true }),
+    row("T-103", { title: "dropped one", status: "dropped" }),
+    row("T-104", { title: "first", status: "in_progress", depends_on: ["T-102", "T-103"] }),
+  ];
+
+  it("lists the children in split order, each linked, with a missing one named", async () => {
+    await taskPage(epic, [], undefined, { "/api/tasks": { data: list } });
+    await screen.findByTestId("child-T-104");
+    const ids = within(region(EPIC_VIEW))
+      .getAllByTestId(/^child-/)
+      .map((el) => el.getAttribute("data-testid"));
+    expect(ids).toEqual(["child-T-104", "child-T-102", "child-T-109", "child-T-103"]);
+    const first = screen.getByTestId("child-T-104");
+    expect(first.textContent).toContain("first");
+    expect(first.textContent).toContain("in_progress");
+    expect(first.textContent).toContain("not merged");
+    expect(first.textContent).toContain("after T-102, T-103");
+    expect(within(first).getByRole("link", { name: "T-104" }).getAttribute("href")).toBe(
+      "/tasks/T-104",
+    );
+    expect(screen.getByTestId("child-T-102").textContent).toContain("merged");
+    expect(screen.getByTestId("child-T-109").textContent).toContain("missing");
+  });
+
+  it("counts merged out of the children not dropped", async () => {
+    await taskPage(epic, [], undefined, { "/api/tasks": { data: list } });
+    const p = await screen.findByTestId("epic-progress");
+    expect(p.textContent).toBe("1 of 3 merged · 1 dropped · 1 missing");
+  });
+
+  it("reads the children from one list read, not a detail read each", async () => {
+    const { sent } = await taskPage(epic, [], undefined, { "/api/tasks": { data: list } });
+    await screen.findByTestId("epic-progress");
+    const paths = sent.map((s) => s.path);
+    expect(paths.filter((p) => p === "/api/tasks")).toHaveLength(1);
+    expect(paths.some((p) => /^\/api\/tasks\/T-10[2-9]$/.test(p))).toBe(false);
+  });
+
+  it("is not drawn for a sub-task", async () => {
+    await taskPage({ ...TASK, epic: "T-100" });
+    await screen.findByText("task body");
+    expect(screen.queryByText(EPIC_VIEW)).toBeNull();
   });
 });
