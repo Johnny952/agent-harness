@@ -12,6 +12,8 @@ import pytest
 
 from dispatcher import tasks
 from dispatcher.context_transfer import (
+    LockHeldError,
+    list_task_ids,
     read_task_file,
     task_file_path,
     write_task_file,
@@ -595,12 +597,17 @@ _S2_TEXT = (
 
 
 def _tree(hive: str) -> dict[str, bytes]:
-    """Every file under the hive root, tasks and board both, by relative path."""
+    """Every file under the hive root, tasks and board both, by relative path.
+
+    Not the write locks: taking one leaves an empty lock file that is no
+    write to the task (ADR 127), and every writer takes one before it reads.
+    """
     root = Path(hive).parent
+    locks = Path(tasks.locks_root(hive))
     return {
         str(path.relative_to(root)): path.read_bytes()
         for path in sorted(root.rglob("*"))
-        if path.is_file()
+        if path.is_file() and locks not in path.parents
     }
 
 
@@ -1360,3 +1367,192 @@ def test_a_base_lock_holder_whose_lock_was_broken_leaves_the_new_one(tmp_path) -
     lock.release()
 
     assert _base_record(tmp_path)["owner"] == "newcomer"
+
+
+# -- the backlog's fields and the write lock (ADR 127) ------------------------
+
+
+def _file(hive: str, task_id: str = "task-1", **frontmatter) -> Path:
+    """A migrated task file with these frontmatter keys, written as literal YAML."""
+    lines = [f"task_id: {task_id}", "status: pending"] + [
+        f"{key}: {json.dumps(value)}" for key, value in frontmatter.items()
+    ]
+    path = Path(task_file_path(hive, task_id))
+    path.write_text("---\n" + "\n".join(lines) + "\n---\n\nbody\n")
+    return path
+
+
+def test_priority_and_source_round_trip_and_a_writer_keeps_them(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    path = _file(hive, status="proposed", priority="high", source="arquitecto")
+
+    task = read_task_file(str(path))
+    assert (task.status, task.priority, task.source) == ("proposed", "high", "arquitecto")
+
+    tasks.set_resolved_debt(hive, "task-1", ["task-0-D1"])
+    after = read_task_file(str(path))
+    assert (after.status, after.priority, after.source) == ("proposed", "high", "arquitecto")
+
+
+def test_a_task_with_neither_field_gets_neither_key_written(tmp_path: Path) -> None:
+    """Every task filed before ADR 127 keeps its bytes' shape: no new keys."""
+    hive = _hive(tmp_path)
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1")
+    text = Path(task_file_path(hive, "task-1")).read_text()
+    assert "priority" not in text and "source" not in text
+    task = read_task_file(task_file_path(hive, "task-1"))
+    assert (task.priority, task.source) == (None, None)
+    assert tasks.effective_priority(task) == tasks.DEFAULT_PRIORITY == "normal"
+
+
+def test_a_bad_hand_edited_field_is_kept_by_the_next_write_and_named(tmp_path: Path) -> None:
+    """Validation on read: a writer does not drop or refuse what a hand edit put there."""
+    hive = _hive(tmp_path)
+    path = _file(hive, priority=0, source="someone")
+
+    tasks.mark_blocked(hive, "task-1", "stuck")
+
+    task = read_task_file(str(path))
+    assert (task.priority, task.source) == (0, "someone")
+    problems = tasks.field_problems(task)
+    assert len(problems) == 2
+    assert "priority is 0" in problems[0] and "high, normal, low" in problems[0]
+    assert "source is 'someone'" in problems[1]
+    assert tasks.dispatch_problems(task) == problems
+
+
+@pytest.mark.parametrize("priority", tasks.PRIORITIES)
+@pytest.mark.parametrize("source", tasks.SOURCES)
+def test_every_listed_value_is_fine(tmp_path: Path, priority: str, source: str) -> None:
+    task = read_task_file(str(_file(_hive(tmp_path), priority=priority, source=source)))
+    assert tasks.field_problems(task) == []
+    assert tasks.dispatch_problems(task) == []
+    assert tasks.effective_priority(task) == priority
+
+
+@pytest.mark.parametrize("status", tasks.BACKLOG_STATUSES)
+def test_a_backlog_task_is_not_dispatchable(tmp_path: Path, status: str) -> None:
+    task = read_task_file(str(_file(_hive(tmp_path), status=status)))
+    assert tasks.is_backlog(task)
+    [problem] = tasks.dispatch_problems(task)
+    assert f"in the backlog (status {status})" in problem
+    assert "pending" in problem
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress", "blocked", "done", "epic"])
+def test_a_board_task_is_not_refused_for_its_status(tmp_path: Path, status: str) -> None:
+    task = read_task_file(str(_file(_hive(tmp_path), status=status)))
+    assert not tasks.is_backlog(task)
+    assert tasks.dispatch_problems(task) == []
+
+
+@pytest.mark.parametrize("status", tasks.BACKLOG_STATUSES)
+def test_acquire_lock_refuses_a_backlog_task_and_writes_nothing(tmp_path: Path, status: str) -> None:
+    hive = _hive(tmp_path)
+    path = _file(hive, status=status)
+    before = path.read_bytes()
+
+    with pytest.raises(tasks.BacklogTaskError) as excinfo:
+        tasks.acquire_lock(hive, "task-1", owner="cuenta1", phase="arquitecto")
+
+    assert isinstance(excinfo.value, ValueError)
+    assert (excinfo.value.task_id, excinfo.value.status) == ("task-1", status)
+    assert path.read_bytes() == before
+
+
+def test_acquire_lock_still_takes_a_blocked_task(tmp_path: Path) -> None:
+    """A retry is the operator's decision (ADR 117): only the backlog is refused."""
+    hive = _hive(tmp_path)
+    _file(hive, status="blocked", blocked_reason="stuck")
+    task = tasks.acquire_lock(hive, "task-1", owner="cuenta1")
+    assert (task.status, task.owner, task.blocked_reason) == ("in_progress", "cuenta1", None)
+
+
+def test_the_write_lock_lives_under_the_hive_root_not_beside_the_tasks(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    assert tasks.task_lock_path(hive, "T-7") == str(tmp_path / "hive" / "locks" / "T-7.lock")
+    with pytest.raises(ValueError):
+        tasks.task_lock_path(hive, "../T-7")
+
+    old = os.umask(0o077)
+    try:
+        tasks.acquire_lock(hive, "T-7", owner="cuenta1")
+    finally:
+        os.umask(old)
+
+    lock = Path(tasks.task_lock_path(hive, "T-7"))
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o644
+    assert lock.read_bytes() == b""
+    assert os.listdir(hive) == ["T-7.md"]
+    assert list(list_task_ids(hive)) == ["T-7"]
+    assert not (Path(tasks.board_root(hive)) / "T-7.lock").exists()
+
+
+def test_the_write_lock_is_exclusive_against_another_open_file(tmp_path: Path) -> None:
+    """`flock` is per open file: what another process would meet."""
+    import fcntl
+
+    hive = _hive(tmp_path)
+    with tasks.task_lock(hive, "task-1"):
+        fd = os.open(tasks.task_lock_path(hive, "task-1"), os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    fd = os.open(tasks.task_lock_path(hive, "task-1"), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # let go, so free
+    finally:
+        os.close(fd)
+
+
+def test_the_write_lock_is_re_entrant_in_one_thread(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    with tasks.task_lock(hive, "task-1"):
+        with tasks.task_lock(hive, "task-1"):
+            tasks.acquire_lock(hive, "task-1", owner="cuenta1")  # a writer inside: no wait on itself
+        tasks.refresh_heartbeat(hive, "task-1")
+    assert read_task_file(task_file_path(hive, "task-1")).owner == "cuenta1"
+
+
+def test_another_thread_waits_for_the_write_lock(tmp_path: Path) -> None:
+    """The heartbeat thread and the phase under it: the second writer waits."""
+    hive = _hive(tmp_path)
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1")
+    done = threading.Event()
+
+    def beat() -> None:
+        tasks.refresh_heartbeat(hive, "task-1")
+        done.set()
+
+    with tasks.task_lock(hive, "task-1"):
+        thread = threading.Thread(target=beat)
+        thread.start()
+        assert not done.wait(0.3)
+    thread.join(timeout=5)
+    assert done.is_set()
+
+
+def test_two_takers_of_a_free_task_cannot_both_have_it(tmp_path: Path) -> None:
+    """The owner check and the write are one step: one taker wins, one is refused."""
+    hive = _hive(tmp_path)
+    _file(hive)
+    start = threading.Barrier(2)
+    won, refused = [], []
+
+    def take(owner: str) -> None:
+        start.wait()
+        try:
+            tasks.acquire_lock(hive, "task-1", owner=owner)
+            won.append(owner)
+        except LockHeldError:
+            refused.append(owner)
+
+    threads = [threading.Thread(target=take, args=(o,)) for o in ("cuenta1", "cuenta2")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert len(won) == 1 and len(refused) == 1
+    assert read_task_file(task_file_path(hive, "task-1")).owner == won[0]

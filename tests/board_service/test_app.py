@@ -208,12 +208,34 @@ def test_list_rows(client, hive):
     assert out["warnings"] == []
     assert out["items"] == [
         {"id": "T-1", "title": "Serve the board over MCP, reads only.", "status": "pending",
-         "place": "board", "epic": "T-9", "merged": False},
+         "place": "board", "epic": "T-9", "merged": False, "priority": "normal", "source": None},
         {"id": "T-2", "title": "Serve the board over MCP, reads only.", "status": "done",
-         "place": "board", "epic": None, "merged": True},
+         "place": "board", "epic": None, "merged": True, "priority": "normal", "source": None},
         {"id": "T-3", "title": None, "status": "pending", "place": "board", "epic": None,
-         "merged": False},
+         "merged": False, "priority": "normal", "source": None},
     ]
+
+
+def test_list_rows_carry_the_backlog_fields(client, hive):
+    task(hive, "T-1", status="proposed", priority="high", source="arquitecto")
+    task(hive, "T-2", status="deferred", priority="low", source="debt")
+    rows = {r["id"]: r for r in ok(client, "board_list", {"place": "backlog"})["items"]}
+    assert (rows["T-1"]["priority"], rows["T-1"]["source"]) == ("high", "arquitecto")
+    assert (rows["T-2"]["priority"], rows["T-2"]["source"]) == ("low", "debt")
+
+
+def test_a_bad_backlog_field_is_served_as_written_and_warned(client, hive):
+    task(hive, "T-1", priority="urgent", source="someone")
+    out = ok(client, "board_list")
+    assert (out["items"][0]["priority"], out["items"][0]["source"]) == ("urgent", "someone")
+    assert len(out["warnings"]) == 2
+    assert "'urgent'" in out["warnings"][0] and "T-1.md" in out["warnings"][0]
+    assert "'someone'" in out["warnings"][1]
+
+
+def test_the_backlog_statuses_are_the_dispatchers(client):
+    from dispatcher import tasks
+    assert service.BACKLOG_STATUSES == set(tasks.BACKLOG_STATUSES)
 
 
 def test_a_frontmatter_title_wins_over_the_goal(client, hive):

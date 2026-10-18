@@ -34,8 +34,11 @@ and a Dockerfile. The write side is this service, and the git credential and
 both pushes stay on the dispatcher (ADR 124). Its compose service, approved by the user on 2026-10-18,
 publishes on loopback `127.0.0.1:8792`, is on `ia_harness_net` only, and
 mounts everything read-only; the operator's session registers it with
-`claude mcp add --scope local`, not a committed `.mcp.json`. The per-task
-lock of section 5 moves to step 5, with the first write. Step 6 is built by
+`claude mcp add --scope local`, not a committed `.mcp.json`. The first part
+of step 5 is built by T-082 (`docs/implementations/T-082.md`,
+`docs/decisions.md` ADR 127): the backlog statuses, `priority` and `source`
+in the frontmatter, `open_cycle` refusing a backlog item, and the per-task
+lock of section 5, a write lock separate from the ownership lock. Step 6 is built by
 T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126). Every
 other later step is not built. It records an
 idea the user raised on
@@ -523,6 +526,17 @@ Each step is a single surface, built in this order:
      open entries already in `docs/debt/` are imported once as `proposed`
      with the tag `debt` (decided by the user on 2026-10-10).
    - The `impact` column in the debt index, set by the auditor.
+   - **Built 2026-10-18** by T-082 (`docs/decisions.md` ADR 127), the first
+     bullet: the backlog statuses `proposed`, `deferred` and `dropped`;
+     `priority` and `source` in the frontmatter, validated on read;
+     `open_cycle`, `queue.plan` and `acquire_lock` refusing a backlog item
+     (blocked retries and resumes still pass); `board_list` serving both
+     fields; and the per-task lock of section 5, a `flock` on
+     `<hive root>/locks/<id>.lock` taken by every writer in
+     `dispatcher/tasks.py`, separate from the `owner` lock of ADR 126. Not
+     built: the write tools and the read-write mount (5b), `tags` and `rank`
+     with the *Ready* order (5c), and debt in the backlog with its import
+     and `impact` (5d).
 6. **`phase` in the frontmatter.** The dispatcher writes and clears it around
    each phase, and the api serves it.
    **Built 2026-10-18** by T-081 (`docs/decisions.md` ADR 126): `phase` in

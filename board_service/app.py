@@ -49,9 +49,10 @@ ROLE_TOOLS: dict[str, tuple[str, ...]] = {
     "arquitecto": ("board_list", "board_get"),
 }
 
-#: The backlog's statuses (section 4). Nothing writes them yet (step 5); a task
-#: with any other status is on the board.
-BACKLOG_STATUSES = frozenset({"proposed", "deferred", "dropped"})
+#: The backlog's statuses (section 4), as `dispatcher/tasks.py` defines them
+#: (ADR 127). Nothing here writes them yet (step 5b); a task with any other
+#: status is on the board.
+BACKLOG_STATUSES = frozenset(task_store.BACKLOG_STATUSES)
 PLACES = ("backlog", "board")
 
 #: The most task files one `board_list` reads. The api's `MAX_ROADMAP_TASKS`
@@ -158,10 +159,18 @@ def board_list(
                 "place": place_of(task.status),
                 "epic": task.epic,
                 "merged": bool(task.merged),
+                # The bucket, `normal` for a task that names none, and who
+                # proposed it, None for one filed before the field (ADR 127).
+                "priority": task_store.effective_priority(task),
+                "source": task.source,
             }
+            problems = task_store.field_problems(task)
         except _UNREADABLE as exc:
             warnings.append(f"{path}: unreadable task file: {exc}")
             continue
+        # Served as the file has them, and named: a hand edit got them wrong,
+        # and `open_cycle` refuses the task until it is put right.
+        warnings.extend(f"{path}: {problem}" for problem in problems)
         if place is not None and row["place"] != place:
             continue
         if status is not None and row["status"] != status:
@@ -270,7 +279,8 @@ TOOLS: dict[str, dict] = {
     "board_list": {
         "name": "board_list",
         "description": (
-            "List the harness's tasks and epics: id, title, status, place, epic, merged. "
+            "List the harness's tasks and epics: id, title, status, place, epic, merged, "
+            "priority, source. "
             "Filters combine; all are optional."
         ),
         "inputSchema": {

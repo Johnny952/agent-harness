@@ -8005,3 +8005,80 @@ service is a container the phases reach over a network); the role as a
 header (the URL is what `--mcp-config` and `.mcp.json` carry); serving an
 unknown role no tools rather than refusing it; parsing `comments.jsonl` to
 count it.
+
+## ADR 127 — The backlog statuses, `priority` and `source` on the task file, and a per-task write lock that is not the ownership lock
+
+**Status:** accepted (T-082, 2026-10-18). Step 5a of
+`docs/plans/board-service.md`: the task model and the dispatcher's side of
+the backlog. The write tools are step 5b. Reconciles the per-task lock of
+the plan's section 5 with ADR 126 and reverses neither: the `owner` and
+`heartbeat` in the frontmatter stay the record of who holds a task, and
+`phase` still rides on them.
+
+**Context.** Section 4 of the plan splits tasks into a backlog, which the
+dispatcher may not take, and the board, which it may. Section 5 asks that
+every write take a per-task lock. Until now nothing told a backlog item from
+a task: `open_cycle` refused only an unmet dependency or a malformed epic,
+and the frontmatter had no priority or source. The writers were atomic
+(`_write_atomic`) but did read-modify-write with no lock, so two processes
+writing one task could lose an update. With one writer process that was
+rare; step 5b adds a second one, the service.
+
+**Decision.**
+1. *The statuses.* `proposed`, `deferred` and `dropped` are the backlog
+   (`tasks.BACKLOG_STATUSES`). `pending` is what a person accepts an item
+   to (`ACCEPTED_STATUS`). The board statuses are unchanged.
+2. *The fields.* `TaskFile.priority` (`high`, `normal`, `low`) and
+   `TaskFile.source` (`operator`, `arquitecto`, `debt`), both `None` when
+   unset. `write_task_file` writes them only when set, so a file without
+   them keeps its bytes. An unset priority reads as `normal`
+   (`effective_priority`). 5a does not require a source on a backlog item.
+3. *Validated on read, not refused on write.* `field_problems` names a value
+   outside the lists. `dispatch_problems` adds the backlog refusal to it.
+   `open_cycle` and `queue.plan` refuse on either, and `board_list` returns
+   the field problems as warnings. The module's writer does not refuse a
+   bad value it did not set: a hand edit must not wedge the heartbeat or a
+   verdict write. 5b's tools validate what they set.
+4. *"Anything but `pending`" means the backlog.* `open_cycle` refuses the
+   three backlog statuses, not every status but `pending`. A blocked retry
+   (`command_run`), an `in_progress` resume and `run-phase` all go through
+   it, and refusing them would break those paths. `acquire_lock` refuses a
+   backlog status too (`BacklogTaskError`), as a backstop for a caller that
+   skips `open_cycle`. It still takes a blocked task.
+5. *The write lock is a separate lock.* `tasks.task_lock(hive_dir, id)`
+   takes an exclusive `flock` on `<hive root>/locks/<id>.lock` for one
+   read-modify-write. It is held for milliseconds and says nothing about
+   ownership. Every writer in the module that reads and rewrites a task
+   takes it (`@_locked`), and so do the creates in `file_split` and
+   `accept_drafts`, `close_epic`'s rewrite of the parent, and each task in
+   `migrate`. `acquire_lock`'s owner check and its write are now one step.
+6. *Where the file lives.* Outside `tasks/` and `board/`, because both are
+   listed (`list_task_ids`, `_next_task_number`) and a lock file must not
+   read as a task. The lock files are kept, never removed, since removing
+   one races a waiter that has it open.
+7. *Who can take it.* The file is created `0644` (an explicit `fchmod`,
+   whatever the umask) and opened read-only, so a process of another uid
+   that can only read the hive can still lock it.
+8. *Re-entrant per thread.* `flock` locks belong to an open file
+   description, so a second open in the same thread would deadlock on
+   itself. A thread-local set of held paths makes a nested take a no-op.
+9. *One order.* Parent, then child, never the reverse: `file_split` holds
+   the parent's lock while it creates the children, and `close_epic` takes
+   only the parent's. `record_merge` calls `mark_merged` and `close_epic`
+   one after the other, not nested.
+
+**Consequences.** A deployment gets a `locks/` directory beside the hive's
+`tasks/` and `board/`, created by the first write. The api and the
+read-only board service take no lock: they read files that `_write_atomic`
+replaces whole. When the service starts writing in 5b, it needs the hive
+mounted read-write, `locks/` included. A writer that does not use the
+module (a hand edit) is not serialized, as before.
+
+**Ruled out.** Refusing a bad `priority` or `source` in the writer; refusing
+every status but `pending` in `open_cycle`; using the frontmatter's
+`owner` as the write lock (a read-modify-write would have to take ownership
+of a task some phase already holds); a lock file beside the task in
+`tasks/` (it would be listed); `fcntl.lockf` or `O_EXCL` lock files that
+are removed after use (the first is per process, so a thread in the same
+process would not wait; the second leaves a stale file behind a crash);
+requiring a `source` on every backlog item before 5b's tools set one.

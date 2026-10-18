@@ -179,22 +179,24 @@ def _title(description: tasks.Description) -> str:
     return line if len(line) <= TITLE_WIDTH else line[: TITLE_WIDTH - 1] + "…"
 
 
-def _depends_on(cfg: Config, task_id: str) -> list[str]:
+def _task_file(cfg: Config, task_id: str) -> context_transfer.TaskFile | None:
+    """The task's file, or None for a task with none yet."""
     try:
-        task = context_transfer.read_task_file(
+        return context_transfer.read_task_file(
             context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
         )
     except FileNotFoundError:
-        return []
-    return list(task.depends_on or [])
+        return None
 
 
 def plan(cfg: Config, project: str, task_ids: list[str], limit: int) -> Queue:
     """The queue the confirmation screen shows, ordered, or QueueError.
 
     Refused before anything is shown: a repeated id, a task nobody described
-    or whose description is not in sections, a limit that is not positive, and
-    a cycle among the listed tasks' `depends_on`. The order is the listed one,
+    or whose description is not in sections, a task `open_cycle` would refuse
+    from its own file — one still in the backlog, or with a bad `priority` or
+    `source` (ADR 127) — a limit that is not positive, and a cycle among the
+    listed tasks' `depends_on`. The order is the listed one,
     moved only as far as a dependency inside the queue requires.
     """
     if limit <= 0:
@@ -212,7 +214,12 @@ def plan(cfg: Config, project: str, task_ids: list[str], limit: int) -> Queue:
             description = tasks.parse_description(text)
         except tasks.DescriptionError as exc:
             raise QueueError(f"task {task_id}: the task description {exc}") from None
-        entries[task_id] = Entry(task_id, _title(description), _depends_on(cfg, task_id))
+        task = _task_file(cfg, task_id)
+        problems = tasks.dispatch_problems(task) if task is not None else []
+        if problems:
+            raise QueueError(f"task {task_id} cannot run: {'; '.join(problems)}")
+        depends_on = list(task.depends_on or []) if task is not None else []
+        entries[task_id] = Entry(task_id, _title(description), depends_on)
     return Queue(
         queue_id=new_queue_id(),
         project=project,

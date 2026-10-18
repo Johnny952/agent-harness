@@ -2748,8 +2748,9 @@ def open_cycle(
 
     Returns None when it cannot get there, having already said why. That is a task nobody described, a description missing a
     required section, a hive `dispatch migrate` has not been run on, an epic,
-    a task with a dependency that is not merged, and a child of a malformed
-    epic. Nothing is marked on a task refused here: it stays as it was.
+    a task still in the backlog or with a `priority` or `source` a hand edit
+    got wrong (ADR 127), a task with a dependency that is not merged, and a
+    child of a malformed epic. Nothing is marked on a task refused here: it stays as it was.
     A draft set's id is refused too: a draft runs only once accepted, under
     the task id `accept-drafts` gives it (ADR 82).
     """
@@ -2839,8 +2840,12 @@ def open_cycle(
                 task_id, _split_into(task),
             )
             return None
-        reasons = tasks.unmet_dependencies(cfg.hive_tasks_dir, task) + tasks.epic_problems(
-            cfg.hive_tasks_dir, task
+        # A backlog task first (ADR 127): it is not accepted, so whether its
+        # dependencies are merged is not the question yet.
+        reasons = (
+            tasks.dispatch_problems(task)
+            + tasks.unmet_dependencies(cfg.hive_tasks_dir, task)
+            + tasks.epic_problems(cfg.hive_tasks_dir, task)
         )
         if reasons:
             logger.error("task %s cannot start: %s", task_id, "; ".join(reasons))

@@ -48,6 +48,23 @@ the role together, and the lock's own reaper clears both:
 `dispatcher.reap_expired_locks` at the next cycle, or `dispatch
 release-account` by hand. Until then the heartbeat is past its TTL, which is
 how a reader tells a dead phase from a running one.
+
+The backlog of `docs/plans/board-service.md` section 4 is the same task files
+(ADR 127): `BACKLOG_STATUSES` are the statuses of what is proposed and not yet
+accepted, and `priority` and `source` the two fields an item carries, checked
+by `field_problems`. Nothing in the backlog runs: `dispatch_problems` is what
+`open_cycle` and `queue.plan` refuse a task for, and `acquire_lock` refuses a
+backlog task itself, as the backstop.
+
+Every task-file writer holds the task's write lock (`task_lock`) across its
+read and its write, so two writers — the heartbeat thread and the phase it
+runs under, two dispatcher processes, and the board service once it writes —
+cannot both read the same file and the second write the first one's change
+away. It is a `flock` on `<hive root>/locks/<task_id>.lock`, a different thing from the
+ownership the frontmatter records: the `owner` and `heartbeat` that
+`acquire_lock` writes say which dispatcher drives the task, for the length of
+a phase, and `phase` rides on them; the write lock is held for one
+read-modify-write and says nothing once it is let go.
 """
 from __future__ import annotations
 
@@ -55,6 +72,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import fcntl
+import functools
 import json
 import os
 import re
@@ -76,6 +94,8 @@ from dispatcher.handoff import _SPLIT_MAX, _SPLIT_MIN, SubTask, split_problems
 # would touch every doc that cites them.
 
 BOARD_DIR_NAME = "board"
+#: The task write locks' directory under the hive root (`task_lock`, ADR 127).
+LOCKS_DIR_NAME = "locks"
 DESCRIPTION_FILE = "description.md"
 REQUIRED = ("Goal", "Done when")
 OPTIONAL = ("Surface", "Steps", "Out of scope")
@@ -92,6 +112,20 @@ ACCEPTED_FILE = "accepted.yaml"
 #: scoped is the thing a draft exists to avoid (`docs/plans/autonomy.md`
 #: *Decisions*, 9), and a Surface naming no path means the whole repo.
 DRAFT_REQUIRED = ("Surface", "Out of scope")
+
+#: The backlog's statuses (section 4): proposed and not accepted, put off,
+#: and dropped. A task with any other status is on the board.
+BACKLOG_STATUSES = ("proposed", "deferred", "dropped")
+#: The status a task has to be accepted into before it may run.
+ACCEPTED_STATUS = "pending"
+#: The priority buckets, highest first; `rank`, the order inside one, is later
+#: work (step 5 of the plan).
+PRIORITIES = ("high", "normal", "low")
+#: The bucket of a task that names none: every task filed before the field,
+#: and a debt entry filed with no impact (section 4).
+DEFAULT_PRIORITY = "normal"
+#: Who proposed an item.
+SOURCES = ("operator", "arquitecto", "debt")
 
 _LEGACY_KEY = "description"
 #: Shaped like a queue id (`queue._QUEUE_ID`), with its own prefix.
@@ -118,6 +152,18 @@ class UnmigratedTaskError(ValueError):
         )
         self.task_id = task_id
         self.path = path
+
+
+class BacklogTaskError(ValueError):
+    """A backlog task asked to run: `acquire_lock` refuses it, as `open_cycle` does."""
+
+    def __init__(self, task_id: str, status: str) -> None:
+        super().__init__(
+            f"task {task_id} is in the backlog (status {status}); "
+            f"only an accepted ({ACCEPTED_STATUS}) task may run"
+        )
+        self.task_id = task_id
+        self.status = status
 
 
 class DraftError(ValueError):
@@ -305,6 +351,126 @@ def write_description(hive_dir: str, task_id: str, text: str) -> str:
     return _write(hive_dir, task_id, text)
 
 
+def locks_root(hive_dir: str) -> str:
+    """The write locks' directory, a sibling of the hive tasks dir and the board."""
+    return os.path.join(context_transfer.hive_root(hive_dir), LOCKS_DIR_NAME)
+
+
+def task_lock_path(hive_dir: str, task_id: str) -> str:
+    """The task's write lock, `<hive root>/locks/<task_id>.lock`.
+
+    In a directory of its own, not beside the task file or under the board:
+    `list_task_ids` and `_next_task_number` list those, and whoever reads the
+    hive's tasks directory reads task files only. `ValueError` for an id that
+    is not one path component.
+    """
+    if not context_transfer._is_single_path_component(task_id):
+        raise ValueError(f"task id {task_id!r} is not a single path component")
+    return os.path.join(locks_root(hive_dir), f"{task_id}.lock")
+
+
+#: The write locks this thread holds, by path, so a writer that calls another
+#: writer on the same task does not wait on itself: a second `flock` on a new
+#: descriptor of the same file blocks even in the process that holds the first.
+_held_task_locks = threading.local()
+
+
+@contextlib.contextmanager
+def task_lock(hive_dir: str, task_id: str):
+    """Hold the task's write lock (ADR 127) for one read-modify-write.
+
+    An exclusive `flock`, as `_base_lock_guard` takes, and blocking: a writer
+    holds it for one read and one atomic write, so a wait is that long.
+    Re-entrant within a thread; another thread of the same process waits, which
+    is what serializes the heartbeat thread with the phase under it. The
+    file is opened read-only, which `flock` needs no more than, so a reader of
+    another uid that can see the file can take the lock too, and made 0644
+    whatever the umask by whoever creates it. It is never removed: removing a
+    lock file another process has open and is waiting on would hand the next
+    writer a fresh, unlocked file.
+    """
+    path = task_lock_path(hive_dir, task_id)
+    held = getattr(_held_task_locks, "paths", None)
+    if held is None:
+        held = _held_task_locks.paths = set()
+    if path in held:
+        yield
+        return
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY)
+    else:
+        os.fchmod(fd, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        held.add(path)
+        try:
+            yield
+        finally:
+            held.discard(path)
+    finally:
+        os.close(fd)
+
+
+def _locked(writer):
+    """Run `writer(hive_dir, task_id, ...)` under that task's write lock."""
+
+    @functools.wraps(writer)
+    def wrapper(hive_dir: str, task_id: str, *args, **kwargs):
+        with task_lock(hive_dir, task_id):
+            return writer(hive_dir, task_id, *args, **kwargs)
+
+    return wrapper
+
+
+def field_problems(task: context_transfer.TaskFile) -> list[str]:
+    """What is wrong with the backlog fields of a task file: empty when nothing.
+
+    `priority` and `source`, when present, have to be one of `PRIORITIES` and
+    `SOURCES`. Absent is fine for both: a task filed before the fields has
+    neither, and its bucket is `DEFAULT_PRIORITY`. Validation on read, for the
+    one path outside this module, the operator's hand edits (section 5);
+    a writer that sets either field checks it here first.
+    """
+    problems = []
+    if task.priority is not None and task.priority not in PRIORITIES:
+        problems.append(
+            f"its priority is {task.priority!r}, not one of {', '.join(PRIORITIES)}"
+        )
+    if task.source is not None and task.source not in SOURCES:
+        problems.append(f"its source is {task.source!r}, not one of {', '.join(SOURCES)}")
+    return problems
+
+
+def effective_priority(task: context_transfer.TaskFile) -> str:
+    """The task's bucket: its `priority`, or `DEFAULT_PRIORITY` when it names none."""
+    return task.priority if task.priority is not None else DEFAULT_PRIORITY
+
+
+def is_backlog(task: context_transfer.TaskFile) -> bool:
+    return task.status in BACKLOG_STATUSES
+
+
+def dispatch_problems(task: context_transfer.TaskFile) -> list[str]:
+    """Why this task may not be run, from its own file: empty when it may.
+
+    A backlog task is not accepted yet, so it is the person's to accept, not
+    the dispatcher's to run (section 4); and a field a hand edit got wrong is
+    named here rather than met later. `open_cycle` and `queue.plan` refuse on
+    any of these; the dependency and epic checks are `unmet_dependencies` and
+    `epic_problems`, which need the rest of the hive.
+    """
+    problems = []
+    if is_backlog(task):
+        problems.append(
+            f"it is in the backlog (status {task.status}): a person accepts it to "
+            f"{ACCEPTED_STATUS} first"
+        )
+    return problems + field_problems(task)
+
+
 def _write_task_file(path: str, task: context_transfer.TaskFile) -> None:
     """Write a task file, unless the one on disk still carries its description.
 
@@ -320,6 +486,7 @@ def _write_task_file(path: str, task: context_transfer.TaskFile) -> None:
     context_transfer.write_task_file(path, task)
 
 
+@_locked
 def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:
     """Record which debt entries this task's work resolved.
 
@@ -332,6 +499,7 @@ def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:
     _write_task_file(path, task)
 
 
+@_locked
 def acquire_lock(
     hive_dir: str,
     task_id: str,
@@ -346,9 +514,13 @@ def acquire_lock(
     behind a new owner.
     """
     path, task = context_transfer._read_or_new(hive_dir, task_id)
+    # The backstop for `open_cycle`'s refusal (ADR 127): every phase comes
+    # through here, whichever entry point started it.
+    if is_backlog(task):
+        raise BacklogTaskError(task_id, task.status)
     # Two dispatcher processes, or a stale retry, must not both drive the same
-    # task. This is a read-then-write check, not a cross-process mutex — a
-    # real mutual-exclusion guard (e.g. flock) is separate future work.
+    # task. The check and the write are one step under the task's write lock
+    # (`_locked`, ADR 127), so two takers cannot both read it free.
     if task.owner is not None and task.owner != owner:
         # A live holder always refreshes its heartbeat, so a foreign owner
         # with heartbeat None can only be a hand-edited or legacy file, not
@@ -375,6 +547,7 @@ def acquire_lock(
     return task
 
 
+@_locked
 def refresh_heartbeat(hive_dir: str, task_id: str) -> None:
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
@@ -382,6 +555,7 @@ def refresh_heartbeat(hive_dir: str, task_id: str) -> None:
     _write_task_file(path, task)
 
 
+@_locked
 def release_stale_lock(hive_dir: str, task_id: str) -> None:
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
@@ -661,6 +835,7 @@ class BaseLock:
         self.release()
 
 
+@_locked
 def handoff(
     hive_dir: str,
     task_id: str,
@@ -681,6 +856,7 @@ def handoff(
     _write_task_file(path, task)
 
 
+@_locked
 def mark_blocked(hive_dir: str, task_id: str, reason: str | None = None) -> None:
     """Record that this task stopped blocked, and release its lock.
 
@@ -699,6 +875,7 @@ def mark_blocked(hive_dir: str, task_id: str, reason: str | None = None) -> None
     _write_task_file(path, task)
 
 
+@_locked
 def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     """Record on the task that its branch was merged into `target`.
 
@@ -713,6 +890,7 @@ def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     _write_task_file(path, task)
 
 
+@_locked
 def record_command_verdict(hive_dir: str, task_id: str, verdict: dict) -> None:
     """Append an operator's verdict on one of this task's command requests.
 
@@ -728,6 +906,7 @@ def record_command_verdict(hive_dir: str, task_id: str, verdict: dict) -> None:
     _write_task_file(path, task)
 
 
+@_locked
 def update_command_verdict(hive_dir: str, task_id: str, role: str, filed_at: object, fields: dict) -> None:
     """Merge `fields` into the verdict on the block `role` filed at `filed_at`.
 
@@ -866,8 +1045,17 @@ def close_epic(hive_dir: str, task_id: str) -> str | None:
         child, _ = _read_for_check(hive_dir, child_id)
         if child is None or not child.merged:
             return None
-    parent.status = "done"
-    _write_task_file(context_transfer.task_file_path(hive_dir, task.epic), parent)
+    # The parent's lock, and only that: no writer takes a parent's lock while
+    # holding a child's, so `file_split`, which holds its parent's while it
+    # writes the children, cannot meet this one the other way round. The
+    # parent is read again under it, so a write since the check is not lost.
+    with task_lock(hive_dir, task.epic):
+        parent_path = context_transfer.task_file_path(hive_dir, task.epic)
+        parent = context_transfer.read_task_file(parent_path)
+        if parent.status != "epic":
+            return None
+        parent.status = "done"
+        _write_task_file(parent_path, parent)
     return task.epic
 
 
@@ -892,6 +1080,7 @@ def _with_epic_line(text: str, parent_id: str, surface: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+@_locked
 def file_split(hive_dir: str, parent_id: str, subtasks: list[SubTask]) -> list[str]:
     """File a split: one `<parent>-S<n>` task per entry, and the parent an epic.
 
@@ -960,7 +1149,11 @@ def file_split(hive_dir: str, parent_id: str, subtasks: list[SubTask]) -> list[s
         if stored[task_id] is None:
             write_description(hive_dir, task_id, texts[task_id])
         path = context_transfer.task_file_path(hive_dir, task_id)
-        if not os.path.exists(path):
+        # The child's lock inside the parent's (`close_epic` says why that
+        # order is the only one), around the check so a file made since is kept.
+        with task_lock(hive_dir, task_id):
+            if os.path.exists(path):
+                continue
             _write_task_file(
                 path,
                 context_transfer.TaskFile(
@@ -1292,7 +1485,9 @@ def accept_drafts(
         if read_description(hive_dir, task_id) is None:
             write_description(hive_dir, task_id, draft.description)
         path = context_transfer.task_file_path(hive_dir, task_id)
-        if not os.path.exists(path):
+        with task_lock(hive_dir, task_id):
+            if os.path.exists(path):
+                continue
             _write_task_file(
                 path,
                 context_transfer.TaskFile(
@@ -1348,61 +1543,64 @@ def migrate(hive_dir: str, ttl_seconds: int) -> MigrateReport:
     refused: list[tuple[str, str]] = []
     already = 0
     for task_id in sorted(context_transfer.list_task_ids(hive_dir)):
-        task_path = context_transfer.task_file_path(hive_dir, task_id)
-        try:
-            fm = _read_frontmatter(task_path)
-            if not isinstance(fm, dict):
-                raise ValueError("its frontmatter is not a mapping")
-            if _LEGACY_KEY not in fm:
-                already += 1
+        # Each file under its write lock: the liveness check and the write are
+        # one step, so a dispatcher that takes the task meanwhile is not written over.
+        with task_lock(hive_dir, task_id):
+            task_path = context_transfer.task_file_path(hive_dir, task_id)
+            try:
+                fm = _read_frontmatter(task_path)
+                if not isinstance(fm, dict):
+                    raise ValueError("its frontmatter is not a mapping")
+                if _LEGACY_KEY not in fm:
+                    already += 1
+                    continue
+                task = context_transfer.read_task_file(task_path)
+                live = _lock_is_live(task, ttl_seconds)
+            except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
+                refused.append((task_id, f"unreadable task file: {exc!r}"))
                 continue
-            task = context_transfer.read_task_file(task_path)
-            live = _lock_is_live(task, ttl_seconds)
-        except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
-            refused.append((task_id, f"unreadable task file: {exc!r}"))
-            continue
-        if live:
-            refused.append(
-                (
-                    task_id,
-                    f"its lock is live (owner {task.owner}): a dispatcher is still running "
-                    f"it; run `{MIGRATE_COMMAND}` again when that cycle has ended",
+            if live:
+                refused.append(
+                    (
+                        task_id,
+                        f"its lock is live (owner {task.owner}): a dispatcher is still running "
+                        f"it; run `{MIGRATE_COMMAND}` again when that cycle has ended",
+                    )
                 )
-            )
-            continue
-        old = fm[_LEGACY_KEY]
-        if old is None or (isinstance(old, str) and not old.strip()):
+                continue
+            old = fm[_LEGACY_KEY]
+            if old is None or (isinstance(old, str) and not old.strip()):
+                context_transfer.write_task_file(task_path, task)
+                emptied.append(task_id)
+                continue
+            if not isinstance(old, str):
+                refused.append(
+                    (task_id, f"its description is a {type(old).__name__}, not text; migrate by hand")
+                )
+                continue
+            text = _legacy_text(old)
+            try:
+                intact = parse_description(text).goal == old.strip()
+            except DescriptionError:
+                intact = False
+            if not intact:
+                refused.append(
+                    (task_id, "its description already has a section heading; migrate by hand")
+                )
+                continue
+            try:
+                path = description_path(hive_dir, task_id)
+                with open(path, encoding="utf-8", newline="") as fh:
+                    existing: str | None = fh.read()
+            except (FileNotFoundError, NotADirectoryError):
+                existing = None
+            except (OSError, ValueError) as exc:
+                refused.append((task_id, f"cannot read its description file: {exc!r}"))
+                continue
+            if existing is not None and existing != text:
+                refused.append((task_id, f"{path} already exists with different content"))
+                continue
+            _write(hive_dir, task_id, text)
             context_transfer.write_task_file(task_path, task)
-            emptied.append(task_id)
-            continue
-        if not isinstance(old, str):
-            refused.append(
-                (task_id, f"its description is a {type(old).__name__}, not text; migrate by hand")
-            )
-            continue
-        text = _legacy_text(old)
-        try:
-            intact = parse_description(text).goal == old.strip()
-        except DescriptionError:
-            intact = False
-        if not intact:
-            refused.append(
-                (task_id, "its description already has a section heading; migrate by hand")
-            )
-            continue
-        try:
-            path = description_path(hive_dir, task_id)
-            with open(path, encoding="utf-8", newline="") as fh:
-                existing: str | None = fh.read()
-        except (FileNotFoundError, NotADirectoryError):
-            existing = None
-        except (OSError, ValueError) as exc:
-            refused.append((task_id, f"cannot read its description file: {exc!r}"))
-            continue
-        if existing is not None and existing != text:
-            refused.append((task_id, f"{path} already exists with different content"))
-            continue
-        _write(hive_dir, task_id, text)
-        context_transfer.write_task_file(task_path, task)
-        moved.append((task_id, path))
+            moved.append((task_id, path))
     return MigrateReport(moved=moved, emptied=emptied, refused=refused, already=already)
