@@ -128,6 +128,12 @@ once* and *Deny* are given from the CLI (`dispatch command-verdict`), not in
 Approvals, and recorded on the task as `command_verdicts`. *Allow* waits for
 step 5, the card for step 6.
 
+**Built 2026-10-18** by T-079 (`docs/decisions.md` ADR 123): the card in
+Approvals, read-only. It shows each request in this order (argv, target,
+role and task, the agent's reason last and marked as the agent's), its state
+and verdict, and the CLI lines to copy. Verdicts stay in the CLI; the card has
+no button that writes.
+
 ### 5. The worker runs it, then the phase resumes
 
 The worker runs the command through `docker exec` on the resolved target:
@@ -249,6 +255,11 @@ Each step is a single surface:
    the read the card needs, `GET /api/command-requests`, with each request's
    state, its verdict and the CLI lines that move it on. The card itself is
    not built.
+
+   **Built 2026-10-18** by T-079 (`docs/decisions.md` ADR 123): the card
+   itself, a read-only section of `front/src/routes/approvals.tsx` over that
+   read, with a state filter and the refused requests listed apart. Verdicts
+   stay in the CLI: the card shows the lines to run and calls no write.
 
 A filed request is also a notification of kind *command request*
 (`docs/plans/notifications.md`).

@@ -100,6 +100,97 @@ export interface Roadmap {
 }
 
 /**
+ * The four states `GET /api/command-requests` puts a request in:
+ * `COMMAND_REQUEST_STATES` in `observability/api/app.py` (ADR 122), pending
+ * first as the api orders them. `?state=` takes one of these and nothing else.
+ */
+export const COMMAND_REQUEST_STATES = ["pending", "awaiting_resume", "resumed", "denied"] as const;
+
+export type CommandRequestState = (typeof COMMAND_REQUEST_STATES)[number];
+
+/** Where the api resolved a request to run. `service` is null for the agent's own container. */
+export interface CommandRequestTarget {
+  kind: string | null;
+  container: string | null;
+  service: string | null;
+  cwd: string | null;
+}
+
+/**
+ * The run of a request, as the api names it: no output is served. `log` is the
+ * run's log by its path under the task's scratch dir (`commands/<n>.log`), and
+ * the card shows the path, never the text.
+ */
+export interface CommandRequestRan {
+  exit_code: number | null;
+  timed_out: boolean;
+  truncated: boolean;
+  log: string | null;
+}
+
+/** A verdict as `command-verdict` wrote it. `by` is null when it looked like an email. */
+export interface CommandRequestVerdict {
+  verdict: "run" | "allow" | "deny" | string;
+  by: string | null;
+  at: string | null;
+  comment: string | null;
+  allowed: string | null;
+  resumed_at: string | null;
+  ran: CommandRequestRan | null;
+}
+
+/**
+ * The CLI lines that move a request on, each null where it does not apply:
+ * run, deny and (for the agent's own container) allow while pending, resume
+ * while awaiting it. Verdicts are given from the CLI; the card only shows these.
+ */
+export interface CommandRequestCommands {
+  run: string | null;
+  allow: string | null;
+  deny: string | null;
+  resume: string | null;
+}
+
+/**
+ * One filed request. `argv` and `target` are null only when the request's
+ * envelope is gone; `agent_reason` is the agent's own words and nothing vouches
+ * for it. `docs/implementations/T-078.md`.
+ */
+export interface CommandRequest {
+  task_id: string;
+  project: string | null;
+  title: string | null;
+  role: string;
+  filed_at: string | null;
+  n: number | null;
+  argv: string[] | null;
+  target: CommandRequestTarget | null;
+  agent_reason: string | null;
+  state: CommandRequestState | string;
+  verdict: CommandRequestVerdict | null;
+  commands: CommandRequestCommands;
+}
+
+/** A request the check refused at filing: no number, nothing to run, only why. */
+export interface RefusedCommandRequest {
+  task_id: string;
+  project: string | null;
+  title: string | null;
+  role: string;
+  filed_at: string | null;
+  argv: string[] | null;
+  target: { kind: string | null; service: string | null };
+  agent_reason: string | null;
+  refused_reason: string;
+}
+
+/** `GET /api/command-requests`'s `data`. */
+export interface CommandRequests {
+  requests: CommandRequest[];
+  refused: RefusedCommandRequest[];
+}
+
+/**
  * A gate note as the approvals surface draws one.
  *
  * Not a phase's: `dispatcher/gates.py` renders its output as prose into the task

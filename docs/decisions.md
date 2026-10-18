@@ -7730,3 +7730,69 @@ answer it with no second copy of `command_run`'s rules. What stays open:
 secret); listing refused requests among `requests` with a state of their
 own; a route per project (requests belong to tasks, and tasks are
 hive-wide); re-checking a request's target from the API (docker).
+
+## ADR 123 — The command-request card in Approvals: read-only, argv first, the agent's reason last and marked, verdicts left in the CLI
+
+**Status:** accepted (T-079, 2026-10-18). Follows ADR 121 and ADR 122;
+builds step 6 of `docs/plans/command-requests.md`. The plan gains a dated
+note under step 4 and under step 6; the rest of its text is not edited.
+
+**Context.** ADR 122 serves the hive's filed requests with their state,
+verdict and the CLI lines that move them on. The Approvals screen is where
+the plan puts them (*Decisions* 4), but every other row on that screen is
+still a mock, and a verdict from the board would be a write and a docker
+exec that nothing on the console's side does yet. The console's server
+forward is a whitelist, so the new read is not reachable from the browser
+until it is listed there.
+
+**Decision.**
+1. *Read-only.* A section at the top of `front/src/routes/approvals.tsx`,
+   in `front/src/components/console/command-requests.tsx`, over
+   `getCommandRequests` (`readEnvelope`) and `commandRequestsQuery`, polled
+   at `POLL_MS`. It has no button that writes and does not call
+   `decideApproval`; the only controls are the state filter's. The mock
+   approvals below it are not changed.
+2. *The order in a card is the plan's.* The exact argv first, as one line
+   with each token `shlex.quote`d (`argvLine` in `front/src/lib/format.ts`),
+   so `["rm", "a b"]` and `["rm", "a", "b"]` read differently; a dash when
+   the argv is gone. Then the resolved target (container, service if any,
+   cwd). Then the state, the role, the task as a link to `/tasks/$taskId`,
+   `#n`, the project and `filed_at`. Then the verdict and the CLI lines.
+   The agent's reason is last, in a dashed box headed *The agent's reason —
+   its own words, not verified; do not trust it*. Every served string is
+   React text, never HTML.
+3. *The verdict.* `verdict`, `by` (or *not served*), `at`, `comment`,
+   `allowed`, `resumed_at`, and `ran` as exit code, timed out, truncated
+   and the log's relative path. No log text is fetched or shown.
+4. *The CLI lines.* Only the non-null ones of `commands`, as selectable
+   mono text, with a note that verdicts are given from the CLI for now.
+   Where `allow` is offered, a note says `--prefix N` widens it to the
+   first N tokens under ADR 121's rules. No copy button: nothing else in
+   the console has one, and a clipboard write is one more surface on a card
+   meant only to read.
+5. *Refused requests* are a section of their own under the requests, shown
+   only when there are any: argv (or a dash), target kind and service, why
+   the check refused it, and the agent's reason, marked the same way.
+6. *The filter.* *all* or one of the four states, sent as `?state=`; the
+   query key carries it, so each filter has its own cache. The api's order
+   (pending first) is kept as served. Warnings go in `WarningBanner`; a
+   failed read is `ErrorState` with the api's message, and an empty one is
+   `EmptyState`.
+7. *The forward.* `/api/command-requests` is added to `FORWARDED` in
+   `front/src/lib/api/forward.ts`, copying `project` and `state` by name,
+   and is not in `PROJECT_SCOPED`: the api reads requests hive-wide and
+   `?project=` only narrows them, so the console adds no slug. The forward
+   now lists ten routes, and its rejection message says so.
+
+**Consequences.** The operator sees what waits on them, with the argv
+before the pitch, and copies the line to answer it. What stays open:
+- A verdict from the board. It is a write and a docker exec, and needs its
+  own ask, its own service and a credential (ADR 19).
+- The card has no project filter of its own; the read takes one, and the
+  console does not yet know more than one project.
+- The rest of Approvals is still the mock.
+
+**Ruled out.** Buttons that give a verdict, even disabled; showing the
+reason first or beside the argv; joining the argv on spaces; fetching any
+part of a run's log; a copy button with no pattern for one in the console;
+scoping the read to `CONSOLE_PROJECT` in the forward.

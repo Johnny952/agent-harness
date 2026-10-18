@@ -204,3 +204,19 @@ export function asPathLine(item: unknown): string | null {
   if (typeof path !== "string" || typeof holds !== "string") return null;
   return `${path} — ${holds}`;
 }
+
+/**
+ * An argv as one line a shell would read back into the same tokens.
+ *
+ * Joining on spaces would draw `["rm", "a b"]` and `["rm", "a", "b"]` alike, and
+ * telling those apart is the point of showing the argv. The quoting is
+ * `shlex.quote`'s, the one the api uses for the CLI lines beside it on the
+ * command-request card (`docs/decisions.md` ADR 123).
+ */
+export function argvLine(argv: string[]): string {
+  return argv
+    .map((token) =>
+      token !== "" && /^[\w@%+=:,./-]+$/.test(token) ? token : `'${token.replace(/'/g, `'"'"'`)}'`,
+    )
+    .join(" ");
+}

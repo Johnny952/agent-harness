@@ -93,7 +93,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/threads"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/threads is not one of the nine routes the console forwards.",
+      error: "/api/threads is not one of the ten routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -135,6 +135,21 @@ describe("the whitelist", () => {
     const fetchMock = stubApi();
     await forwardApiRequest(get("/api/roadmap?project=some-other-project"));
     expect(target(fetchMock)).toBe(`${BASE}/api/roadmap?project=ia-harness`);
+  });
+
+  // Not a fourth: command requests are read hive-wide and `?project=` only
+  // narrows them, so it is the browser's filter, copied by name with `state`
+  // (`docs/decisions.md` ADR 123), and nothing is added in its place.
+  it("copies project and state on the command-requests route", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/command-requests?state=pending&project=other&n=3"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/command-requests?project=other&state=pending`);
+  });
+
+  it("adds no ?project= of its own on the command-requests route", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/command-requests"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/command-requests`);
   });
 });
 
@@ -365,7 +380,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the nine routes the console forwards.",
+      error: "/api/settingsx is not one of the ten routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });

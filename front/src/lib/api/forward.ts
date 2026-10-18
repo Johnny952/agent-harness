@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Nine console paths map one-to-one onto
- * the nine api routes; anything else under `/api/` is a JSON 404 from the console
+ * **It is a whitelist and not a proxy.** Ten console paths map one-to-one onto
+ * the ten api routes; anything else under `/api/` is a JSON 404 from the console
  * and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose nine routes, count and
+ * deliberately not entries of `FORWARDED`, whose ten routes, count and
  * rejection message describe the api alone.
  */
 import {
@@ -56,6 +56,12 @@ const FORWARDED: Record<string, readonly string[]> = {
   // the api resolves the project's `docs/plans/` from the slug, and the slug is
   // the console's (`docs/plans/roadmap-view.md` item 4, T-072).
   "/api/roadmap": [],
+  // The Approvals screen's command-request card (`docs/decisions.md` ADR 123).
+  // Here `project` *is* the browser's: the api reads requests hive-wide, the way
+  // `/api/roadmap` reads its tasks, and `?project=` only narrows them (ADR 122),
+  // so it is a filter the screen picks and not the console's scope. `state` is
+  // one of the api's four, and anything else is the api's 400.
+  "/api/command-requests": ["project", "state"],
 };
 
 /**
@@ -330,7 +336,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the nine.
+      // `%zz` and friends. A path the console cannot read is not one of the ten.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -345,7 +351,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the nine routes the console forwards.`,
+      error: `${path} is not one of the ten routes the console forwards.`,
     };
   }
 
