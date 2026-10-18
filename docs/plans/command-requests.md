@@ -70,6 +70,12 @@ ask a question. The task moves to *Blocked* with the reason
 only a few requests (the number is set when this is built), and `cwd` is
 relative to the task's worktree.
 
+**Built 2026-10-17** by T-070 (`docs/decisions.md` ADR 117). The implementador
+and the cartografo file at most 3 requests; the dispatcher checks each one,
+records the accepted and refused lists in the handoff envelope, and ends the
+cycle *Blocked* with `blocked_reason: command_request` on one accepted
+request, with no gates or revisor after it.
+
 ### 3. The agent names a kind of target, and the dispatcher resolves the container
 
 The agent never names a container. It names one of three kinds, and the
@@ -175,6 +181,9 @@ A filed request is also a notification of kind *command request*
   revisor and the auditor do not write, so a request from either one must not
   write. Whether that is checked, or just left to the person, is decided at
   step 2.
+  *Answered 2026-10-17* by T-070 (ADR 117): only the implementador and the
+  cartografo have the field; the other roles' schemas have none, so there is
+  nothing to check.
 - **A prefix in the allowlist.** `Bash(pytest:*)` is convenient and broad.
   Whether the screen offers prefixes or only exact commands is decided at
   step 6.

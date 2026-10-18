@@ -67,6 +67,10 @@ class TaskFile:
     # {"into": <branch>, "at": <ISO-8601 UTC>}: a dependency counts once this
     # is there, not at `done`.
     merged: dict | None = None
+    # Why the task stopped blocked, when a branch of the cycle says so: today
+    # only `command_request` (ADR 117). Written only when set, and cleared when
+    # the task is taken again.
+    blocked_reason: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -176,6 +180,10 @@ def handoff_path(hive_dir: str, task_id: str, role: str) -> str:
 #: and means something else (`docs/decisions.md` ADR 116).
 PERMISSION_DENIALS_ABSENT = object()
 
+#: `save_handoff`'s default for `command_requests`, for the same reason: only
+#: the roles that can file one record the key (`docs/decisions.md` ADR 117).
+COMMAND_REQUESTS_ABSENT = object()
+
 
 def save_handoff(
     hive_dir: str,
@@ -184,6 +192,7 @@ def save_handoff(
     payload: dict | None,
     round_num: int | None = None,
     permission_denials: object = PERMISSION_DENIALS_ABSENT,
+    command_requests: object = COMMAND_REQUESTS_ABSENT,
 ) -> str:
     """Keep the structured return of a phase, not just its prose rendering.
 
@@ -212,6 +221,10 @@ def save_handoff(
     the envelope carries no such key at all, so every caller that does not
     pass it writes exactly the four keys it always did, and a reader takes a
     missing key as "not recorded".
+
+    `command_requests` is the check of the phase's requests (ADR 117):
+    `{"accepted": [...], "refused": [{"request": ..., "reason": ...}]}`.
+    Absent the same way, so a role that cannot file one writes no such key.
     """
     path = handoff_path(hive_dir, task_id, role)
     envelope = {
@@ -222,6 +235,8 @@ def save_handoff(
     }
     if permission_denials is not PERMISSION_DENIALS_ABSENT:
         envelope["permission_denials"] = permission_denials
+    if command_requests is not COMMAND_REQUESTS_ABSENT:
+        envelope["command_requests"] = command_requests
     # Made here rather than by `_write_atomic`'s own mkdir, which cannot tell
     # the hive from what is under it: `handoffs/` and the scratch dir have to
     # be traversable by `/api/phases`' uid, the file alone is not enough.
@@ -324,8 +339,9 @@ def list_handoff_roles(hive_dir: str, task_id: str) -> list[str]:
 
 
 def read_handoff_envelope(hive_dir: str, task_id: str, role: str) -> dict:
-    """The whole envelope `save_handoff` wrote — its four keys, and `permission_denials`
-    when the phase recorded them (ADR 116) — or an exception.
+    """The whole envelope `save_handoff` wrote — its four keys, `permission_denials`
+    when the phase recorded them (ADR 116), and `command_requests` when its
+    role can file them (ADR 117) — or an exception.
 
     For the reader that has to tell an operator *why* a record could not be
     read, which `read_handoff` cannot: it answers `None` for a file that is
@@ -568,6 +584,7 @@ def read_task_file(path: str) -> TaskFile:
         epic=fm.get("epic") or None,
         split_into=fm.get("split_into") or [],
         merged=fm.get("merged") or None,
+        blocked_reason=fm.get("blocked_reason") or None,
     )
 
 
@@ -687,6 +704,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["split_into"] = task.split_into
     if task.merged:
         fm["merged"] = task.merged
+    if task.blocked_reason:
+        fm["blocked_reason"] = task.blocked_reason
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

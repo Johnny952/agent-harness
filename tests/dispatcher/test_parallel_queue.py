@@ -257,7 +257,7 @@ def cycle(cfg, monkeypatch):
 
     monkeypatch.setattr(core, "open_cycle", open_cycle)
     monkeypatch.setattr(core, "close_cycle", lambda ctx, completed: None)
-    monkeypatch.setattr(core, "_mark_blocked", lambda ctx: None)
+    monkeypatch.setattr(core, "_mark_blocked", lambda ctx, reason=None: None)
     monkeypatch.setattr(core, "update_project_branch", lambda cfg, slug: None)
     monkeypatch.setattr(core, "_needs_mapping", lambda cfg, slug: state["needs_mapping"])
     monkeypatch.setattr(
