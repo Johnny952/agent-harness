@@ -43,6 +43,7 @@ ROUTES = [
     "/api/tasks/T-1/usage",
     "/api/learnings",
     "/api/roadmap",
+    "/api/command-requests",
 ]
 
 

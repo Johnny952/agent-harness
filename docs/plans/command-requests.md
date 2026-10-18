@@ -245,6 +245,11 @@ Each step is a single surface:
    logged. Fresh phases, their retries and resumes get the same list.
 6. The card in Approvals. A front task, behind its own ask for a build.
 
+   **Built 2026-10-18**, in part, by T-078 (`docs/decisions.md` ADR 122):
+   the read the card needs, `GET /api/command-requests`, with each request's
+   state, its verdict and the CLI lines that move it on. The card itself is
+   not built.
+
 A filed request is also a notification of kind *command request*
 (`docs/plans/notifications.md`).
 
