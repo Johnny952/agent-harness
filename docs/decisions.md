@@ -7872,3 +7872,136 @@ normally, including a dispatcher that is killed with the phase running.
 - Recording the role in `state_machine` instead. The board reads the task
   file, and `owner` is already there.
 - Writing it to a board card (ADR 26).
+## ADR 124 — The board's write side is the board service, a root-level package and a service of its own; the git credential and both pushes stay on the dispatcher
+
+**Status:** accepted (T-080, 2026-10-18). Settles the decision
+`docs/plans/front.md` *Tier 3* binds to the tier-3 opening task, as step 4
+of `docs/plans/board-service.md` asks, and the credential question
+`docs/plans/review.md` leaves to the same step. Follows ADR 59, ADR 75 and
+ADR 78. The plan's text is not edited.
+
+**Context.** `front.md` keeps the api write-free and a Node app in its own
+top-level directory, and says neither rule places a Python service that
+writes. `board-service.md` section 5 already names one: the board service
+is both the agents' MCP server and the console's write side, with the hive
+mounted read-write and no docker socket, and the api stays GET-only. What
+it leaves open is where the code and the process live, and `review.md`
+leaves open where the git credential for *approve*'s base push and the
+task-branch push of C-5 as amended live, saying only that neither the api
+nor the board service may hold it. ADR 78 has since answered the
+credential itself: the push uses what the fetch already uses.
+
+**Decision.**
+1. *A root-level package, `board_service/`.* Beside `config_writer/`, not
+   under `observability/` (which stays the read side) and not in `front/`
+   (Node). It has its own `Dockerfile`, built from the repo root, and its
+   own entry in `pyproject.toml`'s `include`, as ADR 75 placed the
+   config writer.
+2. *Its own compose service.* `board-service`, one process serving both the
+   MCP tools of section 6 and, from step 5, the console's HTTP write
+   routes. The console reaches it on `console_net`; the phases on
+   `ia_harness_net`. It mounts the hive, `config.yaml` and `config.d`, and
+   nothing else: no docker socket, no `.data/`, no projects, no keys.
+3. *It reads and writes through `dispatcher/tasks.py`.* The service
+   imports the module; it has no parser or writer of its own. The api keeps
+   importing the same module for its reads and stays GET-only.
+4. *Reads only, for now.* T-080 serves `board_list` and `board_get` and
+   writes nothing; the hive is mounted `:ro` until step 5 brings the first
+   write, the per-task lock with it.
+5. *The git credential and both pushes stay on the dispatcher's side.*
+   The base push after *approve* and the task-branch push after a phase
+   that commits are the dispatcher's, with the credential ADR 78 names (the
+   project's deploy key or the mounted https:// token the fetch uses). The
+   board service never mounts a key, a token, a project checkout or
+   `.data/`, and never runs git. A verdict written through the service is a
+   change to the task's files; the push it leads to is the dispatcher's.
+6. *The dispatcher learns of the service's writes by reading the hive*, as
+   it reads tasks today: a file the service wrote is in the hive the next
+   time the dispatcher reads it. No signal, socket or queue from the
+   service to the dispatcher. One that is needed for latency is its own
+   ADR.
+
+**Consequences.** The write side has a place before it has a write, and the
+credential has one owner. What stays open:
+- The compose entry and its invariant tests (T-080.md holds the exact
+  entry); a change to `docker/compose/` needs the user's approval.
+- The per-task lock of section 5, which step 4 was to bring: it guards
+  writes, and comes with the first write in step 5.
+- Whether the console's write routes are the same Flask app as the MCP
+  endpoint or a second blueprint on the same process; step 5 decides.
+
+**Ruled out.** The writes in the api (it stops being write-free, which is
+what lets it be reachable at all); a module under `observability/`; the
+service holding a git credential or pushing; a signal from the service to
+the dispatcher before a latency problem asks for one; a queue-and-worker
+pair before there is a write slow enough to need it.
+
+## ADR 125 — The board service speaks stateless MCP over HTTP from its own handler; the role is a query parameter checked on every call
+
+**Status:** accepted (T-080, 2026-10-18). Builds the transport and the role
+check of `docs/plans/board-service.md` sections 5 and 6, and their read
+rows. Follows ADR 124.
+
+**Context.** Section 5 has the agents reach the service over MCP's
+streamable HTTP, with the role in the URL (`?role=<role>`) and no
+authentication; section 6 lists which tools each role gets. The project
+has no MCP library among its dependencies, and adding one is a network
+install. Two read tools and a handshake are a small part of the protocol.
+
+**Decision.**
+1. *One `POST /mcp`, stateless, JSON answers only.* Each POST carries one
+   JSON-RPC 2.0 message. `initialize` echoes the client's
+   `protocolVersion` when it is one of 2024-11-05, 2025-03-26, 2025-06-18
+   or 2025-11-25, and offers 2025-11-25 otherwise; the capabilities are
+   `tools` with `listChanged: false`. `ping`, `tools/list` and
+   `tools/call` are answered; a notification or a response gets 202 with
+   no body; any other method is -32601. No `Mcp-Session-Id`, no event
+   stream: `GET` and `DELETE` on `/mcp` are 405. A batch is -32600 and a
+   body that is not JSON is -32700. `GET /health` is for compose.
+2. *Any `Origin` header is refused with 403*, the spec's guard against DNS
+   rebinding. No browser is a client: the console reaches the service from
+   its server, and Claude Code sends no Origin.
+3. *The role is `?role=`, and it is a label, not a credential.* It must be
+   `operator` or one of `PHASE_ROLES`; a missing or unknown role, or any
+   other query parameter, is 400, so a misspelt URL fails loudly instead
+   of serving no tools. `ROLE_TOOLS` is section 6's table: `operator` and
+   `arquitecto` get `board_list` and `board_get`; every other role gets an
+   empty `tools/list`. `tools/call` checks the role again on every call,
+   and a tool outside the role's set is the same -32602 as an unknown one.
+4. *A tool's failure is a result, not a protocol error.* A bad argument,
+   an unknown argument, a missing task, a path or draft id and an
+   unreadable or unmigrated file are `isError: true` with the reason as
+   text. A result is its JSON as one text block and, the same object, as
+   `structuredContent`.
+5. *`board_list`* reads every task file through `context_transfer` and
+   `tasks`, sorted by id and clamped at 2000, and serves `id`, `title`,
+   `status`, `place`, `epic` and `merged` (a boolean). `place` is
+   `backlog` for `proposed`, `deferred` and `dropped` (none written before
+   step 5) and `board` otherwise. Filters `place`, `status`, `epic` and
+   `text` combine; `text` is a case-folded substring of the id, the title
+   and the description. A file that will not read, or is unmigrated, is a
+   warning naming it, and the rest of the list is served.
+6. *The title.* No task carries one yet. A frontmatter `title` is served
+   when there is one; otherwise the first non-blank line of the
+   description's *Goal*, cut to 100 characters; otherwise `null`. The api's
+   roadmap rows keep `null`; the board's rows are for a model to scan.
+7. *`board_get`* serves the whole frontmatter (YAML dates and other values
+   JSON cannot carry made into text), the description verbatim or `null`,
+   `place`, and the comment count: the non-blank lines of
+   `board/<id>/comments.jsonl`, 0 when the file is absent.
+
+**Consequences.** Any MCP client that speaks streamable HTTP can list and
+read the board, and the role check is one table. What stays open:
+- No test runs a real MCP client against the endpoint; the protocol is
+  pinned by the handler's tests against the spec's shapes.
+- The per-phase `--mcp-config` the dispatcher writes (step 7) and the
+  operator's `.mcp.json` (T-080.md holds the exact change).
+- If a later tool needs server-sent notifications or progress, the
+  transport grows an event stream and this ADR is superseded.
+
+**Ruled out.** Adding the `mcp` package as a dependency for two tools; a
+session id the service would have to keep; the stdio transport (the
+service is a container the phases reach over a network); the role as a
+header (the URL is what `--mcp-config` and `.mcp.json` carry); serving an
+unknown role no tools rather than refusing it; parsing `comments.jsonl` to
+count it.

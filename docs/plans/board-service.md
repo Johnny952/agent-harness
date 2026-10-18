@@ -27,10 +27,16 @@ unmerged dependency or a malformed hand-written epic, and a cycle that stops
 blocked marks its task `blocked`. Task 4 of that section is built by T-031
 (`docs/implementations/T-031.md`, `docs/decisions.md` ADR 60): a cycle files
 an arquitecto's split through `file_split`, and so does `dispatch
-file-split`. The per-task lock of section 5 comes
-with the service (step 4). Step 6 is built by T-081
-(`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126). Every other
-later step is not built. It records an
+file-split`. Step 4 is built, without its compose
+entry, by T-080 (`docs/implementations/T-080.md`, `docs/decisions.md` ADR 124
+and ADR 125): the `board_service/` package with `board_list` and `board_get`
+over stateless MCP on `POST /mcp?role=<role>`, the role check of section 6,
+and a Dockerfile. The write side is this service, and the git credential and
+both pushes stay on the dispatcher (ADR 124). The compose service and the
+operator's session configuration wait for the user's approval. The per-task
+lock of section 5 moves to step 5, with the first write. Step 6 is built by
+T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126). Every
+other later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
 and tasks and writes their descriptions and steps, through a service that
@@ -501,6 +507,8 @@ Each step is a single surface, built in this order:
      the tier-3 opening task. The git credential `review.md`'s *approve*
      needs for the push, and the task-branch push of C-5 as amended, stays
      out of the service, on the dispatcher's side.
+   - **Built 2026-10-18** by T-080, except the compose service and the
+     operator's session configuration (ADR 124, ADR 125).
 5. **The backlog and the write tools.**
    - The backlog statuses, `priority`, `source`, and `open_cycle` refusing
      anything but `pending`.
