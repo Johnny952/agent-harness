@@ -52,6 +52,9 @@ built by T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126).
 Step 7 is built by T-083 (`docs/implementations/T-083.md`, `docs/decisions.md`
 ADR 128): the arquitecto's phases get `--mcp-config` for the service at
 `board_mcp_url?role=arquitecto` and the read tools in their allowed tools.
+Step 8 is built by T-090 to T-096 (`docs/implementations/T-090.md` to
+`T-096.md`, `docs/decisions.md` ADR 135 to ADR 141): the console's Board,
+Backlog, task page, epic view and Debt links on real data.
 Every other later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
@@ -626,6 +629,20 @@ Each step is a single surface, built in this order:
    swimlanes, the backlog redefined, the epic view, and the task page's
    description and comments. It is a front task, behind its own ask for a
    build.
+   **Built 2026-10-18** by T-090 to T-096 (`docs/decisions.md` ADR 135 to
+   ADR 141). The read api serves a task's comments (T-090) and the epic
+   fields, `merged` and a title on task rows (T-092). The console forwards
+   the backlog's writes, the *Ready* order and comments to the board-service
+   behind its own CSRF check (T-091). The Backlog screen reads `/api/tasks`
+   and writes through the board-service (T-093). The task page shows the
+   description's sections, the comment thread and form, the phase, its epic,
+   and an epic's tasks and progress (T-094). The Board shows *Ready* in the
+   dispatcher's order, *Waiting*, one lane per role from `phase`, *Blocked*,
+   *Conflict* and *Merged*, with one swimlane per epic (T-095). The Debt
+   screen links each open entry to its backlog item and says whether it was
+   accepted (T-096). Not built: *Awaiting review* stays empty until
+   `review.md` gives it a status, an integrador lane waits for that role in
+   the dispatcher, and *Start development* and the Queue screen are step 9.
 
 9. **Starting development.** The `start` action and its cancel in the
    worker, the button on the board and the epic, the spending limit, and the
