@@ -19,6 +19,7 @@ the project's own domain, the project wins.
 from __future__ import annotations
 
 import logging
+import re
 
 import yaml
 
@@ -46,6 +47,15 @@ DEBT_DIR = f"{DOCS_DIR}/debt"
 DEBT_INDEX = f"{DEBT_DIR}/README.md"
 IMPLEMENTATIONS_DIR = f"{DOCS_DIR}/implementations"
 PLANS_DIR = f"{DOCS_DIR}/plans"
+#: Where the mapper has the run-skill generator write its skill, because a
+#: phase is refused every write under `.claude/` (ADR 115). One directory per
+#: skill, named as the skill is; the dispatcher moves each one into
+#: RUN_SKILLS_DIR before the mapping commit, and nothing under here is ever
+#: committed.
+RUN_SKILL_STAGING = f"{DOCS_DIR}/run-skill"
+#: Where a project's skills live, and so where the roles that work in its
+#: worktree find them.
+RUN_SKILLS_DIR = ".claude/skills"
 
 #: The docs whose sentences are claims about the tree as it is now: an index of
 #: what exists, the rulings in force, the architecture, the business, which
@@ -160,6 +170,63 @@ def has_index(container: str, project_dir: str) -> bool:
     return docker_exec.path_exists(container, index_path(project_dir))
 
 
+#: A staged directory's name, as a skill's: anything else under the staging
+#: directory is not moved, so a path the phase made up never lands under
+#: `.claude/`.
+_RUN_SKILL_NAME = re.compile(r"run-[a-z0-9-]+")
+
+
+def move_staged_run_skills(container: str, workdir: str) -> tuple[str, ...]:
+    """Move each skill the mapper staged into `.claude/skills/`, whole.
+
+    A phase is refused every write under `.claude/`, so the mapper has the
+    run-skill generator write to RUN_SKILL_STAGING instead and this puts it
+    where the roles look (ADR 115). A fixed step with no model in the loop,
+    run under the mapping commit's lock and before it. A directory whose name
+    is not a skill's, or whose target already exists, is logged and left out:
+    an existing skill is never overwritten. The staging directory is removed
+    either way, so nothing in it reaches the commit. With nothing staged this
+    does nothing. Returns the names it moved.
+    """
+    listing = docker_exec.run_docker_exec(
+        container, workdir,
+        ["find", RUN_SKILL_STAGING, "-mindepth", "1", "-maxdepth", "1", "-printf", "%y %f\n"],
+    )
+    if listing.returncode != 0:
+        # No staging directory: the generator did not run, or wrote nothing.
+        return ()
+    moved: list[str] = []
+    for line in listing.stdout.splitlines():
+        kind, _, name = line.partition(" ")
+        if not name:
+            continue
+        staged = f"{RUN_SKILL_STAGING}/{name}"
+        target = f"{RUN_SKILLS_DIR}/{name}"
+        if kind != "d" or not _RUN_SKILL_NAME.fullmatch(name):
+            logger.warning("not moved: %s is not a run-skill directory (run-[a-z0-9-]+)", staged)
+            continue
+        if docker_exec.run_docker_exec(container, workdir, ["test", "-e", target]).returncode == 0:
+            logger.warning(
+                "not moved: %s already exists and is never overwritten; %s is left out of the "
+                "commit", target, staged,
+            )
+            continue
+        proc = docker_exec.run_docker_exec(
+            container, workdir, ["sh", "-c", 'mkdir -p "$1" && mv "$2" "$3"', "sh",
+                                 RUN_SKILLS_DIR, staged, target],
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "could not move %s to %s: %s", staged, target,
+                (proc.stderr.strip() or proc.stdout.strip())[-500:],
+            )
+            continue
+        logger.info("moved the staged skill %s to %s", staged, target)
+        moved.append(name)
+    docker_exec.run_docker_exec(container, workdir, ["rm", "-rf", RUN_SKILL_STAGING])
+    return tuple(moved)
+
+
 _FRONTMATTER_DELIM = "---"
 
 
@@ -179,10 +246,13 @@ def _frontmatter(text: str) -> dict:
 #: to run them with no model in the loop at all. Each one is a command or a
 #: list of commands, run in order from the project root.
 COMMAND_KEYS = ("build", "install", "test", "lint")
-#: The two a mapper is asked to establish. `install` and `lint` are added by
-#: whoever decides a project needs them: what a fresh worktree must install
-#: before its suite can run, and what a gate should only ever report on.
-MAPPED_KEYS = ("build", "test")
+#: The ones a mapper is asked to establish. `install` joined `build` and
+#: `test` once the mapper ran the run-skill generator first (ADR 115): what a
+#: fresh worktree must install before its suite can run is one of the things
+#: the generator runs and sees succeed, so it is no longer a guess. `lint` is
+#: still added by whoever decides a project needs it: what a gate should only
+#: ever report on.
+MAPPED_KEYS = ("build", "install", "test")
 
 
 def _command_list(value: object) -> tuple[str, ...]:
@@ -339,23 +409,49 @@ _AUDITOR = (
     "confirm or kill. Friction with your own skills is not a project doc: say it in `risks`."
 )
 
+#: The first thing in the mapper's prompt. `/run-skill-generator` is
+#: user-invocable only: named mid-prompt, the model reaches for the Skill tool
+#: and is refused, so the generator never runs (probe, 2026-10-17). As the
+#: prompt's leading slash command it runs, and honours the text after it.
+RUN_SKILL_COMMAND = "/run-skill-generator"
+
+
+def mapper_lead() -> str:
+    """The mapper prompt's opening line: the generator, and where it writes."""
+    return (
+        f"{RUN_SKILL_COMMAND} Write the finished skill to `{RUN_SKILL_STAGING}/run-<name>/` "
+        f"instead of `{RUN_SKILLS_DIR}/run-<name>/`, every file it writes included: writes under "
+        "`.claude/` are refused here, and the harness moves the directory into place afterwards. "
+        f"Every path written inside the skill is its final `{RUN_SKILLS_DIR}/run-<name>/...` "
+        f"path, and the skill never mentions `{RUN_SKILL_STAGING}/`. A command that is refused "
+        "is not one the skill may claim works: record it as unverified, never guessed. When the "
+        "skill is written, carry on with the rest of this prompt."
+    )
+
+
 _MAPPER = (
     "This project has no docs index, so nothing about it has been written down for the agents "
     "that come after you. Map it. Do not change its code, do not rewrite the docs it already "
     "has, and do not fix anything you find.\n\n"
-    "{budget}Work outside-in — build files, entry points, directory names, tests — and write:\n"
-    f"- `{INDEX}`, the index. It opens with YAML frontmatter holding `build:` and `test:`, each "
+    "{budget}The generator this prompt opens with runs first, on the staging terms given "
+    "there. Once it has written the skill, or the budget for it is spent, work outside-in — "
+    "build files, entry points, directory names, tests — and write:\n"
+    f"- `{INDEX}`, the index. It opens with YAML frontmatter holding `build:`, `test:` and, "
+    "where a fresh checkout must install something before its suite can run, `install:`, each "
     "one command exactly as it is run from the project root, because later phases run those "
-    "without a model in the loop; omit a key you could not establish rather than guessing one. "
+    "without a model in the loop. Take each from the commands the generator actually ran and "
+    "saw succeed; omit a key it did not verify, or that was refused, rather than guessing one. "
     "Then: what this project is, its stack, its modules and what each is for, and a table of the "
-    "docs that already exist with, per row, when an agent should open it. Point at those docs, "
-    "do not summarise them.\n"
+    "docs that already exist with, per row, when an agent should open it — the generated skill "
+    f"among them, at `{RUN_SKILLS_DIR}/run-<name>/SKILL.md`, opened to build, run or test the "
+    "project. Point at those docs, do not summarise them.\n"
     f"- `{ARCHITECTURE}`: the shape. Modules, how they talk, what crosses a process or network "
     "boundary, and the contracts visible from outside — routes, CLI flags, env keys, schemas.\n"
     f"- `{BUSINESS}`: what the software is for and the rules it enforces, each marked confirmed "
     "(you read it in a doc or a comment) or unconfirmed (you inferred it from the code). "
     "Unconfirmed is not a failure — it is the list a human is being asked to confirm.\n\n"
-    "Thin and true beats complete and late: if the budget runs out mid-map, stop where you are. "
+    "Thin and true beats complete and late: if the budget runs out mid-map, or mid-generator, "
+    "stop where you are. "
     "What you wrote is committed, and the next task extends it."
 )
 

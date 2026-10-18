@@ -343,6 +343,17 @@ mapping_model: claude-sonnet-5-5
 # Optional; defaults to 40.
 mapping_max_turns: 40
 
+# Tool patterns granted to the mapping phase alone, on top of allowed_tools
+# (ADR 115). The mapper runs Claude Code's /run-skill-generator first, and the
+# generator records as working only what it could run: with the list empty
+# mapping still runs, and a refused command is left out of the skill and of
+# the index's build:/test:/install: keys rather than guessed. Every other
+# phase keeps allowed_tools exactly, and permission_mode is not changed for
+# mapping. The owner fills this per the projects in `projects_root`, for
+# example Bash(docker compose*), Bash(npm *) or Bash(make*). Same shape as
+# allowed_tools, read-only in the console. Optional; defaults to [].
+# mapping_allowed_tools: []
+
 # The dispatcher's own checks on the implementador's worktree, run between it
 # and the revisor: a change with no test, the project's test command failing,
 # a contract touched with no doc, a docs pointer whose target is gone. They

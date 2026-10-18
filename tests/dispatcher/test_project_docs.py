@@ -108,6 +108,24 @@ def test_read_commands_reads_lists_and_the_keys_no_mapper_writes(monkeypatch) ->
     }
 
 
+def test_read_commands_never_reads_the_generated_skill(monkeypatch) -> None:
+    """A skill is prose for a model; a gate has none in the loop. With the
+    skill committed and `test:` missing from the frontmatter, the key is
+    absent, and nothing but the index is ever read (ADR 115)."""
+    index = (
+        "---\n"
+        "build: npm run build\n"
+        "---\n\n"
+        "| Doc | Open it when |\n|---|---|\n"
+        f"| `{project_docs.RUN_SKILLS_DIR}/run-myproj/SKILL.md` | to build, run or test |\n"
+    )
+    monkeypatch.setattr(project_docs.docker_exec, "run_docker_exec", _fake_cat(index))
+
+    assert project_docs.read_commands("agent-cuenta1", "/data/projects/myproj") == {
+        "build": ("npm run build",),
+    }
+
+
 def test_read_commands_returns_only_the_keys_that_are_there(monkeypatch) -> None:
     """A map that could not establish the build command omits the key rather
     than guessing one, so a partial answer has to survive."""
@@ -257,10 +275,40 @@ def test_the_mapper_is_told_what_to_write_and_not_to_touch_the_code() -> None:
     for path in (project_docs.INDEX, project_docs.ARCHITECTURE, project_docs.BUSINESS):
         assert path in mapper
     assert "Do not change its code" in mapper
-    # The two keys the dispatcher parses back out, named in the prompt that
+    # The keys the dispatcher parses back out, named in the prompt that
     # writes them.
     for key in project_docs.MAPPED_KEYS:
         assert f"`{key}:`" in mapper
+
+
+def test_the_mapper_runs_the_generator_first_and_stages_its_skill() -> None:
+    """A phase is refused every write under .claude/, so the generator is
+    pointed at the staging dir and the dispatcher moves it (ADR 115). The
+    generator is user-invocable only, so it lives in the prompt's leading
+    line, not in the duties: named mid-prompt it is never run."""
+    lead = project_docs.mapper_lead()
+    mapper = project_docs.duties(project_docs.MAPPER_ROLE, "task-1")
+
+    assert lead.startswith(f"{project_docs.RUN_SKILL_COMMAND} ")
+    assert project_docs.RUN_SKILL_COMMAND not in mapper
+    assert f"`{project_docs.RUN_SKILL_STAGING}/run-<name>/`" in lead
+    assert f"`{project_docs.RUN_SKILLS_DIR}/run-<name>/...` path" in lead
+    # The first probe's one flaw: the skill named its staging path.
+    assert f"the skill never mentions `{project_docs.RUN_SKILL_STAGING}/`" in lead
+    assert "unverified, never guessed" in lead
+    # The index's docs table points the roles at it.
+    assert f"`{project_docs.RUN_SKILLS_DIR}/run-<name>/SKILL.md`" in mapper
+
+
+def test_the_mapper_takes_its_keys_only_from_what_the_generator_verified() -> None:
+    """With mapping_allowed_tools empty most commands are refused: those are
+    left out, never guessed, so a gate never runs an invented command."""
+    mapper = project_docs.duties(project_docs.MAPPER_ROLE, "task-1")
+
+    assert "actually ran and saw succeed" in mapper
+    assert "omit a key it did not verify, or that was refused" in mapper
+    assert "record it as unverified, never guessed" in project_docs.mapper_lead()
+    assert "mid-generator, stop where you are" in mapper
 
 
 def test_the_mapper_is_told_its_turn_budget_when_it_has_one() -> None:

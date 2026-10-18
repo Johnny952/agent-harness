@@ -8,7 +8,7 @@ import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import debt, gates, handoff, learnings, project_docs, role_skills, subagents, tasks
-from dispatcher.config import AccountConfig, Config
+from dispatcher.config import PHASE_ROLES, AccountConfig, Config
 from dispatcher.context_transfer import (
     LockHeldError,
     is_lock_expired,
@@ -199,6 +199,11 @@ class _FakeGit:
         self.premerge_drops = getattr(self, "premerge_drops", [])
         self.premerge_drops.append(task_id)
 
+    def move_staged_run_skills(self, container, workdir):
+        self.staged_moves = getattr(self, "staged_moves", [])
+        self.staged_moves.append((container, workdir))
+        return ()
+
 
 @pytest.fixture(autouse=True)
 def fake_git(monkeypatch):
@@ -218,6 +223,9 @@ def fake_git(monkeypatch):
     monkeypatch.setattr(dispatcher_mod.docker_exec, "adopt_premerge", fake.adopt_premerge)
     monkeypatch.setattr(
         dispatcher_mod.docker_exec, "drop_premerge_worktree", fake.drop_premerge_worktree
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.project_docs, "move_staged_run_skills", fake.move_staged_run_skills
     )
     return fake
 
@@ -3866,6 +3874,21 @@ def test_the_mapper_is_told_the_task_is_context_not_its_job() -> None:
     assert "/data/.hive/tasks/task-1.md" not in prompt
     assert project_docs.INDEX in prompt
     assert "12 turns and no more" in prompt
+
+
+def test_the_mapper_prompt_opens_with_the_generator() -> None:
+    """The generator is user-invocable only: the Skill tool refuses it, and
+    only the prompt's leading slash command runs it (ADR 115). No other role's
+    prompt starts with it."""
+    args = ("task-1", "myproj", "/data/.hive/tasks/task-1.md", _DESCRIPTION,
+            "/data/.hive/scratch/task-1", "/data/.hive/tasks")
+
+    mapper = dispatcher_mod._role_prompt(project_docs.MAPPER_ROLE, *args)
+
+    assert mapper.startswith(f"{project_docs.mapper_lead()}\n\nRole: {project_docs.MAPPER_ROLE}.")
+    assert mapper.count(project_docs.RUN_SKILL_COMMAND) == 1
+    for role in ("arquitecto", "implementador", "revisor", "auditor"):
+        assert project_docs.RUN_SKILL_COMMAND not in dispatcher_mod._role_prompt(role, *args)
 
 
 @pytest.mark.parametrize(
@@ -7798,6 +7821,76 @@ def test_dispatch_phase_holds_the_base_lock_for_the_mapping_commit(
     assert [name for name, _ in seen] == ["commit"]
     assert seen[0][1]["operation"] == "mapping commit"
     assert _base_lock_record(cfg) is None
+
+
+def test_the_mapping_phase_moves_the_staged_skill_under_the_lock_before_its_commit(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """A phase cannot write under .claude/, so the skill is staged and moved
+    by the dispatcher, inside the mapping commit's lock (ADR 115)."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="mapped", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        dispatcher_mod.project_docs, "move_staged_run_skills",
+        _recording_under_the_lock(cfg, seen, "move", fake_git.move_staged_run_skills),
+    )
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "commit_worktree",
+        _recording_under_the_lock(cfg, seen, "commit", fake_git.commit_worktree),
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", project_docs.MAPPER_ROLE, "map it")
+
+    assert [name for name, _ in seen] == ["move", "commit"]
+    assert all(lock["operation"] == "mapping commit" for _, lock in seen)
+    assert len(fake_git.staged_moves) == 1
+
+
+@pytest.mark.parametrize("role", ["arquitecto", "implementador", "auditor", "revisor"])
+def test_no_other_phase_moves_a_staged_skill(tmp_path, monkeypatch, fake_git, role) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", role, "do it")
+
+    assert getattr(fake_git, "staged_moves", []) == []
+
+
+def test_only_the_cartografo_gets_mapping_allowed_tools(tmp_path) -> None:
+    cfg = _make_config(
+        tmp_path, allowed_tools=["Bash(git status*)"], mapping_allowed_tools=["Bash(make*)"],
+    )
+
+    flags = dispatcher_mod._phase_permission_flags(cfg, project_docs.MAPPER_ROLE)
+
+    assert flags["allowed_tools"] == ["Bash(git status*)", "Bash(make*)"]
+    assert flags["permission_mode"] == "acceptEdits"
+    assert cfg.allowed_tools == ["Bash(git status*)"]
+
+
+@pytest.mark.parametrize(
+    "role",
+    sorted(PHASE_ROLES - {project_docs.MAPPER_ROLE}),
+)
+def test_every_other_role_keeps_exactly_allowed_tools(tmp_path, role) -> None:
+    cfg = _make_config(
+        tmp_path, allowed_tools=["Bash(git status*)"], mapping_allowed_tools=["Bash(make*)"],
+    )
+    plain = _make_config(tmp_path, allowed_tools=["Bash(git status*)"])
+
+    flags = dispatcher_mod._phase_permission_flags(cfg, role)
+
+    assert flags == dispatcher_mod._phase_permission_flags(plain, role)
+    assert flags["allowed_tools"] == ["Bash(git status*)"]
 
 
 def test_dispatch_phase_takes_no_base_lock_for_a_task_branch_commit(
