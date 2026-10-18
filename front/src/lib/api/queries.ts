@@ -178,9 +178,3 @@ export const settingsQuery = queryOptions({
   queryKey: ["settings"],
   queryFn: () => api.getSettings(),
 });
-
-export const backlogQuery = queryOptions({
-  queryKey: ["backlog"],
-  queryFn: () => api.listBacklog(),
-  refetchInterval: POLL_MS * 2,
-});

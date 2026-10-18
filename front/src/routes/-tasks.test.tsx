@@ -44,6 +44,10 @@ const TASK: TaskDetail = {
   tags: [],
   rank: null,
   debt_id: null,
+  epic: null,
+  split_into: [],
+  merged: false,
+  title: null,
   body: "",
 };
 

@@ -92,10 +92,11 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  * control which fakes a failure is a fixture wearing a button — so that function
  * and its `isActionBackendDown` reader are gone, with no callers anywhere in
  * `front/src` to mourn them. Nothing flips this now, and nothing will until there
- * is a real write surface to be down. Kept because five mock helpers below read
- * it, and deleting it would reshape five more functions that have no route
- * either. (Four of them write; the fifth is `pingActionBackend`. The role-model
- * save that used to be a fifth writer left with its mock, ADR 113.)
+ * is a real write surface to be down. Kept because four mock helpers below read
+ * it, and deleting it would reshape four more functions that have no route
+ * either. (Three of them write; the fourth is `pingActionBackend`. The
+ * role-model save that used to be a writer left with its mock, ADR 113, and the
+ * backlog's completion toggle with the backlog's mock, ADR 138.)
  */
 const actionBackendDown = false;
 
@@ -524,16 +525,9 @@ export function commandLine(verb: string, args: string[]): string {
 }
 
 /* ── Sessions, tokens, approvals ─────────────────────────────────────── */
-import type {
-  Approval,
-  BacklogItem,
-  ContainerToken,
-  SessionInfo,
-  SessionLogLine,
-} from "./ops-types";
+import type { Approval, ContainerToken, SessionInfo, SessionLogLine } from "./ops-types";
 import {
   initialApprovals,
-  initialBacklog,
   initialTokens,
   mockSessionLines,
   mockSessions,
@@ -618,29 +612,5 @@ export async function decideApproval(
   if (a.state !== "pending") throw new ApiError(`Approval ${id} was already ${a.state}`, 409);
   const next = { ...a, state: decision, decided_at: new Date().toISOString() };
   approvalState = approvals().map((x) => (x.id === id ? next : x));
-  return next;
-}
-
-/* ── Backlog ──────────────────────────────────────────────────────────── */
-
-let backlogState: BacklogItem[] | null = null;
-const backlog = () => (backlogState ??= initialBacklog());
-
-export async function listBacklog(): Promise<BacklogItem[]> {
-  await latency();
-  return backlog();
-}
-
-export async function setBacklogCompleted(id: string, completed: boolean): Promise<BacklogItem> {
-  await latency();
-  if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
-  const item = backlog().find((b) => b.id === id);
-  if (!item) throw new ApiError(`Backlog item ${id} not found`, 404);
-  const next: BacklogItem = {
-    ...item,
-    completed,
-    completed_at: completed ? new Date().toISOString() : null,
-  };
-  backlogState = backlog().map((b) => (b.id === id ? next : b));
   return next;
 }

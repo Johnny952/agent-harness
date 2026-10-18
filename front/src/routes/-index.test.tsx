@@ -64,6 +64,10 @@ const TASK: Task = {
   tags: [],
   rank: null,
   debt_id: null,
+  epic: null,
+  split_into: [],
+  merged: false,
+  title: null,
 };
 
 /** The one route a card links to, and no component mounted on it. */
