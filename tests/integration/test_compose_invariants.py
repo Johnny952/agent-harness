@@ -943,3 +943,34 @@ def test_no_agent_or_sidecar_joins_console_net() -> None:
             assert "console_net" not in service.get("networks", []), name
     for name in ("collector", "registry-mirror", "dispatcher"):
         assert "console_net" not in coolify[name]["networks"], name
+
+
+# --- the board service (docs/decisions.md ADR 124, ADR 125) -------------------
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_board_service_mounts_everything_read_only_and_no_socket(compose_file: str) -> None:
+    """Step 4 writes nothing: the hive, config.yaml and config.d, all `:ro`;
+    no socket, no .data, no projects, no credentials."""
+    board = _load(compose_file)["services"]["board-service"]
+
+    assert board["volumes"] == [
+        "../../.hive:/data/.hive:ro",
+        "../../config.yaml:/app/config.yaml:ro",
+        "../../config.d:/app/config.d:ro",
+    ]
+    assert "docker.sock" not in yaml.safe_dump(board)
+    assert board["build"] == {"context": "../..", "dockerfile": "board_service/Dockerfile"}
+    assert "profiles" not in board
+    assert "environment" not in board
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_board_service_publishes_only_loopback_8792_on_the_agents_network(
+    compose_file: str,
+) -> None:
+    board = _load(compose_file)["services"]["board-service"]
+
+    assert board["ports"] == ["127.0.0.1:8792:8792"]
+    assert board["networks"] == ["ia_harness_net"]
+
