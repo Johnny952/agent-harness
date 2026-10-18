@@ -672,6 +672,93 @@ def test_a_task_of_an_epic_waits_for_its_epic(tmp_path: Path) -> None:
     assert tasks.accept(hive, epic["tasks"][0], to="dropped")["status"] == "dropped"
 
 
+def test_dropping_the_last_open_task_of_an_epic_closes_it(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive, 3)
+    s1, s2, s3 = epic["tasks"]
+    tasks.accept(hive, s3, to="deferred")
+    tasks.accept(hive, epic["id"])
+    tasks.mark_merged(hive, s1, "main")
+
+    # A deferred task holds its epic open, and so does a pending one.
+    assert tasks.close_epic(hive, s1) is None
+    assert tasks.accept(hive, s3, to="dropped") == {
+        "id": s3, "status": "dropped", "changed": True, "children": {},
+    }
+    assert _read(hive, epic["id"]).status == "epic"
+
+    tasks.mark_merged(hive, s2, "main")
+    assert tasks.close_epic(hive, s2) == epic["id"]
+    assert _read(hive, epic["id"]).status == "done"
+
+
+def test_dropping_every_task_of_an_accepted_epic_drops_it(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    s1, s2 = epic["tasks"]
+    for child in (s1, s2):
+        tasks.accept(hive, child, to="deferred")
+    tasks.accept(hive, epic["id"])
+    tasks.accept(hive, s1, to="dropped")
+
+    result = tasks.accept(hive, s2, to="dropped")
+
+    assert result == {
+        "id": s2, "status": "dropped", "changed": True, "children": {}, "epic_closed": epic["id"],
+    }
+    assert _read(hive, epic["id"]).status == "dropped"
+
+
+def test_a_retried_drop_closes_the_epic_a_crash_left_open(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    s1, s2 = epic["tasks"]
+    tasks.accept(hive, s2, to="deferred")
+    tasks.accept(hive, epic["id"])
+    tasks.mark_merged(hive, s1, "main")
+    # The drop was written and the close never ran.
+    path = task_file_path(hive, s2)
+    task = read_task_file(path)
+    task.status = "dropped"
+    write_task_file(path, task)
+
+    result = tasks.accept(hive, s2, to="dropped")
+
+    assert result["changed"] is False and result["epic_closed"] == epic["id"]
+    assert _read(hive, epic["id"]).status == "done"
+    assert "epic_closed" not in tasks.accept(hive, s2, to="dropped")
+
+
+def test_a_dropped_task_closes_its_epic_holding_no_childs_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    s1, s2 = epic["tasks"]
+    tasks.accept(hive, s2, to="deferred")
+    tasks.accept(hive, epic["id"])
+    tasks.mark_merged(hive, s1, "main")
+    close_epic = tasks.close_epic
+    free: list[bool] = []
+
+    def close_checking_locks(hive_dir: str, task_id: str):
+        # Another thread can take the child's lock and the create lock: the
+        # close holds neither, so it takes the parent's in the order ADR 129 sets.
+        def take() -> None:
+            with tasks.task_lock(hive_dir, tasks.CREATE_LOCK), tasks.task_lock(hive_dir, task_id):
+                free.append(True)
+
+        thread = threading.Thread(target=take)
+        thread.start()
+        thread.join(timeout=5)
+        return close_epic(hive_dir, task_id)
+
+    monkeypatch.setattr(tasks, "close_epic", close_checking_locks)
+
+    assert tasks.accept(hive, s2, to="dropped", priority="low")["epic_closed"] == epic["id"]
+    assert free == [True]
+
+
 def test_dropping_an_epic_drops_its_backlog_tasks(tmp_path: Path) -> None:
     hive = _hive(tmp_path)
     epic = _epic(hive, 3)

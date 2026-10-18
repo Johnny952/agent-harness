@@ -8528,3 +8528,62 @@ The front's `Task` and `DebtEntry` types do not declare the new keys yet
 - A `ready` key or a `?ready` filter on `/api/tasks`: it changes the list
   route's envelope, or adds a parameter that orders instead of filtering.
 - Warning on an `impact` typo: ADR 131 reads it as `none` by design.
+## ADR 134 — An epic closes once every task of it is settled, merged or dropped
+
+**Status:** accepted (T-089, 2026-10-18). Amends the closing rule of
+`docs/plans/task-split.md` section 3 and ADR 129 point 9. Keeps the lock
+order of ADR 129 and ADR 130: `CREATE_LOCK` before a task's lock, and a
+parent's lock never taken under a child's.
+
+**Context.** `tasks.close_epic` closed an epic only when every id in its
+`split_into` had a `merged` block, and only `dispatcher.record_merge` ran
+it. A task of an epic can be dropped (`backlog_accept` to `dropped`, before
+or after the epic is accepted) and can be left deferred when the epic is
+accepted (ADR 129 point 9). A dropped task never merges, so its epic stayed
+`status: epic` for good. No tool moves a task once it is on the board, so
+nothing could close it by hand either.
+
+**Decision.**
+1. *Settled is merged or dropped.* `tasks.is_settled` is true for a task
+   with a `merged` block or with `status: dropped`. Dropped is final, so a
+   dropped task will never hold its epic open again.
+2. *A deferred task keeps its epic open.* So do pending, running, blocked,
+   proposed, and `done` without a merge. A deferred task is a decision the
+   person has not made yet. Closing its epic under it would strand it:
+   `accept` takes a task of an epic only while the epic is `status: epic`,
+   and `epic_problems` refuses to run one under a closed epic. The person
+   settles it by accepting it or by dropping it, and the drop closes the
+   epic (point 4).
+3. *What the epic becomes.* `status: done` when at least one of its tasks
+   merged. `status: dropped` when none did, since nothing of it shipped.
+   `dropped` is a final backlog status, so the epic sits with the dropped
+   items and is never run. Its lock, body and other fields stay, as before.
+4. *Dropping a task of an epic runs the close.* `tasks.accept`, after it
+   writes a task of an epic to `dropped`, runs `close_epic` once both its
+   locks are let go: the create lock and the task's. `close_epic` then takes
+   only the parent's lock, so the order of ADR 129 holds. A drop that is a
+   no-op runs it too, so a retry makes a close that a crash cut off. When it
+   closes the epic, the result has `epic_closed` with the epic's id. The
+   merge paths still run it after `mark_merged`.
+5. *Never with an open task.* `close_epic` reads every task of the epic
+   first and writes nothing if one is not settled. It reads the parent
+   again under its lock and closes only a parent still `status: epic`.
+
+**Consequences.** An epic whose last open task is dropped closes at that
+drop. One whose last open task merges closes at the merge, as before, even
+when a sibling was dropped. Two triggers that race each write their own
+task before they run the check, so the later one sees both. Dropping a
+task while its epic is still in the backlog closes nothing, since the epic
+is not `status: epic`. `record_merge`'s line still says "every sub-task is
+merged", which is loose when a sibling was dropped.
+
+**Ruled out.**
+- A deferred task that stops counting: the epic would close with work the
+  person meant to come back to, and that work could then never be accepted
+  or run.
+- `done` for an epic none of whose tasks merged: it would show as shipped
+  work that never shipped.
+- Leaving an all-dropped epic open: no tool moves a task on the board, so
+  it would stay `epic` for good.
+- Closing from `_accept_epic`: it moves only epics in the backlog, which
+  `close_epic` does not close.
