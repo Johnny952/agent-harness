@@ -9,7 +9,8 @@ account is doing, `observability/collector/db.py` lists events,
 the hive's trap entries; `context_transfer.read_usage` reads a task's per-call
 usage log (ADR 54), and `observability/api/plans.py` reads a plan's frontmatter
 (T-072; it lives here and not in `dispatcher/` because no dispatcher code reads
-a plan, and its test imports it). This is an HTTP surface over those, and nothing more:
+a plan, and its test imports it), and `dispatcher/command_run.py` answers which
+block of command requests a task is held on and what verdict it has (T-078). This is an HTTP surface over those, and nothing more:
 every route is a `GET`, every mount is `:ro`, and there is no second copy of any
 file format here — a parser this service needs and does not have is one to make
 reachable in `dispatcher/`, not one to rewrite.
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import shlex
 import sqlite3
 from pathlib import Path
 
@@ -42,6 +44,7 @@ import yaml
 from flask import Flask, jsonify, request
 
 from dispatcher import (
+    command_run,
     context_transfer,
     debt,
     docker_exec,
@@ -168,6 +171,14 @@ MAX_ROADMAP_PLANS = 500
 #: than one that grows with every task this harness has run, and it reports
 #: itself in `warnings`. A task row is four scalars, so a count is bound enough.
 MAX_ROADMAP_TASKS = 2000
+
+#: The most task files one `/api/command-requests` answer reads, for the reason
+#: `MAX_ROADMAP_TASKS` gives and with its number: the route reads every task in
+#: the hive, and the clamp is taken on the sorted ids before any file is
+#: opened. A task carries at most three requests a block
+#: (`dispatcher/handoff.py`) and two filing roles, so a count of tasks bounds
+#: the rows.
+MAX_COMMAND_REQUEST_TASKS = 2000
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
@@ -727,6 +738,70 @@ def create_app(
             task_rows.append((row, plan, merged, month))
         return _envelope(_roadmap(slug, plan_rows, task_rows, warnings), warnings)
 
+    @app.get("/api/command-requests")
+    @requires_auth
+    def command_requests():
+        """The command requests filed across the hive, each with its state.
+
+        The data half of step 6 of `docs/plans/command-requests.md`
+        (`docs/decisions.md` ADR 122). Hive-wide, as `/api/roadmap` reads its
+        tasks: `?project=` narrows to one checkout and leaves out only a task
+        whose file names another, and `?state=` narrows `requests` to one of
+        `COMMAND_REQUEST_STATES`. Which block a task is held on and whether it
+        waits on a resume are `dispatcher/command_run.py`'s answers, not a
+        second copy here; nothing it calls touches docker, a subprocess or a
+        file it would write. No output is served: a run's log is named by its
+        path under the task's scratch dir, and its text stays there.
+        """
+        rejected = _reject_unknown_parameters(frozenset({"project", "state"}))
+        if rejected is not None:
+            return rejected
+        slug = request.args.get("project") or None
+        if slug is not None:
+            slug, rejected = _project(cfg, slug)
+            if rejected is not None:
+                return rejected
+        state = request.args.get("state") or None
+        if state is not None and state not in COMMAND_REQUEST_STATES:
+            return _error(
+                f"state {state!r} is not one of {', '.join(COMMAND_REQUEST_STATES)}", 400
+            )
+        slugs = _project_slugs(cfg.projects_root)
+        default_project = slug or (slugs[0] if len(slugs) == 1 else None)
+        warnings: list[str] = []
+        rows: list[dict] = []
+        refused: list[dict] = []
+        task_ids = sorted(context_transfer.list_task_ids(cfg.hive_tasks_dir))
+        if len(task_ids) > MAX_COMMAND_REQUEST_TASKS:
+            warnings.append(
+                f"{len(task_ids)} task files are in the hive and this service answers at "
+                f"most {MAX_COMMAND_REQUEST_TASKS}: the first {MAX_COMMAND_REQUEST_TASKS} by "
+                f"task id are read, and {len(task_ids) - MAX_COMMAND_REQUEST_TASKS} are left out."
+            )
+            task_ids = task_ids[:MAX_COMMAND_REQUEST_TASKS]
+        for task_id in task_ids:
+            path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+            try:
+                task = context_transfer.read_task_file(path)
+                project = _task_frontmatter(path).get("project")
+                if slug is not None and project is not None and project != slug:
+                    continue
+                project = project if isinstance(project, str) else default_project
+                task_rows, task_refused = _command_requests(
+                    cfg, task, project, warnings
+                )
+                app.json.dumps([task_rows, task_refused])
+            except _UNREADABLE as exc:
+                warnings.append(f"{path}: unreadable task file: {exc}")
+                continue
+            rows.extend(task_rows)
+            refused.extend(task_refused)
+        if state is not None:
+            rows = [row for row in rows if row["state"] == state]
+        rows.sort(key=_command_request_order)
+        refused.sort(key=lambda row: (str(row["filed_at"] or ""), row["task_id"]))
+        return _envelope({"requests": rows, "refused": refused}, warnings)
+
     return app
 
 
@@ -1249,6 +1324,275 @@ def _roadmap(slug: str, plan_rows: list[dict], task_rows: list, warnings: list[s
         "bands": {band: _band_order(rows) for band, rows in bands.items()},
         "no_plan": {"now": no_plan_now, "past": past},
     }
+
+
+# --- command requests -----------------------------------------------------
+
+#: What `?state=` takes and a request row's `state` is, ADR 122:
+#: - `pending`: the task is blocked on this block and it has no verdict yet;
+#:   every accepted request of it is one the operator can give a verdict on.
+#: - `awaiting_resume`: the block has a verdict, of any kind, whose resume no
+#:   account took yet (`command_run.awaits_resume`).
+#: - `denied`: a *deny*, no longer waiting on its resume.
+#: - `resumed`: a *run* or *allow*, no longer waiting on its resume; its
+#:   `verdict.resumed_at` is null when the task was moved on another way.
+COMMAND_REQUEST_STATES = ("pending", "awaiting_resume", "resumed", "denied")
+
+
+def _command_requests(
+    cfg: Config, task: context_transfer.TaskFile, project: str | None, warnings: list[str]
+) -> tuple[list[dict], list[dict]]:
+    """One task's request rows and its current block's refused requests.
+
+    Read from each filing role's envelope on record, which holds that role's
+    newest block, and from the task's verdicts, which outlive the envelope a
+    later phase overwrote: such a verdict is still a row, with `argv`,
+    `agent_reason` and, on a *deny*, `target` null, since the request it was
+    given on is no longer on record. A block with a verdict is one row, the
+    request the verdict names; one with none is a row per accepted request
+    while the task is blocked on it, and no row once it is not (the task was
+    moved on with no verdict, and nothing is left to decide). An envelope that
+    will not parse is a warning and the rest of the task still comes back.
+    """
+    hive = cfg.hive_tasks_dir
+    task_id = task.task_id
+    if not all(isinstance(entry, dict) for entry in task.command_verdicts):
+        # `command_run` reads each as a mapping and would fail on the task:
+        # the file is a bad one, and the route's guard says so.
+        raise TypeError("command_verdicts is a list of mappings")
+    current = _current_block(cfg, task_id)
+    awaiting = current is not None and command_run.awaits_resume(cfg, task_id)
+    base = {"task_id": task_id, "project": project, "title": None}
+    rows: list[dict] = []
+    refused: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for role in command_run._FILING_ROLES:
+        envelope_path = context_transfer.handoff_path(hive, task_id, role)
+        try:
+            envelope = context_transfer.read_handoff_envelope(hive, task_id, role)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            warnings.append(f"{envelope_path}: unreadable handoff: {exc}")
+            continue
+        try:
+            block_rows, block_refused, key = _block_rows(
+                cfg, task, role, envelope, current, awaiting, base
+            )
+        except _UNREADABLE as exc:
+            warnings.append(f"{envelope_path}: unreadable command requests: {exc}")
+            continue
+        if key is not None:
+            seen.add(key)
+        rows.extend(block_rows)
+        refused.extend(block_refused)
+    for entry in task.command_verdicts:
+        key = (entry.get("role"), entry.get("filed_at"))
+        if key in seen:
+            continue
+        ran = entry.get("ran") if isinstance(entry.get("ran"), dict) else {}
+        rows.append(_request_row(
+            cfg, base, entry.get("role"), entry.get("filed_at"), entry.get("n"), None,
+            _resolved_target(ran.get("resolved")), None, _verdict_state(entry, False), entry,
+        ))
+    return rows, refused
+
+
+def _current_block(cfg: Config, task_id: str) -> tuple[str, object] | None:
+    """The `(role, filed_at)` the task is blocked on now, or None when it is not.
+
+    `command_run`'s own two checks, so a verdict or a resume from the CLI and
+    this row agree on which block is the live one.
+    """
+    try:
+        command_run._check_blocked(cfg, task_id)
+        role, envelope = command_run._filed_block(cfg, task_id)
+    except command_run.VerdictRefused:
+        return None
+    return role, envelope.get("saved_at")
+
+
+def _block_rows(
+    cfg: Config,
+    task: context_transfer.TaskFile,
+    role: str,
+    envelope: dict,
+    current: tuple[str, object] | None,
+    awaiting: bool,
+    base: dict,
+) -> tuple[list[dict], list[dict], tuple[str, object] | None]:
+    """The rows one envelope's block makes. Raises `TypeError` or `ValueError` on a bad shape."""
+    requests = envelope.get("command_requests")
+    if not isinstance(requests, dict):
+        return [], [], None
+    accepted = requests.get("accepted") or []
+    filed = requests.get("refused") or []
+    if not isinstance(accepted, list) or not isinstance(filed, list):
+        raise TypeError("command_requests' accepted and refused are lists")
+    if not (accepted or filed):
+        return [], [], None
+    filed_at = envelope.get("saved_at")
+    is_current = current == (role, filed_at)
+    entry = command_run._block_verdict(task, role, filed_at)
+    rows: list[dict] = []
+    if entry is not None:
+        n = entry.get("n")
+        request = accepted[n - 1] if isinstance(n, int) and 1 <= n <= len(accepted) else None
+        rows.append(_accepted_row(
+            cfg, base, role, filed_at, n, request,
+            _verdict_state(entry, is_current and awaiting), entry,
+        ))
+    elif is_current:
+        for n, request in enumerate(accepted, start=1):
+            rows.append(_accepted_row(cfg, base, role, filed_at, n, request, "pending", None))
+    refused = [_refused_row(base, role, filed_at, item) for item in filed] if is_current else []
+    return rows, refused, (role, filed_at)
+
+
+def _verdict_state(entry: dict, awaiting: bool) -> str:
+    if awaiting:
+        return "awaiting_resume"
+    return "denied" if entry.get("verdict") == command_run.DENY else "resumed"
+
+
+def _accepted_row(
+    cfg: Config, base: dict, role: str, filed_at: object, n: object, request: dict | None,
+    state: str, entry: dict | None,
+) -> dict:
+    """A row for an accepted request as its envelope has it; `request` None when gone."""
+    if request is None:
+        ran = entry.get("ran") if entry is not None and isinstance(entry.get("ran"), dict) else {}
+        return _request_row(
+            cfg, base, role, filed_at, n, None, _resolved_target(ran.get("resolved")), None,
+            state, entry,
+        )
+    if not isinstance(request, dict):
+        raise TypeError(f"an accepted request is a mapping, not a {type(request).__name__}")
+    argv = request.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(token, str) for token in argv):
+        raise TypeError("an accepted request's argv is a list of strings")
+    target = _resolved_target(request.get("resolved"))
+    if target is None:
+        raise TypeError("an accepted request carries its resolved target")
+    reason = request.get("reason")
+    return _request_row(
+        cfg, base, role, filed_at, n, list(argv), target,
+        reason if isinstance(reason, str) else None, state, entry,
+    )
+
+
+def _resolved_target(resolved: object) -> dict | None:
+    """kind, container, service and cwd of a resolved target; None for no mapping."""
+    if not isinstance(resolved, dict):
+        return None
+    return {key: resolved.get(key) for key in ("kind", "container", "service", "cwd")}
+
+
+def _request_row(
+    cfg: Config, base: dict, role: object, filed_at: object, n: object, argv: list | None,
+    target: dict | None, agent_reason: str | None, state: str, entry: dict | None,
+) -> dict:
+    task_id = base["task_id"]
+    return {
+        **base,
+        "role": role,
+        "filed_at": filed_at,
+        "n": n,
+        "argv": argv,
+        "target": target,
+        "agent_reason": agent_reason,
+        "state": state,
+        "verdict": _verdict(cfg, task_id, entry) if entry is not None else None,
+        "commands": _commands(task_id, base["project"], n, state, target),
+    }
+
+
+def _verdict(cfg: Config, task_id: str, entry: dict) -> dict:
+    """The verdict as the card shows it: no output, and the log by its relative path.
+
+    `by` is served only when it does not look like an email: the CLI writes
+    `operator`, and a board that passes a person must not have their address
+    land on every screen that lists requests.
+    """
+    by = entry.get("by")
+    ran = entry.get("ran")
+    row = {
+        "verdict": entry.get("verdict"),
+        "by": by if isinstance(by, str) and "@" not in by else None,
+        "at": entry.get("at"),
+        "comment": entry.get("comment"),
+        "allowed": entry.get("allowed"),
+        "resumed_at": entry.get("resumed_at"),
+        "ran": None,
+    }
+    if isinstance(ran, dict):
+        n = entry.get("n")
+        row["ran"] = {
+            "exit_code": ran.get("exit_code"),
+            "timed_out": bool(ran.get("timed_out")),
+            "truncated": bool(ran.get("truncated")),
+            "log": _relative_log(cfg, task_id, n) if isinstance(n, int) else None,
+        }
+    return row
+
+
+def _relative_log(cfg: Config, task_id: str, n: int) -> str:
+    """`commands/<n>.log`: where the run's log is, under the task's scratch dir."""
+    hive = cfg.hive_tasks_dir
+    return os.path.relpath(
+        context_transfer.command_log_path(hive, task_id, n),
+        context_transfer.scratch_dir(hive, task_id),
+    )
+
+
+def _commands(
+    task_id: str, project: str | None, n: object, state: str, target: dict | None
+) -> dict:
+    """The CLI lines that move this row on, or null where none applies.
+
+    *allow* only for a request resolved to the agent's own container, the one
+    kind `command-verdict` takes it for (ADR 121). A task with no project
+    known gets `<project>` in place of a slug, for the operator to fill in.
+    """
+    tail = f"--project {shlex.quote(project) if project else '<project>'}"
+    task = shlex.quote(task_id)
+    commands = {"run": None, "allow": None, "deny": None, "resume": None}
+    if state == "pending" and isinstance(n, int):
+        for verdict in (command_run.RUN, command_run.DENY):
+            commands[verdict] = f"dispatch command-verdict {task} {n} {verdict} {tail}"
+        if target is not None and target.get("kind") == "agent":
+            commands["allow"] = f"dispatch command-verdict {task} {n} allow {tail}"
+    elif state == "awaiting_resume":
+        commands["resume"] = f"dispatch command-resume {task} {tail}"
+    return commands
+
+
+def _refused_row(base: dict, role: str, filed_at: object, item: object) -> dict:
+    """A request the check refused at filing: no number, nothing to run, only why."""
+    if not isinstance(item, dict):
+        raise TypeError(f"a refused request is a mapping, not a {type(item).__name__}")
+    request = item.get("request") if isinstance(item.get("request"), dict) else {}
+    argv = request.get("argv")
+    target = request.get("target") if isinstance(request.get("target"), dict) else {}
+    reason = request.get("reason")
+    return {
+        **base,
+        "role": role,
+        "filed_at": filed_at,
+        "argv": list(argv) if isinstance(argv, list) and all(isinstance(t, str) for t in argv) else None,
+        "target": {
+            key: target.get(key) if isinstance(target.get(key), str) else None
+            for key in ("kind", "service")
+        },
+        "agent_reason": reason if isinstance(reason, str) else None,
+        "refused_reason": str(item.get("reason")),
+    }
+
+
+def _command_request_order(row: dict) -> tuple:
+    """Pending first, then everything by `filed_at`, oldest first, then task and number."""
+    n = row["n"] if isinstance(row["n"], int) else 0
+    return (row["state"] != "pending", str(row["filed_at"] or ""), row["task_id"], n)
 
 
 if __name__ == "__main__":

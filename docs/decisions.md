@@ -7632,3 +7632,101 @@ and role, and the decision can be listed and revoked. What stays open:
 never was); storing the list in the hive or in the project's repo (a phase
 can write both); writing an entry into the global `allowed_tools`; allowing a
 `dind` or `service` command (the flag does not reach those containers).
+
+## ADR 122 — `GET /api/command-requests`: the hive's filed requests, each with its state and verdict, read through `command_run` and with no output
+
+**Status:** accepted (T-078, 2026-10-18). Follows ADR 117, ADR 119, ADR 120
+and ADR 121; builds the data half of step 6 of
+`docs/plans/command-requests.md`. The plan gains a dated note under step 6;
+the rest of its text is not edited. The card that shows it is T-079.
+
+**Context.** A request is filed in a phase's handoff envelope, and a verdict
+on it is a `command_verdicts` record on the task (ADR 119); `command_run`
+answers which block a task is held on and whether its verdict waits on a
+resume (ADR 120). The CLI is the only place an operator sees any of it.
+Step 6 puts the decision in Approvals, and a front card needs a read first.
+The read sits next to the logs of commands that ran, and those can hold a
+secret the command printed.
+
+**Decision.**
+1. *The path.* `GET /api/command-requests`: plural and kebab-case like
+   `/api/tasks` and `/api/roadmap`. It is hive-wide like `/api/roadmap`,
+   because a request belongs to a task and the tasks are in the hive, not in
+   a checkout. Basic auth and the envelope are the same as on every route,
+   and an unknown parameter is a 400.
+2. *The filters.* `?project=<slug>` is checked like on the roadmap (an
+   unknown slug is a 404) and leaves out only a task whose file names
+   another project. `?state=` is one of `pending`, `awaiting_resume`,
+   `resumed`, `denied`; anything else is a 400. It narrows `requests` only.
+3. *The answer.* `{"requests": [...], "refused": [...]}`. A request row is
+   `task_id`, `project`, `title` (null: a task file has none, as on the
+   roadmap), `role`, `filed_at` (the envelope's `saved_at`, the key a verdict
+   names its block by), `n` (1-based over the accepted, as `command-verdict`
+   takes it), `argv` (the exact list), `target` (`kind`, `container`,
+   `service`, `cwd` as filing resolved them), `agent_reason` (the agent's
+   own words, untrusted), `state`, `verdict` and `commands`.
+4. *Which rows, and in what state.* Each filing role's envelope on record is
+   one block.
+   - A block with no verdict is a row per accepted request, `pending`, while
+     the task is blocked on it (`command_run._check_blocked` and
+     `_filed_block`, the CLI's own checks). Once the task has moved on with
+     no verdict, it is no row: nothing is left to decide.
+   - A block with a verdict is one row, for the request the verdict names. A
+     verdict covers the whole block, so its other requests are moot.
+   - That row is `awaiting_resume` while `command_run.awaits_resume` holds,
+     for a *deny* too. Otherwise it is `denied` for a *deny*, and `resumed`
+     for a *run* or *allow*, with `verdict.resumed_at` null when the task was
+     moved on another way.
+   - A verdict whose block's envelope a later phase overwrote is still a
+     row. Its `argv` and `agent_reason` are null, and its `target` comes from
+     the run's own `resolved`, or is null for a *deny*.
+5. *The verdict.* `verdict`, `by`, `at`, `comment`, `allowed` (ADR 121),
+   `resumed_at`, and `ran` as `{exit_code, timed_out, truncated, log}`.
+   `log` is `commands/<n>.log`, relative to the task's scratch dir. No
+   output is ever served, nor the absolute path or the run's `resolved`.
+   `by` is null when it holds an `@`: the CLI writes `operator`, and a
+   person's address must not land on every screen that lists requests. The
+   envelope's `session_id` and `account` are never read into a row.
+6. *The commands.* `commands` is `{run, allow, deny, resume}`, each a CLI
+   line or null.
+   - For `pending`: `dispatch command-verdict <task> <n> run|deny --project
+     <slug>`, and `allow` only for a request resolved to kind `agent`, the
+     one kind *allow* takes.
+   - For `awaiting_resume`: `dispatch command-resume <task> --project
+     <slug>`.
+   - Tokens are `shlex.quote`d. With no project known (the task names none
+     and the hive has more than one checkout), the slug is the literal
+     `<project>`.
+7. *Refused requests are listed apart,* in `refused`, and only for the block
+   a task is blocked on now. Each row has `task_id`, `project`, `title`,
+   `role`, `filed_at`, `argv` (null unless a list of strings), `target` as
+   the agent wrote it (`kind`, `service`), `agent_reason` and
+   `refused_reason`. There is no `n` and no commands, since nothing can be
+   run. Apart, because a block of only refused requests would otherwise be
+   invisible on the card, yet mixing them into `requests` would offer
+   verdicts the CLI refuses. Only the live block's, because a past block's
+   refusals were seen in its own handoff and decide nothing now.
+8. *The order.* `pending` first, then by `filed_at`, oldest first, then by
+   task id and `n`. What waits on the operator comes first, oldest first.
+   `refused` is ordered by `filed_at` and task id.
+9. *Read-only and bounded.* No write, no docker, no subprocess: `_recheck`,
+   which calls docker, is not used. A task file or envelope that will not
+   read, or that has the wrong shape, is a warning naming its path, and the
+   rest of the answer still comes back. A `command_verdicts` entry that is
+   not a mapping makes the task file a bad one. At most
+   `MAX_COMMAND_REQUEST_TASKS` (2000) task files are read, by sorted id,
+   with a warning, as on the roadmap.
+
+**Consequences.** The card can show what waits on the operator and how to
+answer it with no second copy of `command_run`'s rules. What stays open:
+- The answer offers commands to copy, not buttons. A verdict from the board
+  is a write and a docker exec, which this read does not do.
+- A block whose envelope was overwritten keeps only its verdict, so an old
+  row has no argv. Keeping the requests on the verdict record would fix it,
+  as a dispatcher change.
+- An undecided block the task moved on from leaves no trace here.
+
+**Ruled out.** Serving a log's text, even truncated (a command can print a
+secret); listing refused requests among `requests` with a state of their
+own; a route per project (requests belong to tasks, and tasks are
+hive-wide); re-checking a request's target from the API (docker).
