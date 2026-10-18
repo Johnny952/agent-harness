@@ -589,6 +589,18 @@ Each step is a single surface, built in this order:
      `dispatch import-debt` (`--project` or `--index`, `--dry-run`) files
      the open entries already in the index. Step 5 is complete; step 8 (the
      console) and step 9 remain.
+   - **Built 2026-10-18**, three follow-ups to step 5. T-087
+     (`docs/decisions.md` ADR 132): `dispatch run-queue --ready N` tops the
+     queue up with the first N tasks of `ready_order` not already listed,
+     picked once at plan time; the confirmation screen marks them and names
+     the ones passed over. T-088 (ADR 133): `/api/tasks` and `/api/tasks/<id>`
+     serve `priority`, `source`, `tags`, `rank` and `debt_id` as `board_list`
+     shapes them, with a warning per bad field, and `/api/ready` serves the
+     Ready order; `/api/debt` already served `impact`. T-089 (ADR 134): an
+     epic closes once every task of it is merged or dropped, `done` if one
+     merged and `dropped` if none did; a deferred task keeps it open, and
+     `backlog_accept` dropping a task of an epic runs the check. This amends
+     `docs/plans/task-split.md` section 3, where only a merge closed one.
 6. **`phase` in the frontmatter.** The dispatcher writes and clears it around
    each phase, and the api serves it.
    **Built 2026-10-18** by T-081 (`docs/decisions.md` ADR 126): `phase` in
