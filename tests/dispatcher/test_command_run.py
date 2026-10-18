@@ -433,3 +433,303 @@ def test_the_log_header_is_json_argv(tmp_path, monkeypatch) -> None:
 
     first = _log(cfg).splitlines()[0]
     assert json.loads(first.removeprefix("argv: ")) == ["echo", "two words"]
+
+
+# --- the held resume (T-076, ADR 120) ----------------------------------------
+
+
+def _held(tmp_path, monkeypatch, verdict="run", comment=None, **exec_kwargs):
+    """A verdict whose resume no account took; the next resume finds one.
+
+    Returns the prompt the held resume was given, with the phase and exec
+    records cleared, so what follows counts only the resume.
+    """
+    cfg, phases = _blocked(tmp_path, monkeypatch)
+    phases.no_account_on_resume = True
+    fake = _exec(monkeypatch, **exec_kwargs)
+    outcome = command_run.run_command_request(cfg, "task-1", "myproj", 1, verdict, comment=comment)
+    assert outcome == dispatcher_mod.CycleOutcome.HELD
+    task = _task(cfg)
+    assert task.status == "blocked" and task.blocked_reason == handoff.COMMAND_REQUEST
+    assert "resumed_at" not in task.command_verdicts[0]
+    prompt = phases.calls[0]["prompt"]
+    phases.calls.clear()
+    fake.calls.clear()
+    phases.no_account_on_resume = False
+    return cfg, phases, fake, prompt
+
+
+def _resume_refused(cfg, match):
+    with pytest.raises(command_run.VerdictRefused, match=match):
+        command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+
+def test_a_verdict_that_resumed_records_resumed_at(tmp_path, monkeypatch) -> None:
+    cfg, _ = _blocked(tmp_path, monkeypatch)
+    _exec(monkeypatch, stdout="ok\n")
+
+    command_run.run_command_request(cfg, "task-1", "myproj", 1, "run")
+
+    verdict = _task(cfg).command_verdicts[0]
+    assert verdict["resumed_at"]
+    assert verdict["ran"]["exit_code"] == 0 and verdict["ran"]["timed_out"] is False
+    assert verdict["ran"]["log"] == context_transfer.command_log_path(cfg.hive_tasks_dir, "task-1", 1)
+
+
+def test_a_held_run_resumes_with_the_same_prompt_and_never_runs_again(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, held_prompt = _held(tmp_path, monkeypatch, stdout="Resolved 12 packages\n")
+
+    outcome = command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+    assert fake.calls == []
+    resume = phases.calls[0]
+    assert resume["prompt"] == held_prompt
+    assert "Resolved 12 packages" in resume["prompt"]
+    assert resume["resume_session_id"] == "sess-implementador-2"
+    assert resume["only_account"] == "cuenta1" and resume["round_num"] == 1
+    assert phases.roles() == ["implementador", "revisor", "auditor"]
+    assert outcome == dispatcher_mod.CycleOutcome.FINISHED
+    verdicts = _task(cfg).command_verdicts
+    assert len(verdicts) == 1 and verdicts[0]["resumed_at"]
+
+
+@pytest.mark.parametrize("exec_kwargs", [
+    dict(returncode=2, stdout="partial\n", stderr="error: no lockfile\n"),
+    dict(timeout=True, stdout="still resolving\n"),
+    dict(stdout="x" * (command_run.OUTPUT_CAP_BYTES + 1000)),
+])
+def test_a_held_run_rebuilds_exit_timeout_and_truncation_alike(tmp_path, monkeypatch, exec_kwargs) -> None:
+    cfg, phases, fake, held_prompt = _held(tmp_path, monkeypatch, **exec_kwargs)
+
+    command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+    assert fake.calls == []
+    assert phases.calls[0]["prompt"] == held_prompt
+
+
+def test_a_held_deny_resumes_with_its_comment(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, held_prompt = _held(tmp_path, monkeypatch, verdict="deny", comment="use the lockfile")
+
+    command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+    assert fake.calls == []
+    assert phases.calls[0]["prompt"] == held_prompt
+    assert "use the lockfile" in held_prompt
+
+
+def test_a_resume_held_again_stays_resumable(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, held_prompt = _held(tmp_path, monkeypatch)
+    phases.no_account_on_resume = True
+
+    assert command_run.resume_command_verdict(cfg, "task-1", "myproj") == dispatcher_mod.CycleOutcome.HELD
+    assert command_run.awaits_resume(cfg, "task-1")
+    phases.no_account_on_resume = False
+    assert command_run.resume_command_verdict(cfg, "task-1", "myproj") == dispatcher_mod.CycleOutcome.FINISHED
+
+    assert fake.calls == []
+    assert [call["prompt"] for call in phases.calls[:2]] == [held_prompt, held_prompt]
+
+
+def test_a_second_resume_is_refused(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+    command_run.resume_command_verdict(cfg, "task-1", "myproj")
+    phases.calls.clear()
+
+    # The resumed phase moved the task on, which is the first guard.
+    _resume_refused(cfg, "not blocked on a command request")
+    assert fake.calls == [] and phases.calls == []
+
+
+def test_a_verdict_already_resumed_is_refused_even_when_still_blocked(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+    entry = _task(cfg).command_verdicts[0]
+    dispatcher_mod.tasks.update_command_verdict(
+        cfg.hive_tasks_dir, "task-1", entry["role"], entry["filed_at"], {"resumed_at": "2026-10-18T10:00:00+00:00"},
+    )
+
+    _resume_refused(cfg, "already resumed at 2026-10-18T10:00:00")
+    assert fake.calls == [] and phases.calls == []
+
+
+def test_a_resume_whose_phase_ran_and_failed_is_not_resumed_again(tmp_path, monkeypatch) -> None:
+    """The lock was taken, so the session ran: resumed_at stays, whatever came of it."""
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+
+    def failed(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, **kwargs):
+        phases.calls.append(dict(role=role, prompt=prompt, resume_session_id=resume_session_id))
+        return dispatcher_mod.DispatchResult(
+            success=False, session_id="sess-x", result_text="claude timed out", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", failed)
+
+    assert command_run.resume_command_verdict(cfg, "task-1", "myproj") == dispatcher_mod.CycleOutcome.BLOCKED
+    assert _task(cfg).command_verdicts[0]["resumed_at"]
+    _resume_refused(cfg, "not blocked on a command request")
+    assert len(phases.calls) == 1 and fake.calls == []
+
+
+def test_a_rate_limit_inside_the_held_resume_puts_the_block_back(tmp_path, monkeypatch) -> None:
+    """The pinned account took the lock, was refused, and gave it back before the hold."""
+    cfg, phases = _blocked(tmp_path, monkeypatch)
+    _exec(monkeypatch)
+
+    def rate_limited(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, **kwargs):
+        dispatcher_mod.tasks.acquire_lock(cfg_arg.hive_tasks_dir, task_id, owner="cuenta1")
+        dispatcher_mod.tasks.release_stale_lock(cfg_arg.hive_tasks_dir, task_id)
+        return dispatcher_mod.DispatchResult(
+            success=False, session_id=None, result_text="no account", account="", no_account=True,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", rate_limited)
+
+    assert command_run.run_command_request(cfg, "task-1", "myproj", 1, "deny") == dispatcher_mod.CycleOutcome.HELD
+    task = _task(cfg)
+    assert task.status == "blocked" and task.blocked_reason == handoff.COMMAND_REQUEST
+    assert command_run.awaits_resume(cfg, "task-1")
+
+
+def test_a_block_with_no_verdict_is_refused(tmp_path, monkeypatch) -> None:
+    cfg, phases = _blocked(tmp_path, monkeypatch)
+    fake = _exec(monkeypatch)
+
+    _resume_refused(cfg, "has no verdict yet; give one with command-verdict")
+    assert fake.calls == [] and phases.calls == []
+
+
+def test_a_resume_on_a_task_not_blocked_is_refused(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _Phases({}))
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    _resume_refused(cfg, "not blocked on a command request")
+
+
+def test_a_resume_with_no_session_on_record_is_refused(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+    path = context_transfer.handoff_path(cfg.hive_tasks_dir, "task-1", "implementador")
+    with open(path) as handle:
+        envelope = json.load(handle)
+    envelope["session_id"] = envelope["account"] = None
+    with open(path, "w") as handle:
+        json.dump(envelope, handle)
+
+    _resume_refused(cfg, "session is not on record")
+    assert fake.calls == [] and phases.calls == []
+
+
+def _drop_ran(cfg):
+    task = _task(cfg)
+    task.command_verdicts = [{k: v for k, v in item.items() if k != "ran"} for item in task.command_verdicts]
+    context_transfer.write_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"), task)
+
+
+@pytest.mark.parametrize("exec_kwargs", [
+    dict(stdout="Resolved 12 packages\n"),
+    dict(returncode=2, stdout="partial\n", stderr="error: no lockfile\n"),
+    dict(timeout=True, stdout="still resolving\n"),
+    dict(stdout="x" * (command_run.OUTPUT_CAP_BYTES + 1000)),
+])
+def test_an_entry_without_ran_is_rebuilt_from_its_log(tmp_path, monkeypatch, exec_kwargs) -> None:
+    """A T-074 entry, or one whose run stopped between its log and `ran`."""
+    cfg, phases, fake, held_prompt = _held(tmp_path, monkeypatch, **exec_kwargs)
+    _drop_ran(cfg)
+
+    command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+    assert fake.calls == []
+    assert phases.calls[0]["prompt"] == held_prompt
+
+
+def test_a_run_verdict_with_no_log_is_refused_and_not_run(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+    _drop_ran(cfg)
+    import os
+    os.remove(context_transfer.command_log_path(cfg.hive_tasks_dir, "task-1", 1))
+
+    _resume_refused(cfg, "no readable log")
+    assert fake.calls == [] and phases.calls == []
+
+
+def test_a_log_for_another_argv_is_refused(tmp_path, monkeypatch) -> None:
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+    _drop_ran(cfg)
+    context_transfer.save_command_log(
+        cfg.hive_tasks_dir, "task-1", 1, 'argv: ["make"]\ntarget: agent c\ncwd: /w\nexit: 0\n--- output ---\n',
+    )
+
+    _resume_refused(cfg, "no readable log")
+    assert fake.calls == [] and phases.calls == []
+
+
+def test_a_held_mapping_resume_stays_blocked_and_resumes_on_to_the_arquitecto(tmp_path, monkeypatch) -> None:
+    """Pinned and found taken, the cartografo is held, not an optional phase that failed."""
+    cfg = _make_config(tmp_path, mapping_enabled=True)
+    _fake_index(monkeypatch, exists=False)
+    phases = _Phases({project_docs.MAPPER_ROLE: [
+        _mapper_return([_request(argv=("npm", "ci"))]), _mapper_return([]),
+    ]}, no_account_on_resume=True)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", phases)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+    phases.calls.clear()
+    fake = _exec(monkeypatch, stdout="added 3 packages\n")
+
+    held = command_run.run_command_request(cfg, "task-1", "myproj", 1, "run")
+
+    assert held == dispatcher_mod.CycleOutcome.HELD
+    assert phases.roles() == [project_docs.MAPPER_ROLE]
+    task = _task(cfg)
+    assert task.status == "blocked" and task.blocked_reason == handoff.COMMAND_REQUEST
+    held_prompt = phases.calls[0]["prompt"]
+    phases.calls.clear()
+    fake.calls.clear()
+    phases.no_account_on_resume = False
+
+    outcome = command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+    # The later phases read the project's docs through the same exec; npm ci is never among them.
+    assert [call for call in fake.calls if call["command"][:2] == ["npm", "ci"]] == []
+    assert phases.calls[0]["prompt"] == held_prompt
+    assert phases.calls[0]["resume_session_id"] == "sess-cartografo-1"
+    assert phases.roles()[1:] == ["arquitecto", "implementador", "revisor", "auditor"]
+    assert outcome == dispatcher_mod.CycleOutcome.FINISHED
+    assert _task(cfg).command_verdicts[0]["resumed_at"]
+
+
+def _resume_cli(monkeypatch, cfg, *argv):
+    monkeypatch.setattr(cli, "load_config", lambda path: cfg)
+    monkeypatch.setattr(sys, "argv", ["dispatch", "--config", "c.yaml", "command-resume", *argv])
+    cli.main()
+
+
+def test_the_cli_held_verdict_points_to_command_resume(tmp_path, monkeypatch, capsys) -> None:
+    cfg, phases = _blocked(tmp_path, monkeypatch)
+    phases.no_account_on_resume = True
+    _exec(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        _cli(monkeypatch, cfg, "task-1", "1", "deny", "--project", "myproj")
+
+    assert exc.value.code == cli.EXIT_HELD
+    assert "command-resume task-1 --project myproj" in capsys.readouterr().err
+
+
+def test_the_cli_resume_exits_held_refused_and_finished(tmp_path, monkeypatch, capsys) -> None:
+    cfg, phases, fake, _ = _held(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    phases.no_account_on_resume = True
+    with pytest.raises(SystemExit) as exc:
+        _resume_cli(monkeypatch, cfg, "task-1", "--project", "myproj")
+    assert exc.value.code == cli.EXIT_HELD
+    assert "command-resume task-1" in capsys.readouterr().err
+
+    phases.no_account_on_resume = False
+    _resume_cli(monkeypatch, cfg, "task-1", "--project", "myproj")
+    assert "the verdict was resumed; the cycle finished" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exc:
+        _resume_cli(monkeypatch, cfg, "task-1", "--project", "myproj")
+    assert exc.value.code == cli.EXIT_BLOCKED
+    assert "resume refused" in capsys.readouterr().err
+    assert fake.calls == []

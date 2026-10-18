@@ -2927,7 +2927,11 @@ def run_phase(
         # account ran the phase, whatever became of it.
         ctx.took_lock = True
     if not result.success:
-        if fatal:
+        # A phase pinned to one account (a command request's verdict, ADR 119)
+        # that found it taken never ran: held, never an optional phase that
+        # failed, which would hand the task off as if the phase had run
+        # (ADR 120).
+        if fatal or (account is not None and result.no_account):
             # Said out loud because otherwise nothing says it: this return is
             # the whole of the cycle's failure path, and without a line here a
             # timed-out or crashed phase ends the run at exit 0 with the last
