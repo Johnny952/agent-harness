@@ -8475,3 +8475,56 @@ The front does not start queues, and its board is unchanged.
   did not list it, and the screen names it.
 - Picking tasks whose dependencies merge during the queue: what the screen
   shows would then depend on how the run goes.
+## ADR 133 — The read api serves the backlog fields on task rows, and the Ready order at `/api/ready`
+
+**Status:** accepted (T-088, 2026-10-18). Brings `observability/api/app.py`
+up to ADR 130 and ADR 131, which added `tags`, `rank`, `debt_id` and the
+debt index's `impact`, and served them from `board_service/app.py` only.
+Keeps ADR 5 (never-500, a bad file is a warning), ADR 21 (`body` only on the
+detail route) and ADR 59 (no card).
+
+**Context.** The front reads the read api, not the board service. After
+T-085 and T-086 a task row there still had the eight fields plus `phase`, so
+a screen could not show a task's tags, its place in its bucket or the debt
+entry it came from, and could not order the Ready column without computing
+it a second time. The debt route already served `impact`: it returns
+`debt.index_rows` whole, and T-086 added the column there.
+
+**Decision.**
+1. *Every task row gains five keys, shaped as `board_list` shapes them.*
+   `priority` is `tasks.effective_priority` (`normal` when the file names
+   none), `source` and `debt_id` are the file's, `tags` is
+   `tasks.normal_tags` ([] for none), and `rank` is the file's. `priority`
+   and `source` ride along because a rank means nothing without its bucket
+   and `debt_id` belongs with `source: debt`. They are added in `_task`, so
+   `/api/tasks` and `/api/tasks/<id>` keep the same keys, the detail route
+   adding only `body`.
+2. *A bad value is a warning, and the row is still served as written.*
+   Both task routes add `"<path>: <problem>"` for each of
+   `tasks.field_problems`, the one validator the board service also uses.
+   Nothing is mended here: a hand edit's `urgent` is served as `urgent`.
+3. *`GET /api/ready` returns the Ready column as task ids, in order.* It is
+   `tasks.ready_order` over every task file that reads, the function the
+   board service and the queue use, so there is one order. It reads with its
+   own loop rather than `read_all_tasks`, because that drops an unreadable
+   file without a word. Here such a file is a warning, and so is a bad
+   field. It takes no parameters. It is not `/api/tasks/ready`, which would
+   be the detail route for a task named `ready`.
+4. *`impact` is served as `index_rows` reads it.* A typo or a missing column
+   is `none`, with no warning, as `docs/debt/README.md` defines it. A check
+   here would be a second parser of the index.
+
+**Consequences.** The change is additive: new keys and one new route, and
+no key changed meaning. Exact-dict tests of a task row gained the five keys.
+The front's `Task` and `DebtEntry` types do not declare the new keys yet
+(nor `phase`), so no screen shows them until the front is changed.
+
+**Ruled out.**
+- Serving only `tags`, `rank` and `debt_id`: a rank without its bucket does
+  not order anything.
+- Serving the cleaned values only (the bucket and rank `ready_order` sorts
+  by): the board service serves the file's values beside a warning, and two
+  services answering one task two ways would be the bug.
+- A `ready` key or a `?ready` filter on `/api/tasks`: it changes the list
+  route's envelope, or adds a parameter that orders instead of filtering.
+- Warning on an `impact` typo: ADR 131 reads it as `none` by design.
