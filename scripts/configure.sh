@@ -313,6 +313,11 @@ EOF
     command: ["--registry-mirror=http://registry-mirror:5000"]
     volumes:
       - dind_${name}_data:/var/lib/docker
+      # The projects tree at the agent's path. The agent runs \`docker compose\`
+      # against this daemon from /data/projects/<slug>, and the daemon resolves
+      # the project's bind mounts on its own filesystem, so the path must exist
+      # here too. A \`service\` command request's project lives here (ADR 118).
+      - ../../.data/projects:/data/projects
     networks:
       - ia_harness_net
 
@@ -442,6 +447,11 @@ EOF
     command: ["--registry-mirror=http://registry-mirror:5000"]
     volumes:
       - dind_${name}_data:/var/lib/docker
+      # The projects tree at the agent's path. The agent runs \`docker compose\`
+      # against this daemon from /data/projects/<slug>, and the daemon resolves
+      # the project's bind mounts on its own filesystem, so the path must exist
+      # here too. A \`service\` command request's project lives here (ADR 118).
+      - ../../.data/projects:/data/projects
     networks:
       - ia_harness_net
 
