@@ -45,6 +45,7 @@ ROUTES = [
     "/api/roadmap",
     "/api/command-requests",
     "/api/ready",
+    "/api/tasks/T-1/comments",
 ]
 
 
@@ -2075,6 +2076,220 @@ def test_reading_the_usage_route_writes_nothing(tmp_path: Path) -> None:
     before = path.read_bytes()
     _get(harness, "/api/tasks/T-1/usage")
     assert path.read_bytes() == before
+
+
+# --- comments (ADR 135) ---------------------------------------------------
+
+
+def _comments_file(tasks_dir: str, task_id: str) -> Path:
+    path = Path(task_store.comments_path(tasks_dir, task_id))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_comments_are_served_oldest_first_as_add_comment_wrote_them(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    first = task_store.add_comment(harness.tasks_dir, "T-1", "operator", "first")["comment"]
+    second = task_store.add_comment(
+        harness.tasks_dir, "T-1", "reviewer", "this line", file="a/b.py", line=3, commit="abc1234"
+    )["comment"]
+
+    resp = _get(harness, "/api/tasks/T-1/comments")
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {
+        "data": {"task_id": "T-1", "comments": [first, second]},
+        "warnings": [],
+    }
+    assert set(second) == {"at", "author", "text", "file", "line", "commit"}
+
+
+def test_a_task_with_no_comments_file_is_an_empty_thread_and_no_warning(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+
+    resp = _get(harness, "/api/tasks/T-1/comments")
+
+    assert resp.get_json() == {"data": {"task_id": "T-1", "comments": []}, "warnings": []}
+
+
+def test_comments_of_a_task_with_no_task_file_are_404_like_the_detail_route(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _comments_file(harness.tasks_dir, "T-9").write_text(
+        json.dumps({"at": "x", "author": "operator", "text": "orphan"}) + "\n"
+    )
+
+    resp = _get(harness, "/api/tasks/T-9/comments")
+
+    assert resp.status_code == 404
+    assert "T-9" in resp.get_json()["error"]
+    assert "data" not in resp.get_json()
+
+
+@pytest.mark.parametrize("task_id", ["..", ".", "..%2F..", "a%2Fb", "a%5Cb"])
+def test_comments_of_an_id_that_is_not_bare_are_404(tmp_path: Path, task_id: str) -> None:
+    harness = _harness(tmp_path)
+    (Path(harness.tasks_dir) / "...md").write_text("---\ntask_id: ..\n---\n")
+
+    resp = _get(harness, f"/api/tasks/{task_id}/comments")
+
+    assert resp.status_code == 404
+    assert "data" not in (resp.get_json(silent=True) or {})
+
+
+def test_a_line_that_is_not_a_comment_is_skipped_with_a_warning_naming_its_line(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    path = _comments_file(harness.tasks_dir, "T-1")
+    good = {"at": "2026-10-18T00:00:00+00:00", "author": "operator", "text": "kept"}
+    path.write_bytes(
+        b"\n".join(
+            [
+                json.dumps(good).encode(),
+                b"{not json",
+                b"[1, 2]",
+                json.dumps({"at": "x", "author": "operator"}).encode(),
+                json.dumps({"at": "x", "author": 7, "text": "t"}).encode(),
+                b"",
+                b"\xff\xfe",
+                json.dumps({**good, "text": "also kept"}).encode(),
+            ]
+        )
+        + b"\n"
+    )
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert [c["text"] for c in body["data"]["comments"]] == ["kept", "also kept"]
+    assert len(body["warnings"]) == 5
+    for number, warning in zip((2, 3, 4, 5, 7), body["warnings"]):
+        assert warning.startswith(f"{path}: line {number}: ")
+        assert warning.endswith("skipped")
+    assert "text" in body["warnings"][2]
+    assert "author" in body["warnings"][3]
+
+
+def test_only_the_known_keys_of_a_comment_cross(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _comments_file(harness.tasks_dir, "T-1").write_text(
+        json.dumps({"at": "x", "author": "operator", "text": "t", "secret": 1, "id": "c"}) + "\n"
+    )
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert body == {
+        "data": {"task_id": "T-1", "comments": [{"at": "x", "author": "operator", "text": "t"}]},
+        "warnings": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        {"file": "a.py"},
+        {"file": "a.py", "line": 3},
+        {"file": "a.py", "line": "3", "commit": "abc1234"},
+        {"file": "a.py", "line": True, "commit": "abc1234"},
+        {"file": None, "line": 3, "commit": "abc1234"},
+    ],
+)
+def test_a_broken_diff_anchor_is_dropped_and_the_comment_still_served(
+    tmp_path: Path, anchor: dict
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    path = _comments_file(harness.tasks_dir, "T-1")
+    path.write_text(json.dumps({"at": "x", "author": "reviewer", "text": "t", **anchor}) + "\n")
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert body["data"]["comments"] == [{"at": "x", "author": "reviewer", "text": "t"}]
+    (warning,) = body["warnings"]
+    assert warning.startswith(f"{path}: line 1: ")
+    assert "anchor" in warning
+
+
+def test_a_thread_over_the_count_cap_keeps_its_newest_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api_app, "MAX_COMMENTS", 3)
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _comments_file(harness.tasks_dir, "T-1").write_text(
+        "".join(
+            json.dumps({"at": str(n), "author": "operator", "text": f"c{n}"}) + "\n"
+            for n in range(5)
+        )
+    )
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert [c["text"] for c in body["data"]["comments"]] == ["c2", "c3", "c4"]
+    (warning,) = body["warnings"]
+    assert "5 comments" in warning and "newest 3" in warning
+
+
+@pytest.mark.parametrize("cut_mid_line", [True, False])
+def test_a_file_over_the_byte_cap_is_read_from_its_end_at_a_whole_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut_mid_line: bool
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    path = _comments_file(harness.tasks_dir, "T-1")
+    lines = [
+        json.dumps({"at": str(n), "author": "operator", "text": f"c{n:02d}"}) + "\n"
+        for n in range(10)
+    ]
+    path.write_text("".join(lines) + "{bad\n")
+    size = path.stat().st_size
+    # Exactly the last four lines (three comments and the bad line), or that
+    # and half of the line before them.
+    tail = len(lines[-1].encode()) * 3 + len(b"{bad\n")
+    if cut_mid_line:
+        tail += 5
+    monkeypatch.setattr(api_app, "MAX_COMMENTS_BYTES", tail)
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert [c["text"] for c in body["data"]["comments"]] == ["c07", "c08", "c09"]
+    cut, bad = body["warnings"]
+    assert cut.startswith(f"{path}: the comments file is over {tail} bytes")
+    # A mid-line cut also leaves unread the five bytes of line 7 it landed in.
+    assert f"first {size - tail + (5 if cut_mid_line else 0)} bytes" in cut
+    # The line number is the file's, not the tail's.
+    assert bad.startswith(f"{path}: line 11: ")
+
+
+def test_an_unreadable_comments_file_is_null_with_a_warning(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    path = _comments_file(harness.tasks_dir, "T-1")
+    path.mkdir()  # a directory where the file should be: IsADirectoryError
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert body["data"] is None
+    (warning,) = body["warnings"]
+    assert warning.startswith(f"{path}: unreadable comments file")
+
+
+def test_reading_comments_writes_nothing(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    task_store.add_comment(harness.tasks_dir, "T-1", "operator", "hello")
+    hive = Path(harness.tasks_dir).parent
+    before = {p: p.read_bytes() for p in hive.rglob("*") if p.is_file()}
+
+    _get(harness, "/api/tasks/T-1/comments")
+    _get(harness, "/api/tasks/T-2/comments")
+
+    assert {p: p.read_bytes() for p in hive.rglob("*") if p.is_file()} == before
 
 
 # --- learnings ------------------------------------------------------------
