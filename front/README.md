@@ -179,6 +179,15 @@ those place. A failed ready read folds Ready and Waiting into one Pending
 column and says so. Backlog items are the Backlog screen's, not cards here.
 `docs/decisions.md` ADR 140, which replaces ADR 26's columns and ADR 28's banner.
 
+The Debt screen stays the index's view of `docs/debt/`, open entries first and
+resolved below. Each open entry has an *item* column: a link to the backlog
+item filed from it (paired on `debt_id`, as the dispatcher pairs them) and
+whether it was accepted — not imported; proposed, deferred or dropped (not
+accepted); or accepted, with the board status or merged. Two items with one
+`debt_id` are both shown under a warning. If `/api/tasks` fails, the index
+still renders and the column says the pairing is unavailable. The screen
+writes nothing. `docs/decisions.md` ADR 141.
+
 The console authenticates as a service, not as a human: a bearer token read
 server-side, never under a `VITE_` prefix, so Vite cannot inline it into the
 browser bundle. See *The five environment variables* above and

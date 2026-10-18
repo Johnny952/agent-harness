@@ -8908,3 +8908,38 @@ do. A card shows the title, falling back to the description.
 - Treating a failed ready read as an empty one: every pending task would
   look blocked on a dependency.
 - A *Start development* button: that is step 9.
+
+## ADR 141 — The Debt screen pairs each open entry with its backlog item
+
+**Status:** accepted (T-096, 2026-10-18). Step 8 of
+`docs/plans/board-service.md`, the Debt row. Builds on ADR 131 (`source:
+debt` and `debt_id`) and ADR 17 (the open/resolved partition). No new route.
+
+**Context.** `/debt` showed the index alone. Since ADR 131 the dispatcher files
+each open entry as a backlog item carrying its `debt_id`, so the screen can say
+what became of it.
+
+**Decision.**
+1. *The pairing is the dispatcher's.* `front/src/lib/debt.ts` matches on
+   `debt_id` alone, as `dispatcher/tasks.py:find_debt_item` does, over one
+   `tasksQuery` read.
+2. *States.* No item is "not imported"; `proposed`, `deferred` or `dropped`
+   is "not accepted"; any board status is "accepted", naming it, with
+   `merged: true` shown as merged; a status the dispatcher does not write is
+   named verbatim, not counted either way. Each item links to
+   `/tasks/$taskId`, as the Backlog screen does.
+3. *Two items with one `debt_id`* are both drawn, under a warning. The
+   dispatcher takes the first; the screen does not pick.
+4. *Open entries only.* Only the Open partition gets the item column;
+   resolved rows are unchanged.
+5. *A failed tasks read* is a broken-read line, and each item cell says
+   "pairing unavailable". The index still renders.
+
+**Consequences.** The screen still writes nothing. Accepting, deferring and
+dropping stay on the Backlog screen.
+
+**Ruled out.**
+- Matching on `source: debt` too: the dispatcher does not, and a hand-edited
+  source would hide a pairing it keeps.
+- Showing "not imported" while the tasks read is down: that is a claim about
+  items the read never saw.
