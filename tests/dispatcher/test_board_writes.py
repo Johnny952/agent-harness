@@ -404,7 +404,8 @@ def test_edit_refuses_a_task_that_has_started(tmp_path: Path, status, fields, ne
 def test_edit_takes_a_task_not_yet_started(tmp_path: Path, status) -> None:
     hive = _hive(tmp_path)
     _task(hive, "T-001", status=status)
-    assert tasks.edit_task(hive, "T-001", priority="low")["changed"] == ["priority"]
+    # Into another bucket, so at its end too (ADR 130).
+    assert tasks.edit_task(hive, "T-001", priority="low")["changed"] == ["priority", "rank"]
 
 
 def test_an_epic_is_editable_until_one_of_its_tasks_starts(tmp_path: Path) -> None:

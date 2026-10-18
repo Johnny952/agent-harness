@@ -8258,3 +8258,78 @@ allowed tools through ADR 128's table. The console screens, the api serving
 - An HTTP route that takes the role from the request: the console is the
   operator's.
 - Writing directly from `board_service`.
+
+## ADR 130 — Tags, a sparse rank inside the priority bucket, and the Ready order as pure functions served by `board_list`
+
+**Status:** accepted (T-085, 2026-10-18). Step 5c of
+`docs/plans/board-service.md`: `tags`, `rank` and the *Ready* order
+(section 4). Builds on ADR 127 (`priority` as the bucket, `task_lock`) and
+ADR 129 (the writers in `dispatcher/tasks.py`, `CREATE_LOCK`, the schemas).
+Reverses none of them. Debt in the backlog, its import and `impact` (5d) are
+not part of it.
+
+**Context.** Section 4 puts each item in a priority bucket and, inside it, at
+a position the user sets by dragging. It also defines *Ready*: what can be
+picked up now, in the order it would be picked up, where a dependency takes
+the bucket of what waits on it and an epic's tasks take the epic's bucket.
+It adds `tags`, a free list. The plan leaves open how a position is stored,
+what "take the bucket" means when the task's own bucket is higher, where the
+order is served, and whether a proposal that waits on a task lifts it.
+
+**Decision.**
+
+1. *`tags` is a free list, checked on read and normalized on write.* Each tag
+   is a non-blank string of at most `MAX_TAG_CHARS` (50), at most `MAX_TAGS`
+   (20) per item. The writer trims each tag and keeps the first of repeats,
+   in order. Tags are case-sensitive. `backlog_propose` and `task_edit` set
+   them; `[]` on an edit clears them; an epic's tasks take the epic's tags.
+   A bad list on disk is a `board_list` warning and is served normalized.
+2. *`rank` is a sparse integer, the position inside the bucket.* Ranks are
+   handed out `RANK_STEP` (1024) apart, so one write moves one item between
+   two neighbours. The highest rank is `MAX_RANK`, `2**53 - 1`, the largest
+   integer JSON carries exactly. A missing or bad rank sorts as 0, so tasks
+   from before this step come first, in id order. Ties break by the id in
+   natural order (`T-3` before `T-10`).
+3. *A new position is the end of the bucket, under `CREATE_LOCK`.* The end
+   is the highest rank among every task, backlog and board, whose own
+   `priority` is that bucket, plus one step. A proposal, an accepted draft,
+   and an accept or edit that changes the bucket without giving a rank all
+   take it. An epic's task `k` takes the epic's rank plus `k` steps. Every
+   write that hands out a rank holds `CREATE_LOCK` before the task's lock,
+   so two writes never take the same end.
+4. *`task_edit` sets `rank`, and the schema bounds it.* `rank` is an integer
+   from 0 to `MAX_RANK`; the schema check now enforces `minimum` and
+   `maximum`, and the writer checks again and refuses a bool. A proposal
+   takes no `rank`. Both schemas stay closed and the role table is
+   unchanged.
+5. *Ready is pure, in `dispatcher/tasks.py`.* `effective_buckets` raises
+   each task to the highest bucket of what waits on it, transitively, and
+   each epic's task to the epic's bucket. It only raises, so a high task in
+   a low epic stays high, and it ends on a cycle. Backlog items lift
+   nothing: a proposal is not a commitment, and it would let anyone with
+   `backlog_propose` reorder the board. `ready_order` takes the pending
+   tasks whose every dependency is known and merged, by effective bucket,
+   then rank, then id.
+6. *`board_list` serves it with the smallest surface.* Each row gains `tags`
+   and `rank`. The backlog rows are listed by bucket, then rank, then id,
+   after the board rows by id. A top-level `ready` holds the listed ids in
+   the Ready order. It is computed over every task read, so a filter narrows
+   it and never reorders it.
+
+**Consequences.** The console can show the backlog in its real order and
+drag inside a bucket with one `task_edit`. The order is a function the
+dispatcher can call when it picks work. Changing a task's `priority` puts it
+at the end of the new bucket. The tuples in `changed` gain `tags` and
+`rank`, and a bucket change reports `rank` too.
+
+**Ruled out.**
+- A dense position renumbered on each move: one drag would rewrite the whole
+  bucket, under many locks.
+- Fractional or string ranks: floats run out of precision silently, and a
+  string order is harder to check on read.
+- A lower bucket for an epic's high task: "take the epic's bucket" is read
+  as a floor, so an epic never demotes its own work.
+- A separate `board_ready` tool: one more tool and one more role row, for a
+  list `board_list` already has to read.
+- Renumbering when a gap runs out: left to the console's drag (step 8),
+  which knows the neighbours.
