@@ -36,8 +36,11 @@ publishes on loopback `127.0.0.1:8792`, is on `ia_harness_net` only, and
 mounts everything read-only; the operator's session registers it with
 `claude mcp add --scope local`, not a committed `.mcp.json`. The per-task
 lock of section 5 moves to step 5, with the first write. Step 6 is built by
-T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126). Every
-other later step is not built. It records an
+T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126).
+Step 7 is built by T-083 (`docs/implementations/T-083.md`, `docs/decisions.md`
+ADR 128): the arquitecto's phases get `--mcp-config` for the service at
+`board_mcp_url?role=arquitecto` and the read tools in their allowed tools.
+Every other later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
 and tasks and writes their descriptions and steps, through a service that
@@ -535,6 +538,15 @@ Each step is a single surface, built in this order:
    board's role lanes are step 8.
 7. **Each phase gets its config.** The dispatcher passes `--mcp-config` with
    the phase's role, and the arquitecto gets the read tools.
+   **Built 2026-10-18** by T-083 (`docs/decisions.md` ADR 128): the role
+   table moves to `dispatcher/board_mcp.py`, and the service imports it from
+   there. A phase whose role has tools there (the arquitecto, draft runs
+   included) gets `--mcp-config` with one http server, `board`, at
+   `<board_mcp_url>?role=<role>`, on every call and every resume, and
+   `mcp__board__board_list` and `mcp__board__board_get` in its allowed tools.
+   `board_mcp_url` is a read-only config key, `http://board-service:8792/mcp`
+   by default; `null` or `""` turns it off. The agent containers are already
+   on `ia_harness_net`, so compose does not change.
 8. **The console.** The screens in section 8: the board's live columns and
    swimlanes, the backlog redefined, the epic view, and the task page's
    description and comments. It is a front task, behind its own ask for a

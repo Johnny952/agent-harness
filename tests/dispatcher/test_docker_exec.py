@@ -517,6 +517,50 @@ def test_exec_claude_keeps_allowed_tools_and_add_dirs_apart(monkeypatch) -> None
     assert cmd[cmd.index("--allowed-tools") + 2] == "-p"
 
 
+def _command(monkeypatch, **kwargs) -> list[str]:
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout=None):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", fake_run)
+    exec_claude("agent-cuenta1", "/wd", "do it", **kwargs)
+    return captured["cmd"]
+
+
+_BOARD = '{"mcpServers":{"board":{"type":"http","url":"http://b/mcp?role=arquitecto"}}}'
+
+
+def test_exec_claude_passes_the_mcp_config_as_one_argument(monkeypatch) -> None:
+    """Inline JSON, one argv element, ahead of `-p` like the other variadics
+    (ADR 128): `--mcp-config <configs...>` would eat the prompt past it."""
+    cmd = _command(monkeypatch, mcp_config=_BOARD)
+
+    assert cmd.count("--mcp-config") == 1
+    start = cmd.index("--mcp-config")
+    assert cmd[start + 1] == _BOARD
+    assert start < cmd.index("-p")
+
+
+@pytest.mark.parametrize("mcp_config", [None, ""])
+def test_exec_claude_omits_the_mcp_config_when_there_is_none(monkeypatch, mcp_config) -> None:
+    assert "--mcp-config" not in _command(monkeypatch, mcp_config=mcp_config)
+
+
+def test_exec_claude_keeps_the_mcp_config_apart_from_the_other_variadics(monkeypatch) -> None:
+    cmd = _command(
+        monkeypatch,
+        mcp_config=_BOARD,
+        add_dirs=["/data/.hive"],
+        allowed_tools=["mcp__board__board_list"],
+    )
+
+    start = cmd.index("--mcp-config")
+    assert cmd[start + 1:start + 3] == [_BOARD, "--add-dir"]
+    assert cmd[cmd.index("--allowed-tools") + 1:][:2] == ["mcp__board__board_list", "-p"]
+
+
 def test_exec_claude_keeps_the_structured_output_on_raw(monkeypatch) -> None:
     """The validated return arrives as a field of the `--output-format json`
     envelope, beside `result` rather than inside it, and `raw` is what carries

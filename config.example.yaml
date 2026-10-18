@@ -109,6 +109,14 @@ state_dir: /state
 # Observability collector URL, reached over ia_harness_net by service name.
 collector_url: http://collector:8787
 
+# The board service's MCP endpoint, reached over ia_harness_net by service
+# name (docs/decisions.md ADR 128). Each phase whose role has board tools (the
+# arquitecto, today) gets `--mcp-config` for it with `?role=<role>` added, and
+# the board's tool names in its allowed tools. Optional; defaults to the value
+# below. No query and no fragment. Set it to null or "" to give no phase the
+# server.
+# board_mcp_url: http://board-service:8792/mcp
+
 # Model passed as `claude --model <default_model>` for every role
 # (arquitecto/implementador/revisor/auditor) that role_model below does not
 # name. Optional; defaults to claude-opus-5-5. A full ID rather than an alias,

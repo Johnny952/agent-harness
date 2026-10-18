@@ -17,6 +17,7 @@ from dispatcher import (
     adr_numbers,
     allowlist,
     auto_approve,
+    board_mcp,
     command_targets,
     context_transfer,
     debt,
@@ -49,7 +50,8 @@ _PROBE_WORST_CASE_SECONDS = _USAGE_PROBE_TIMEOUT_SECONDS + docker_exec.HOST_BACK
 def _phase_permission_flags(cfg: Config, role: str, slug: str | None = None) -> dict:
     """What every call that runs a role's own work has to carry.
 
-    Three flags. The first two are the two halves of one measured failure
+    Three flags, and a fourth for a role with board tools. The first two are
+    the two halves of one measured failure
     (2026-09-23, 43 of 62 tool calls denied and no file written):
 
     `permission_mode`, because under `-p` with no mode and no SDK host there
@@ -79,6 +81,13 @@ def _phase_permission_flags(cfg: Config, role: str, slug: str | None = None) -> 
     with no repeat. The global list is never changed; a call with no slug
     gets it alone.
 
+    `mcp_config`, for a role that has board tools (ADR 128): the board
+    service's server under `board_mcp_url` with `?role=<role>`, and its tool
+    names appended to `allowed_tools`, last and with no repeat. Without the
+    names the server would be listed and every call to it would prompt, which
+    under `-p` is a denial. A role with no tools, or `board_mcp_url` off,
+    gets neither, and the key is left out so the call is the one it was.
+
     The /usage probes do not get these: a probe runs a built-in command, uses
     no tools and touches no files.
     """
@@ -86,14 +95,20 @@ def _phase_permission_flags(cfg: Config, role: str, slug: str | None = None) -> 
         [*cfg.allowed_tools, *cfg.mapping_allowed_tools]
         if role == project_docs.MAPPER_ROLE else cfg.allowed_tools
     )
-    return {
+    tools = (
+        allowlist.merged_allowed_tools(cfg.state_dir, slug, role, list(base))
+        if slug else base
+    )
+    flags = {
         "permission_mode": cfg.permission_mode,
         "add_dirs": [context_transfer.hive_root(cfg.hive_tasks_dir)],
-        "allowed_tools": (
-            allowlist.merged_allowed_tools(cfg.state_dir, slug, role, list(base))
-            if slug else base
-        ),
+        "allowed_tools": tools,
     }
+    board_tools = board_mcp.allowed_tools(role)
+    if cfg.board_mcp_url and board_tools:
+        flags["mcp_config"] = board_mcp.mcp_config(cfg.board_mcp_url, role)
+        flags["allowed_tools"] = [*tools, *(t for t in board_tools if t not in tools)]
+    return flags
 
 
 @dataclasses.dataclass

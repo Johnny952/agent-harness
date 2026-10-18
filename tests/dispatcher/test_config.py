@@ -939,6 +939,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "hive_tasks_dir": "/t",
         "state_dir": "/s",
         "collector_url": "http://c",
+        "board_mcp_url": "http://b/mcp",
         "permission_mode": "plan",
         "allowed_tools": ["Bash(ls*)"],
         "mapping_allowed_tools": ["Bash(make*)"],
@@ -959,9 +960,51 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         22,
-        16,
+        17,
         2,
     )
     for spec in CONFIG_KEYS.values():
         assert (spec.kind is not None) == (spec.key_class == EDITABLE)
         assert spec.reason
+
+
+def _load_with(tmp_path: Path, extra: str) -> Config:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + extra)
+    return load_config(str(config_path))
+
+
+def test_board_mcp_url_defaults_to_the_service_on_the_compose_network(tmp_path: Path) -> None:
+    assert _load_with(tmp_path, "").board_mcp_url == "http://board-service:8792/mcp"
+    assert Config.__dataclass_fields__["board_mcp_url"].default == (
+        "http://board-service:8792/mcp"
+    )
+
+
+@pytest.mark.parametrize("value", ["null", "''", "'   '"])
+def test_board_mcp_url_null_or_empty_turns_it_off(tmp_path: Path, value: str) -> None:
+    assert _load_with(tmp_path, f"board_mcp_url: {value}\n").board_mcp_url is None
+
+
+def test_board_mcp_url_is_read_and_stripped(tmp_path: Path) -> None:
+    cfg = _load_with(tmp_path, "board_mcp_url: ' https://board.example:9000/mcp '\n")
+    assert cfg.board_mcp_url == "https://board.example:9000/mcp"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "42",
+        "[http://b/mcp]",
+        "board-service:8792/mcp",
+        "'http://b/mcp?role=arquitecto'",
+        "'http://b/mcp#x'",
+    ],
+)
+def test_board_mcp_url_refuses_what_is_not_a_bare_http_url(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ValueError, match="board_mcp_url"):
+        _load_with(tmp_path, f"board_mcp_url: {value}\n")
+
+
+def test_board_mcp_url_is_read_only_in_the_key_table() -> None:
+    assert CONFIG_KEYS["board_mcp_url"].key_class == READ_ONLY

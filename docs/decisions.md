@@ -8005,3 +8005,66 @@ service is a container the phases reach over a network); the role as a
 header (the URL is what `--mcp-config` and `.mcp.json` carry); serving an
 unknown role no tools rather than refusing it; parsing `comments.jsonl` to
 count it.
+
+## ADR 128 — Each phase gets the board's `--mcp-config` from the role table; the URL is a read-only config key, on by default and able to be turned off
+
+**Status:** accepted (T-083, 2026-10-18). Builds step 7 of
+`docs/plans/board-service.md`. Follows ADR 125.
+
+**Context.** ADR 125 left the per-phase config open. The service takes the
+role from `?role=` and refuses an unknown one, so each phase needs a URL
+written for its own role. A committed `.mcp.json` cannot do this, because
+every clone under `.data/projects/` would read it under one role. Section 6
+gives board tools only to `operator` and `arquitecto`, and the operator is
+not a phase. The CLI also asks before an MCP tool runs unless the tool is in
+`--allowed-tools`, and under `-p` an unanswered ask is a denial. A resume is
+a new process and inherits no flags.
+
+**Decision.**
+1. *One table, in the dispatcher.* `ROLE_TOOLS` and `OPERATOR` move to
+   `dispatcher/board_mcp.py`, which imports nothing from the package, and
+   `board_service/app.py` imports them from there. The service already
+   imports `dispatcher`, so the dispatcher could not import the service
+   back. With one copy, the roles that get a config and the roles the
+   service serves cannot drift apart.
+2. *Only a role with tools gets the server.* `_phase_permission_flags` adds
+   `mcp_config` for a role whose `ROLE_TOOLS` entry is non-empty, which today
+   is the arquitecto, and that includes the draft-specs run. Every other
+   phase's command line is unchanged. The value is inline JSON, one http
+   server named `board`, at `<board_mcp_url>?role=<role>`, with the role
+   URL-encoded.
+3. *The tools go in the allowed tools.* `mcp__board__board_list` and
+   `mcp__board__board_get` are appended after the configured list and the
+   project allowlist, and a name already there is not added again. Without
+   them every call would be a denial under `-p`.
+4. *It rides with the permission flags.* `exec_claude` takes
+   `mcp_config` and emits `--mcp-config <json>` before `--add-dir` and
+   ahead of `-p`, since the flag is variadic. Because the flags dict is
+   splatted into every phase call, a resume restates it as well. The
+   `/usage` probes get none of this.
+5. *`board_mcp_url` is a read-only config key.* It defaults in code to
+   `http://board-service:8792/mcp`, the compose name on `ia_harness_net`,
+   where the agent containers are. `null`, `""` or whitespace turns it off.
+   The value is stripped, it must be http or https, and a query or fragment
+   is refused, since the service refuses any parameter but `role`. It is
+   read-only in `CONFIG_KEYS` because it is a service address and a grant.
+   The name is not `vibe_kanban_mcp_url`, which `_refuse_board_keys`
+   refuses (ADR 59).
+
+**Consequences.** The arquitecto's phases can list and read the board once
+the service is up. If the service is down, its tools are missing for that
+phase, and the phase goes on. What stays open:
+- `--strict-mcp-config` is not passed, so a project's own `.mcp.json` in a
+  clone still loads beside the board. Passing it would also drop servers a
+  project relies on. That is the user's call.
+- The learnings' `harness_fingerprint` still hashes the configured
+  `allowed_tools` only. The board names are fixed per role and change with
+  the code, not the config.
+- No test runs the real CLI or a live service; the command line and the
+  URL are pinned, and the URL is checked against the service's own handler.
+
+**Ruled out.** A temp file per phase for the config (inline JSON needs
+nothing on disk inside the agent container); a committed `.mcp.json`; a
+config for every role with an empty `tools/list`; a second copy of the role
+table in the dispatcher; letting the operator edit the URL from the console;
+a URL with its own query string.
