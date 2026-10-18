@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Eight console paths map one-to-one onto
- * the eight api routes; anything else under `/api/` is a JSON 404 from the console
+ * **It is a whitelist and not a proxy.** Nine console paths map one-to-one onto
+ * the nine api routes; anything else under `/api/` is a JSON 404 from the console
  * and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose eight routes, count and
+ * deliberately not entries of `FORWARDED`, whose nine routes, count and
  * rejection message describe the api alone.
  */
 import {
@@ -52,16 +52,21 @@ const FORWARDED: Record<string, readonly string[]> = {
   // slug is the console's own configuration and the search box on the Learnings
   // screen filters rows the api already sent (`docs/decisions.md` ADR 41, ADR 42).
   "/api/learnings": [],
+  // The Roadmap screen's one read. `project` is absent for the same reason again:
+  // the api resolves the project's `docs/plans/` from the slug, and the slug is
+  // the console's (`docs/plans/roadmap-view.md` item 4, T-072).
+  "/api/roadmap": [],
 };
 
 /**
  * The routes whose `?project=` comes from `CONSOLE_PROJECT` and never from the
- * browser. Both are project-scoped reads on an api that may hold several
- * checkouts, where the parameter is optional for one and required for two —
+ * browser. All three are project-scoped reads on an api that may hold several
+ * checkouts, where the parameter is optional with one checkout and required with
+ * several —
  * `docs/decisions.md` ADR 24 for why it is set here, ADR 41 part 2 for the rule
  * the api applies to it.
  */
-const PROJECT_SCOPED = new Set(["/api/debt", "/api/learnings"]);
+const PROJECT_SCOPED = new Set(["/api/debt", "/api/learnings", "/api/roadmap"]);
 
 /**
  * The detail route. No second segment: `/api/tasks/a/b` is not this route.
@@ -325,7 +330,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the eight.
+      // `%zz` and friends. A path the console cannot read is not one of the nine.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -340,7 +345,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the eight routes the console forwards.`,
+      error: `${path} is not one of the nine routes the console forwards.`,
     };
   }
 

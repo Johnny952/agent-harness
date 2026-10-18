@@ -42,6 +42,64 @@ export interface DebtEntry {
 }
 
 /**
+ * One task as `GET /api/roadmap` serves it, inside a plan or under `no_plan`.
+ * `observability/api/app.py`, T-072.
+ */
+export interface RoadmapTask {
+  id: string;
+  /** Always `null` today: neither a task file nor its description carries one. */
+  title: string | null;
+  /**
+   * The task's status, verbatim. A string rather than `TaskStatus` because the
+   * api passes the file through; a merge is `merged_at`, not a status.
+   */
+  state: string;
+  /**
+   * `merged.at` from the task file, as served. `null` when the task is not
+   * merged, and also for a merged task whose block has no date: every task under
+   * `no_plan.past` is merged, whatever this says.
+   */
+  merged_at: string | null;
+}
+
+/** One plan in `docs/plans/`, with the tasks that name it. */
+export interface RoadmapPlan {
+  /** The plan's filename, which is also its key. */
+  file: string;
+  title: string | null;
+  /**
+   * The frontmatter `status`: `idea`, `design`, `approved`, `building`, `built`,
+   * `superseded` or `dropped`, or `null` when the plan carries none. The api
+   * already put the plan in the band its status belongs to.
+   */
+  status: string | null;
+  approved: string | null;
+  built: string | null;
+  supersedes: string[];
+  superseded_by: string[];
+  tasks: RoadmapTask[];
+}
+
+/** The tasks of `no_plan.past` that were merged in one month. */
+export interface RoadmapMonth {
+  /** `YYYY-MM`, or `null` for merged tasks whose `merged.at` is missing or not ISO. */
+  month: string | null;
+  tasks: RoadmapTask[];
+}
+
+/**
+ * `GET /api/roadmap`'s `data`: three bands of plans, and the tasks no plan
+ * names, split into unmerged (`now`) and merged by month (`past`). Each band is
+ * newest first by `built`, else `approved`, undated last; months newest first,
+ * the undated group last.
+ */
+export interface Roadmap {
+  project: string;
+  bands: { future: RoadmapPlan[]; now: RoadmapPlan[]; past: RoadmapPlan[] };
+  no_plan: { now: RoadmapTask[]; past: RoadmapMonth[] };
+}
+
+/**
  * A gate note as the approvals surface draws one.
  *
  * Not a phase's: `dispatcher/gates.py` renders its output as prose into the task

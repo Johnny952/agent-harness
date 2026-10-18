@@ -93,7 +93,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/threads"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/threads is not one of the eight routes the console forwards.",
+      error: "/api/threads is not one of the nine routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -127,6 +127,14 @@ describe("the whitelist", () => {
     const fetchMock = stubApi();
     await forwardApiRequest(get("/api/learnings?project=some-other-project"));
     expect(target(fetchMock)).toBe(`${BASE}/api/learnings?project=ia-harness`);
+  });
+
+  // The third: the roadmap reads one project's `docs/plans/`, so the slug that
+  // picks it is the console's and not the browser's (T-075).
+  it("sends its own ?project= on the roadmap route too", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/roadmap?project=some-other-project"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/roadmap?project=ia-harness`);
   });
 });
 
@@ -357,7 +365,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the eight routes the console forwards.",
+      error: "/api/settingsx is not one of the nine routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });

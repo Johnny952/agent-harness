@@ -157,6 +157,16 @@ stands.
    its epics and each epic to its tasks, with the *full history* and *current
    only* filter.
 
+   **Note 2026-10-18** (T-075): built, in its cheap form. `/roadmap` in the
+   console reads `GET /api/roadmap` through the bearer forward, project-scoped
+   as `/api/debt` is. It lists the future, now and past bands newest first,
+   each with its count; a plan is a collapsed row (title, status, dates) that
+   opens to its tasks, each linking to `/tasks/$taskId`. `no_plan.now` closes
+   the now band and `no_plan.past` closes the past band, grouped by month. The
+   filter is `?view=current` (*Current only*, which hides the past band and
+   every merged or done task); no parameter is *Full history*. Plans expand
+   straight to tasks: epics come with step 2 of *How it would be built*.
+
 ## How it would be built
 
 1. **The cheap form, possible now.** The plans' frontmatter, the backfill,
