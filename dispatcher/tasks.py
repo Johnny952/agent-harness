@@ -309,6 +309,40 @@ def parse_description(text: str) -> Description:
     return Description(**{_field(name): bodies.get(name) or None for name in REQUIRED + OPTIONAL})
 
 
+#: The longest title `display_title` serves when it falls back to the Goal's
+#: first line. A row is meant to be scanned, and the whole ask is one read away.
+#: Not `MAX_TITLE_CHARS`, which bounds what a write stores.
+DISPLAY_TITLE_CHARS = 100
+
+
+def display_title(title: object, description: str | None) -> str | None:
+    """A task's frontmatter `title` when there is one, else the Goal's first line, else None.
+
+    `backlog_propose` and `task_edit` write one (ADR 129); a task filed before
+    them has none, and the Goal's first non-blank line stands in, cut to
+    `DISPLAY_TITLE_CHARS`, so a list of ids reads as a list of asks (ADR 125).
+    `title` is the raw frontmatter value (`TaskFile.title`): anything but a
+    string with text falls through to the Goal. One rule for the board
+    service's `board_list` and the read api's task rows, so the two answer one
+    task the same way (ADR 133, ADR 137).
+    """
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    if description is None:
+        return None
+    try:
+        goal = parse_description(description).goal
+    except DescriptionError:
+        return None
+    for line in goal.splitlines():
+        line = line.strip()
+        if line:
+            if len(line) <= DISPLAY_TITLE_CHARS:
+                return line
+            return line[: DISPLAY_TITLE_CHARS - 1] + "…"
+    return None
+
+
 def _read_frontmatter(path: str) -> object:
     """A task file's frontmatter as YAML made it. Same split as `read_task_file`."""
     text = Path(path).read_text()

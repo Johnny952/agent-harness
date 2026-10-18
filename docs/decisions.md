@@ -8717,3 +8717,40 @@ service's name there.
 - 503 for an unreachable board-service, as the config writer's: 503 there
   also means "not configured", and the board-service has no such state, so
   an unreachable one is a 502 gateway failure.
+
+## ADR 137 — The api's task rows carry the epic fields, `merged` and a title
+
+**Status:** accepted (T-092, 2026-10-18). Step 8 of
+`docs/plans/board-service.md`. Extends ADR 133: the read api and the
+board-service answer one task the same way.
+
+**Context.** The console's epic view groups sub-tasks under their epic and
+names each row. `_task` in `observability/api/app.py` served neither the
+epic fields nor a title, and `board_service/app.py:board_list` already
+served `epic`, `merged` and `title` for the same files.
+
+**Decision.**
+1. *Four keys on `_task`, so on `/api/tasks` and `/api/tasks/<id>`.*
+   `epic` and `split_into` are `TaskFile`'s, served as written: `null` and
+   `[]` when absent. `merged` is `bool(task.merged)`, as `board_list`
+   serves it. `title` is the board-service's rule.
+2. *One title rule.* `_title` moves to `dispatcher/tasks.py:display_title`,
+   with its cut `DISPLAY_TITLE_CHARS` (100). It takes the raw frontmatter
+   `title` (`TaskFile.title` is that value), so the api needs no second
+   frontmatter read. `board_service/app.py:_title` and `TITLE_CHARS` stay as
+   thin names for it. Both images copy `dispatcher/`.
+3. *A non-list `split_into` is served verbatim, with no warning here.*
+   `field_problems` is the backlog fields' check and feeds
+   `dispatch_problems`, which the dispatcher refuses a task on; adding to it
+   would change the dispatcher. The dispatcher
+   names the problem in `tasks.epic_problems`.
+
+**Consequences.** A task row has eighteen keys on the list route. A later
+task adds them to the console's `Task` type.
+
+**Ruled out.**
+- A copy of `_title` in the api: two rules drift, and ADR 133 asks for one
+  answer.
+- Serving the `merged` record: what the reader asks is whether it merged.
+- An api-only `split_into` warning: the board-service would not give it,
+  and the two services would disagree about the same file.

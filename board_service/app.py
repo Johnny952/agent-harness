@@ -63,8 +63,8 @@ PLACES = ("backlog", "board")
 #: is taken on the sorted ids before any file is opened.
 MAX_LIST_TASKS = 2000
 #: The longest title `board_list` serves when it falls back to the Goal's first
-#: line. A row is meant to be scanned, and the whole ask is one `board_get` away.
-TITLE_CHARS = 100
+#: line: `tasks.DISPLAY_TITLE_CHARS`, the rule the read api shares (ADR 137).
+TITLE_CHARS = task_store.DISPLAY_TITLE_CHARS
 #: The longest text filter. A filter is a word or a phrase.
 MAX_TEXT_CHARS = 200
 
@@ -105,24 +105,10 @@ def place_of(status: object) -> str:
 def _title(frontmatter: dict, description: str | None) -> str | None:
     """A frontmatter `title` when there is one, else the Goal's first line, else None.
 
-    `backlog_propose` and `task_edit` write one (ADR 129); a task filed before
-    them has none, and the Goal's first non-blank line stands in, cut to
-    `TITLE_CHARS`, so a list of ids reads as a list of asks (ADR 125).
+    `tasks.display_title`, the one rule the read api's task rows use too, so
+    the two services answer one task the same way (ADR 133, ADR 137).
     """
-    title = frontmatter.get("title")
-    if isinstance(title, str) and title.strip():
-        return title.strip()
-    if description is None:
-        return None
-    try:
-        goal = task_store.parse_description(description).goal
-    except task_store.DescriptionError:
-        return None
-    for line in goal.splitlines():
-        line = line.strip()
-        if line:
-            return line if len(line) <= TITLE_CHARS else line[: TITLE_CHARS - 1] + "…"
-    return None
+    return task_store.display_title(frontmatter.get("title"), description)
 
 
 def board_list(
