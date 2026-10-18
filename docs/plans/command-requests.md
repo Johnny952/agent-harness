@@ -148,6 +148,10 @@ resolved again from the account that resumes.
 rather than the worker, and only on the phase's own account. The log keeps
 the argv, the target, the `cwd` and the exit code, or a timeout with none.
 
+**Amended 2026-10-18** by T-076 (`docs/decisions.md` ADR 120): a resume held
+after the verdict is given again with `dispatch command-resume`, from what the
+run recorded, without running the command a second time.
+
 ### 6. A standing permission is per project and per role
 
 *Allow* writes the command to that project's allowlist for that role, as the
@@ -218,6 +222,13 @@ Each step is a single surface:
    *deny* resumes it with the comment. The cycle then goes on as after that
    phase. *Allow*, the allowlist and a resume on another account are not
    built.
+
+   **Amended 2026-10-18** by T-076 (`docs/decisions.md` ADR 120): a verdict
+   whose resume was held (its account not idle) is resumed later with
+   `dispatch command-resume <task> --project <slug>`, in the same session and
+   with the same prompt, rebuilt from the verdict entry and
+   `commands/<n>.log`; the command is not run again. `resumed_at` on the
+   entry says the resume happened.
 5. The per-project, per-role allowlist and its merge into a phase's flags.
 6. The card in Approvals. A front task, behind its own ask for a build.
 

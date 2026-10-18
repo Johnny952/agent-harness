@@ -690,7 +690,8 @@ def record_command_verdict(hive_dir: str, task_id: str, verdict: dict) -> None:
     """Append an operator's verdict on one of this task's command requests.
 
     `verdict` is `{"n", "verdict", "by", "at", "comment", "role", "filed_at"}`
-    (`docs/decisions.md` ADR 119); `command_run` refuses a second one on the
+    (`docs/decisions.md` ADR 119), and `update_command_verdict` adds to it
+    later (ADR 120); `command_run` refuses a second one on the
     same request before it gets here. Status, lock and body are left as they
     were. A task with no file raises rather than getting one.
     """
@@ -698,6 +699,26 @@ def record_command_verdict(hive_dir: str, task_id: str, verdict: dict) -> None:
     task = context_transfer.read_task_file(path)
     task.command_verdicts = [*task.command_verdicts, dict(verdict)]
     _write_task_file(path, task)
+
+
+def update_command_verdict(hive_dir: str, task_id: str, role: str, filed_at: object, fields: dict) -> None:
+    """Merge `fields` into the verdict on the block `role` filed at `filed_at`.
+
+    What `command_run` keeps on a verdict after it is recorded: `ran`, what a
+    *run* came to, and `resumed_at`, when the resumed phase took the task
+    (ADR 120). Status, lock and body are left as they were. A task with no
+    file, or no verdict on that block, raises rather than getting one.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    for index, item in enumerate(task.command_verdicts):
+        if item.get("role") == role and item.get("filed_at") == filed_at:
+            entries = list(task.command_verdicts)
+            entries[index] = {**item, **fields}
+            task.command_verdicts = entries
+            _write_task_file(path, task)
+            return
+    raise KeyError(f"task {task_id} has no verdict on the block the {role} filed at {filed_at}")
 
 
 def _read_for_check(

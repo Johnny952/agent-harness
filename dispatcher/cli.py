@@ -88,6 +88,36 @@ def _epic_line(cfg: Config, task_id: str) -> str:
     return f"task {task_id} is now an epic: {ids}; run them in that order"
 
 
+def _exit_on_resumed_outcome(cfg: Config, args: argparse.Namespace, outcome: CycleOutcome) -> None:
+    """What `command-verdict` and `command-resume` say and exit with, short of a finish.
+
+    The codes `run-task` uses. A hold names the command that moves the task
+    on: `command-resume` while the verdict's own resume is the one no account
+    took, `run-phase` once it ran and a later phase was the one held.
+    """
+    for line in left_behind_report(cfg, args.task_id):
+        print(line, file=sys.stderr)
+    if outcome is CycleOutcome.HELD:
+        if command_run.awaits_resume(cfg, args.task_id):
+            then = (
+                f"resume it with command-resume {args.task_id} --project {args.project} "
+                "once one resets; the verdict stays and the command does not run again"
+            )
+        else:
+            then = "run the phase again with run-phase once one resets"
+        print(
+            f"task {args.task_id} is held: no account could take its next phase; {then}",
+            file=sys.stderr,
+        )
+        raise SystemExit(EXIT_HELD)
+    if outcome is CycleOutcome.BLOCKED:
+        print(f"task {args.task_id} is blocked; the log above says why", file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED)
+    if outcome is CycleOutcome.SPLIT:
+        print(_epic_line(cfg, args.task_id))
+        raise SystemExit(EXIT_SPLIT)
+
+
 def _print_proposed_split(args: argparse.Namespace, payload: dict | None) -> None:
     """Say what a lone arquitecto phase proposed. `run-phase` files nothing."""
     if handoff.blocked(payload):
@@ -396,6 +426,19 @@ def main() -> None:
         f"without one the phase reads \"{command_run.DENIED_NO_COMMENT}\".",
     )
 
+    resume_parser = sub.add_parser(
+        "command-resume",
+        help="Resume the phase on the verdict a task's command-request block "
+        "already has, when no account could take that resume: the same session, "
+        "on its own account, told the same thing command-verdict would have told "
+        "it, and the cycle on from there. The command is never run again. Refused "
+        "when the task is not blocked on command_request, the block has no "
+        "verdict, the verdict was already resumed, or the phase's session is not "
+        "on record.",
+    )
+    resume_parser.add_argument("task_id", metavar="task")
+    resume_parser.add_argument("--project", required=True, help="Project slug")
+
     bootstrap_parser = sub.add_parser(
         "bootstrap-project",
         help="Create the per-project directory (projects_root/<slug>) on one account's container",
@@ -693,22 +736,17 @@ def main() -> None:
         except command_run.VerdictRefused as exc:
             print(f"task {args.task_id}: verdict refused: {exc}", file=sys.stderr)
             raise SystemExit(EXIT_BLOCKED) from None
-        for line in left_behind_report(cfg, args.task_id):
-            print(line, file=sys.stderr)
-        if outcome is CycleOutcome.HELD:
-            print(
-                f"task {args.task_id} is held: no account could take its next phase; "
-                "run the phase again with run-phase once one resets",
-                file=sys.stderr,
-            )
-            raise SystemExit(EXIT_HELD)
-        if outcome is CycleOutcome.BLOCKED:
-            print(f"task {args.task_id} is blocked; the log above says why", file=sys.stderr)
-            raise SystemExit(EXIT_BLOCKED)
-        if outcome is CycleOutcome.SPLIT:
-            print(_epic_line(cfg, args.task_id))
-            raise SystemExit(EXIT_SPLIT)
+        _exit_on_resumed_outcome(cfg, args, outcome)
         print(f"task {args.task_id}: request {args.n} {args.verdict}; the cycle finished")
+    elif args.command == "command-resume":
+        _require_migrated(cfg, parser)
+        try:
+            outcome = command_run.resume_command_verdict(cfg, args.task_id, args.project)
+        except command_run.VerdictRefused as exc:
+            print(f"task {args.task_id}: resume refused: {exc}", file=sys.stderr)
+            raise SystemExit(EXIT_BLOCKED) from None
+        _exit_on_resumed_outcome(cfg, args, outcome)
+        print(f"task {args.task_id}: the verdict was resumed; the cycle finished")
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
         # config schema has no repo-source field, so cloning the actual

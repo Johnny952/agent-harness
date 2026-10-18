@@ -7445,3 +7445,76 @@ in a fresh session. The
 timeout kills the `docker exec` client, not the process inside the container.
 The resume carries no write window, as `run-phase` does not.
 `--permission-prompt-tool` (ADR 118, decision 8) stays deferred.
+
+## ADR 120 — a verdict whose resume was held is resumed with `dispatch command-resume`, never by running the command again
+
+**Status:** accepted (T-076, 2026-10-18). Follows ADR 119; builds the held
+resume of step 4 of `docs/plans/command-requests.md` (decision 5). The plan
+gains a dated note under step 4 and under decision 5; the rest of its text is
+not edited.
+
+**Context.** ADR 119 records a verdict before its command runs and takes one
+verdict per block, so a command never runs twice. A resume that then finds
+the phase's account taken is held, and nothing could give that verdict again:
+the operator's only way on was `run-phase`, in a fresh session that had lost
+the context the resume was for. A held resume of the cartografo was worse: it
+was read as an optional phase that failed, and the cycle handed the task on
+to the arquitecto as if the mapping had run.
+
+**Decision.**
+1. *`dispatch command-resume <task> --project <slug>`*, calling
+   `command_run.resume_command_verdict(cfg, task_id, slug) -> CycleOutcome`.
+   It resumes the session of the block's verdict with the prompt that verdict
+   was resumed with, and carries the cycle on as `command-verdict` does. It
+   never runs the command: *run*'s prompt is rebuilt with `run_prompt` from
+   what was recorded, *deny*'s with `deny_prompt` from the recorded comment.
+   The exit is `command-verdict`'s (blocked 1, held 75, split 3); a refusal
+   prints its reason and exits 1.
+2. *Refusals*, as `VerdictRefused` before anything is opened or run: the task
+   is not blocked on `command_request`; the current block (the newest filing
+   envelope, as ADR 119 reads it) has no verdict; its verdict already has a
+   `resumed_at`; the phase's session is not on record; a *run* verdict whose
+   log is missing, unreadable or for another argv.
+3. *What a run came to is kept on the verdict.* Right after the run,
+   `tasks.update_command_verdict` adds `ran: {exit_code, timed_out,
+   truncated, log, resolved}` to the entry. The output stays in
+   `commands/<n>.log`, after its `--- output ---` line, so it is not copied
+   into the frontmatter. An entry without `ran` (written by T-074, or by a
+   run that stopped between its log and `ran`) is read from the log's header,
+   which names the argv, the target, the `cwd` and the exit or the timeout;
+   truncation is read from `TRUNCATED_MARKER` in the output.
+4. *`resumed_at` is set when the resumed phase took the task's lock*
+   (`ctx.took_lock` after `run_phase`), before the cycle goes on, by
+   `command-verdict` and `command-resume` alike. That is the point where the
+   session has been handed to an account and may run:
+   - not before it: a resume held for no account, or stopped by another
+     run's lock, never ran the session, and keeps its verdict resumable;
+   - not after the cycle: a crash between the lock and the write leaves the
+     task `in_progress`, since `acquire_lock` already moved it off its block,
+     and `command-resume` refuses it on status. So a session is never
+     resumed twice, and a held one is never stranded.
+   A resumed phase that ran and failed keeps its `resumed_at`; the task is
+   then moved on with `run-phase`, as any failed phase is.
+5. *An entry without `resumed_at`* (every T-074 entry) is read as not
+   resumed; the task's status is then the guard. A T-074 verdict that did
+   resume moved the task off its block, so it is refused there; one whose
+   resume was held is resumable.
+6. *A held resume puts the block back.* A pinned call refused by a rate
+   limit took the lock and gave it back before ending `no_account`, which
+   leaves the task `in_progress` with no owner. When the resume is held and
+   no one owns the task, it is marked blocked on `command_request` again, so
+   `command-resume` can find it. A task another run owns is left alone.
+7. *A pinned phase that found its account taken is held.* `run_phase` reads
+   `no_account` on a call with `account` as held, whatever `fatal` says, so a
+   held cartografo resume stops the cycle instead of handing it on.
+8. The CLI's held message for either command names `command-resume <task>
+   --project <slug>` when the task awaits a resume (`awaits_resume`), and
+   `run-phase` otherwise.
+
+**Consequences.** A verdict whose resume was held is resumed later in its own
+session with the same prompt, and the command runs once whatever happens to
+the resume. An exception inside `dispatch_phase` after it took the lock leaves
+the task `in_progress` with no owner and `resumed_at` unset; `command-resume`
+refuses it on status, and the operator moves it on with `run-phase`. That is
+the conservative side: the session may have partly run. The resume is still
+on the phase's own account only.
