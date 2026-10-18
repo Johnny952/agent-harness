@@ -266,6 +266,7 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         heartbeat="2026-09-26T18:00:00+00:00",
         description=_DESCRIPTION,
         resolved_debt=["T-008-D2"],
+        phase="implementador",
         body="arquitecto: plan ready",
     )
 
@@ -280,6 +281,8 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         # The text of the task's `description.md`, verbatim: not parsed.
         "description": _DESCRIPTION,
         "resolved_debt": ["T-008-D2"],
+        # The running phase's role, as the dispatcher wrote it (ADR 126).
+        "phase": "implementador",
         # A fixed timestamp in the past, so against any TTL this is a lock whose
         # holder stopped writing. The three values of this field have their own
         # tests below, against heartbeats relative to now.
@@ -288,6 +291,26 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         # alone (`docs/decisions.md` ADR 21). Asserting the whole dict is what
         # makes moving it into `_task` fail here rather than pass quietly.
     }
+
+
+def test_both_task_routes_serve_the_phase_the_dispatcher_writes_and_clears(
+    tmp_path: Path,
+) -> None:
+    """ADR 126, through the dispatcher's own writers: the role while the lock
+    is held, `null` once the phase has handed off."""
+    harness = _harness(tmp_path)
+    task_store.acquire_lock(harness.tasks_dir, "T-1", owner="cuenta1", phase="revisor")
+
+    [listed] = _get(harness, "/api/tasks").get_json()["data"]
+    detail = _get(harness, "/api/tasks/T-1").get_json()["data"]
+    assert (listed["phase"], detail["phase"]) == ("revisor", "revisor")
+    assert listed["lock_expired"] is False
+
+    task_store.handoff(harness.tasks_dir, "T-1", new_status="pending", body="## revisor")
+
+    [listed] = _get(harness, "/api/tasks").get_json()["data"]
+    detail = _get(harness, "/api/tasks/T-1").get_json()["data"]
+    assert (listed["phase"], detail["phase"]) == (None, None)
 
 
 def test_a_task_file_that_will_not_parse_is_a_warning_and_not_a_missing_list(
@@ -404,6 +427,7 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
         "heartbeat": None,
         "description": None,
         "resolved_debt": [],
+        "phase": None,
         "lock_expired": None,
     }
 

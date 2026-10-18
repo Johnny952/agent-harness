@@ -902,6 +902,78 @@ def test_mark_blocked_sets_the_status_and_releases_the_lock_keeping_the_body(
     assert (after.body, after.depends_on) == (before.body, before.depends_on)
 
 
+# -- phase (ADR 126) ------------------------------------------------------------
+
+
+def test_acquire_lock_writes_the_phase_and_refresh_heartbeat_keeps_it(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    path = task_file_path(hive, "task-1")
+
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1", phase="arquitecto")
+    assert read_task_file(path).phase == "arquitecto"
+    assert "phase: arquitecto\n" in Path(path).read_text()
+
+    tasks.refresh_heartbeat(hive, "task-1")
+    assert read_task_file(path).phase == "arquitecto"
+
+
+def test_acquire_lock_replaces_the_phase_and_without_one_leaves_none(tmp_path: Path) -> None:
+    """A lock taken again names its own phase, never the one before it."""
+    hive = _hive(tmp_path)
+    path = task_file_path(hive, "task-1")
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1", phase="arquitecto")
+
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1", phase="implementador")
+    assert read_task_file(path).phase == "implementador"
+
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1")
+    assert read_task_file(path).phase is None
+
+
+#: Each writer that drops the lock, as a call on (hive, task id).
+_RELEASES = {
+    "release_stale_lock": tasks.release_stale_lock,
+    "handoff": lambda hive, tid: tasks.handoff(hive, tid, new_status="pending", body="## arquitecto"),
+    "mark_blocked": tasks.mark_blocked,
+}
+
+
+@pytest.mark.parametrize("release", sorted(_RELEASES))
+def test_every_writer_that_drops_the_lock_clears_the_phase(tmp_path: Path, release: str) -> None:
+    hive = _hive(tmp_path)
+    path = task_file_path(hive, "task-1")
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1", phase="revisor")
+
+    _RELEASES[release](hive, "task-1")
+
+    after = read_task_file(path)
+    assert (after.owner, after.heartbeat, after.phase) == (None, None, None)
+    assert "phase:" not in Path(path).read_text()
+
+
+@pytest.mark.parametrize(
+    "writer", ["set_resolved_debt", "mark_merged"],
+)
+def test_a_writer_that_leaves_the_lock_leaves_the_phase(tmp_path: Path, writer: str) -> None:
+    hive = _hive(tmp_path)
+    tasks.acquire_lock(hive, "task-1", owner="cuenta1", phase="integrador")
+
+    _WRITERS[writer](hive, "task-1")
+
+    assert read_task_file(task_file_path(hive, "task-1")).phase == "integrador"
+
+
+def test_a_task_file_without_a_phase_keeps_its_bytes(tmp_path: Path) -> None:
+    """Written only when set: a file from before the key round-trips unchanged."""
+    hive = _hive(tmp_path)
+    path = _legacy(hive, "")
+    before = path.read_bytes()
+
+    write_task_file(str(path), read_task_file(str(path)))
+
+    assert path.read_bytes() == before
+
+
 # -- close_epic, epic_problems --------------------------------------------------
 
 

@@ -1855,8 +1855,13 @@ def dispatch_phase(
         try:
             # Claim the task before touching the worktree: a task another
             # account still owns (live heartbeat) must be refused outright,
-            # not after work has already started on disk.
-            tasks.acquire_lock(cfg.hive_tasks_dir, task_id, owner=account, ttl_seconds=cfg.heartbeat_ttl_seconds)
+            # not after work has already started on disk. The role goes on the
+            # task with the lock, and comes off with it on every path out of
+            # here and the handoff after (ADR 126).
+            tasks.acquire_lock(
+                cfg.hive_tasks_dir, task_id, owner=account,
+                ttl_seconds=cfg.heartbeat_ttl_seconds, phase=role,
+            )
             lock_acquired = True
             # The keyword goes only when asked for: every other phase calls
             # create_worktree exactly as it always did.

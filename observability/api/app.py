@@ -963,6 +963,11 @@ def _task(
         "heartbeat": task.heartbeat,
         "description": description,
         "resolved_debt": task.resolved_debt,
+        # The role of the phase running now, or `null` between phases: the
+        # dispatcher writes it with the lock and clears it with the lock
+        # (ADR 126), so it is the file's, not invented here. A value beside
+        # `lock_expired: true` is a dead dispatcher's, not a running phase.
+        "phase": task.phase,
         "lock_expired": _lock_expired(task, ttl_seconds),
     }
 

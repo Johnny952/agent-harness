@@ -37,6 +37,17 @@ id>/`, `check_drafts` holds them to the section rules, and `accept_drafts`
 files the ones the owner accepts as pending tasks with fresh ids. A draft is
 not a task: no description is ever stored under a draft id, so nothing that
 runs tasks can be pointed at one.
+
+The task file also says which phase is running on it (`phase`, ADR 126), and
+it rides on the lock rather than having writers of its own: `acquire_lock`
+writes the role with the owner and the heartbeat, and the three writers that
+drop the lock — `release_stale_lock`, `handoff`, `mark_blocked` — clear it with
+them. A phase that ends, however it ends, ends in one of those, so a `phase`
+is never left behind by a live dispatcher. A killed one leaves the lock and
+the role together, and the lock's own reaper clears both:
+`dispatcher.reap_expired_locks` at the next cycle, or `dispatch
+release-account` by hand. Until then the heartbeat is past its TTL, which is
+how a reader tells a dead phase from a running one.
 """
 from __future__ import annotations
 
@@ -322,8 +333,18 @@ def set_resolved_debt(hive_dir: str, task_id: str, entries: list[str]) -> None:
 
 
 def acquire_lock(
-    hive_dir: str, task_id: str, owner: str, ttl_seconds: int | None = None
+    hive_dir: str,
+    task_id: str,
+    owner: str,
+    ttl_seconds: int | None = None,
+    phase: str | None = None,
 ) -> context_transfer.TaskFile:
+    """Take the task's lock for `owner`, and record which phase holds it.
+
+    `phase` is the role about to run (ADR 126). It is written with the lock and
+    replaces whatever was there, so a call without one leaves no stale role
+    behind a new owner.
+    """
     path, task = context_transfer._read_or_new(hive_dir, task_id)
     # Two dispatcher processes, or a stale retry, must not both drive the same
     # task. This is a read-then-write check, not a cross-process mutex — a
@@ -349,6 +370,7 @@ def acquire_lock(
     # The block's reason goes with the block: a task taken again is running,
     # whatever stopped it last time (ADR 117).
     task.blocked_reason = None
+    task.phase = phase
     _write_task_file(path, task)
     return task
 
@@ -365,6 +387,9 @@ def release_stale_lock(hive_dir: str, task_id: str) -> None:
     task = context_transfer.read_task_file(path)
     task.owner = None
     task.heartbeat = None
+    # The phase goes with the lock that names it (ADR 126): this is the
+    # release of a phase that failed, and the reaper of one whose dispatcher died.
+    task.phase = None
     _write_task_file(path, task)
 
 
@@ -647,6 +672,7 @@ def handoff(
     task.status = new_status
     task.owner = None
     task.heartbeat = None
+    task.phase = None
     # Accumulate phase summaries rather than replacing task.body — the next
     # role needs the full trail of prior phases, not just the last one.
     task.body = f"{task.body}\n\n{body}" if task.body else body
@@ -668,6 +694,7 @@ def mark_blocked(hive_dir: str, task_id: str, reason: str | None = None) -> None
     task.status = "blocked"
     task.owner = None
     task.heartbeat = None
+    task.phase = None
     task.blocked_reason = reason
     _write_task_file(path, task)
 

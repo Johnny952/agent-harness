@@ -75,6 +75,12 @@ class TaskFile:
     # `{"n", "verdict", "by", "at", "comment", "role", "filed_at"}` per block,
     # so a second verdict on the same block is refused. Written only when set.
     command_verdicts: list[dict] = dataclasses.field(default_factory=list)
+    # The role of the phase running on the task now, `arquitecto` to
+    # `integrador` (ADR 126). It goes with the lock: `acquire_lock` writes it,
+    # and every writer that drops the lock clears it, so a value here with an
+    # expired heartbeat is a dead dispatcher's, not a running phase. Written
+    # only when set.
+    phase: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -620,6 +626,7 @@ def read_task_file(path: str) -> TaskFile:
         merged=fm.get("merged") or None,
         blocked_reason=fm.get("blocked_reason") or None,
         command_verdicts=fm.get("command_verdicts") or [],
+        phase=fm.get("phase") or None,
     )
 
 
@@ -743,6 +750,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["blocked_reason"] = task.blocked_reason
     if task.command_verdicts:
         fm["command_verdicts"] = task.command_verdicts
+    if task.phase:
+        fm["phase"] = task.phase
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

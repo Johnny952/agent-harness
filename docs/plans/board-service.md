@@ -28,7 +28,9 @@ blocked marks its task `blocked`. Task 4 of that section is built by T-031
 (`docs/implementations/T-031.md`, `docs/decisions.md` ADR 60): a cycle files
 an arquitecto's split through `file_split`, and so does `dispatch
 file-split`. The per-task lock of section 5 comes
-with the service (step 4). Every later step is not built. It records an
+with the service (step 4). Step 6 is built by T-081
+(`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126). Every other
+later step is not built. It records an
 idea the user raised on
 2026-10-10: the agent, not the operator, keeps the board. It creates epics
 and tasks and writes their descriptions and steps, through a service that
@@ -512,6 +514,14 @@ Each step is a single surface, built in this order:
    - The `impact` column in the debt index, set by the auditor.
 6. **`phase` in the frontmatter.** The dispatcher writes and clears it around
    each phase, and the api serves it.
+   **Built 2026-10-18** by T-081 (`docs/decisions.md` ADR 126): `phase` in
+   the task file's frontmatter, written by `tasks.acquire_lock` with the lock
+   as each phase starts and cleared by every writer that drops the lock
+   (`release_stale_lock`, `handoff`, `mark_blocked`); a killed dispatcher's
+   is cleared by `reap_expired_locks` at the next cycle or by `dispatch
+   release-account`, and until then `lock_expired` is true beside it.
+   `/api/tasks` and `/api/tasks/<id>` serve it, `null` when unset. The
+   board's role lanes are step 8.
 7. **Each phase gets its config.** The dispatcher passes `--mcp-config` with
    the phase's role, and the arquitecto gets the read tools.
 8. **The console.** The screens in section 8: the board's live columns and
