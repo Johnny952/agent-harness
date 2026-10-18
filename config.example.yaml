@@ -19,11 +19,17 @@
 
 # One entry per Claude Pro account the dispatcher can dispatch work to.
 # `container` must match a container_name in docker-compose.agents.yml.
+# `dind` is that account's dind container, the one its agent's DOCKER_HOST
+# points at. A command request of kind dind or service resolves to it, and an
+# account without one refuses those kinds; it is never guessed from the name
+# (docs/decisions.md ADR 118).
 accounts:
   - name: cuenta1
     container: agent-cuenta1
+    dind: dind-cuenta1
   - name: cuenta2
     container: agent-cuenta2
+    dind: dind-cuenta2
     # Phases this account may hold at once. Default 1; raise it only on a Max
     # account (ADR 84). `--parallel` is still the ceiling on the whole run.
     # max_concurrent_phases: 2

@@ -23,6 +23,11 @@ class AccountConfig:
     #: and 88). 1 is today's behaviour; only the owner raises it, on an account
     #: whose plan allows it. `--parallel` is still the ceiling.
     max_concurrent_phases: int = 1
+    #: The account's dind container, the one its agent's `DOCKER_HOST` points
+    #: at. Named, never guessed from `container`: a command request of kind
+    #: `dind` or `service` resolves to it, and an account without one refuses
+    #: those kinds (`docs/decisions.md` ADR 118).
+    dind: str | None = None
 
 
 #: The config keys the board seam read, all refused now that it is gone
@@ -691,6 +696,12 @@ def _build_config(raw: dict) -> Config:
             raise ValueError(
                 f"account {account.name}: max_concurrent_phases must be an "
                 f"integer of at least 1, not {slots!r}"
+            )
+        dind = account.dind
+        if dind is not None and (not isinstance(dind, str) or not dind.strip()):
+            raise ValueError(
+                f"account {account.name}: dind must be a non-empty string, "
+                f"the account's dind container, not {dind!r}"
             )
         accounts.append(account)
     primary_account = _load_primary_account(raw, accounts)

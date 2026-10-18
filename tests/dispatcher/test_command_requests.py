@@ -5,7 +5,7 @@ import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import context_transfer, handoff, project_docs, tasks
-from dispatcher.config import PHASE_ROLES
+from dispatcher.config import PHASE_ROLES, AccountConfig
 from dispatcher.context_transfer import read_task_file, task_file_path
 from dispatcher.docker_exec import ClaudeResult
 from tests.dispatcher.test_dispatcher import (  # noqa: F401 - fixtures used by name
@@ -190,7 +190,9 @@ def test_an_implementador_request_blocks_the_cycle_before_any_review(tmp_path, m
     assert task.status == "blocked"
     assert task.blocked_reason == handoff.COMMAND_REQUEST
     envelope = context_transfer.read_handoff_envelope(cfg.hive_tasks_dir, "task-1", "implementador")
-    assert envelope["command_requests"] == {"accepted": [_request()], "refused": []}
+    worktree = f"{cfg.projects_root}/myproj/worktrees/task-1/work"
+    resolved = {"kind": "agent", "container": "agent-cuenta1", "cwd": worktree}
+    assert envelope["command_requests"] == {"accepted": [{**_request(), "resolved": resolved}], "refused": []}
 
 
 def test_only_refused_requests_do_not_block(tmp_path, monkeypatch) -> None:
@@ -214,7 +216,10 @@ def test_only_refused_requests_do_not_block(tmp_path, monkeypatch) -> None:
 
 
 def test_a_mapping_request_blocks_before_the_arquitecto(tmp_path, monkeypatch) -> None:
-    cfg = _make_config(tmp_path, mapping_enabled=True)
+    cfg = _make_config(
+        tmp_path, mapping_enabled=True,
+        accounts=[AccountConfig(name="cuenta1", container="agent-cuenta1", dind="dind-cuenta1")],
+    )
     _fake_index(monkeypatch, exists=False)
     calls = []
     monkeypatch.setattr(
@@ -316,9 +321,33 @@ def test_no_gates_run_after_a_filed_request(tmp_path, monkeypatch) -> None:
     )
 
     out, report = dispatcher_mod._run_gates(
-        cfg, "agent-cuenta1", "/w", "/p", "task-1", "implementador", result,
-        None, None, None, None,
+        cfg, "agent-cuenta1", "/w", f"{cfg.projects_root}/p", "task-1", "implementador", result,
+        None, None, None, None, account="cuenta1",
     )
 
     assert out is result
     assert report is None
+
+
+def test_the_gates_run_when_step_3_refuses_every_request(tmp_path, monkeypatch) -> None:
+    # The cycle does not block on a request the denylist refused (ADR 118), so
+    # the branch goes on to the revisor and has to be graded first.
+    cfg = _make_config(tmp_path, gates_enabled=True)
+    graded = []
+
+    def gate(*args, **kwargs):
+        graded.append(True)
+        return None
+
+    monkeypatch.setattr(dispatcher_mod, "_gate_report", gate)
+    result = ClaudeResult(
+        session_id="s", result_text="",
+        raw={"is_error": False, "structured_output": _implementador_return([_request(argv=("sudo", "ls"))])},
+    )
+
+    dispatcher_mod._run_gates(
+        cfg, "agent-cuenta1", "/w", f"{cfg.projects_root}/p", "task-1", "implementador", result,
+        None, None, None, None, account="cuenta1",
+    )
+
+    assert graded == [True]
