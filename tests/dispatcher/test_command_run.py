@@ -334,7 +334,7 @@ def test_deny_does_not_need_the_check_to_pass(tmp_path, monkeypatch) -> None:
 
 def test_an_unknown_verdict_is_refused(tmp_path, monkeypatch) -> None:
     cfg, _ = _blocked(tmp_path, monkeypatch)
-    _refused(cfg, 1, "allow", "not one of")
+    _refused(cfg, 1, "approve", "not one of")
 
 
 def test_a_second_verdict_on_the_same_block_is_refused(tmp_path, monkeypatch) -> None:

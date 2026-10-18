@@ -15,6 +15,7 @@ from collections.abc import Callable
 
 from dispatcher import (
     adr_numbers,
+    allowlist,
     auto_approve,
     command_targets,
     context_transfer,
@@ -45,7 +46,7 @@ _USAGE_PROBE_TIMEOUT_SECONDS = 120
 _PROBE_WORST_CASE_SECONDS = _USAGE_PROBE_TIMEOUT_SECONDS + docker_exec.HOST_BACKSTOP_SECONDS
 
 
-def _phase_permission_flags(cfg: Config, role: str) -> dict:
+def _phase_permission_flags(cfg: Config, role: str, slug: str | None = None) -> dict:
     """What every call that runs a role's own work has to carry.
 
     Three flags. The first two are the two halves of one measured failure
@@ -72,15 +73,25 @@ def _phase_permission_flags(cfg: Config, role: str) -> dict:
     run-skill generator has to run the project's own build to say what works,
     and every other role keeps exactly the standing grant above.
 
+    With `slug`, the project's allowlist for the role follows (ADR 121):
+    the patterns an operator's *allow* verdict wrote, each checked again on
+    the way in and skipped if it no longer passes, after the global ones and
+    with no repeat. The global list is never changed; a call with no slug
+    gets it alone.
+
     The /usage probes do not get these: a probe runs a built-in command, uses
     no tools and touches no files.
     """
+    base = (
+        [*cfg.allowed_tools, *cfg.mapping_allowed_tools]
+        if role == project_docs.MAPPER_ROLE else cfg.allowed_tools
+    )
     return {
         "permission_mode": cfg.permission_mode,
         "add_dirs": [context_transfer.hive_root(cfg.hive_tasks_dir)],
         "allowed_tools": (
-            [*cfg.allowed_tools, *cfg.mapping_allowed_tools]
-            if role == project_docs.MAPPER_ROLE else cfg.allowed_tools
+            allowlist.merged_allowed_tools(cfg.state_dir, slug, role, list(base))
+            if slug else base
         ),
     }
 
@@ -1408,6 +1419,7 @@ def _resume_missing_handoff(
     model: str | None,
     effort: str | None,
     recorder: _UsageRecorder,
+    slug: str | None = None,
 ) -> docker_exec.ClaudeResult:
     """Up to `max_handoff_resumes` `--resume`s for a phase that stopped short.
 
@@ -1440,7 +1452,7 @@ def _resume_missing_handoff(
             # The session already read its skills; the schema has to travel,
             # or the return it is being asked for comes back as prose.
             json_schema=handoff.schema_for(role),
-            **_phase_permission_flags(cfg, role),
+            **_phase_permission_flags(cfg, role, slug),
         )
         recorder.record("handoff-resume", retry)
         if not _exec_succeeded(retry) or is_rate_limit_error(retry):
@@ -1468,6 +1480,7 @@ def _shrink_over_budget(
     model: str | None,
     effort: str | None,
     recorder: _UsageRecorder,
+    slug: str | None = None,
 ) -> docker_exec.ClaudeResult:
     """One `--resume` asking for a shorter handoff, when one blew its budget.
 
@@ -1528,7 +1541,7 @@ def _shrink_over_budget(
         json_schema=handoff.schema_for(role),
         # A resume is a new `claude` process and inherits no flags, so the
         # permissions have to be restated here too.
-        **_phase_permission_flags(cfg, role),
+        **_phase_permission_flags(cfg, role, slug),
     )
     # Before the branch below, not after: a retry this discards as a *result*
     # still cost the account a turn, and the log is about what was spent.
@@ -1607,6 +1620,7 @@ def _run_gates(
     round_num: int | None,
     recorder: _UsageRecorder,
     account: str = "",
+    slug: str | None = None,
 ) -> tuple[docker_exec.ClaudeResult, gates.Report | None]:
     """The deterministic checks, and the one `--resume` they are worth.
 
@@ -1657,7 +1671,7 @@ def _run_gates(
         json_schema=handoff.schema_for(role),
         # Restated for the same reason as the shrink retry's: new process,
         # no inherited flags.
-        **_phase_permission_flags(cfg, role),
+        **_phase_permission_flags(cfg, role, slug),
     )
     # Recorded whether or not it is kept, for the shrink retry's reason.
     recorder.record("gate-retry", retry)
@@ -1679,6 +1693,7 @@ def _refuse_review_writes(
     model: str | None,
     effort: str | None,
     recorder: _UsageRecorder,
+    slug: str | None = None,
 ) -> docker_exec.ClaudeResult:
     """One `--resume` telling a reviewing phase the edits it made are gone.
 
@@ -1735,7 +1750,7 @@ def _refuse_review_writes(
         # as the shrink retry's, and the corrected return is the one that has
         # to land in the task file.
         json_schema=handoff.schema_for(role),
-        **_phase_permission_flags(cfg, role),
+        **_phase_permission_flags(cfg, role, slug),
     )
     # Recorded whether or not it is kept, for the shrink retry's reason.
     recorder.record("review-retry", retry)
@@ -1870,7 +1885,7 @@ def dispatch_phase(
                     plugin_dirs=role_skills.plugin_dirs(role),
                     append_system_prompt=_phase_system_prompt(role),
                     json_schema=handoff.schema_for(role),
-                    **_phase_permission_flags(cfg, role),
+                    **_phase_permission_flags(cfg, role, slug),
                 )
                 # Here, before the retries: each of them *replaces* `result`,
                 # so a record taken afterwards would describe the last retry
@@ -1880,23 +1895,23 @@ def dispatch_phase(
                 # First of the retries: the gates, the review check and the
                 # shrink all work on a handoff, and this is what makes one.
                 result = _resume_missing_handoff(
-                    cfg, container, workdir, role, result, model, effort, recorder,
+                    cfg, container, workdir, role, result, model, effort, recorder, slug,
                 )
                 # Before the shrink, not after: the gate retry writes a new
                 # handoff, and the byte budget has to be enforced on the return
                 # that actually lands in the task file.
                 result, gate_report = _run_gates(
                     cfg, container, workdir, project_dir, task_id, role,
-                    result, model, effort, round_num, recorder, account=account,
+                    result, model, effort, round_num, recorder, account=account, slug=slug,
                 )
                 # Between the two for the same reason: it can rewrite the
                 # handoff as well, and the gates only ever run for the
                 # implementador, which this never fires for.
                 result = _refuse_review_writes(
-                    cfg, container, workdir, task_id, role, result, model, effort, recorder,
+                    cfg, container, workdir, task_id, role, result, model, effort, recorder, slug,
                 )
                 result = _shrink_over_budget(
-                    cfg, container, workdir, role, result, model, effort, recorder,
+                    cfg, container, workdir, role, result, model, effort, recorder, slug,
                 )
             # A checkout at the base has no branch to commit to (ADR 94).
             if not at_base and _should_commit(role, result):
