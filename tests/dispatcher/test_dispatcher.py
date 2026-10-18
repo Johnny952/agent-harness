@@ -7033,6 +7033,44 @@ def test_open_cycle_accepts_a_dependency_that_is_merged(tmp_path) -> None:
     assert dispatcher_mod.open_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION) is not None
 
 
+@pytest.mark.parametrize("status", tasks.BACKLOG_STATUSES)
+def test_open_cycle_refuses_a_backlog_task(tmp_path, caplog, status) -> None:
+    """ADR 127: a proposed, deferred or dropped task is accepted first."""
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status=status, body="")
+
+    logged = _refused_by_open_cycle(cfg, caplog, description=_DESCRIPTION)
+
+    assert f"task task-1 cannot start: it is in the backlog (status {status})" in logged
+    assert tasks.read_description(cfg.hive_tasks_dir, "task-1") is None
+
+
+def test_open_cycle_refuses_a_bad_priority_or_source(tmp_path, caplog) -> None:
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="pending", body="")
+    path = Path(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    path.write_text(path.read_text().replace("status: pending\n", "status: pending\npriority: urgent\n"))
+
+    logged = _refused_by_open_cycle(cfg, caplog, description=_DESCRIPTION)
+
+    assert "task task-1 cannot start: its priority is 'urgent'" in logged
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked", "in_progress"])
+def test_open_cycle_still_opens_a_board_task(tmp_path, status) -> None:
+    """Only the backlog is refused: a blocked retry and a resume come through here."""
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status=status, body="")
+    path = Path(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    path.write_text(
+        path.read_text().replace(
+            f"status: {status}\n", f"status: {status}\npriority: high\nsource: operator\n"
+        )
+    )
+
+    assert dispatcher_mod.open_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION) is not None
+
+
 def test_run_task_cycle_is_blocked_by_an_unmet_dependency_and_marks_nothing(
     tmp_path, monkeypatch,
 ) -> None:

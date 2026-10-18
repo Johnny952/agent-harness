@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -129,6 +130,24 @@ def test_cycle_in_dependencies_is_refused(cfg):
 def test_task_without_description_is_refused(cfg):
     tasks.handoff(cfg.hive_tasks_dir, "T-1", "pending", "")
     with pytest.raises(queue_mod.QueueError, match="no description"):
+        queue_mod.plan(cfg, "proj", ["T-1"], limit=10)
+
+
+@pytest.mark.parametrize("status", tasks.BACKLOG_STATUSES)
+def test_a_backlog_task_is_refused(cfg, status):
+    """ADR 127: refused before the confirmation screen, as `open_cycle` would."""
+    _task(cfg, "T-1")
+    _task(cfg, "T-2")
+    tasks.handoff(cfg.hive_tasks_dir, "T-2", status, "")
+    with pytest.raises(queue_mod.QueueError, match=rf"task T-2 cannot run: it is in the backlog \(status {status}\)"):
+        queue_mod.plan(cfg, "proj", ["T-1", "T-2"], limit=10)
+
+
+def test_a_task_with_a_bad_source_is_refused(cfg):
+    _task(cfg, "T-1")
+    path = Path(context_transfer.task_file_path(cfg.hive_tasks_dir, "T-1"))
+    path.write_text(path.read_text().replace("status: pending\n", "status: pending\nsource: me\n"))
+    with pytest.raises(queue_mod.QueueError, match="its source is 'me'"):
         queue_mod.plan(cfg, "proj", ["T-1"], limit=10)
 
 

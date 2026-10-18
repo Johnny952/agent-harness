@@ -81,6 +81,14 @@ class TaskFile:
     # expired heartbeat is a dead dispatcher's, not a running phase. Written
     # only when set.
     phase: str | None = None
+    # The backlog's fields (`docs/plans/board-service.md` section 4, ADR 127):
+    # the priority bucket, `high`, `normal` or `low`, and who proposed the
+    # item, `operator`, `arquitecto` or `debt`. Read as YAML made them and
+    # checked by `tasks.field_problems`, not here, so a hand-edited value is
+    # reported by name rather than lost. Each written only when set; a task
+    # with no `priority` is `normal`.
+    priority: str | None = None
+    source: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -627,6 +635,8 @@ def read_task_file(path: str) -> TaskFile:
         blocked_reason=fm.get("blocked_reason") or None,
         command_verdicts=fm.get("command_verdicts") or [],
         phase=fm.get("phase") or None,
+        priority=fm.get("priority"),
+        source=fm.get("source"),
     )
 
 
@@ -752,6 +762,12 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["command_verdicts"] = task.command_verdicts
     if task.phase:
         fm["phase"] = task.phase
+    # `is not None`, not truthiness: a hand-edited `priority: 0` is kept for
+    # `tasks.field_problems` to name, not dropped by the next heartbeat.
+    if task.priority is not None:
+        fm["priority"] = task.priority
+    if task.source is not None:
+        fm["source"] = task.source
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 
