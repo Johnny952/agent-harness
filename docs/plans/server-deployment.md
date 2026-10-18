@@ -247,6 +247,41 @@ state, and what a backup does with it:
   sessions and logins included. The backup is for a lost or corrupted
   volume or disk.
 
+### 9. The dind runs in one of a few modes, chosen per account
+
+Settled by the user on 2026-10-18. Today every account's dind runs under
+`runtime: sysbox-runc` (`docker/compose/docker-compose.agents.yml`,
+`docker-compose.coolify.yml`), and the README makes sysbox a requirement. A
+server the harness is deployed to may not allow installing a runtime, so
+sysbox becomes the preferred mode, not a requirement.
+
+Why a dind at all: a phase that needs containers (the project's compose,
+an image build, an integration test against a real database) needs a docker
+daemon. The host's socket is not one to give it: whoever holds it is root on
+the host and can see and stop every container, the dispatcher, the api,
+`postgres-db` and the other accounts' agents among them. A dind gives each
+account a daemon of its own, with its own images, networks and volumes, that
+the agent reaches through `DOCKER_HOST` and that sees nothing else.
+
+The modes, one per account:
+
+| Mode | What runs | When |
+|---|---|---|
+| `sysbox` | the dind under `sysbox-runc`, no `--privileged` | the default, wherever sysbox can be installed |
+| `remote` | no local dind; `DOCKER_HOST` points at a daemon on another machine or VM set aside for that account | a server where no runtime can be installed but another host can run docker |
+| `none` | no dind and no `DOCKER_HOST` | projects whose work needs no containers; a command request of kind `dind` or `service` is refused with its reason, as ADR 118 already does for an account with no `dind` key |
+| `privileged` | the dind with `privileged: true` | an explicit opt-in only, never a default and never picked by the installer on its own. It is close to root on the host, so choosing it names that in the config and the README warns of it |
+
+- **Where it is set.** In the account's record (*Decisions*, 4), seeded from
+  `config.yaml`, beside `dind`. The template of *Decisions*, 3 makes the
+  pair that the mode names, and nothing else.
+- **The installer checks.** `scripts/configure.sh` looks for `sysbox-runc`
+  in `docker info`. With it, `sysbox` is offered; without it, `none` is, and
+  `remote` and `privileged` only when asked for by name.
+- **Never the host socket.** No mode mounts `/var/run/docker.sock` into an
+  agent or a dind, and the command-requests denylist keeps refusing it
+  (ADR 118).
+
 ## The order across the plans
 
 Most of what these plans add needs the queue and the worker first. This is
@@ -324,6 +359,9 @@ Each step is a single surface:
 7. The phone fits, inside each screen's own task (*Decisions*, 6).
 8. The backup and restore commands, `BACKUP_DIR` and the copy cap
    (*Decisions*, 8).
+9. The dind modes (*Decisions*, 9): the per-account key, the compose
+   variants for `remote`, `none` and `privileged`, the installer's check,
+   and the README's requirement turned into a preference. Under an ADR.
 
 ## Open questions
 
