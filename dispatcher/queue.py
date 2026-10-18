@@ -23,6 +23,11 @@ The queue is a file in `state_dir/queues/`, rewritten atomically on every
 change of state, so a kill at any point leaves it readable. A task is marked
 `running` before its cycle starts; `--resume` finds it that way, records it
 `interrupted` and never starts it again.
+
+The listed tasks can be topped up from the board's *Ready* order (ADR 130,
+ADR 132): `plan(..., ready=n)` adds the first `n` ready tasks after the
+listed ones, read once, before the confirmation screen, so what runs is
+still what the owner saw.
 """
 from __future__ import annotations
 
@@ -103,6 +108,8 @@ class Entry:
     tokens: int = 0
     unmeasured: int = 0
     note: str = ""
+    # Taken from the board's Ready order, not listed by the owner (ADR 132).
+    from_ready: bool = False
 
 
 @dataclasses.dataclass
@@ -117,6 +124,9 @@ class Queue:
     authorized: bool = True
     status: str = Q_RUNNING
     created_at: str = ""
+    # Ready tasks the pick passed over, each with the reason `plan` would
+    # have refused it, for the confirmation screen (ADR 132).
+    passed_over: list[str] = dataclasses.field(default_factory=list)
 
     def entry(self, task_id: str) -> Entry:
         return next(e for e in self.entries if e.task_id == task_id)
@@ -189,7 +199,9 @@ def _task_file(cfg: Config, task_id: str) -> context_transfer.TaskFile | None:
         return None
 
 
-def plan(cfg: Config, project: str, task_ids: list[str], limit: int) -> Queue:
+def plan(
+    cfg: Config, project: str, task_ids: list[str], limit: int, ready: int = 0
+) -> Queue:
     """The queue the confirmation screen shows, ordered, or QueueError.
 
     Refused before anything is shown: a repeated id, a task nobody described
@@ -198,35 +210,81 @@ def plan(cfg: Config, project: str, task_ids: list[str], limit: int) -> Queue:
     `source` (ADR 127) — a limit that is not positive, and a cycle among the
     listed tasks' `depends_on`. The order is the listed one,
     moved only as far as a dependency inside the queue requires.
+
+    `ready` adds up to that many tasks from the board's Ready order (ADR 130)
+    after the listed ones, in that order: the owner's own list is never
+    reordered by it (ADR 132). A ready task the checks above would refuse is
+    passed over, not a refusal of the queue, and named in `passed_over`.
     """
     if limit <= 0:
         raise QueueError("the limit must be a positive number of tokens")
-    if not task_ids:
+    if ready < 0:
+        raise QueueError("the number of ready tasks to add cannot be negative")
+    if not task_ids and not ready:
         raise QueueError("a queue needs at least one task")
     if len(set(task_ids)) != len(task_ids):
         raise QueueError("a task is listed twice")
-    entries: dict[str, Entry] = {}
-    for task_id in task_ids:
-        text = tasks.read_description(cfg.hive_tasks_dir, task_id)
-        if not text:
-            raise QueueError(f"task {task_id} has no description")
-        try:
-            description = tasks.parse_description(text)
-        except tasks.DescriptionError as exc:
-            raise QueueError(f"task {task_id}: the task description {exc}") from None
-        task = _task_file(cfg, task_id)
-        problems = tasks.dispatch_problems(task) if task is not None else []
-        if problems:
-            raise QueueError(f"task {task_id} cannot run: {'; '.join(problems)}")
-        depends_on = list(task.depends_on or []) if task is not None else []
-        entries[task_id] = Entry(task_id, _title(description), depends_on)
+    entries = {task_id: _entry(cfg, task_id) for task_id in task_ids}
+    picked, passed_over = _pick_ready(cfg, ready, frozenset(task_ids))
+    entries.update((e.task_id, e) for e in picked)
+    if not entries:
+        raise QueueError("no task is ready to add, and none is listed")
     return Queue(
         queue_id=new_queue_id(),
         project=project,
         limit=limit,
-        entries=_ordered(task_ids, entries),
+        entries=_ordered(list(entries), entries),
         created_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        passed_over=passed_over,
     )
+
+
+def _entry(cfg: Config, task_id: str) -> Entry:
+    """The queue's entry for one task, or QueueError for the first reason it cannot run."""
+    text = tasks.read_description(cfg.hive_tasks_dir, task_id)
+    if not text:
+        raise QueueError(f"task {task_id} has no description")
+    try:
+        description = tasks.parse_description(text)
+    except tasks.DescriptionError as exc:
+        raise QueueError(f"task {task_id}: the task description {exc}") from None
+    task = _task_file(cfg, task_id)
+    problems = tasks.dispatch_problems(task) if task is not None else []
+    if problems:
+        raise QueueError(f"task {task_id} cannot run: {'; '.join(problems)}")
+    depends_on = list(task.depends_on or []) if task is not None else []
+    return Entry(task_id, _title(description), depends_on)
+
+
+def _pick_ready(
+    cfg: Config, count: int, listed: frozenset[str]
+) -> tuple[list[Entry], list[str]]:
+    """The first `count` tasks of the Ready order not listed, and why others were passed over.
+
+    The order is `tasks.ready_order` over every task file, as `board_list`
+    serves it: the bucket lifted by what waits on it, then the rank, then the
+    id. Every task it names has its dependencies merged, so `_ordered` never
+    holds one back; it moves one forward only for a listed task that depends
+    on it. Read here, once: a resume runs what was confirmed and never picks
+    again.
+    """
+    picked: list[Entry] = []
+    passed_over: list[str] = []
+    if count == 0:
+        return picked, passed_over
+    for task_id in tasks.ready_order(tasks.read_all_tasks(cfg.hive_tasks_dir)):
+        if len(picked) == count:
+            break
+        if task_id in listed:
+            continue
+        try:
+            entry = _entry(cfg, task_id)
+        except QueueError as exc:
+            passed_over.append(str(exc))
+            continue
+        entry.from_ready = True
+        picked.append(entry)
+    return picked, passed_over
 
 
 def _ordered(task_ids: list[str], entries: dict[str, Entry]) -> list[Entry]:
@@ -278,7 +336,11 @@ def confirmation(cfg: Config, queue: Queue) -> str:
     ]
     for n, e in enumerate(queue.entries, 1):
         after = f"  (after {', '.join(e.depends_on)})" if e.depends_on else ""
-        lines.append(f"  {n}. {e.task_id}  {e.title}{after}")
+        picked = "  [from Ready]" if e.from_ready else ""
+        lines.append(f"  {n}. {e.task_id}  {e.title}{after}{picked}")
+    if queue.passed_over:
+        lines += ["", "Passed over from the Ready order:"]
+        lines += [f"  {why}" for why in queue.passed_over]
     lines += [
         "",
         "Each task runs one cycle: " + ", ".join(roles(cfg)) + ".",
