@@ -8754,3 +8754,61 @@ task adds them to the console's `Task` type.
 - Serving the `merged` record: what the reader asks is whether it merged.
 - An api-only `split_into` warning: the board-service would not give it,
   and the two services would disagree about the same file.
+
+## ADR 138 — The console's Backlog screen reads `/api/tasks` and writes through the board-service
+
+**Status:** accepted (T-093, 2026-10-18). Step 8 of
+`docs/plans/board-service.md`. Builds on ADR 136 (the forward) and ADR 137
+(the epic fields on a task row). Replaces the Backlog screen's mock.
+
+**Context.** `front/src/routes/backlog.tsx` read a fixture list with a
+completion toggle that no service had. The board-service now takes the
+backlog's verdicts (`POST /api/tasks/<id>/accept`) and rank edits
+(`PATCH /api/tasks/<id>`), and the api serves every field the screen needs.
+
+**Decision.**
+1. *One read.* The screen reads `tasksQuery` (`/api/tasks`) and keeps the
+   `proposed`, `deferred` and `dropped` rows. No backlog-only route: the
+   board and the backlog are the same files.
+2. *The board's order, copied.* `front/src/lib/backlog.ts:compareTasks` is
+   `dispatcher/tasks.py:order_key`: bucket (`high`, `normal`, `low`; any
+   other value is `normal`), then rank (a missing or bad one is 0, so an
+   unranked item sorts *first* in its bucket), then id in number order.
+3. *Epics group their tasks.* A backlog item whose `epic` names another task
+   is drawn under it. The head is the epic's own row when it is in the
+   backlog, or a header row when the epic is on the board (`status: epic`)
+   or was not served.
+4. *Verdicts.* Accept sends `{to: "pending", priority}` with the row's
+   priority select (default: its bucket), defer `{to: "deferred"}` (on a
+   proposed item only), drop `{to: "dropped"}` after an inline confirm. A
+   dropped item shows `final` and no action. A task of an epic cannot be
+   accepted until its epic has `status: epic`, which is the board-service's
+   own refusal, shown before the click. No completion action: an item is
+   finished on the board, not here.
+5. *Reorder writes `rank`.* Up and down move a top-level, non-dropped row
+   past the next visible row of its bucket. The rank is computed over the
+   whole bucket, rows hidden by a filter included: the midpoint between the
+   new neighbours when they leave room, else the bucket is renumbered
+   `RANK_STEP` (1024) apart and only the changed ranks are written, one
+   `PATCH` after another. A reorder never crosses buckets; that is a
+   priority change.
+6. *Filters.* Status (dropped unticked by default), tag (`debt` is one) and
+   source (`none` for a task that records none). The options are the values
+   the backlog holds. A debt item's `debt_id` links to `/debt`.
+7. *Errors in a toast.* A refusal's message (`ApiError`, ADR 136) goes to
+   `toast.error`; a success names the task and the verdict.
+8. *The mock goes.* `listBacklog`, `setBacklogCompleted`, `backlogQuery`,
+   `BacklogItem` and its fixture are deleted. `actionBackendQuery` stays:
+   other screens read it.
+
+**Consequences.** The Backlog is the seventh screen on the real api. The
+front `Task` type carries `epic`, `split_into` (as `unknown`, narrowed by
+`splitInto`), `merged` and `title`.
+
+**Ruled out.**
+- A drag-and-drop library: a new dependency for what two buttons do.
+- Renumbering on every move: one write is enough while there is room, and
+  every write is a file change in the hive.
+- Moving dropped rows: dropped is final, and its rank decides nothing.
+- Parallel rank writes: a refusal mid-renumber would leave an order nobody
+  chose; in sequence it stops at the first refusal.

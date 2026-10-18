@@ -110,6 +110,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-004",
@@ -126,6 +130,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-007",
@@ -144,6 +152,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-008",
@@ -160,6 +172,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-011",
@@ -176,6 +192,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-012",
@@ -195,6 +215,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-013",
@@ -211,6 +235,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-014",
@@ -227,6 +255,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       task_id: "T-015",
@@ -243,6 +275,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
     {
       // The pre-merge check's stop (`CONFLICT_STATUS` in
@@ -261,6 +297,10 @@ export function mockTasks(): Task[] {
       tags: [],
       rank: null,
       debt_id: null,
+      epic: null,
+      split_into: [],
+      merged: false,
+      title: null,
     },
   ];
 }

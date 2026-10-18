@@ -127,7 +127,7 @@ on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
   CDN.
 - **Types mirror the api, not the screens.** `src/lib/api/types.ts` is the
   served contract. `src/lib/api/ops-types.ts` is the half that has no backend
-  at all — approvals, tokens, sessions, role models, backlog — and the
+  at all — approvals, tokens, sessions, role models — and the
   separation is deliberate: it is the list of what would have to be built.
 - **One shell.** Every screen renders inside
   `src/components/console/app-shell.tsx`, which owns the rail, the keyboard
@@ -142,13 +142,14 @@ on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
 
 ## What is real and what is not
 
-Of the twelve screens, six now read the api: **Board, task detail, Pool, Debt,
-the live tail and Learnings** — the task detail over three routes, the task card
-and the phase timeline since T-013 and its learnings region since T-016. The
-other six are built against `ops-types.ts` or against
-routes that do not exist, and have no backend of any kind: **Approvals, Tokens,
-Session logs, Role models, Backlog and Queue.** Writes are the
-same story; `docs/plans/front.md` tier 3 puts the write surface in a different
+Of the twelve screens, seven now read the api: **Board, task detail, Pool, Debt,
+the live tail, Learnings and Backlog** — the task detail over three routes, the
+task card and the phase timeline since T-013 and its learnings region since
+T-016, and the Backlog over `/api/tasks` since T-093, writing its accept, defer,
+drop and reorder through the board-service (ADR 138). The other five are built
+against `ops-types.ts` or against routes that do not exist, and have no backend
+of any kind: **Approvals, Tokens, Session logs, Role models and Queue.** Their
+writes are the same story; `docs/plans/front.md` tier 3 puts the write surface in a different
 service, for reasons that are about blast radius rather than convenience.
 
 Tier 1 of that plan is parity with the Flask board's four screens against the real

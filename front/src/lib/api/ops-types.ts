@@ -67,22 +67,3 @@ export interface RoleModelConfig {
   model: string;
   updated_at: string | null;
 }
-
-export type BacklogKind = "task" | "epic";
-export type BacklogCategory =
-  "harness" | "pool" | "gates" | "learnings" | "debt" | "docs" | "infra";
-
-export interface BacklogItem {
-  id: string;
-  kind: BacklogKind;
-  title: string;
-  category: BacklogCategory;
-  /** 1 = highest. Ordering on the screen follows this number. */
-  priority: number;
-  created_at: string;
-  completed: boolean;
-  completed_at: string | null;
-  /** Set when the item is (or was) worked as a harness task. */
-  task_id: string | null;
-  notes: string | null;
-}
