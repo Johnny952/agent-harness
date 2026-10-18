@@ -123,6 +123,11 @@ Under C-12 a verdict authorizes what it starts; the three are in its list
 since 2026-10-11 (C-12, *Amended*). Running the command spends no
 quota; resuming the phase does, and the verdict authorizes it too.
 
+**Built 2026-10-18** by T-074 (`docs/decisions.md` ADR 119), in part: *Run
+once* and *Deny* are given from the CLI (`dispatch command-verdict`), not in
+Approvals, and recorded on the task as `command_verdicts`. *Allow* waits for
+step 5, the card for step 6.
+
 ### 5. The worker runs it, then the phase resumes
 
 The worker runs the command through `docker exec` on the resolved target:
@@ -138,6 +143,10 @@ than a fresh phase because the session keeps its context. It may resume on
 another account if the phase's account is cooling: sessions live on the
 shared volume (`docs/ROADMAP.md` check D1). In that case the target is
 resolved again from the account that resumes.
+
+**Built 2026-10-18** by T-074 (`docs/decisions.md` ADR 119), from the CLI
+rather than the worker, and only on the phase's own account. The log keeps
+the argv, the target, the `cwd` and the exit code, or a timeout with none.
 
 ### 6. A standing permission is per project and per role
 
@@ -194,6 +203,21 @@ Each step is a single surface:
 3. Target resolution and the denylist, with `accounts[].dind`, under an ADR.
 4. The verdicts in the board service, and the worker's execution and resume.
    This needs `board-service.md`'s queue and worker.
+
+   **Amended 2026-10-18** by the user's ruling: step 4 is built in the
+   dispatcher first, through a CLI verdict, without waiting for
+   `board-service.md`'s queue and worker. The verdicts move to Approvals when
+   the board service exists, and its worker calls the same function.
+
+   **Built 2026-10-18** by T-074 (`docs/decisions.md` ADR 119).
+   `dispatch command-verdict <task> <n> run|deny [--comment TEXT]` calls
+   `command_run.run_command_request`: *run* re-checks the request on the
+   phase's account, runs the argv through `docker exec -w <cwd>` with no
+   shell (300 s timeout, 64 KiB output cap), writes `commands/<n>.log` under
+   the task's scratch dir, and resumes the phase's session with the result;
+   *deny* resumes it with the comment. The cycle then goes on as after that
+   phase. *Allow*, the allowlist and a resume on another account are not
+   built.
 5. The per-project, per-role allowlist and its merge into a phase's flags.
 6. The card in Approvals. A front task, behind its own ask for a build.
 

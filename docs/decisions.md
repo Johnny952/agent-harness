@@ -7351,3 +7351,97 @@ worktree path, and step 4 has to decide how a command run in the dind reaches
 the tree (a bind mount, or `docker compose --project-directory` from the agent
 side). The `board` names in `HARNESS_SERVICES` are a guess until the board
 service is built.
+
+## ADR 119 — a command request's verdict is given from the CLI, runs the argv with no shell, and resumes the phase's own session
+
+**Status:** accepted (T-074, 2026-10-18; building step 4 in the dispatcher
+first, through a CLI verdict, without waiting for the board service, was the
+user's ruling the same day). Builds step 4 of `docs/plans/command-requests.md`
+(decisions 4 and 5) for *Run once* and *Deny*. The plan gains an *Amended*
+and a *Built* note under step 4 and *Built* notes under decisions 4 and 5; the
+rest of its text is not edited.
+
+**Context.** ADR 117 ends a cycle blocked on `command_request` when a phase
+files a command it was refused, and ADR 118 resolves each accepted request
+to a container and a `cwd` and runs the denylist on it. Nothing unblocked
+such a task: the plan put the verdicts in the board service's queue and
+worker, which do not exist yet. The operator needs to answer a request now,
+and the board service's worker will need the same step later.
+
+**Decision.**
+1. *`dispatch command-verdict <task> <n> run|deny --project <slug>
+   [--comment TEXT]`.* `<n>` is the 1-based index into the accepted list of
+   the filing envelope's `command_requests`. The CLI calls one function,
+   `command_run.run_command_request(cfg, task_id, slug, n, verdict,
+   comment=None, by="operator") -> CycleOutcome`, which the board service's
+   worker is to call too. A refusal raises `VerdictRefused` with a reason,
+   which the CLI prints and exits 1 on; otherwise the exit follows the
+   outcome as `run-task` does (blocked 1, held 75, split 3).
+2. *The filing block.* The newest `saved_at` among the implementador's and
+   the cartografo's envelopes that recorded any request is the block. Each
+   of these is refused before anything runs or is recorded: a verdict other
+   than `run` or `deny`; a task not `blocked` with `blocked_reason:
+   command_request`; no filed requests on record; an `n` out of range; an
+   `n` on a block whose requests were all refused at filing (a refused
+   request has no number and is never the operator's to run); a block that
+   already has a verdict; a session not on record; and, on *run*, a request
+   that no longer passes its check (decision 4).
+3. *One verdict per block, recorded first.* The task file gains
+   `command_verdicts`, a list of `{n, verdict, by, at, comment, role,
+   filed_at}`, `filed_at` being the envelope's `saved_at`. A block matched by
+   role and `filed_at` that already has one is refused, naming it: the
+   verdict resumes the phase, and its other requests are moot once the phase
+   has gone on. A request filed again by the resumed phase is a new envelope,
+   so a new block. The verdict is recorded before the command runs, so a
+   crash past that point can never run it twice.
+4. *Run re-checks on the account that resumes.* The `resolved` key is
+   dropped and step 3's `command_targets.check` runs again with that
+   account, its writer worktree and the dind's running services, so a
+   stopped service or a config edit since filing refuses it ("no longer
+   passes its check: <reason>"). *Deny* runs nothing and is not checked.
+5. *No shell.* The argv runs through `docker_exec.run_docker_exec(container,
+   cwd, argv)`, that is `docker exec -w <cwd> <container> <argv...>` as list
+   items, so a `;` or a `$(...)` is an argument. A `service` target runs
+   `docker compose exec -T <service> <argv...>` in its dind from the
+   resolved `cwd`, so compose finds the project the agent started there (the
+   dinds mount `/data/projects` at the agent's path since this task's base).
+   The timeout is `COMMAND_TIMEOUT_SECONDS = 300` and the output cap
+   `OUTPUT_CAP_BYTES = 64 KiB`, module constants; past the cap the rest is
+   dropped and `TRUNCATED_MARKER` says how many bytes.
+6. *The log.* `commands/<n>.log` under the task's scratch dir, where the
+   resumed phase can read it, written atomically. Its header lines are
+   `argv: <JSON list>`, `target: <kind> <container>`, `service: <name>` for a
+   service, `cwd: <path>`, then `exit: <code>`, or `timeout: after 300s, no
+   exit code` on a timeout; then `--- output ---` and the (capped) output,
+   stdout before stderr.
+7. *The resume.* `run_phase` gains `resume_session_id`, `prompt` and
+   `account`, and `dispatch_phase` gains `only_account`, which counts every
+   other account as tried, so a pinned call that cannot get its account ends
+   `no_account` and the task is held. The envelope now records the phase's
+   `session_id` and `account`; for an envelope written before, the newest
+   usage line of that role and round with a session is read. *Run*'s prompt
+   carries the request's number, its argv as JSON, the target and `cwd`, the
+   exit code or the timeout, and the output in a fence, or the log's path
+   when the output passed the cap. *Deny*'s carries the argv and the comment,
+   or `denied, no comment`, and says not to run it another way.
+8. *The cycle goes on as after that phase.* `run_task_cycle` is split so the
+   resume reuses its code: `_cycle_rounds(..., resumed=(round, result))` for
+   an implementador starts the rounds from the result it returned (the gates,
+   then the revisor, and on to the auditor), and `_cycle_from_arquitecto`
+   follows a resumed cartografo. A resumed phase that files a request again
+   blocks again, read the way a cycle reads it. The resume opens and closes
+   the cycle with `open_cycle` and `close_cycle`, as `run-phase` does, with no
+   scheduler.
+
+Out of scope: *Allow for this role* and the allowlist (step 5), the Approvals
+card and any api route (step 6), the board service, and a resume on another
+account than the phase's.
+
+**Consequences.** A task blocked on a command request can be unblocked by the
+operator, and the board service's worker has one function to call. A resume
+held after the verdict (its account not idle) leaves the verdict recorded, so
+a second verdict is refused; the phase is then run again with `run-phase`,
+in a fresh session. The
+timeout kills the `docker exec` client, not the process inside the container.
+The resume carries no write window, as `run-phase` does not.
+`--permission-prompt-tool` (ADR 118, decision 8) stays deferred.

@@ -71,6 +71,10 @@ class TaskFile:
     # only `command_request` (ADR 117). Written only when set, and cleared when
     # the task is taken again.
     blocked_reason: str | None = None
+    # The operator's verdicts on this task's command requests (ADR 119), one
+    # `{"n", "verdict", "by", "at", "comment", "role", "filed_at"}` per block,
+    # so a second verdict on the same block is refused. Written only when set.
+    command_verdicts: list[dict] = dataclasses.field(default_factory=list)
 
 
 def hive_root(hive_dir: str) -> str:
@@ -193,6 +197,8 @@ def save_handoff(
     round_num: int | None = None,
     permission_denials: object = PERMISSION_DENIALS_ABSENT,
     command_requests: object = COMMAND_REQUESTS_ABSENT,
+    session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Keep the structured return of a phase, not just its prose rendering.
 
@@ -225,6 +231,11 @@ def save_handoff(
     `command_requests` is the check of the phase's requests (ADR 117):
     `{"accepted": [...], "refused": [{"request": ..., "reason": ...}]}`.
     Absent the same way, so a role that cannot file one writes no such key.
+
+    `session_id` and `account` are the call's CLI session and the account it
+    ran on, written only when given (`docs/decisions.md` ADR 119): a command
+    request's verdict resumes that session, on that account, days after the
+    process that ran the phase is gone.
     """
     path = handoff_path(hive_dir, task_id, role)
     envelope = {
@@ -237,11 +248,34 @@ def save_handoff(
         envelope["permission_denials"] = permission_denials
     if command_requests is not COMMAND_REQUESTS_ABSENT:
         envelope["command_requests"] = command_requests
+    if session_id:
+        envelope["session_id"] = session_id
+    if account:
+        envelope["account"] = account
     # Made here rather than by `_write_atomic`'s own mkdir, which cannot tell
     # the hive from what is under it: `handoffs/` and the scratch dir have to
     # be traversable by `/api/phases`' uid, the file alone is not enough.
     _makedirs_readable(hive_dir, os.path.dirname(path))
     _write_atomic(path, json.dumps(envelope, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+#: Where a command request's run is logged, `<n>.log` per request, under the
+#: task's scratch dir, where the resumed phase can read it (ADR 119). Its own
+#: directory, for the reason `_HANDOFF_SUBDIR` gives: the scratch dir is
+#: writable by the phases.
+_COMMANDS_SUBDIR = "commands"
+
+
+def command_log_path(hive_dir: str, task_id: str, n: int) -> str:
+    return os.path.join(scratch_dir(hive_dir, task_id), _COMMANDS_SUBDIR, f"{n}.log")
+
+
+def save_command_log(hive_dir: str, task_id: str, n: int, text: str) -> str:
+    """Write the log of command request `n`, atomically. Raises OSError. Returns its path."""
+    path = command_log_path(hive_dir, task_id, n)
+    _makedirs_readable(hive_dir, os.path.dirname(path))
+    _write_atomic(path, text)
     return path
 
 
@@ -585,6 +619,7 @@ def read_task_file(path: str) -> TaskFile:
         split_into=fm.get("split_into") or [],
         merged=fm.get("merged") or None,
         blocked_reason=fm.get("blocked_reason") or None,
+        command_verdicts=fm.get("command_verdicts") or [],
     )
 
 
@@ -706,6 +741,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["merged"] = task.merged
     if task.blocked_reason:
         fm["blocked_reason"] = task.blocked_reason
+    if task.command_verdicts:
+        fm["command_verdicts"] = task.command_verdicts
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 
