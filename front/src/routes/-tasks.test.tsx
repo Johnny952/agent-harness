@@ -38,6 +38,12 @@ const TASK: TaskDetail = {
   description: DESCRIPTION,
   resolved_debt: [],
   lock_expired: null,
+  phase: null,
+  priority: "normal",
+  source: null,
+  tags: [],
+  rank: null,
+  debt_id: null,
   body: "",
 };
 

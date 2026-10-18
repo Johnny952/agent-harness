@@ -8587,3 +8587,79 @@ merged", which is loose when a sibling was dropped.
   it would stay `epic` for good.
 - Closing from `_accept_epic`: it moves only epics in the backlog, which
   `close_epic` does not close.
+
+## ADR 136 — The console forwards the backlog's writes to the board-service, behind its own CSRF check
+
+**Status:** accepted (T-091, 2026-10-18). Step 8 of
+`docs/plans/board-service.md`, sections 4, 6 and 8. Extends ADR 24's
+whitelist and ADR 112's second upstream. Reads ADR 133 for `/api/ready` and
+ADR 135 for the comments read.
+
+**Context.** The backlog screens need four writes: propose, edit, comment
+and accept. The board-service makes them (ADR 129) and listens on
+`console_net`. The browser cannot reach it, and must not: it takes no token,
+and it refuses any request with an `Origin` header, so a page in a browser
+could never call it directly anyway. `lib/api/forward.ts` already forwards
+reads to the api and the settings routes to the config writer. Its 405 for
+"reads only" stood between the browser and any other write.
+
+**Decision.**
+1. *A third upstream, four pairs.* `forward.ts` matches exactly `POST
+   /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`
+   and `POST /api/tasks/<id>/accept`, before the 405. Every other method on
+   those paths keeps its old answer: 405 on an api path, 404 on a path the
+   api does not have. The id is decoded and re-encoded as one segment, as on
+   the read routes. No query parameter crosses.
+2. *Its address.* `BOARD_SERVICE_URL`, default `http://board-service:8792`,
+   the compose service on `console_net`, trailing slashes trimmed. No token:
+   the board-service has none to check. A 5000 ms timeout.
+3. *The CSRF check is the console's.* The session-less console has no
+   cookie to protect, but the board-service writes the hive, so a page on
+   another site must not be able to make the operator's browser write it.
+   The forward refuses, without calling the board-service: a body whose
+   content type is not `application/json` (415, which a plain HTML form or
+   a CORS-simple request cannot send); a `Sec-Fetch-Site` that is present
+   and not `same-origin` (403); an `Origin` that is present and not the
+   request's own origin (403). A request with neither header passes: a
+   browser sends at least one on a cross-site `POST` or `PATCH`.
+4. *Nothing of the browser's goes upstream.* Only `Content-Type:
+   application/json` and the body bytes, capped at 64 KiB (413 over it, by
+   the declared length or while reading). Not `Origin`, which the
+   board-service would refuse, nor a cookie or an `Authorization`.
+5. *Its answer passes back unchanged:* status (201 included), body and
+   content type. The board-service's results are bare, not the envelope, so
+   `client.ts` reads them with a reader that keeps `readEnvelope`'s JSON and
+   `{error}` checks and nothing else.
+6. *Failures name the service, not its address.* "The board-service could
+   not be reached." is a 502 and a timeout is a 504. The address goes to the
+   server log only.
+7. *The comments path is shared by method.* `GET /api/tasks/<id>/comments`
+   is the api's read (ADR 135), forwarded like the usage route: one
+   segment, no parameter, no project. `POST` on the same path is the
+   board-service's write. `/api/ready` is forwarded with no parameter and
+   no project. That makes twelve api routes.
+8. *No mock.* `getReady`, `listComments` and the four writes are real
+   `fetch`es in every mode, as the settings writes are (ADR 113). Their
+   mutations refetch `tasks`, `ready`, and the task's own `task` and
+   `comments` queries when they settle.
+
+**Consequences.** The console can write the backlog with no new credential.
+The 405's message still says "the console forwards reads only", which is
+true of the api's paths it is answered on. A non-browser client on
+`console_net` that sends neither header passes the CSRF check, the same as
+it could call the board-service directly. Compose needs no change: the
+console is already on `console_net`, and the default address is the
+service's name there.
+
+**Ruled out.**
+- The browser calling the board-service: it refuses every `Origin`, and it
+  would have to be published past loopback.
+- A token for the board-service: it has none, and the console holding one
+  would add a secret without a check behind it.
+- A CSRF token: there is no session to bind it to. The content type,
+  `Sec-Fetch-Site` and `Origin` checks need no state.
+- Forwarding any method on the matched paths: an exact list keeps a new
+  board-service route from reaching the browser by accident.
+- 503 for an unreachable board-service, as the config writer's: 503 there
+  also means "not configured", and the board-service has no such state, so
+  an unreachable one is a 502 gateway failure.
