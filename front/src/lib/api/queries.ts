@@ -1,5 +1,6 @@
 import { queryOptions } from "@tanstack/react-query";
 import * as api from "./client";
+import type { CommandRequestState } from "./types";
 
 /** Nothing polls faster than 2s. */
 export const POLL_MS = 2500;
@@ -42,6 +43,14 @@ export const roadmapQuery = queryOptions({
   queryFn: () => api.getRoadmap(),
   refetchInterval: POLL_MS * 2,
 });
+
+/** Keyed by the state filter, so each filter keeps its own cache. ADR 123. */
+export const commandRequestsQuery = (state?: CommandRequestState) =>
+  queryOptions({
+    queryKey: ["command-requests", state ?? "all"],
+    queryFn: () => api.getCommandRequests({ state }),
+    refetchInterval: POLL_MS,
+  });
 
 export const learningsQuery = queryOptions({
   queryKey: ["learnings"],

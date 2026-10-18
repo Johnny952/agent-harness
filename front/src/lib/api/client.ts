@@ -1,9 +1,9 @@
 /**
  * Typed API client. One function per endpoint.
  *
- * **Nine of them are real.** `listTasks`, `getTask`, `listAccounts`,
- * `listEvents`, `listDebt`, `listPhases`, `listLearnings`, `listUsage` and
- * `getRoadmap` read
+ * **Ten of them are real.** `listTasks`, `getTask`, `listAccounts`,
+ * `listEvents`, `listDebt`, `listPhases`, `listLearnings`, `listUsage`,
+ * `getRoadmap` and `getCommandRequests` read
  * `observability/api/` through the console's own
  * origin — `lib/api/forward.ts` is the server half that holds the bearer, so
  * nothing here carries a credential and every URL below is relative. They resolve
@@ -18,12 +18,12 @@
  * dock. A screen reading one of those says so on itself rather than looking
  * finished; `docs/ui.md` *A region with no route says which route, and when*.
  *
- * Relative URLs mean these nine may only be called from the browser: a relative
+ * Relative URLs mean these ten may only be called from the browser: a relative
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
  * `useEffect` today, and ADR 24 names moving one into a route loader as the case
  * that has to answer the base-URL question again.
  *
- * **A tenth is real through another forward.** `getSettings` reads
+ * **An eleventh is real through another forward.** `getSettings` reads
  * `/api/settings`, which `lib/api/forward.ts` sends to the config writer rather
  * than the api, under the writer's own token (`docs/decisions.md` ADR 112). It goes
  * through the same `readEnvelope`, so a writer that refused, timed out or was never
@@ -38,6 +38,8 @@ import type {
   Account,
   ApiResult,
   ChatThread,
+  CommandRequestState,
+  CommandRequests,
   DebtEntry,
   HookEvent,
   LearningEntry,
@@ -75,8 +77,8 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  */
 const actionBackendDown = false;
 
-/* ── The nine wired reads ─────────────────────────────────────────────────
- * One boundary function, and every one of the nine goes through it: ADR 7's
+/* ── The ten wired reads ──────────────────────────────────────────────────
+ * One boundary function, and every one of the ten goes through it: ADR 7's
  * "one boundary function per call", inherited by the console under ADR 16.
  */
 
@@ -285,6 +287,26 @@ export function listUsage(taskId: string): Promise<ApiResult<UsageGroup[] | null
  */
 export function getRoadmap(): Promise<ApiResult<Roadmap>> {
   return readEnvelope<Roadmap>("/api/roadmap");
+}
+
+/**
+ * The command requests filed across the hive, each with its state, and the
+ * ones the check refused at filing.
+ *
+ * One read and no mapping: the order (pending first), the states and the CLI
+ * lines are the api's (`observability/api/app.py`, ADR 122). Hive-wide, so the
+ * forward adds no project: `project` and `state` are filters the caller picks,
+ * and an unknown one is the api's 404 or 400. Read only — a verdict is given
+ * from the CLI (`docs/decisions.md` ADR 123).
+ */
+export function getCommandRequests(
+  params: { project?: string | undefined; state?: CommandRequestState | undefined } = {},
+): Promise<ApiResult<CommandRequests>> {
+  const query = new URLSearchParams();
+  if (params.project) query.set("project", params.project);
+  if (params.state) query.set("state", params.state);
+  const qs = query.toString();
+  return readEnvelope<CommandRequests>(`/api/command-requests${qs ? `?${qs}` : ""}`);
 }
 
 /**

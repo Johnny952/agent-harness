@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, GitBranch, X } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
+import { CommandRequestsSection } from "@/components/console/command-requests";
 import {
   EmptyState,
   ErrorState,
@@ -69,6 +70,9 @@ function ApprovalsPage() {
           subtitle="Everything the harness is waiting on you for."
           right={<RefreshedAt at={q.dataUpdatedAt} />}
         />
+        {/* Real, and read-only: the command requests phases filed (ADR 123). The
+            approvals below it are still the mock's. */}
+        <CommandRequestsSection />
         {backendUp === false && (
           <Banner tone="danger">
             Decisions are disabled while the action backend is unreachable. You can still review
