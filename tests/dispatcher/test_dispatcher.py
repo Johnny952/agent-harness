@@ -6038,6 +6038,9 @@ def test_usage_record_keeps_every_number_a_full_result_carried(tmp_path) -> None
         "output_tokens": 9_500,
         "cache_read_input_tokens": 480_000,
         "cache_creation_input_tokens": 31_000,
+        # No `permission_denials` key in the result, so not reported: null,
+        # and no `permission_denials_dropped` (ADR 116).
+        "permission_denials": None,
     }
     # Plain JSON all the way down: `append_usage` serialises this as it is.
     assert json.loads(json.dumps(record)) == record
@@ -6346,6 +6349,253 @@ def test_a_usage_log_that_cannot_be_written_does_not_cost_the_phase(
         "implementador" in r.getMessage() and "No space left on device" in r.getMessage()
         for r in caplog.records
     )
+
+
+# --- what the CLI refused, recorded (ADR 116) --------------------------------
+#
+# The `permission_denials` list a `claude -p` result carries, reduced to three
+# keys per entry and capped, on the usage line and in the handoff envelope.
+
+
+def _denial_record(raw):
+    return dispatcher_mod._usage_record(
+        "T-069", "implementador", 1, "cuenta1", "phase", None,
+        ClaudeResult(session_id="sess-1", result_text="", raw=raw),
+        _USAGE_NOW,
+    )
+
+
+_BASH_DENIAL = {
+    "tool_name": "Bash",
+    "tool_use_id": "toolu_01",
+    "tool_input": {"command": "npm i", "description": "Install packages"},
+}
+
+
+def test_usage_record_keeps_each_denial_the_cli_reported() -> None:
+    record = _denial_record({"permission_denials": [_BASH_DENIAL]})
+
+    assert record["permission_denials"] == [_BASH_DENIAL]
+    assert "permission_denials_dropped" not in record
+    assert json.loads(json.dumps(record)) == record
+
+
+def test_usage_record_keeps_an_empty_list_apart_from_an_absent_one() -> None:
+    """`[]` is "the CLI said nothing was refused"; `null` is "it did not say".
+    A reader asking whether a permission cost a phase needs the difference."""
+    assert _denial_record({"permission_denials": []})["permission_denials"] == []
+    assert _denial_record({"is_error": False})["permission_denials"] is None
+    assert _denial_record({})["permission_denials"] is None
+
+
+@pytest.mark.parametrize("value", [None, {"tool_name": "Bash"}, "Bash", 3, True])
+def test_usage_record_denials_that_are_not_a_list_are_null(value) -> None:
+    record = _denial_record({"permission_denials": value})
+
+    assert record["permission_denials"] is None
+    assert "permission_denials_dropped" not in record
+
+
+def test_usage_record_drops_the_keys_of_a_denial_it_does_not_know() -> None:
+    entry = {**_BASH_DENIAL, "reason": "not allowed", "extra": {"x": 1}}
+
+    record = _denial_record({"permission_denials": [entry]})
+
+    assert record["permission_denials"] == [_BASH_DENIAL]
+
+
+def test_usage_record_fills_in_null_for_a_missing_id_or_input() -> None:
+    record = _denial_record({"permission_denials": [{"tool_name": "Write", "tool_use_id": 7}]})
+
+    assert record["permission_denials"] == [
+        {"tool_name": "Write", "tool_use_id": None, "tool_input": None},
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry, type_name",
+    [
+        ("Bash", "str"),
+        (["Bash"], "list"),
+        (None, "NoneType"),
+        ({"tool_use_id": "toolu_01"}, "dict"),
+        ({"tool_name": 3, "tool_input": {}}, "dict"),
+    ],
+)
+def test_usage_record_marks_a_malformed_denial_instead_of_dropping_it(entry, type_name) -> None:
+    """Kept in place and named for what it was, so a format drift shows on the
+    page instead of as a list one entry shorter."""
+    record = _denial_record({"permission_denials": [_BASH_DENIAL, entry]})
+
+    assert record["permission_denials"] == [_BASH_DENIAL, {"malformed": type_name}]
+
+
+def test_usage_record_keeps_fifty_denials_and_counts_the_rest() -> None:
+    denials = [
+        {"tool_name": "Bash", "tool_use_id": f"toolu_{i}", "tool_input": {"command": str(i)}}
+        for i in range(53)
+    ]
+
+    record = _denial_record({"permission_denials": denials})
+
+    assert len(record["permission_denials"]) == 50
+    assert record["permission_denials"][-1]["tool_use_id"] == "toolu_49"
+    assert record["permission_denials_dropped"] == 3
+
+
+def test_usage_record_of_exactly_fifty_denials_drops_nothing() -> None:
+    denials = [{"tool_name": "Bash", "tool_use_id": None, "tool_input": None}] * 50
+
+    record = _denial_record({"permission_denials": denials})
+
+    assert len(record["permission_denials"]) == 50
+    assert "permission_denials_dropped" not in record
+
+
+def test_usage_record_cuts_every_long_string_in_a_denial_input() -> None:
+    body = "x" * 1_234
+    entry = {
+        "tool_name": "Write",
+        "tool_use_id": "toolu_02",
+        "tool_input": {
+            "file_path": "/repo/a.py",
+            "content": body,
+            "edits": [{"old_string": body, "new_string": "y" * 500}],
+        },
+    }
+
+    record = _denial_record({"permission_denials": [entry]})
+
+    kept = record["permission_denials"][0]["tool_input"]
+    cut = "x" * 500 + "…[cut 734 chars]"
+    assert kept["file_path"] == "/repo/a.py"
+    assert kept["content"] == cut
+    assert kept["edits"][0]["old_string"] == cut
+    assert kept["edits"][0]["new_string"] == "y" * 500, "500 is the limit, not past it"
+    # The CLI's own object is left as it was: the reduction copies.
+    assert entry["tool_input"]["content"] == body
+
+
+def test_usage_record_a_denial_that_will_not_reduce_is_null_and_the_line_stands(
+    monkeypatch, caplog,
+) -> None:
+    def boom(raw):
+        raise RuntimeError("unexpected shape")
+
+    monkeypatch.setattr(dispatcher_mod, "_reduce_permission_denials", boom)
+
+    with caplog.at_level("WARNING"):
+        record = _denial_record(_FULL_RAW | {"permission_denials": [_BASH_DENIAL]})
+
+    assert record["permission_denials"] is None
+    assert record["input_tokens"] == 1_200, "the rest of the line is unharmed"
+    assert "unexpected shape" in caplog.text
+
+
+def test_a_denial_that_will_not_reduce_does_not_cost_the_phase(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(
+            session_id="sess-1", result_text="built it",
+            raw=_FULL_RAW | {"permission_denials": [_BASH_DENIAL]},
+        ),
+    ])
+
+    def boom(raw):
+        raise RuntimeError("unexpected shape")
+
+    monkeypatch.setattr(dispatcher_mod, "_reduce_permission_denials", boom)
+
+    with caplog.at_level("WARNING"):
+        result = dispatcher_mod.dispatch_phase(
+            cfg, "task-1", "myproj", "implementador", "build the thing",
+        )
+
+    assert result.success is True
+    assert result.permission_denials is None
+    lines = _usage_lines(cfg)
+    assert len(lines) == 1
+    assert lines[0]["permission_denials"] is None
+    assert "unexpected shape" in caplog.text
+
+
+def test_a_dispatched_phase_hands_back_the_denials_of_its_last_call(tmp_path, monkeypatch) -> None:
+    """Each retry replaces `result`, so the handoff's denials are the call that
+    answered — the retry — while each call keeps its own on its usage line."""
+    cfg = _make_config(tmp_path)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="", raw={
+            "is_error": False, "structured_output": _FAT_HANDOFF,
+            "permission_denials": [_BASH_DENIAL],
+        }),
+        ClaudeResult(session_id="sess-1", result_text="", raw={
+            "is_error": False, "structured_output": _LEAN_HANDOFF, "permission_denials": [],
+        }),
+    ])
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "revisor", "review the thing")
+
+    assert result.permission_denials == []
+    lines = _usage_lines(cfg)
+    assert [line["permission_denials"] for line in lines] == [[_BASH_DENIAL], []]
+
+
+def test_a_phase_with_no_account_hands_back_no_denials() -> None:
+    """No call was made, so there is nothing to have been refused or not: the
+    default, which `save_handoff` writes as no key at all."""
+    result = dispatcher_mod.DispatchResult(
+        success=False, session_id=None, result_text="no accounts available", account="",
+        no_account=True,
+    )
+
+    assert result.permission_denials is dispatcher_mod.context_transfer.PERMISSION_DENIALS_ABSENT
+
+
+def test_run_single_phase_writes_the_denials_into_the_envelope(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED",
+            account="cuenta1", handoff={"verdict": "APPROVED"},
+            permission_denials=[_BASH_DENIAL],
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    envelope = dispatcher_mod.context_transfer.read_handoff_envelope(
+        cfg.hive_tasks_dir, "task-1", "revisor",
+    )
+    assert envelope["permission_denials"] == [_BASH_DENIAL]
+    assert envelope["handoff"] == {"verdict": "APPROVED"}
+
+
+def test_run_single_phase_writes_null_denials_as_null(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="VERDICT: APPROVED",
+            account="cuenta1", handoff={"verdict": "APPROVED"}, permission_denials=None,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+    dispatcher_mod.run_single_phase(
+        cfg, "task-1", "myproj", "revisor", round_num=2, description=_DESCRIPTION,
+    )
+
+    envelope = dispatcher_mod.context_transfer.read_handoff_envelope(
+        cfg.hive_tasks_dir, "task-1", "revisor",
+    )
+    assert "permission_denials" in envelope
+    assert envelope["permission_denials"] is None
 
 
 def _left_behind_phase(tmp_path, monkeypatch, role="implementador"):

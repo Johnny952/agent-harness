@@ -102,6 +102,12 @@ class DispatchResult:
     #: its own when an account resets, and the CLI exits with a different code
     #: for it (ADR 52).
     no_account: bool = False
+    #: What the CLI refused during the call whose handoff this is — the last
+    #: call, since each retry replaces the result — reduced as the usage log
+    #: reduces it: a list, `[]` for none, `None` for not reported. Left at
+    #: the "absent" default by a phase that made no call, so `save_handoff`
+    #: writes no key for it (`docs/decisions.md` ADR 116).
+    permission_denials: object = context_transfer.PERMISSION_DENIALS_ABSENT
 
 
 class CycleOutcome(enum.Enum):
@@ -521,6 +527,106 @@ def _number_or_none(value: object) -> int | float | None:
     return value
 
 
+#: How many refused tool calls one usage line keeps, and how long any string
+#: inside a kept `tool_input` may be. Both exist so a line stays a few KB at
+#: most: `/api/tasks/<id>/usage` reads up to `MAX_USAGE_CALLS` lines whole,
+#: and that bound was set for lines of scalars (`docs/decisions.md` ADR 116).
+_MAX_PERMISSION_DENIALS = 50
+_MAX_DENIAL_STRING = 500
+
+
+def _cut_strings(value: object) -> object:
+    """`value` with every string in it cut to `_MAX_DENIAL_STRING` characters.
+
+    Walks objects and lists, because a `tool_input` is whatever the tool takes
+    and a long string (a file body for Write, a script for Bash) can sit at any
+    depth. Only values are cut, never object keys: keys are parameter names the
+    tool defined, and they are short. The marker says how much went, so a cut
+    value is never mistaken for the whole one (ADR 116).
+    """
+    if isinstance(value, str):
+        if len(value) <= _MAX_DENIAL_STRING:
+            return value
+        cut = len(value) - _MAX_DENIAL_STRING
+        return f"{value[:_MAX_DENIAL_STRING]}…[cut {cut} chars]"
+    if isinstance(value, dict):
+        return {key: _cut_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cut_strings(item) for item in value]
+    return value
+
+
+def _reduce_denial(entry: object) -> dict:
+    """One refused tool call as the log keeps it: three keys, or `malformed`.
+
+    Only `tool_name`, `tool_use_id` and `tool_input` are kept, so a key the CLI
+    adds later does not ride into the log unread. An entry that is not an
+    object, or that names no tool, is recorded as what it was instead of being
+    dropped, so a format drift shows on the page rather than as a shorter list
+    (`_number_or_none`'s rule: never coerce, never hide).
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("tool_name"), str):
+        return {"malformed": type(entry).__name__}
+    tool_use_id = entry.get("tool_use_id")
+    return {
+        "tool_name": entry["tool_name"],
+        "tool_use_id": tool_use_id if isinstance(tool_use_id, str) else None,
+        "tool_input": _cut_strings(entry.get("tool_input")),
+    }
+
+
+def _reduce_permission_denials(raw: dict) -> dict:
+    """What the CLI said it refused, reduced for the log (ADR 116).
+
+    `permission_denials` is `null` when the result has no such key or holds
+    something other than a list, and `[]` when the CLI reported an empty list:
+    "not reported" and "nothing was refused" are different facts, and a reader
+    deciding whether a permission failed a phase needs to tell them apart.
+    Past `_MAX_PERMISSION_DENIALS` entries the rest are counted, not kept, in
+    `permission_denials_dropped`, which is present only when something was.
+    """
+    denials = raw.get("permission_denials")
+    if not isinstance(denials, list):
+        return {"permission_denials": None}
+    fields: dict = {
+        "permission_denials": [_reduce_denial(entry) for entry in denials[:_MAX_PERMISSION_DENIALS]],
+    }
+    if len(denials) > _MAX_PERMISSION_DENIALS:
+        fields["permission_denials_dropped"] = len(denials) - _MAX_PERMISSION_DENIALS
+    return fields
+
+
+def _permission_denial_fields(raw: dict, task_id: str, role: str, call: str) -> dict:
+    """`_reduce_permission_denials`, or `null` if building it raised.
+
+    The rest of the line is worth more than this field: a usage line is what
+    says a call happened and what it cost, so a result shaped in a way the
+    reduction did not foresee loses only its denials, with a warning, and never
+    the line or the phase (ADR 116).
+    """
+    try:
+        return _reduce_permission_denials(raw)
+    except Exception as exc:
+        logger.warning(
+            "task %s: could not read the permission denials of the %s phase's %s call: %s; "
+            "recorded as null",
+            task_id, role, call, exc,
+        )
+        return {"permission_denials": None}
+
+
+def _handoff_denials(task_id: str, role: str, result: docker_exec.ClaudeResult) -> list | None:
+    """The denials list for the handoff envelope, from the call that answered.
+
+    Only the list: the envelope is one call's record and keeps the same
+    null/[] rule as the usage line, which is where `permission_denials_dropped`
+    lives for a call that hit the cap. Guarded like the usage line, so a result
+    the reduction chokes on is written as `null` with a warning, never a phase
+    that fails at its last step (ADR 116).
+    """
+    return _permission_denial_fields(result.raw, task_id, role, "handoff")["permission_denials"]
+
+
 def _usage_record(
     task_id: str,
     role: str,
@@ -533,7 +639,8 @@ def _usage_record(
 ) -> dict:
     """One `claude` call as the task's usage log keeps it (ADR 53, ADR 68).
 
-    Nineteen keys in two halves. The first ten are the dispatcher's own and
+    Twenty keys in two halves, plus one that only a long list adds. The first
+    ten are the dispatcher's own and
     it always knows them; the rest keep the CLI's own spelling, so there is no
     translation table to maintain and a key the CLI renames shows up as a
     column that went all-null rather than as a number quietly meaning
@@ -553,6 +660,10 @@ def _usage_record(
     is `null`. That is a different fact from a call that cost nothing, and the
     distinction is the whole point: nothing here is summed, scaled, defaulted
     to zero or carried over from another call.
+
+    `permission_denials` is what the CLI refused during the call, reduced by
+    `_reduce_permission_denials`; `permission_denials_dropped` joins it only
+    when there were more entries than a line keeps (ADR 116).
     """
     raw = result.raw
     usage = raw.get("usage")
@@ -582,6 +693,7 @@ def _usage_record(
         "output_tokens": _number_or_none(usage.get("output_tokens")),
         "cache_read_input_tokens": _number_or_none(usage.get("cache_read_input_tokens")),
         "cache_creation_input_tokens": _number_or_none(usage.get("cache_creation_input_tokens")),
+        **_permission_denial_fields(raw, task_id, role, call),
     }
 
 
@@ -1830,6 +1942,7 @@ def dispatch_phase(
             return DispatchResult(
                 success=False, session_id=result.session_id, result_text=result.result_text,
                 account=account, handoff=_phase_handoff(container, result), gates=gate_report,
+                permission_denials=_handoff_denials(task_id, role, result),
             )
 
         # A turn the service actually served is proof the refusal is over —
@@ -1840,6 +1953,7 @@ def dispatch_phase(
         return DispatchResult(
             success=True, session_id=result.session_id, result_text=result.result_text,
             account=account, handoff=_phase_handoff(container, result), gates=gate_report,
+            permission_denials=_handoff_denials(task_id, role, result),
         )
 
 
@@ -2814,8 +2928,12 @@ def run_phase(
     # the rendering. Written here rather than in the cycle because this is the
     # one place every phase passes through, whichever entry point dispatched
     # it, which is what lets a task driven a phase at a time still be closed.
+    # The denials ride along for the same reason: the envelope is the one
+    # record of this phase's answer, and what it was refused is part of
+    # reading that answer (`docs/decisions.md` ADR 116).
     context_transfer.save_handoff(
         cfg.hive_tasks_dir, ctx.task_id, role, result.handoff, round_num=round_num,
+        permission_denials=result.permission_denials,
     )
     return result
 

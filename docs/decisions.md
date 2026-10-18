@@ -7064,3 +7064,71 @@ skill from the mapping commit; the dispatcher does not override it. Still
 unverified: bringing a project up in the agent's dind under `-p`. A resumed
 mapping phase is not told to run the generator again: the leading command
 belongs to the first call of the session.
+
+## ADR 116 — the CLI's permission denials are recorded on the usage line and in the handoff envelope, and listed on the task page
+
+**Status:** accepted (T-069, 2026-10-17; the shape, the caps and the front's
+states were decided by the owner in the task). Builds step 1 of
+`docs/plans/command-requests.md` (decision 1). The plan's text is not edited.
+
+**Context.** A phase runs under `permission_mode` and `allowed_tools`, and a
+tool call outside them is refused. The `claude -p --output-format json` result
+lists what was refused in `permission_denials`, and the dispatcher dropped it:
+the only trace was the transcript. Before any allowlist is widened, or any
+command request is designed (the plan's later steps), the refusals in real
+runs have to be seen. The usage log (`<hive>/tasks/<id>/usage/calls.jsonl`,
+ADR 53, ADR 54, ADR 68) already has one line per CLI call, and the handoff
+envelope (ADR 27) is the phase's record.
+
+**Decision.**
+1. *The usage line gains one key, `permission_denials`*, read from the raw
+   result by `_usage_record` for every call:
+   - `null` when the key is absent or is not a list; `[]` when the CLI
+     reported an empty list. A missing key, `null` and `[]` stay three facts;
+   - each entry is reduced to `tool_name`, `tool_use_id` and `tool_input`.
+     A missing `tool_input`, or a `tool_use_id` that is not a string, is
+     `null`; any other key is dropped;
+   - an entry that is not an object, or whose `tool_name` is not a string,
+     becomes `{"malformed": <Python type name>}`, never a guess;
+   - at most 50 entries are kept (`_MAX_PERMISSION_DENIALS`); when more were
+     reported, `permission_denials_dropped` counts the rest. That key exists
+     only then;
+   - every string value inside an entry longer than 500 characters
+     (`_MAX_DENIAL_STRING`) is cut to its first 500 plus `"…[cut N chars]"`,
+     N being the characters removed. Keys are not cut. The raw result is not
+     mutated.
+2. *No other redaction.* The same tool inputs are already in the phase's
+   transcript, and the log is 0644 in a 0755 directory under the root-owned
+   hive: it adds no reader that the transcript does not already have.
+3. *The handoff envelope gains a fifth key, `permission_denials`*: the reduced
+   list (or `null`) of the phase's final result, the last retry's when the
+   call was retried. The dropped count stays on the usage line.
+   `context_transfer.save_handoff` writes the key only when it is given one
+   (`PERMISSION_DENIALS_ABSENT` is the default), so a phase with no account,
+   which made no call, writes the four keys it always did. An envelope
+   written before this ADR has no key, and reads as "not recorded";
+   `read_handoff_envelope` is unchanged.
+4. *Recording never fails a phase.* The reduction is wrapped: any exception is
+   logged as a warning and the call's `permission_denials` is `null`; the rest
+   of the line and the phase's outcome are unchanged.
+5. *`task_usage` gets no logic change.* `MAX_USAGE_CALLS` keeps its value; its
+   comment now says `permission_denials` is the one list whose length the CLI
+   decides, and that the caps above keep a line to tens of KB at worst.
+6. *The task page lists them.* Each call line in the usage region has a
+   *denied* row with four states: missing key, "written before denials were
+   logged" (muted); `null`, Absent; `[]`, "none"; a list, one row per entry
+   with the `tool_name` and a one-line, shortened `tool_input`, the whole
+   value in its `title`. A malformed entry, or a value of the wrong type, is
+   shown as Malformed; a dropped count as "+N more not recorded". An attempt's
+   header gets an "N denied" badge, the kept entries plus the dropped counts
+   of its calls, when N is above zero.
+
+Out of scope: command requests, verdicts, the allowlist, an Approvals card,
+`allowed_tools` and `permission_mode`, `/api/phases`, backfilling old lines,
+docker, `config.yaml`, `front/vite.config.ts`.
+
+**Consequences.** Lines and envelopes written before this ADR carry no key,
+and the page says so rather than showing "none". The page shows refusals
+without the transcript open, which is what the plan's next steps need. The
+caps bound a line, not the log: a phase that is refused often still writes
+one line per call.

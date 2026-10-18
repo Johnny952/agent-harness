@@ -171,12 +171,19 @@ def handoff_path(hive_dir: str, task_id: str, role: str) -> str:
     return os.path.join(scratch_dir(hive_dir, task_id), _HANDOFF_SUBDIR, f"{role}.json")
 
 
+#: `save_handoff`'s default for `permission_denials`: the caller did not say,
+#: so the envelope has no key. Not `None`, which is a value the key can carry
+#: and means something else (`docs/decisions.md` ADR 116).
+PERMISSION_DENIALS_ABSENT = object()
+
+
 def save_handoff(
     hive_dir: str,
     task_id: str,
     role: str,
     payload: dict | None,
     round_num: int | None = None,
+    permission_denials: object = PERMISSION_DENIALS_ABSENT,
 ) -> str:
     """Keep the structured return of a phase, not just its prose rendering.
 
@@ -198,6 +205,13 @@ def save_handoff(
     Written even when `payload` is None, so that a re-run whose handoff failed
     to parse clears the previous round's file rather than leaving it standing
     as if it were this round's answer.
+
+    `permission_denials` is the reduced list of what the CLI refused during the
+    call whose handoff this is (`docs/decisions.md` ADR 116): `None` when that
+    call did not report it, `[]` when it reported none. Left at its default,
+    the envelope carries no such key at all, so every caller that does not
+    pass it writes exactly the four keys it always did, and a reader takes a
+    missing key as "not recorded".
     """
     path = handoff_path(hive_dir, task_id, role)
     envelope = {
@@ -206,6 +220,8 @@ def save_handoff(
         "saved_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "handoff": payload,
     }
+    if permission_denials is not PERMISSION_DENIALS_ABSENT:
+        envelope["permission_denials"] = permission_denials
     # Made here rather than by `_write_atomic`'s own mkdir, which cannot tell
     # the hive from what is under it: `handoffs/` and the scratch dir have to
     # be traversable by `/api/phases`' uid, the file alone is not enough.
@@ -308,7 +324,8 @@ def list_handoff_roles(hive_dir: str, task_id: str) -> list[str]:
 
 
 def read_handoff_envelope(hive_dir: str, task_id: str, role: str) -> dict:
-    """The whole envelope `save_handoff` wrote — all four keys — or an exception.
+    """The whole envelope `save_handoff` wrote — its four keys, and `permission_denials`
+    when the phase recorded them (ADR 116) — or an exception.
 
     For the reader that has to tell an operator *why* a record could not be
     read, which `read_handoff` cannot: it answers `None` for a file that is

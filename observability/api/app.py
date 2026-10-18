@@ -136,7 +136,13 @@ MAX_LEARNINGS = 500
 #: reader came for is the last one; the first group served may then lack its
 #: `phase` line, and the warning says so. It bounds a count and not bytes, on
 #: `MAX_PHASES`' model, which is enough while a line is seventeen scalars plus
-#: `raw_keys` and `models_used`. `docs/decisions.md` ADR 54, ADR 68.
+#: `raw_keys`, `models_used` and `permission_denials`. The last is the one list
+#: whose length the CLI decides, and the dispatcher caps it before it is
+#: written: at most 50 entries, the rest only counted, and every string in a
+#: `tool_input` cut to 500 characters. A tool's input is a handful of named
+#: parameters, so a line stays tens of KB at the very worst and a full answer
+#: stays a bounded read rather than one that grows with what a phase tried.
+#: `docs/decisions.md` ADR 54, ADR 68, ADR 116.
 MAX_USAGE_CALLS = 1000
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
