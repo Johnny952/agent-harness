@@ -35,6 +35,7 @@ arrives as an import, for one frozenset, and is never called.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import shlex
 import sqlite3
@@ -151,6 +152,27 @@ MAX_LEARNINGS = 500
 #: stays a bounded read rather than one that grows with what a phase tried.
 #: `docs/decisions.md` ADR 54, ADR 68, ADR 116.
 MAX_USAGE_CALLS = 1000
+
+#: The most comments one `/api/tasks/<task_id>/comments` answer carries. Five
+#: hundred because a comment is a note a person or a phase writes by hand, and a
+#: thread past that is the news rather than a thread to read whole. The newest
+#: are kept, on `MAX_USAGE_CALLS`' model: the end of a thread is what a reader
+#: opens the task page for, and the clamp names itself in `warnings`.
+#: `docs/decisions.md` ADR 135.
+MAX_COMMENTS = 500
+
+#: The most bytes of a task's `comments.jsonl` one answer reads, from its end.
+#: The count above bounds what is served and not what is read, and one comment
+#: may be `tasks.MAX_COMMENT_CHARS` (20 000) characters, so the file is bounded
+#: too: 1 MiB is fifty of the longest comments `add_comment` writes and
+#: thousands of ordinary ones. Over it the newest end is read, starting at a
+#: whole line, and the cut names itself in `warnings`. ADR 135.
+MAX_COMMENTS_BYTES = 1024 * 1024
+
+#: The keys a comment line may carry across this api: `tasks.add_comment`'s
+#: three, and the diff anchor's three. Anything else on a line is dropped.
+_COMMENT_KEYS = ("at", "author", "text")
+_ANCHOR_KEYS = ("file", "line", "commit")
 
 #: The most plans one `/api/roadmap` answer carries. Five hundred because a plan
 #: is one file a person writes under `docs/plans/` and this harness has 21 of
@@ -632,6 +654,66 @@ def create_app(
             warnings.append(f"{path}: unreadable usage log: {exc}")
             return _envelope(None, warnings)
         return _envelope(groups, warnings)
+
+    @app.get("/api/tasks/<task_id>/comments")
+    @requires_auth
+    def task_comments(task_id: str):
+        """A task's comment thread, oldest first: `{"task_id", "comments"}`.
+
+        The lines `dispatcher/tasks.py:add_comment` appends to the task's
+        `comments.jsonl`, parsed here because no reader in `dispatcher/`
+        parses them (the board service only counts them). A line that is not
+        a comment is a warning naming the file and its line, and the rest of
+        the thread is still served. `docs/decisions.md` ADR 135.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        # A 404 in the same two cases and words as the detail route, for the
+        # reason `/api/tasks/<task_id>/usage` gives: this read belongs to the
+        # screen that opens the task first.
+        if not _is_bare_task_id(task_id):
+            return _error(f"no task {task_id!r}", 404)
+        if not os.path.exists(context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)):
+            return _error(f"no task {task_id!r} in {cfg.hive_tasks_dir}", 404)
+        try:
+            path = task_store.comments_path(cfg.hive_tasks_dir, task_id)
+        except ValueError:
+            # `.` and `..` pass `_is_bare_task_id`; as a directory name they
+            # leave the board root, and `comments_path` refuses them.
+            return _error(f"no task {task_id!r}", 404)
+        try:
+            first_line, raw, cut_bytes = _comments_tail(path)
+        except (FileNotFoundError, NotADirectoryError):
+            # No file is no comment yet: `add_comment` creates it on the first.
+            return _envelope({"task_id": task_id, "comments": []}, [])
+        except OSError as exc:
+            # `null` and not `[]`: an empty thread is a different claim from
+            # "the api may not read it".
+            return _envelope(None, [f"{path}: unreadable comments file: {exc}"])
+        warnings: list[str] = []
+        if cut_bytes:
+            warnings.append(
+                f"{path}: the comments file is over {MAX_COMMENTS_BYTES} bytes: its "
+                f"first {cut_bytes} bytes are not read, and the oldest comments "
+                "in them are not served"
+            )
+        comments = []
+        for number, line in enumerate(raw.split(b"\n"), start=first_line):
+            if not line.strip():
+                continue
+            comment, problem = _comment(line)
+            if problem is not None:
+                warnings.append(f"{path}: line {number}: {problem}")
+            if comment is not None:
+                comments.append(comment)
+        if len(comments) > MAX_COMMENTS:
+            warnings.append(
+                f"{len(comments)} comments and this service answers at most "
+                f"{MAX_COMMENTS}: the newest {MAX_COMMENTS} are served"
+            )
+            comments = comments[-MAX_COMMENTS:]
+        return _envelope({"task_id": task_id, "comments": comments}, warnings)
 
     @app.get("/api/learnings")
     @requires_auth
@@ -1154,6 +1236,79 @@ def _bounded_body(path: str, body: str) -> tuple[str, list[str]]:
         "are served and the start of the running record is not. The whole "
         "record is in the task file."
     ]
+
+
+def _comments_tail(path: str) -> tuple[int, bytes, int]:
+    """The newest `MAX_COMMENTS_BYTES` of a comments file, as whole lines.
+
+    Returns the file's line number of the first line kept, the bytes kept and
+    how many bytes were left unread (0 for a file under the cap). The prefix is
+    read in chunks only to count its newlines, so a warning about a kept line
+    names the line an editor shows, and so a cut never lands mid-line: what
+    follows the last newline of the prefix, a partial line, is dropped.
+    """
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        if size <= MAX_COMMENTS_BYTES:
+            return 1, fh.read(MAX_COMMENTS_BYTES), 0
+        skip = size - MAX_COMMENTS_BYTES
+        newlines = 0
+        last = b"\n"
+        left = skip
+        while left:
+            chunk = fh.read(min(left, 64 * 1024))
+            if not chunk:
+                break
+            newlines += chunk.count(b"\n")
+            last = chunk[-1:]
+            left -= len(chunk)
+        kept = fh.read(MAX_COMMENTS_BYTES)
+    if last != b"\n":
+        # The prefix ended mid-line: the rest of that line is not a comment.
+        partial, newline, rest = kept.partition(b"\n")
+        skip += len(partial) + len(newline)
+        newlines += 1 if newline else 0
+        kept = rest
+    return newlines + 1, kept, skip
+
+
+def _comment(line: bytes) -> tuple[dict | None, str | None]:
+    """One `comments.jsonl` line as served, and what was wrong with it.
+
+    `(None, problem)` for a line that is not a comment: not JSON, not an
+    object, or without a string `at`, `author` and `text`. A comment whose diff
+    anchor is broken — not all three of `file`, `line` and `commit`, or one of
+    the wrong type — is served without it, with the problem, because its text
+    is still readable. Only the six known keys cross; nothing is mended.
+    """
+    try:
+        value = json.loads(line)
+    except ValueError as exc:
+        # `UnicodeDecodeError` is a `ValueError`, so bytes that are not UTF-8
+        # land here too.
+        return None, f"not a JSON line ({exc}), skipped"
+    if not isinstance(value, dict):
+        return None, f"not a JSON object but a {type(value).__name__}, skipped"
+    missing = [key for key in _COMMENT_KEYS if not isinstance(value.get(key), str)]
+    if missing:
+        return None, f"no string {', '.join(missing)}, skipped"
+    comment = {key: value[key] for key in _COMMENT_KEYS}
+    present = [key for key in _ANCHOR_KEYS if key in value]
+    if not present:
+        return comment, None
+    anchor_ok = (
+        len(present) == len(_ANCHOR_KEYS)
+        and isinstance(value["file"], str)
+        and type(value["line"]) is int
+        and isinstance(value["commit"], str)
+    )
+    if not anchor_ok:
+        return comment, (
+            "a diff anchor that is not a string file, an integer line and a "
+            "string commit; the comment is served without it"
+        )
+    comment.update({key: value[key] for key in _ANCHOR_KEYS})
+    return comment, None
 
 
 def _no_events_warning(db_path: str, exc: Exception) -> str:

@@ -8587,3 +8587,57 @@ merged", which is loose when a sibling was dropped.
   it would stay `epic` for good.
 - Closing from `_accept_epic`: it moves only epics in the backlog, which
   `close_epic` does not close.
+## ADR 135 — The read api serves a task's comments at `/api/tasks/<id>/comments`
+
+**Status:** accepted (T-090, 2026-10-18). Serves step 8 of
+`docs/plans/board-service.md` (section 8, the task page's comment thread).
+Keeps ADR 5 (never-500, a bad file is a warning), ADR 11 (the warnings cap)
+and ADR 54's 404 posture for a read under `/api/tasks/<task_id>`.
+
+**Context.** `tasks.add_comment` appends `{"at", "author", "text"}`, plus
+`file`, `line` and `commit` on a diff anchor, to the task's
+`comments.jsonl`. The board service only counts those lines (`board_get`'s
+`comment_count`), and no route served them, so the console's task page could
+not show the thread. No reader in `dispatcher/` parses the file.
+
+**Decision.**
+1. *`GET /api/tasks/<task_id>/comments`, no parameters.* A 200 is the
+   usual envelope, `{"data": {"task_id", "comments"}, "warnings"}`, with
+   the comments oldest first, in file order. The envelope is kept and not
+   flattened to a top-level `comments`, because every 200 of this api is
+   `{data, warnings}` and the console's client rejects any other 200.
+2. *404 as on the detail route.* An id that is not bare, or one with no
+   task file, answers 404 in the detail route's words, even when a
+   comments file exists. `comments_path` refusing an id is a 404 too.
+3. *Absent file, empty thread.* No `comments.jsonl` is `comments: []` with
+   no warning: `add_comment` creates it on the first comment. A file that
+   will not open is `data: null` with a warning, because an empty thread is
+   a different claim.
+4. *A bad line is skipped and named.* A line that is not JSON, not an
+   object, or without a string `at`, `author` and `text` is skipped with
+   `"<path>: line <n>: <problem>, skipped"`. `<n>` is the file's line
+   number. Blank lines are skipped without a word. A diff anchor that is
+   not all three keys, or not a string `file`, an integer `line` and a
+   string `commit`, is dropped with a warning, and the comment is served
+   without it.
+5. *Only the six known keys cross.* Anything else on a line is dropped.
+   Nothing is mended or invented.
+6. *Bounded twice.* `MAX_COMMENTS` (500) caps the comments served, keeping
+   the newest, with a warning. `MAX_COMMENTS_BYTES` (1 MiB) caps what is
+   read: over it, the file's newest end is read from a whole line, and a
+   warning says how many bytes were not read. The prefix is still scanned
+   in chunks to count its newlines, so line numbers stay the file's.
+
+**Consequences.** One new route and no change to any other. The parser
+lives in `observability/api/app.py`, so the board service's count and this
+route can disagree on a file with bad lines: the count is every non-blank
+line, the thread only the comments that read.
+
+**Ruled out.**
+- A top-level `{"task_id", "comments", "warnings"}`: it breaks ADR 5's one
+  envelope and the console's `readEnvelope`.
+- A comments key on `/api/tasks/<task_id>`: a thread only grows, and ADR 21
+  keeps growing records off the routes that are read often.
+- A 200 with an empty thread for an id with no task file: it contradicts
+  the detail route the page opens first.
+- Skipping a comment for a broken anchor: its text is still readable.
