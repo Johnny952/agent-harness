@@ -1343,10 +1343,14 @@ had. Each line names a piece and says whether it is **built**, **planned**,
 [`docs/plans/backlog.md`](docs/plans/backlog.md), under the item's own
 number and title.
 
-0. **Editing `config.yaml` from the console** — **open**, added 2026-10-15
-   and placed first; numbered 0 so the items below keep their numbers. Bound
-   to the tier-3 *Role models write* in
-   [`docs/plans/front.md`](docs/plans/front.md).
+0. **Editing `config.yaml` from the console** — **built** 2026-10-17 by
+   T-064 to T-067, planned in
+   [`docs/plans/console-config.md`](docs/plans/console-config.md): the
+   `load_config` merge of `config.d/overrides.yaml`, the `config-writer`
+   service, and the Role models screen's saves and resets. Added 2026-10-15
+   and placed first; numbered 0 so the items below keep their numbers. The
+   credentials and the login, that plan's section 4, are the Tokens task of
+   [`docs/plans/front.md`](docs/plans/front.md), not built.
 1. **Project memory: role skills, per-project docs, and a pointer-based
    handoff.**
    - *Role skills (method)*, from superpowers, thermos and ponytail —

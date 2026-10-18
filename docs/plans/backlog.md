@@ -27,6 +27,10 @@ approved: evaluate it when the work is taken on, not before.
 four build tasks, in order, are in `docs/plans/console-config.md`. The text
 below is kept as it was written.
 
+**Built 2026-10-17** by T-064 to T-067, the first three tasks of
+`docs/plans/console-config.md`. Its fourth, the credentials and the login,
+is the Tokens task of `docs/plans/front.md` and is not built.
+
 Added on 2026-10-15 at the operator's request and placed first by them. It is
 numbered 0 so the items below keep the numbers other documents cite. Unlike
 the rest of this file it was not moved from the README; like the rest, nothing

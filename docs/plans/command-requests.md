@@ -1,7 +1,7 @@
 ---
-status: building
+status: built
 approved: 2026-10-11
-built: null
+built: 2026-10-18
 supersedes: []
 ---
 
@@ -13,6 +13,13 @@ command to be run when it lacks the permission to run it. Because the harness
 has many containers, the request must reach the right one. It builds on
 `docs/plans/board-service.md` (the queue, the worker and Approvals) and
 `docs/plans/review.md` (C-12's console verdicts).
+
+**Built 2026-10-18**, the six steps of *How it would be built*, by T-069,
+T-070, T-073, T-074, T-076, T-077, T-078 and T-079 (`docs/decisions.md`
+ADR 116 to ADR 123). Two pieces are left out of it: the *command request*
+notification waits on `docs/plans/notifications.md`, and a resume on an
+account other than the phase's is not built. Verdicts are given in the CLI
+until `docs/plans/board-service.md`'s worker exists.
 
 ## The goal
 
