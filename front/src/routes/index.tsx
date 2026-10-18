@@ -5,7 +5,6 @@ import { GitBranch } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
   Absent,
-  Banner,
   BrokenBanner,
   EmptyState,
   ErrorState,
@@ -15,9 +14,19 @@ import {
   PageHeader,
   WarningBanner,
 } from "@/components/console/primitives";
-import { accountsQuery, debtQuery, tasksQuery } from "@/lib/api/queries";
+import { accountsQuery, debtQuery, readyQuery, tasksQuery } from "@/lib/api/queries";
 import { debtTaskId } from "@/lib/api/client";
-import type { Task, TaskStatus } from "@/lib/api/types";
+import type { Task } from "@/lib/api/types";
+import {
+  KNOWN_STATUSES,
+  buildBoard,
+  columnOf,
+  phaseNote,
+  type BoardColumn,
+  type Lane,
+} from "@/lib/board";
+import { splitInto } from "@/lib/backlog";
+import { epicChildren, epicProgress } from "@/lib/epic";
 import { useNow, useSearchHotkey } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 
@@ -28,7 +37,7 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Kanban of harness tasks over the five statuses a task file carries, with the api's lock-expiry judgement and declared debt per card.",
+          "Kanban of accepted harness tasks: Ready in the dispatcher's order, Waiting, one lane per role's live phase, the stops and Merged, in one swimlane per epic.",
       },
       { property: "og:title", content: "Board — harness operations console" },
       {
@@ -41,22 +50,20 @@ export const Route = createFileRoute("/")({
 });
 
 /**
- * The five columns, in the order a task moves through them. ADR 26. `conflict`
- * sits beside `blocked`: both are a task stopped until someone acts, and a
- * conflict is the pre-merge check's stop, on the way to `done`.
+ * The ready read says it failed in two ways: an error, or the envelope
+ * `observability/api/app.py` answers when `ready_order` itself raised — an
+ * empty list beside a "no ready order" warning. Both mean the same to this
+ * board: there is no order, so pending cannot be split.
  */
-const COLUMNS: { status: TaskStatus; title: string }[] = [
-  { status: "pending", title: "Pending" },
-  { status: "in_progress", title: "In progress" },
-  { status: "blocked", title: "Blocked" },
-  { status: "conflict", title: "Conflict" },
-  { status: "done", title: "Done" },
-];
+const NO_READY_ORDER = ": no ready order: ";
 
 function BoardPage() {
   const now = useNow();
   const searchRef = useSearchHotkey();
   const tasks = useQuery(tasksQuery);
+  // One read for the Ready column and its order, the dispatcher's own
+  // (`ready_order`, ADR 133): the board never recomputes it. ADR 140.
+  const ready = useQuery(readyQuery);
   const accounts = useQuery(accountsQuery);
   // The debt chip is a filter over /api/debt by the task prefix of a debt id, not
   // a field /api/tasks serves. `docs/decisions.md` ADR 17.
@@ -64,14 +71,21 @@ function BoardPage() {
 
   const [q, setQ] = useState("");
   const [accountFilter, setAccountFilter] = useState<string>("all");
+  const [columnFilter, setColumnFilter] = useState<string>("all");
   const [dense, setDense] = useState(false);
 
   // `tasks.data?.data ?? []` is a fresh array on every render while the read has
   // not answered, and `useNow` re-renders this screen every two seconds, so the
-  // filter below recomputed on every tick. The memo is here for the array's
-  // identity, not for the cost of `??`: deleting it un-memoises `filtered`.
-  // `docs/decisions.md` ADR 40.
+  // board below recomputed on every tick. The memo is here for the array's
+  // identity, not for the cost of `??`. `docs/decisions.md` ADR 40.
   const rows = useMemo(() => tasks.data?.data ?? [], [tasks.data]);
+
+  const readyFailed =
+    ready.isError || (ready.data?.warnings ?? []).some((w) => w.includes(NO_READY_ORDER));
+  const readyOrder = useMemo(
+    () => (readyFailed ? null : (ready.data?.data ?? [])),
+    [readyFailed, ready.data],
+  );
 
   const debtByTask = useMemo(() => {
     const map = new Map<string, number>();
@@ -82,29 +96,39 @@ function BoardPage() {
     return map;
   }, [debt.data]);
 
-  const filtered = useMemo(() => {
-    return rows.filter((t) => {
-      if (accountFilter !== "all" && t.owner !== accountFilter) return false;
-      // `description` is `null` for a task with no `description.md`, and a
-      // template literal would spell that as the text `null` and match it.
-      if (q && !`${t.task_id} ${t.description ?? ""}`.toLowerCase().includes(q.toLowerCase()))
-        return false;
-      return true;
-    });
-  }, [rows, accountFilter, q]);
+  const filtering = q !== "" || accountFilter !== "all" || columnFilter !== "all";
+  const board = useMemo(
+    () =>
+      buildBoard(
+        rows,
+        readyOrder,
+        (t, column) => {
+          if (columnFilter !== "all" && column !== columnFilter) return false;
+          if (accountFilter !== "all" && t.owner !== accountFilter) return false;
+          // `description` and `title` are `null` when absent, and a template
+          // literal would spell that as the text `null` and match it.
+          const hay = `${t.task_id} ${t.title ?? ""} ${t.description ?? ""}`.toLowerCase();
+          return !q || hay.includes(q.toLowerCase());
+        },
+        filtering,
+      ),
+    [rows, readyOrder, columnFilter, accountFilter, q, filtering],
+  );
 
-  const byStatus = (status: TaskStatus) => filtered.filter((t) => t.status === status);
-
-  // A status outside the five appears in no column, so it is named rather than
-  // dropped: the api serves what the task file says and nothing validates it, and
-  // filtering on five literals loses a row silently. ADR 26.
-  const unplaced = rows.filter((t) => !COLUMNS.some((c) => c.status === t.status));
+  // A status the dispatcher does not write is still a card — in Other — and is
+  // also named here: the api serves what the task file says and nothing
+  // validates it. ADR 26, ADR 140.
+  const unknown = rows.filter((t) => !KNOWN_STATUSES.includes(t.status));
 
   // A failed read carries no `warnings`, so the banner above stays silent for it:
   // broken and partial are different states and they are reported separately.
-  // `docs/ui.md` *Absent, empty and broken are three different things*. Neither
-  // of these two takes the screen — the board is the task index, and it is fine.
+  // `docs/ui.md` *Absent, empty and broken are three different things*.
   const brokenReads = [
+    readyFailed
+      ? "/api/ready gave no ready order, so Ready and Waiting cannot be told apart: every " +
+        "pending task is in one Pending column, in the dispatcher's order but not split by " +
+        "whether its dependencies are merged."
+      : null,
     accounts.isError
       ? "/api/accounts did not answer, so the account filter has no options to offer. " +
         "The rows below are the task index and are unaffected."
@@ -117,12 +141,13 @@ function BoardPage() {
 
   const warnings = [
     ...(tasks.data?.warnings ?? []),
+    ...(ready.data?.warnings ?? []),
     ...(accounts.data?.warnings ?? []),
     ...(debt.data?.warnings ?? []),
-    ...unplaced.map(
+    ...unknown.map(
       (t) =>
-        `${t.task_id}: status ${JSON.stringify(t.status)} is none of pending, in_progress, blocked, conflict or done, ` +
-        `so this task is in no column. The api serves what the task file says.`,
+        `${t.task_id}: status ${JSON.stringify(t.status)} is not one the dispatcher writes, ` +
+        `so this task is in Other. The api serves what the task file says.`,
     ),
   ];
 
@@ -130,7 +155,7 @@ function BoardPage() {
     <AppShell>
       <PageHeader
         title="Board"
-        subtitle="The five statuses a task file carries. Lock expiry is the api's judgement, not this screen's."
+        subtitle="Accepted tasks by where they are: ready, waiting, in a role's phase, stopped, merged. One lane per epic."
         right={
           <>
             <RefreshedAt at={tasks.dataUpdatedAt} />
@@ -153,30 +178,27 @@ function BoardPage() {
           className="mono w-56 rounded-sm border border-border bg-surface px-2 py-1 text-[11px] outline-none focus:border-ring"
         />
         <Select
+          value={columnFilter}
+          onChange={setColumnFilter}
+          options={[
+            { value: "all", label: "all" },
+            ...board.columns.map((c) => ({ value: c.key, label: c.title })),
+          ]}
+          label="column"
+        />
+        <Select
           value={accountFilter}
           onChange={setAccountFilter}
-          options={["all", ...(accounts.data?.data ?? []).map((a) => a.name)]}
+          options={["all", ...(accounts.data?.data ?? []).map((a) => a.name)].map((n) => ({
+            value: n,
+            label: n,
+          }))}
           label="account"
         />
         <span className="ml-auto text-[10px] text-muted-foreground">
-          {filtered.length} of {rows.length} tasks
+          {board.shown} of {board.cards} cards
         </span>
       </div>
-
-      {/* The role lanes are not waiting on a route any more: they are waiting on a
-          *record*, and this names it rather than sending an operator to look for a
-          bug in an api that answers correctly. `docs/ui.md` *A region with no route
-          says which route, and when*, third case; `docs/decisions.md` ADR 28. */}
-      <Banner tone="info">
-        In progress is one column, and the five role lanes are not coming from a route. Which role
-        is <em>running</em> is written down nowhere: the dispatcher knows it while the phase runs
-        and persists only a heartbeat, and <Mono>/api/phases</Mono> answers phases that have{" "}
-        <em>ended</em>. The role filter and the gate chips go with the lanes for the same reason.
-        What a card carries instead is <Mono>owner</Mono> — the account holding the task — and the
-        api&apos;s own <Mono>lock_expired</Mono> judgement over that heartbeat. The last role that
-        finished is on the task detail&apos;s timeline, and the gate notes are prose in that
-        task&apos;s body, on the same screen.
-      </Banner>
 
       <BrokenBanner reads={brokenReads} />
 
@@ -187,36 +209,98 @@ function BoardPage() {
           title="The task API did not answer"
           body="The board could not read /api/tasks. Check that observability/api is up and that this console was started with API_TOKEN set, then reload — nothing was changed."
         />
-      ) : tasks.isLoading ? (
+      ) : tasks.isLoading || ready.isLoading ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading tasks…</p>
       ) : rows.length === 0 ? (
         <EmptyState
           title="No task has been filed"
-          body="The harness holds no task cards. Create one with run-task and it will appear in Pending."
+          body="The harness holds no task cards. Propose one on the Backlog screen and accept it to put it here."
         />
-      ) : filtered.length === 0 ? (
+      ) : board.cards === 0 && board.lanes.length === 0 ? (
+        <EmptyState
+          title="Nothing is on the board"
+          body="Every task is in the backlog — proposed, deferred or dropped. Accepting one on the Backlog screen puts it here."
+        />
+      ) : filtering && board.shown === 0 ? (
         <EmptyState
           title="No task matches these filters"
-          body="Clear the search box or set the account filter back to all to see the rest of the board."
+          body="Clear the search box or set the column and account filters back to all to see the rest of the board."
         />
       ) : (
-        <div className="flex min-h-0 gap-3 overflow-x-auto p-3">
-          {COLUMNS.map(({ status, title }) => (
-            <Column key={status} title={title} count={byStatus(status).length}>
-              {byStatus(status).map((t) => (
-                <TaskCard
-                  key={t.task_id}
-                  task={t}
-                  now={now}
-                  dense={dense}
-                  debtCount={debtByTask.get(t.task_id) ?? 0}
-                />
-              ))}
-            </Column>
+        <div className="min-h-0 space-y-4 overflow-x-auto p-3">
+          {board.lanes.map((lane) => (
+            <Swimlane key={lane.id ?? "no-epic"} lane={lane} rows={rows}>
+              {board.columns.map((c) => {
+                const cards = lane.cells.get(c.key) ?? [];
+                return (
+                  <Column key={c.key} column={c} count={cards.length}>
+                    {cards.map((t) => (
+                      <TaskCard
+                        key={t.task_id}
+                        task={t}
+                        now={now}
+                        dense={dense}
+                        debtCount={debtByTask.get(t.task_id) ?? 0}
+                      />
+                    ))}
+                  </Column>
+                );
+              })}
+            </Swimlane>
           ))}
         </div>
       )}
     </AppShell>
+  );
+}
+
+/**
+ * One epic's row of columns, headed by a link to the epic and its progress by
+ * the epic view's own rule (ADR 139), or the no-epic lane.
+ */
+function Swimlane({
+  lane,
+  rows,
+  children,
+}: {
+  lane: Lane;
+  rows: Task[];
+  children: React.ReactNode;
+}) {
+  const progress =
+    lane.head && lane.id ? epicProgress(epicChildren(splitInto(lane.head), rows)) : null;
+  return (
+    <div data-lane={lane.id ?? "none"} className="space-y-2">
+      <div className="flex flex-wrap items-baseline gap-2 px-1">
+        {lane.id === null ? (
+          <span className="text-[11px] font-semibold text-muted-foreground">No epic</span>
+        ) : (
+          <Link
+            to="/tasks/$taskId"
+            params={{ taskId: lane.id }}
+            className="flex items-baseline gap-2 hover:underline"
+          >
+            <Mono className="text-[11px] font-semibold">{lane.id}</Mono>
+            <span className="text-[11px]">
+              {lane.head ? (
+                (lane.head.title ?? <Absent label="no title" />)
+              ) : (
+                <Absent label="epic not served by /api/tasks" />
+              )}
+            </span>
+          </Link>
+        )}
+        {progress && (
+          <span className="mono text-[10px] text-muted-foreground">
+            {progress.merged} of {progress.total} merged
+            {progress.dropped > 0 && `, ${progress.dropped} dropped`}
+            {progress.missing > 0 && `, ${progress.missing} missing`}
+          </span>
+        )}
+        <span className="mono ml-auto text-[10px] text-muted-foreground">{lane.count}</span>
+      </div>
+      <div className="flex gap-3">{children}</div>
+    </div>
   );
 }
 
@@ -228,7 +312,7 @@ function Select({
 }: {
   value: string;
   onChange: (v: string) => void;
-  options: readonly string[];
+  options: readonly { value: string; label: string }[];
   label: string;
 }) {
   return (
@@ -240,8 +324,8 @@ function Select({
         className="mono rounded-sm border border-border bg-surface px-1.5 py-1 text-[11px] normal-case text-foreground"
       >
         {options.map((o) => (
-          <option key={o} value={o}>
-            {o}
+          <option key={o.value} value={o.value}>
+            {o.label}
           </option>
         ))}
       </select>
@@ -250,24 +334,27 @@ function Select({
 }
 
 function Column({
-  title,
+  column,
   count,
   children,
 }: {
-  title: string;
+  column: BoardColumn;
   count: number;
   children: React.ReactNode;
 }) {
+  // Awaiting review has no status behind it yet (`docs/plans/review.md`), so its
+  // empty is "not built", not "nothing waiting". ADR 140.
+  const empty = column.key === "review" ? "not built: no status says this yet" : "empty";
   return (
-    <section className="panel flex w-[210px] shrink-0 flex-col">
+    <section data-column={column.key} className="panel flex w-[200px] shrink-0 flex-col">
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
         <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-muted-foreground">
-          {title}
+          {column.title}
         </span>
         <span className="mono text-[10px] text-muted-foreground">{count}</span>
       </div>
       <div className="flex-1 space-y-2 p-2">
-        {count === 0 && <p className="px-1 py-2 text-[10px] text-muted-foreground/70">empty</p>}
+        {count === 0 && <p className="px-1 py-2 text-[10px] text-muted-foreground/70">{empty}</p>}
         {children}
       </div>
     </section>
@@ -291,6 +378,9 @@ export function TaskCard({
   dense: boolean;
   debtCount: number;
 }) {
+  const note = phaseNote(task);
+  // Ready or Waiting does not change the chip, so any set will do here.
+  const placedAs = columnOf(task, null);
   return (
     <Link
       to="/tasks/$taskId"
@@ -306,10 +396,20 @@ export function TaskCard({
       </div>
       {!dense && (
         <p className="mt-1 line-clamp-2 text-[11px] text-foreground/90">
-          {task.description ?? <Absent label="no description" />}
+          {task.title ?? task.description ?? <Absent label="no description" />}
         </p>
       )}
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
+        {note && (
+          <span className="mono rounded-sm border border-warning/50 px-1 text-[10px] text-warning">
+            {note}
+          </span>
+        )}
+        {placedAs === "other" && (
+          <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
+            {task.status}
+          </span>
+        )}
         {task.owner ? (
           <Mono className="text-[10px] text-muted-foreground">{task.owner}</Mono>
         ) : (
