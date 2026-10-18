@@ -686,6 +686,20 @@ def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     _write_task_file(path, task)
 
 
+def record_command_verdict(hive_dir: str, task_id: str, verdict: dict) -> None:
+    """Append an operator's verdict on one of this task's command requests.
+
+    `verdict` is `{"n", "verdict", "by", "at", "comment", "role", "filed_at"}`
+    (`docs/decisions.md` ADR 119); `command_run` refuses a second one on the
+    same request before it gets here. Status, lock and body are left as they
+    were. A task with no file raises rather than getting one.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.command_verdicts = [*task.command_verdicts, dict(verdict)]
+    _write_task_file(path, task)
+
+
 def _read_for_check(
     hive_dir: str, task_id: object
 ) -> tuple[context_transfer.TaskFile | None, str | None]:

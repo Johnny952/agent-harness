@@ -1763,8 +1763,15 @@ def dispatch_phase(
     round_num: int | None = None,
     max_turns: int | None = None,
     at_base: bool = False,
+    only_account: str | None = None,
 ) -> DispatchResult:
-    tried: set[str] = set()
+    # `only_account` pins the call to that one account: a command request's verdict
+    # resumes the phase's own session, which lives in that account's CLI
+    # config (ADR 119). Every other account counts as tried, so a pinned call
+    # that cannot get it ends `no_account` instead of moving on.
+    tried: set[str] = (
+        {a.name for a in cfg.accounts if a.name != only_account} if only_account else set()
+    )
     while True:
         # Exclude `tried` up front rather than picking idle[0] and bailing
         # when it's already been tried: a recheck can recover the very
@@ -2703,6 +2710,12 @@ class CycleContext:
     # nothing started and nothing marked. The queue's token limit (A-5, ADR
     # 79) is the one caller: a limit reached mid-cycle starts no new phase.
     may_start_phase: Callable[[], bool] | None = None
+    # Set once the auditor has filed what this task learned: `close_cycle`'s
+    # `completed`, kept here since the stages after the mapping are their own
+    # functions (ADR 119).
+    completed: bool = False
+    # Set once the scheduler granted this cycle its write window.
+    write_window: bool = False
 
 
 def open_cycle(
@@ -2857,6 +2870,9 @@ def run_phase(
     max_turns: int | None = None,
     note: str = "",
     repeated_finding: bool = False,
+    resume_session_id: str | None = None,
+    prompt: str | None = None,
+    account: str | None = None,
 ) -> DispatchResult | None:
     """One role's turn, with everything that has to happen around it.
 
@@ -2864,6 +2880,11 @@ def run_phase(
     the gates and the handoff the next phase reads — all of it per phase, none
     of it per cycle, which is what lets `run-phase` exist at all.
     `repeated_finding` is the cycle's signal for `Config.effort_for`.
+
+    `resume_session_id`, `prompt` and `account` are a command request's
+    verdict resuming the phase that filed it (ADR 119): that session, on that
+    account only, told the verdict instead of the role's prompt. Everything
+    after the call is the same as for a fresh phase.
     """
     cfg = ctx.cfg
     if ctx.may_start_phase is not None and not ctx.may_start_phase():
@@ -2878,16 +2899,18 @@ def run_phase(
     try:
         result = dispatch_phase(
             cfg, ctx.task_id, ctx.slug, role,
-            prompt=_role_prompt(
+            prompt=prompt if prompt is not None else _role_prompt(
                 role, ctx.task_id, ctx.slug, ctx.task_file, ctx.description,
                 ctx.scratch_dir, cfg.hive_tasks_dir,
                 harness=ctx.harness,
                 round_num=round_num, max_turns=max_turns, note=note,
             ),
+            resume_session_id=resume_session_id,
             model=model or cfg.model_for(role),
             effort=effort,
             round_num=round_num,
             max_turns=max_turns,
+            only_account=account,
         )
     except context_transfer.LockHeldError as exc:
         # A re-run within the TTL after a Ctrl+C, or a second dispatcher
@@ -2962,6 +2985,8 @@ def run_phase(
     context_transfer.save_handoff(
         cfg.hive_tasks_dir, ctx.task_id, role, result.handoff, round_num=round_num,
         permission_denials=result.permission_denials, **requests,
+        # What a verdict on a request filed here needs to resume this call.
+        session_id=result.session_id, account=result.account,
     )
     return result
 
@@ -3483,20 +3508,8 @@ def run_task_cycle(
     if ctx is None:
         return CycleOutcome.BLOCKED
     ctx.may_start_phase = may_start_phase
-    # Every stop after a phase that returned None reads this: the phase knows
-    # whether it was held, and the cycle only has to pass that on.
-    def stopped() -> CycleOutcome:
-        return CycleOutcome.HELD if ctx.held else blocked()
-    # Every stop that leaves the task blocked after a phase of this run took
-    # its lock. `_mark_blocked` decides whether there is anything to write, so
-    # a foreign lock goes through here too and marks nothing.
     def blocked(reason: str | None = None) -> CycleOutcome:
-        _mark_blocked(ctx, reason)
-        return CycleOutcome.BLOCKED
-    # Set once the auditor has filed what this task learned.
-    completed = False
-    # Set once the scheduler granted this cycle its write window.
-    in_window = False
+        return _blocked_outcome(ctx, reason)
 
     try:
         try:
@@ -3569,61 +3582,127 @@ def run_task_cycle(
             if _filed_command_requests(ctx, mapped):
                 return blocked(handoff.COMMAND_REQUEST)
 
-        arquitecto = run_phase(ctx, "arquitecto")
-        if arquitecto is None:
-            return stopped()
-        if handoff.blocked(arquitecto.handoff):
-            # The one phase whose block costs less than the work it stops. The
-            # arquitecto reads the plan, the charter and the indexes before
-            # anything is written, so a decision the task was never given is
-            # visible here and nowhere earlier — and an implementador released
-            # without it does not stall, it invents one, and the revisor then
-            # reviews the invention.
-            missing = handoff.pending(arquitecto.handoff)
+        return _cycle_from_arquitecto(ctx, authorized, on_approve, scheduler)
+    finally:
+        try:
+            close_cycle(ctx, completed=ctx.completed)
+        finally:
+            if ctx.write_window:
+                scheduler.leave_write_window(task_id)
+
+
+def _stopped(ctx: CycleContext) -> CycleOutcome:
+    """The stop after a phase that returned None: the phase knows whether it was held."""
+    return CycleOutcome.HELD if ctx.held else _blocked_outcome(ctx)
+
+
+def _blocked_outcome(ctx: CycleContext, reason: str | None = None) -> CycleOutcome:
+    """Every stop that leaves the task blocked after a phase of this run took its lock.
+
+    `_mark_blocked` decides whether there is anything to write, so a foreign
+    lock goes through here too and marks nothing.
+    """
+    _mark_blocked(ctx, reason)
+    return CycleOutcome.BLOCKED
+
+
+def _cycle_from_arquitecto(
+    ctx: CycleContext,
+    authorized: bool,
+    on_approve: Callable[[ApproveResult], None] | None,
+    scheduler=None,
+) -> CycleOutcome:
+    """`run_task_cycle` from the arquitecto on: the plan, the write window, the rounds.
+
+    Its own function so a verdict's resume of the mapping (ADR 119) carries on
+    from here through the same code a cycle does. The caller leaves the write
+    window this enters, on `ctx.write_window`.
+    """
+    cfg, task_id, slug = ctx.cfg, ctx.task_id, ctx.slug
+    arquitecto = run_phase(ctx, "arquitecto")
+    if arquitecto is None:
+        return _stopped(ctx)
+    if handoff.blocked(arquitecto.handoff):
+        # The one phase whose block costs less than the work it stops. The
+        # arquitecto reads the plan, the charter and the indexes before
+        # anything is written, so a decision the task was never given is
+        # visible here and nowhere earlier — and an implementador released
+        # without it does not stall, it invents one, and the revisor then
+        # reviews the invention.
+        missing = handoff.pending(arquitecto.handoff)
+        logger.warning(
+            "task %s: the arquitecto blocked before implementation: %s",
+            task_id, "; ".join(missing) or "no reason given",
+        )
+        return _blocked_outcome(ctx)
+    subtasks = handoff.split_of(arquitecto.handoff)
+    if subtasks:
+        # The arquitecto's other early end (ADR 60): the task is more than
+        # one. A split that was filed leaves the task `epic` and is not a
+        # block; one that could not be filed is, and is marked like any.
+        outcome = _file_split(ctx, subtasks)
+        return _blocked_outcome(ctx) if outcome is CycleOutcome.BLOCKED else outcome
+
+    stale_note = None
+    if scheduler is not None:
+        # The write window: from here to the merge, no task whose surface
+        # overlaps this one's writes (ADR 83). Left in the `finally`.
+        task_surface = _task_surface(ctx.description)
+        scheduler.enter_write_window(task_id, task_surface)
+        ctx.write_window = True
+        try:
+            move = merge_base_at_write_window(cfg, task_id, slug)
+        except tasks.BaseLockHeldError as exc:
+            logger.warning("task %s: %s", task_id, exc)
+            return _blocked_outcome(ctx)
+        stale_note = stale_plan_note(move, task_surface, _plan_entries(arquitecto.handoff))
+        if stale_note:
             logger.warning(
-                "task %s: the arquitecto blocked before implementation: %s",
-                task_id, "; ".join(missing) or "no reason given",
+                "task %s: the base moved under the plan; the implementador is told", task_id,
             )
-            return blocked()
-        subtasks = handoff.split_of(arquitecto.handoff)
-        if subtasks:
-            # The arquitecto's other early end (ADR 60): the task is more than
-            # one. A split that was filed leaves the task `epic` and is not a
-            # block; one that could not be filed is, and is marked like any.
-            outcome = _file_split(ctx, subtasks)
-            return blocked() if outcome is CycleOutcome.BLOCKED else outcome
 
-        stale_note = None
-        if scheduler is not None:
-            # The write window: from here to the merge, no task whose surface
-            # overlaps this one's writes (ADR 83). Left in the `finally`.
-            task_surface = _task_surface(ctx.description)
-            scheduler.enter_write_window(task_id, task_surface)
-            in_window = True
-            try:
-                move = merge_base_at_write_window(cfg, task_id, slug)
-            except tasks.BaseLockHeldError as exc:
-                logger.warning("task %s: %s", task_id, exc)
-                return blocked()
-            stale_note = stale_plan_note(move, task_surface, _plan_entries(arquitecto.handoff))
-            if stale_note:
-                logger.warning(
-                    "task %s: the base moved under the plan; the implementador is told", task_id,
-                )
+    return _cycle_rounds(ctx, authorized, on_approve, stale_note=stale_note)
 
-        approved = False
-        # Counted separately from `round_num`: `max_revision_rounds: 0` makes
-        # the range empty and leaves the loop variable unbound, and the one
-        # place that reads this is the branch that runs when the loop did not
-        # approve — including when it never ran.
-        rounds_run = 0
-        # What the last review that sent a round back sent it back for, and
-        # whether the one after it repeated any of it (ADR 73). A round the
-        # gates blocked has no review, so it changes neither.
-        previous_reasons: dict[str, str] = {}
-        repeated_finding = False
-        for round_num in range(1, cfg.max_revision_rounds + 1):
-            rounds_run = round_num
+
+def _cycle_rounds(
+    ctx: CycleContext,
+    authorized: bool,
+    on_approve: Callable[[ApproveResult], None] | None,
+    stale_note: str | None = None,
+    resumed: tuple[int, DispatchResult] | None = None,
+) -> CycleOutcome:
+    """The implementador and revisor rounds, then the auditor and the merge.
+
+    `resumed` is `(round, result)` for a verdict that already resumed that
+    round's implementador (ADR 119): the rounds start there, from the result,
+    and everything after it — the gates, the revisor, the auditor — is what a
+    cycle does after the phase. Sets `ctx.completed` once the auditor filed.
+    """
+    cfg, task_id, slug = ctx.cfg, ctx.task_id, ctx.slug
+    approved = False
+    # Counted separately from `round_num`: `max_revision_rounds: 0` makes
+    # the range empty and leaves the loop variable unbound, and the one
+    # place that reads this is the branch that runs when the loop did not
+    # approve — including when it never ran.
+    rounds_run = 0
+    # What the last review that sent a round back sent it back for, and
+    # whether the one after it repeated any of it (ADR 73). A round the
+    # gates blocked has no review, so it changes neither.
+    previous_reasons: dict[str, str] = {}
+    repeated_finding = False
+    first_round, last_round = 1, cfg.max_revision_rounds
+    if resumed is not None:
+        # The resumed round runs even when it is past the rounds allowed: a
+        # `run-phase --round` can have filed it from beyond them.
+        first_round = resumed[0]
+        last_round = max(last_round, first_round)
+    for round_num in range(first_round, last_round + 1):
+        rounds_run = round_num
+        if resumed is not None and round_num == first_round:
+            # A verdict's resume already ran this round's implementador
+            # (ADR 119): the round goes on from what it returned.
+            implemented = resumed[1]
+        else:
             # Only the first round hears of the moved base: later rounds open
             # on the review's findings, written against the merged branch.
             noted = {"note": stale_note} if stale_note and round_num == 1 else {}
@@ -3631,133 +3710,127 @@ def run_task_cycle(
                 ctx, "implementador", round_num=round_num, repeated_finding=repeated_finding,
                 **noted,
             )
-            if implemented is None:
-                return stopped()
-            if _filed_command_requests(ctx, implemented):
-                # Before the gates' verdict and the revisor: the phase stopped
-                # for a command it was denied, so its work is not done.
-                return blocked(handoff.COMMAND_REQUEST)
-            if stale_note and round_num == 1 and handoff.blocked(implemented.handoff):
-                # The block back the note offers: the plan no longer holds,
-                # and the arquitecto replans on the next run of the task.
-                logger.warning(
-                    "task %s: the implementador blocked on the moved base: %s",
-                    task_id, "; ".join(handoff.pending(implemented.handoff)) or "no reason given",
-                )
-                return blocked()
-            if implemented.gates is not None and implemented.gates.blocking:
-                # The gates already asked for this in-session and checked the
-                # answer. Paying a revisor to read a branch whose tests fail
-                # buys a finding the dispatcher has in hand, so the round goes
-                # back around instead — the findings are in the task file, and
-                # the next implementador round opens on them.
-                logger.warning(
-                    "task %s: the gates blocked round %d before review", task_id, round_num,
-                )
-                continue
-            revisor_result = run_phase(ctx, "revisor", round_num=round_num)
-            if revisor_result is None:
-                return stopped()
-            disguised = debt.blocking(revisor_result.handoff)
-            if disguised:
-                # A block wearing a debt costume. Another round cannot supply
-                # a decision the task was never given, so this ends here
-                # rather than burning the remaining rounds to say so again.
-                logger.warning(
-                    "task %s: the revisor read %d declaration(s) as blocks: %s",
-                    task_id, len(disguised), "; ".join(disguised),
-                )
-                break
-            sent_back = debt.rejected(revisor_result.handoff)
-            if revisor_approved(revisor_result.result_text, revisor_result.handoff):
-                if not sent_back:
-                    approved = True
-                    break
-                # Rejected debt is work the revisor says this task should have
-                # done, which is a finding; a verdict of APPROVED over the top
-                # of one is a contradiction, and the finding wins. It costs a
-                # round like any other finding, so this still terminates.
-                logger.info(
-                    "task %s: round %d came back APPROVED with %d debt declaration(s) rejected, "
-                    "so it is not an approval: %s",
-                    task_id, round_num, len(sent_back), "; ".join(sent_back),
-                )
-            reasons = review_reasons(revisor_result.handoff)
-            repeated = [text for key, text in reasons.items() if key in previous_reasons]
-            previous_reasons = reasons
-            if (
-                repeated
-                and cfg.escalate_effort_on_repeated_finding
-                and round_num < cfg.max_revision_rounds
-            ):
-                repeated_finding = True
-                logger.info(
-                    "task %s: round %d runs the implementador at effort %s, "
-                    "the revisor sent back the same finding(s) twice: %s",
-                    task_id, round_num + 1, cfg.escalated_effort, "; ".join(repeated),
-                )
-
-        if not approved:
-            # Said out loud because otherwise nothing says it: the task
-            # file's `status:` is only written by a handoff, and before ADR 52
-            # the run exited 0 either way — so a task that used up every round
-            # looked exactly like one that was never dispatched.
+        if implemented is None:
+            return _stopped(ctx)
+        if _filed_command_requests(ctx, implemented):
+            # Before the gates' verdict and the revisor: the phase stopped
+            # for a command it was denied, so its work is not done.
+            return _blocked_outcome(ctx, handoff.COMMAND_REQUEST)
+        if stale_note and round_num == 1 and handoff.blocked(implemented.handoff):
+            # The block back the note offers: the plan no longer holds,
+            # and the arquitecto replans on the next run of the task.
             logger.warning(
-                "task %s: blocked after %d of %d revision round(s) without an approval",
-                task_id, rounds_run, cfg.max_revision_rounds,
+                "task %s: the implementador blocked on the moved base: %s",
+                task_id, "; ".join(handoff.pending(implemented.handoff)) or "no reason given",
             )
-            return blocked()
-
-        # Stamped before the phase that files them, so the auditor's prompt
-        # can name the entries it owns and a later run can tell an entry that
-        # was handed to a task from one nobody has picked up yet.
-        learnings.carry(cfg.hive_tasks_dir, slug, task_id)
-        # Written to the task file rather than only handed to the auditor: the
-        # merge can happen days later, in `merge-task`, long after this
-        # handoff is prose in a file nobody parses, and the api serves the
-        # list from the task file.
-        tasks.set_resolved_debt(
-            cfg.hive_tasks_dir, task_id, debt.resolved(implemented.handoff)
-        )
-        # Before the auditor, because the auditor writes the rows these ids
-        # name.
-        filed = _file_accepted_debt(
-            cfg, task_id, slug, implemented.handoff, revisor_result.handoff
-        )
-        audited = run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed))
-        if audited is None:
-            return stopped()
-        completed = True
-
-        if cfg.auto_approves(slug):
-            # The conditions win over `merge_on_done` (ADR 77): a project
-            # with both on merges only what the automatic approve allows.
-            approve = _auto_approve_and_merge(
-                cfg, task_id, slug,
-                description=ctx.description,
-                implemented=implemented,
-                reviewed=revisor_result,
-                audited=audited,
-                filed=filed,
-                authorized=authorized,
+            return _blocked_outcome(ctx)
+        if implemented.gates is not None and implemented.gates.blocking:
+            # The gates already asked for this in-session and checked the
+            # answer. Paying a revisor to read a branch whose tests fail
+            # buys a finding the dispatcher has in hand, so the round goes
+            # back around instead — the findings are in the task file, and
+            # the next implementador round opens on them.
+            logger.warning(
+                "task %s: the gates blocked round %d before review", task_id, round_num,
             )
-            if on_approve is not None:
-                on_approve(approve)
-            merged = approve.merged
-        else:
-            # Never pushes: the push of the base belongs to an approve, a
-            # person's or the automatic one (ADR 78), not to `merge_on_done`.
-            merged = cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug)
-        if merged:
-            # Only now: the entries are in the project's docs on the branch
-            # that just landed, so the inbox copy would charge every later
-            # phase for a row the repo already has. A branch that did not
-            # merge keeps them here, where the next task still sees them.
-            learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
-        return CycleOutcome.FINISHED
-    finally:
-        try:
-            close_cycle(ctx, completed=completed)
-        finally:
-            if in_window:
-                scheduler.leave_write_window(task_id)
+            continue
+        revisor_result = run_phase(ctx, "revisor", round_num=round_num)
+        if revisor_result is None:
+            return _stopped(ctx)
+        disguised = debt.blocking(revisor_result.handoff)
+        if disguised:
+            # A block wearing a debt costume. Another round cannot supply
+            # a decision the task was never given, so this ends here
+            # rather than burning the remaining rounds to say so again.
+            logger.warning(
+                "task %s: the revisor read %d declaration(s) as blocks: %s",
+                task_id, len(disguised), "; ".join(disguised),
+            )
+            break
+        sent_back = debt.rejected(revisor_result.handoff)
+        if revisor_approved(revisor_result.result_text, revisor_result.handoff):
+            if not sent_back:
+                approved = True
+                break
+            # Rejected debt is work the revisor says this task should have
+            # done, which is a finding; a verdict of APPROVED over the top
+            # of one is a contradiction, and the finding wins. It costs a
+            # round like any other finding, so this still terminates.
+            logger.info(
+                "task %s: round %d came back APPROVED with %d debt declaration(s) rejected, "
+                "so it is not an approval: %s",
+                task_id, round_num, len(sent_back), "; ".join(sent_back),
+            )
+        reasons = review_reasons(revisor_result.handoff)
+        repeated = [text for key, text in reasons.items() if key in previous_reasons]
+        previous_reasons = reasons
+        if (
+            repeated
+            and cfg.escalate_effort_on_repeated_finding
+            and round_num < cfg.max_revision_rounds
+        ):
+            repeated_finding = True
+            logger.info(
+                "task %s: round %d runs the implementador at effort %s, "
+                "the revisor sent back the same finding(s) twice: %s",
+                task_id, round_num + 1, cfg.escalated_effort, "; ".join(repeated),
+            )
+
+    if not approved:
+        # Said out loud because otherwise nothing says it: the task
+        # file's `status:` is only written by a handoff, and before ADR 52
+        # the run exited 0 either way — so a task that used up every round
+        # looked exactly like one that was never dispatched.
+        logger.warning(
+            "task %s: blocked after %d of %d revision round(s) without an approval",
+            task_id, rounds_run, cfg.max_revision_rounds,
+        )
+        return _blocked_outcome(ctx)
+
+    # Stamped before the phase that files them, so the auditor's prompt
+    # can name the entries it owns and a later run can tell an entry that
+    # was handed to a task from one nobody has picked up yet.
+    learnings.carry(cfg.hive_tasks_dir, slug, task_id)
+    # Written to the task file rather than only handed to the auditor: the
+    # merge can happen days later, in `merge-task`, long after this
+    # handoff is prose in a file nobody parses, and the api serves the
+    # list from the task file.
+    tasks.set_resolved_debt(
+        cfg.hive_tasks_dir, task_id, debt.resolved(implemented.handoff)
+    )
+    # Before the auditor, because the auditor writes the rows these ids
+    # name.
+    filed = _file_accepted_debt(
+        cfg, task_id, slug, implemented.handoff, revisor_result.handoff
+    )
+    audited = run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed))
+    if audited is None:
+        return _stopped(ctx)
+    ctx.completed = True
+
+    if cfg.auto_approves(slug):
+        # The conditions win over `merge_on_done` (ADR 77): a project
+        # with both on merges only what the automatic approve allows.
+        approve = _auto_approve_and_merge(
+            cfg, task_id, slug,
+            description=ctx.description,
+            implemented=implemented,
+            reviewed=revisor_result,
+            audited=audited,
+            filed=filed,
+            authorized=authorized,
+        )
+        if on_approve is not None:
+            on_approve(approve)
+        merged = approve.merged
+    else:
+        # Never pushes: the push of the base belongs to an approve, a
+        # person's or the automatic one (ADR 78), not to `merge_on_done`.
+        merged = cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug)
+    if merged:
+        # Only now: the entries are in the project's docs on the branch
+        # that just landed, so the inbox copy would charge every later
+        # phase for a row the repo already has. A branch that did not
+        # merge keeps them here, where the next task still sees them.
+        learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
+    return CycleOutcome.FINISHED

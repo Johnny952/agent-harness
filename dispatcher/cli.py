@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from dispatcher import (
+    command_run,
     context_transfer,
     docker_exec,
     handoff,
@@ -375,6 +376,26 @@ def main() -> None:
     split_parser.add_argument("--task-id", required=True)
     split_parser.add_argument("--project", required=True, help="Project slug")
 
+    verdict_parser = sub.add_parser(
+        "command-verdict",
+        help="Run or deny one command request a task is blocked on, then resume the "
+        "phase that filed it in its own session and carry the cycle on from there "
+        "(gates, revisor, auditor; the arquitecto on after the cartografo). <n> "
+        "counts from 1 over the requests the check accepted. Refused when the task "
+        "is not blocked on command_request, <n> names no accepted request, the "
+        "block already has a verdict, or, on run, the request no longer passes "
+        "its check.",
+    )
+    verdict_parser.add_argument("task_id", metavar="task")
+    verdict_parser.add_argument("n", type=int)
+    verdict_parser.add_argument("verdict", choices=command_run.VERDICTS)
+    verdict_parser.add_argument("--project", required=True, help="Project slug")
+    verdict_parser.add_argument(
+        "--comment",
+        help="What the phase is told with the verdict. On deny it is the reason; "
+        f"without one the phase reads \"{command_run.DENIED_NO_COMMENT}\".",
+    )
+
     bootstrap_parser = sub.add_parser(
         "bootstrap-project",
         help="Create the per-project directory (projects_root/<slug>) on one account's container",
@@ -661,6 +682,33 @@ def main() -> None:
         print(f"phase {args.role} finished; {context_transfer.task_file_path(cfg.hive_tasks_dir, args.task_id)} has its handoff")
         if args.role == "arquitecto":
             _print_proposed_split(args, result.handoff)
+    elif args.command == "command-verdict":
+        _require_migrated(cfg, parser)
+        if args.n < 1:
+            parser.error("<n> counts from 1")
+        try:
+            outcome = command_run.run_command_request(
+                cfg, args.task_id, args.project, args.n, args.verdict, comment=args.comment,
+            )
+        except command_run.VerdictRefused as exc:
+            print(f"task {args.task_id}: verdict refused: {exc}", file=sys.stderr)
+            raise SystemExit(EXIT_BLOCKED) from None
+        for line in left_behind_report(cfg, args.task_id):
+            print(line, file=sys.stderr)
+        if outcome is CycleOutcome.HELD:
+            print(
+                f"task {args.task_id} is held: no account could take its next phase; "
+                "run the phase again with run-phase once one resets",
+                file=sys.stderr,
+            )
+            raise SystemExit(EXIT_HELD)
+        if outcome is CycleOutcome.BLOCKED:
+            print(f"task {args.task_id} is blocked; the log above says why", file=sys.stderr)
+            raise SystemExit(EXIT_BLOCKED)
+        if outcome is CycleOutcome.SPLIT:
+            print(_epic_line(cfg, args.task_id))
+            raise SystemExit(EXIT_SPLIT)
+        print(f"task {args.task_id}: request {args.n} {args.verdict}; the cycle finished")
     elif args.command == "bootstrap-project":
         # Only creates the directory create_worktree() needs as its cwd; the
         # config schema has no repo-source field, so cloning the actual
