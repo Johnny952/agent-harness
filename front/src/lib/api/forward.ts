@@ -9,9 +9,9 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Ten console paths map one-to-one onto
- * the ten api routes; anything else under `/api/` is a JSON 404 from the console
- * and never reaches the api. Query parameters are copied by name per route — the
+ * **It is a whitelist and not a proxy.** Twelve console paths map one-to-one
+ * onto twelve api routes; anything else under `/api/` is a JSON 404 from the
+ * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
  * a 400 it did not expect. `?project=` is added from the console's own
@@ -24,8 +24,18 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose ten routes, count and
+ * deliberately not entries of `FORWARDED`, whose twelve routes, count and
  * rejection message describe the api alone.
+ *
+ * **Four method and path pairs go to the board-service** (`docs/decisions.md`
+ * ADR 136): `POST /api/backlog`, `PATCH /api/tasks/<id>`,
+ * `POST /api/tasks/<id>/comments` and `POST /api/tasks/<id>/accept`, onto the
+ * same paths there. They are matched by method *and* path before the read-only
+ * check, so every other method on those paths keeps the answer it had: a `GET`
+ * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
+ * `POST /api/tasks` is still the 405, a `GET /api/backlog` still the 404. They
+ * are the only writes that are not the settings', so they carry the console's
+ * CSRF checks, written at `forwardBoard`.
  */
 import {
   API_BASE_URL,
@@ -35,6 +45,8 @@ import {
   CONFIG_WRITER_TOKEN,
   CONFIG_WRITER_URL,
   CONSOLE_PROJECT,
+  BOARD_SERVICE_TIMEOUT_MS,
+  BOARD_SERVICE_URL,
 } from "./server-env";
 
 /** The list routes, and the browser parameters each one may carry. */
@@ -62,6 +74,10 @@ const FORWARDED: Record<string, readonly string[]> = {
   // so it is a filter the screen picks and not the console's scope. `state` is
   // one of the api's four, and anything else is the api's 400.
   "/api/command-requests": ["project", "state"],
+  // The Ready column's order, as task ids (`docs/decisions.md` ADR 133). The api
+  // takes no parameter here and reads the hive, not a project, so nothing is
+  // copied and no `?project=` is added.
+  "/api/ready": [],
 };
 
 /**
@@ -100,6 +116,29 @@ const TASK_DETAIL = /^\/api\/tasks\/([^/]+)$/;
 const TASK_USAGE = /^\/api\/tasks\/([^/]+)\/usage$/;
 
 /**
+ * One task's comments: `TASK_USAGE`'s shape exactly, one segment and no query
+ * parameter. The path is shared (ADR 136): a `GET` is the api's read, and a
+ * `POST` is the board-service's `task_comment`, matched in `boardTarget`.
+ */
+const TASK_COMMENTS = /^\/api\/tasks\/([^/]+)\/comments$/;
+
+/** Accepting a backlog item: a `POST` to the board-service, never a read. */
+const TASK_ACCEPT = /^\/api\/tasks\/([^/]+)\/accept$/;
+
+/** Proposing a backlog item: a `POST` to the board-service, never a read. */
+const BACKLOG = "/api/backlog";
+
+/** The words every failure body uses for the board-service: never its address. */
+const BOARD = "the board-service";
+
+/**
+ * The largest body a board write carries across (ADR 136). The biggest thing the
+ * tools take is a proposal's description and its sub-tasks, far under this; a
+ * body over it is the console's 413 and never reaches the board-service.
+ */
+const MAX_BOARD_BODY_BYTES = 64 * 1024;
+
+/**
  * The settings collection: `GET` only, onto the writer's `GET /settings`
  * (`docs/decisions.md` ADR 112 part 1 and part 4).
  */
@@ -136,10 +175,18 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
+  // Also before the read-only check, and only for the four exact pairs: a method
+  // or a path that is not one of them falls through to the answer it had.
+  const board = boardTarget(request.method, url.pathname);
+  if (board) return forwardBoard(request, url, board);
+
   if (request.method !== "GET") {
     // The api serves reads only: every route there is a `GET` and the service
     // writes nothing anywhere. A write that ever goes this way re-opens ADR 24's
-    // last paragraph about the CSRF middleware rather than inheriting it.
+    // last paragraph about the CSRF middleware rather than inheriting it. The
+    // message still says "reads only" because it describes the api's paths: the
+    // writes the console does forward are the settings' and the board's, both
+    // dispatched above, so none of them reaches this line.
     return jsonResponse(
       { error: `${request.method} is not served here: the console forwards reads only.` },
       405,
@@ -312,8 +359,177 @@ function capitalise(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+/**
+ * Where on the board-service one of the four writes goes, or `null` for any
+ * other method and path, which then gets the answer it had before ADR 136.
+ * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
+ * segment for the board-service to refuse; an undecodable one is a 404 here.
+ */
+function boardTarget(method: string, path: string): Resolution | null {
+  if (method === "POST" && path === BACKLOG) {
+    return { kind: "forward", target: `${BOARD_SERVICE_URL}${BACKLOG}` };
+  }
+  const pattern =
+    method === "PATCH"
+      ? TASK_DETAIL
+      : method === "POST"
+        ? TASK_COMMENTS.test(path)
+          ? TASK_COMMENTS
+          : TASK_ACCEPT.test(path)
+            ? TASK_ACCEPT
+            : null
+        : null;
+  const match = pattern?.exec(path);
+  if (!match) return null;
+  let id: string;
+  try {
+    id = decodeURIComponent(match[1]!);
+  } catch {
+    return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
+  }
+  const tail = pattern === TASK_COMMENTS ? "/comments" : pattern === TASK_ACCEPT ? "/accept" : "";
+  return {
+    kind: "forward",
+    target: `${BOARD_SERVICE_URL}/api/tasks/${encodeURIComponent(id)}${tail}`,
+  };
+}
+
+/**
+ * The board-service's answer to one of its four writes (`docs/decisions.md`
+ * ADR 136).
+ *
+ * On CSRF. These are the first writes here a cross-site page could send without
+ * a preflight being refused first, since `POST` is one a form can make, so the
+ * console checks the request itself, in this order:
+ * - `Content-Type` must be `application/json` (415). A form can only send three
+ *   other types, and a cross-site `fetch` with this one is preflighted, and the
+ *   preflight is refused: no `OPTIONS` is answered with an `Access-Control-*`.
+ * - `Sec-Fetch-Site`, when the browser sends it, must be `same-origin` (403).
+ * - `Origin`, when it is sent, must be this request's own origin (403).
+ * The two headers are checked only when present, because a browser that sends
+ * neither is one the content type already holds; a header that is there and
+ * says another site is the refusal.
+ *
+ * Nothing of the browser's request crosses but the body, bounded to
+ * `MAX_BOARD_BODY_BYTES` (413), under the console's own
+ * `Content-Type: application/json`. `Origin` above all: the board-service
+ * refuses any request that carries one (its guard against a browser), and the
+ * console's server half is not a browser. No token either: the board-service
+ * takes none. No query string: the board-service refuses one.
+ */
+async function forwardBoard(request: Request, url: URL, resolved: Resolution): Promise<Response> {
+  if (resolved.kind === "reject") {
+    return jsonResponse({ error: resolved.error }, resolved.status);
+  }
+
+  const mediaType = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    return jsonResponse({ error: `A write to ${BOARD} must be sent as application/json.` }, 415);
+  }
+  const site = request.headers.get("sec-fetch-site");
+  if (site !== null && site !== "same-origin") {
+    return jsonResponse(
+      { error: `A write to ${BOARD} must come from the console's own pages, not ${site}.` },
+      403,
+    );
+  }
+  const origin = request.headers.get("origin");
+  if (origin !== null && origin !== url.origin) {
+    return jsonResponse(
+      { error: `A write to ${BOARD} must come from the console's own origin.` },
+      403,
+    );
+  }
+
+  const body = await readBounded(request, MAX_BOARD_BODY_BYTES);
+  if (body === null) {
+    return jsonResponse(
+      { error: `A write to ${BOARD} takes at most ${MAX_BOARD_BODY_BYTES} bytes.` },
+      413,
+    );
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(resolved.target, {
+      method: request.method,
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(BOARD_SERVICE_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    // The address only in the server log, as for the api and the writer.
+    // 504 for the timeout, 502 for everything else: the console is the gateway
+    // and the board-service is what did not answer.
+    const why = describe(cause);
+    console.error(`[forward] ${BOARD_SERVICE_URL} did not answer: ${why}`);
+    if (isTimeout(cause)) {
+      return jsonResponse(
+        { error: `${capitalise(BOARD)} did not answer within ${BOARD_SERVICE_TIMEOUT_MS} ms.` },
+        504,
+      );
+    }
+    return jsonResponse({ error: `${capitalise(BOARD)} could not be reached.` }, 502);
+  }
+
+  // The board-service's status (201 for something made), body and content type,
+  // as the api's are passed back.
+  const answer = await upstream.arrayBuffer();
+  const contentType = upstream.headers.get("content-type");
+  return new Response(answer, {
+    status: upstream.status,
+    headers: contentType ? { "content-type": contentType } : {},
+  });
+}
+
+/**
+ * The request's body, or `null` once it passes `limit` bytes. Read as a stream
+ * and stopped at the limit, so a large body is not buffered whole to be refused.
+ * A declared `Content-Length` over the limit is refused before any of it is read.
+ */
+async function readBounded(request: Request, limit: number): Promise<ArrayBuffer | null> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) return null;
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new ArrayBuffer(size);
+  const view = new Uint8Array(out);
+  let at = 0;
+  for (const chunk of chunks) {
+    view.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
+}
+
 function resolveTarget(url: URL): Resolution {
   const path = url.pathname;
+
+  const comments = TASK_COMMENTS.exec(path);
+  if (comments) {
+    let id: string;
+    try {
+      id = decodeURIComponent(comments[1]!);
+    } catch {
+      return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
+    }
+    return {
+      kind: "forward",
+      target: `${API_BASE_URL}/api/tasks/${encodeURIComponent(id)}/comments`,
+    };
+  }
 
   const usage = TASK_USAGE.exec(path);
   if (usage) {
@@ -336,7 +552,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the ten.
+      // `%zz` and friends. A path the console cannot read is not one of the twelve.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -351,7 +567,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the ten routes the console forwards.`,
+      error: `${path} is not one of the twelve routes the console forwards.`,
     };
   }
 

@@ -24,10 +24,13 @@ vi.mock("./server-env", () => ({
   CONFIG_WRITER_URL: "http://writer.test:8791",
   CONFIG_WRITER_TOKEN: "writer-token",
   CONFIG_WRITER_TIMEOUT_MS: 5000,
+  BOARD_SERVICE_URL: "http://board.test:8792",
+  BOARD_SERVICE_TIMEOUT_MS: 5000,
 }));
 
 const BASE = "http://api.test:8789";
 const WRITER = "http://writer.test:8791";
+const BOARD = "http://board.test:8792";
 
 function get(path: string, init?: RequestInit): Request {
   return new Request(`http://console.test${path}`, init);
@@ -93,7 +96,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/threads"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/threads is not one of the ten routes the console forwards.",
+      error: "/api/threads is not one of the twelve routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -184,6 +187,35 @@ describe("the task usage route", () => {
     const fetchMock = stubApi();
     await forwardApiRequest(get("/api/tasks/..%2f..%2fadmin/usage"));
     expect(target(fetchMock)).toBe(`${BASE}/api/tasks/..%2F..%2Fadmin/usage`);
+  });
+});
+
+describe("the ready order", () => {
+  it("is forwarded with no parameter and no project", async () => {
+    const fetchMock = stubApi('{"data":[],"warnings":[]}');
+    await forwardApiRequest(get("/api/ready?project=other&limit=3"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/ready`);
+  });
+});
+
+describe("the task comments read", () => {
+  it("goes to the api, not the board-service, with no parameter", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/T-014/comments?x=1"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/T-014/comments`);
+  });
+
+  it("re-encodes an id rather than passing it through", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/..%2f..%2fadmin/comments"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/..%2F..%2Fadmin/comments`);
+  });
+
+  it("404s an id it cannot read, without asking the api", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/tasks/%zz/comments"));
+    expect(answer?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -380,7 +412,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the ten routes the console forwards.",
+      error: "/api/settingsx is not one of the twelve routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -424,6 +456,184 @@ describe("the settings forward", () => {
   });
 });
 
+describe("the board-service writes", () => {
+  /** A write as the console's own page sends it. */
+  function write(path: string, method: string, body = '{"text":"hi"}', headers = {}): Request {
+    return get(path, {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        cookie: "session=whatever",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  function sent(fetchMock: ReturnType<typeof stubApi>): RequestInit {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return fetchMock.mock.calls[0]![1]!;
+  }
+
+  it.each([
+    ["POST", "/api/backlog", `${BOARD}/api/backlog`],
+    ["PATCH", "/api/tasks/T-014", `${BOARD}/api/tasks/T-014`],
+    ["POST", "/api/tasks/T-014/comments", `${BOARD}/api/tasks/T-014/comments`],
+    ["POST", "/api/tasks/T-014/accept", `${BOARD}/api/tasks/T-014/accept`],
+  ])("%s %s reaches the board-service with the body and one header", async (method, path, url) => {
+    const fetchMock = stubApi('{"id":"T-014"}');
+    const answer = await forwardApiRequest(write(path, method));
+    expect(answer?.status).toBe(200);
+    expect(target(fetchMock)).toBe(url);
+    const init = sent(fetchMock);
+    expect(init.method).toBe(method);
+    // Not the browser's Origin, cookie or authorization: the board-service
+    // refuses any Origin, and it has no credential to check.
+    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+    expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe('{"text":"hi"}');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("copies no query parameter", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(write("/api/backlog?project=other", "POST"));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/backlog`);
+  });
+
+  it("re-encodes an id, and 404s one it cannot read", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(write("/api/tasks/..%2fadmin/accept", "POST"));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/..%2Fadmin/accept`);
+    const answer = await forwardApiRequest(write("/api/tasks/%zz", "PATCH"));
+    expect(answer?.status).toBe(404);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves every other method on these paths as it was", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(write("/api/tasks", "POST")))?.status).toBe(405);
+    expect((await forwardApiRequest(get("/api/backlog")))?.status).toBe(404);
+    expect((await forwardApiRequest(get("/api/tasks/T-014/accept")))?.status).toBe(404);
+    expect((await forwardApiRequest(write("/api/tasks/T-014/usage", "POST")))?.status).toBe(405);
+    expect((await forwardApiRequest(write("/api/tasks/T-014", "PUT")))?.status).toBe(405);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("passes the board-service's status, body and content type back", async () => {
+    stubApi('{"error":"no such task"}', 404);
+    const missing = await forwardApiRequest(write("/api/tasks/T-999/accept", "POST"));
+    expect(missing?.status).toBe(404);
+    expect(await missing?.text()).toBe('{"error":"no such task"}');
+    vi.restoreAllMocks();
+    stubApi('{"id":"T-014","comment":{},"comment_count":1}', 201);
+    const created = await forwardApiRequest(write("/api/tasks/T-014/comments", "POST"));
+    expect(created?.status).toBe(201);
+    expect(created?.headers.get("content-type")).toBe("application/json");
+  });
+
+  it("allows a write with neither Sec-Fetch-Site nor Origin", async () => {
+    const fetchMock = stubApi();
+    const request = get("/api/backlog", {
+      method: "POST",
+      body: "{}",
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+    expect((await forwardApiRequest(request))?.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("415s a body that is not declared JSON", async () => {
+    const fetchMock = stubApi();
+    for (const type of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"]) {
+      const answer = await forwardApiRequest(
+        write("/api/backlog", "POST", "{}", { "content-type": type }),
+      );
+      expect(answer?.status).toBe(415);
+      expect((await answer!.json()).error).toContain("application/json");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("403s a cross-site or same-site Sec-Fetch-Site", async () => {
+    const fetchMock = stubApi();
+    for (const site of ["cross-site", "same-site", "none"]) {
+      const answer = await forwardApiRequest(
+        write("/api/backlog", "POST", "{}", { "sec-fetch-site": site }),
+      );
+      expect(answer?.status).toBe(403);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("403s a foreign Origin, and does not forward the console's own", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(
+      write("/api/backlog", "POST", "{}", { origin: "http://evil.test" }),
+    );
+    expect(answer?.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await forwardApiRequest(write("/api/backlog", "POST"));
+    expect(sent(fetchMock).headers).not.toHaveProperty("origin");
+    expect(sent(fetchMock).headers).not.toHaveProperty("Origin");
+  });
+
+  it("413s a body over 64 KiB without asking the board-service", async () => {
+    const fetchMock = stubApi();
+    const big = JSON.stringify({ text: "x".repeat(64 * 1024) });
+    const answer = await forwardApiRequest(write("/api/tasks/T-014/comments", "POST", big));
+    expect(answer?.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("413s a streamed body over 64 KiB that declares no length", async () => {
+    const fetchMock = stubApi();
+    const chunk = new Uint8Array(40 * 1024).fill(0x20);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(chunk);
+        controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    const request = new Request("http://console.test/api/backlog", {
+      method: "POST",
+      body: stream,
+      headers: { "content-type": "application/json" },
+      duplex: "half",
+    } as RequestInit);
+    expect((await forwardApiRequest(request))?.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("turns an unreachable board-service into a 502 that names it and not its address", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new TypeError("fetch failed: connect ECONNREFUSED http://board.test:8792"),
+    );
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const answer = await forwardApiRequest(write("/api/backlog", "POST"));
+    expect(answer?.status).toBe(502);
+    const body = await answer?.text();
+    expect(body).toBe('{"error":"The board-service could not be reached."}');
+    expect(body).not.toContain("board.test");
+    expect(logged.mock.calls[0]![0]).toContain(BOARD);
+  });
+
+  it("turns a timeout into a 504 that names the board-service", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new DOMException("The operation timed out.", "TimeoutError"),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const answer = await forwardApiRequest(write("/api/tasks/T-014", "PATCH"));
+    expect(answer?.status).toBe(504);
+    expect(await answer?.text()).toBe(
+      '{"error":"The board-service did not answer within 5000 ms."}',
+    );
+  });
+});
+
 /**
  * `CONFIG_WRITER_TOKEN` unset. The value is read when `server-env.ts` is imported,
  * so the module graph is reset and re-imported under a second mock rather than
@@ -440,6 +650,8 @@ describe("the settings forward without CONFIG_WRITER_TOKEN", () => {
       CONFIG_WRITER_URL: "http://writer.test:8791",
       CONFIG_WRITER_TOKEN: null,
       CONFIG_WRITER_TIMEOUT_MS: 5000,
+      BOARD_SERVICE_URL: "http://board.test:8792",
+      BOARD_SERVICE_TIMEOUT_MS: 5000,
     }));
     const forward = await import("./forward");
     vi.doUnmock("./server-env");

@@ -33,21 +33,43 @@
  * `PUT` and `DELETE` on `/api/settings/<key>`, through the same forward and the
  * same envelope reader, so a refusal keeps the writer's message and its status
  * (`docs/decisions.md` ADR 110 part 6, ADR 114).
+ *
+ * **Two more reads, and four writes, for the backlog** (`docs/decisions.md`
+ * ADR 136, `docs/plans/board-service.md` §4 and §6). `getReady` reads the api's
+ * `/api/ready` and `listComments` reads `GET /api/tasks/<id>/comments`, both
+ * the api's and both through `readEnvelope` like the ten (ADR 135 for the
+ * comments). `proposeBacklog`, `editTask`, `commentTask` and
+ * `acceptTask` are the writes: `POST /api/backlog`, `PATCH /api/tasks/<id>`,
+ * `POST /api/tasks/<id>/comments` and `POST /api/tasks/<id>/accept`, which the
+ * forward sends to the board-service. The board-service answers its result bare,
+ * not in an envelope, so they go through `readBare`, and a refusal is an
+ * `ApiError` with the service's own message and status. There is no mock for any
+ * of the six: like the settings writes, they are real `fetch`es in every mode.
  */
 import type {
+  AcceptTaskBody,
+  AcceptTaskResult,
   Account,
   ApiResult,
   ChatThread,
   CommandRequestState,
   CommandRequests,
+  CommentTaskBody,
+  CommentTaskResult,
   DebtEntry,
+  EditTaskBody,
+  EditTaskResult,
   HookEvent,
   LearningEntry,
   Phase,
+  ProposeBacklogBody,
+  ProposeBacklogResult,
   QueuedAction,
+  ReadyOrder,
   Roadmap,
   Settings,
   Task,
+  TaskComments,
   TaskDetail,
   UsageGroup,
 } from "./types";
@@ -353,6 +375,114 @@ export function resetSetting(key: string, revision: string | null): Promise<ApiR
     method: "DELETE",
     body: { revision },
   });
+}
+
+/* ── The backlog: the ready order, comments, and the board-service writes ── */
+
+/**
+ * The order a worker would take tasks in, as task ids, first first.
+ *
+ * No parameters and no project: the api's `/api/ready` reads the harness's own
+ * board and takes nothing (`observability/api/app.py`, T-088). No mapping and no
+ * sort, because the order is the subject.
+ */
+export function getReady(): Promise<ApiResult<ReadyOrder>> {
+  return readEnvelope<ReadyOrder>("/api/ready");
+}
+
+/**
+ * The comments on one task, oldest first.
+ *
+ * The api's envelope like the other reads (`docs/decisions.md` ADR 135): `data`
+ * is `null` for a comments file that exists and could not be read, with the
+ * reason in `warnings`; an unknown task is the api's 404, an `ApiError`.
+ */
+export function listComments(taskId: string): Promise<ApiResult<TaskComments | null>> {
+  return readEnvelope<TaskComments | null>(`/api/tasks/${encodeURIComponent(taskId)}/comments`);
+}
+
+/**
+ * Propose a task for the backlog: `POST /api/backlog`. `created` is false when
+ * the board-service found the same proposal already there, and `tasks` is what
+ * it wrote (`board_service/app.py`).
+ */
+export function proposeBacklog(body: ProposeBacklogBody): Promise<ProposeBacklogResult> {
+  return readBare<ProposeBacklogResult>("/api/backlog", { method: "POST", body });
+}
+
+/** Edit a task's backlog fields: `PATCH /api/tasks/<id>`. `changed` names the fields written. */
+export function editTask(taskId: string, body: EditTaskBody): Promise<EditTaskResult> {
+  return readBare<EditTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+/** Add a comment to a task: `POST /api/tasks/<id>/comments`. */
+export function commentTask(taskId: string, body: CommentTaskBody): Promise<CommentTaskResult> {
+  return readBare<CommentTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}/comments`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * Accept a proposed task onto the board: `POST /api/tasks/<id>/accept`. For an
+ * epic, `children` maps each sub-task to the status it took.
+ */
+export function acceptTask(taskId: string, body: AcceptTaskBody = {}): Promise<AcceptTaskResult> {
+  return readBare<AcceptTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}/accept`, {
+    method: "POST",
+    body,
+  });
+}
+
+/** A write to the board-service. The forward sends the body on and nothing else. */
+interface BoardWrite {
+  method: "POST" | "PATCH";
+  body: object;
+}
+
+/**
+ * `readEnvelope`'s guards, for a payload that is not an envelope: the JSON
+ * content-type check, and `{error}` on a non-2xx as an `ApiError` with the
+ * status. Status 0 is the console's own origin not answering. Nothing about the
+ * 2xx body is checked beyond its being JSON — the shape is the service's.
+ */
+async function readBare<T>(path: string, write?: BoardWrite): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(
+      path,
+      write
+        ? {
+            method: write.method,
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body: JSON.stringify(write.body),
+          }
+        : { headers: { accept: "application/json" } },
+    );
+  } catch (cause) {
+    throw new ApiError(`${path} could not be reached: ${String(cause)}`, 0);
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new ApiError(
+      `${path} answered ${res.status} as ${contentType || "no content type"}, not JSON`,
+      res.status,
+    );
+  }
+
+  const body: unknown = await res.json();
+  if (!res.ok) {
+    const reported = (body as { error?: unknown } | null)?.error;
+    throw new ApiError(
+      typeof reported === "string" ? reported : `${path} answered ${res.status}`,
+      res.status,
+    );
+  }
+  return body as T;
 }
 
 /* ── Still fixtures: tier 3, and the ones that never land ───────────────── */

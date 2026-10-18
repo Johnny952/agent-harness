@@ -23,7 +23,28 @@ export interface ApiResult<T> {
  * The api serves what the file says, so a status outside these five is possible
  * and the screens render it verbatim rather than dropping the row.
  */
-export type TaskStatus = "pending" | "in_progress" | "blocked" | "conflict" | "done";
+export type TaskStatus =
+  "pending" | "in_progress" | "blocked" | "conflict" | "done" | BacklogStatus | "epic";
+
+/**
+ * The three statuses a backlog item holds before it is on the board
+ * (`dispatcher/tasks.py:BACKLOG_STATUSES`, ADR 129): `proposed` waiting for the
+ * operator, `deferred` set aside, `dropped` final. `epic` is a split task's
+ * status once accepted, and an epic closes to `done` or `dropped` (ADR 134).
+ */
+export type BacklogStatus = "proposed" | "deferred" | "dropped";
+
+/** The three priority buckets (`dispatcher/tasks.py:PRIORITIES`, ADR 130). */
+export type TaskPriority = "high" | "normal" | "low";
+
+/** Who proposed a task (`dispatcher/tasks.py:SOURCES`, ADR 129 and ADR 131). */
+export type TaskSource = "operator" | "arquitecto" | "debt";
+
+/**
+ * A debt index row's `impact`, as `dispatcher/debt.py:impact_of` reads it: one
+ * of the three the auditor writes, or `none` for a typo or a missing column.
+ */
+export type DebtImpact = "risk" | "cost" | "cosmetic" | "none";
 
 export interface DebtEntry {
   id: string;
@@ -35,6 +56,11 @@ export interface DebtEntry {
    * a Kanban board card id. Written `none` since ADR 59: nothing mirrors a row.
    */
   card: string;
+  /**
+   * The auditor's judgement of the entry (ADR 131), which sets the priority its
+   * backlog item is filed at. `none` when the index has no impact column.
+   */
+  impact: DebtImpact;
   /** Best-effort, from a `**resolved` prefix on the **what** cell. ADR 17. */
   resolved: boolean;
   /** Split out of `id` in `client.ts` — `T-011-D1` is task `T-011`. ADR 17. */
@@ -390,7 +416,8 @@ export interface UsageGroup {
 }
 
 /**
- * The eight keys `/api/tasks` answers. `body` is not one of them — it is the detail
+ * The fourteen keys `/api/tasks` answers, as `observability/api/app.py:_task`
+ * shapes them (ADR 133). `body` is not one of them — it is the detail
  * route's alone (`docs/decisions.md` ADR 21) — and neither is a debt list: that is
  * a filter over `/api/debt` by the task prefix of a debt id (ADR 17). Nor is a
  * card: the task file is the board's data and nothing mirrors it (ADR 59).
@@ -407,11 +434,123 @@ export interface Task {
    */
   description: string | null;
   resolved_debt: string[];
+  /**
+   * The role of the phase running now, or `null` between phases (ADR 126). A
+   * value beside `lock_expired: true` is a dead dispatcher's, not a running one.
+   */
+  phase: string | null;
   /** The api's judgement against its own expiry window; never re-derived here. */
   lock_expired: boolean | null;
+  /**
+   * The bucket, `normal` when the file names none. A bad value is served as
+   * written beside a warning (ADR 133), hence the `string`.
+   */
+  priority: TaskPriority | string;
+  /** Who proposed it; `null` on a task filed before ADR 129. Served as written. */
+  source: TaskSource | string | null;
+  /** The cleaned list (`tasks.normal_tags`): stripped, no repeats, [] for none. */
+  tags: string[];
+  /** The order inside the bucket, lower first; `null` sorts as 0. As written. */
+  rank: number | null;
+  /** The debt index entry a `source: debt` item came from, else `null` (ADR 131). */
+  debt_id: string | null;
 }
 
-/** `/api/tasks/<task_id>`: the list's eight keys plus the running record. ADR 21. */
+/**
+ * `/api/ready`'s `data`: the Ready column as task ids, in the order work should
+ * be taken (`dispatcher/tasks.py:ready_order`, ADR 133).
+ */
+export type ReadyOrder = string[];
+
+/**
+ * One comment on a task (`dispatcher/tasks.py:add_comment`). `file`, `line` and
+ * `commit` come together or not at all: a comment pinned to a place in the code.
+ */
+export interface TaskComment {
+  /** ISO 8601, when it was written. */
+  at: string;
+  author: string;
+  text: string;
+  file?: string;
+  line?: number;
+  commit?: string;
+}
+
+/**
+ * `data` of `GET /api/tasks/<id>/comments` (ADR 135), in the api's usual
+ * envelope: the task, and its comments oldest first. `data` is `null` when the
+ * comments file exists and could not be read, with the reason in `warnings`.
+ */
+export interface TaskComments {
+  task_id: string;
+  comments: TaskComment[];
+}
+
+/**
+ * The board-service's four writes (ADR 136), as `board_service/app.py:TOOLS`
+ * takes them. The task id is the path's and never the body's.
+ */
+export interface ProposeBacklogBody {
+  title: string;
+  description: string;
+  priority?: TaskPriority;
+  tags?: string[];
+  depends_on?: string[];
+  /** Sub-tasks for an epic; `after` names earlier entries by index. */
+  tasks?: { title: string; description: string; after?: number[] }[];
+}
+
+/** `backlog_propose`'s answer: the id, whether it was new, and any sub-task ids. */
+export interface ProposeBacklogResult {
+  id: string;
+  created: boolean;
+  tasks: string[];
+}
+
+export interface EditTaskBody {
+  title?: string;
+  description?: string;
+  depends_on?: string[];
+  priority?: TaskPriority;
+  tags?: string[];
+  rank?: number;
+}
+
+/** `task_edit`'s answer: the fields that changed, [] for a no-op. */
+export interface EditTaskResult {
+  id: string;
+  changed: string[];
+}
+
+export type CommentTaskBody =
+  { text: string } | { text: string; file: string; line: number; commit: string };
+
+/** `task_comment`'s answer: the comment as stored, and how many the task has. */
+export interface CommentTaskResult {
+  id: string;
+  comment: TaskComment;
+  comment_count: number;
+}
+
+export interface AcceptTaskBody {
+  /** Where the item goes; `pending` (on the board) when absent. */
+  to?: "pending" | "deferred" | "dropped";
+  priority?: TaskPriority;
+}
+
+/**
+ * `backlog_accept`'s answer. `children` is an epic's sub-tasks and where each
+ * went, `{}` for a plain task; `epic_closed` is the epic a drop closed (ADR 134).
+ */
+export interface AcceptTaskResult {
+  id: string;
+  status: string;
+  changed: boolean;
+  children: Record<string, string>;
+  epic_closed?: string;
+}
+
+/** `/api/tasks/<task_id>`: the list's fourteen keys plus the running record. ADR 21. */
 export interface TaskDetail extends Task {
   body: string;
 }

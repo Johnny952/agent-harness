@@ -58,6 +58,12 @@ const TASK: Task = {
   description: "the pointers in docs/ still land somewhere",
   resolved_debt: [],
   lock_expired: null,
+  phase: null,
+  priority: "normal",
+  source: null,
+  tags: [],
+  rank: null,
+  debt_id: null,
 };
 
 /** The one route a card links to, and no component mounted on it. */

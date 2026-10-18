@@ -1,10 +1,10 @@
 /**
- * The five names the console reads from its environment, validated at import.
+ * The six names the console reads from its environment, validated at import.
  *
  * Server-only: this module reads the api's bearer token, and the one rule
  * `docs/decisions.md` ADR 15 calls easy to undo by accident is that the token is
  * read on the server or it is published — Vite inlines every
- * `import.meta.env.VITE_*` into the client bundle, so none of these five carries
+ * `import.meta.env.VITE_*` into the client bundle, so none of these six carries
  * that prefix and none of them may grow it. `typeof window` below is the
  * mechanical half of that rule; `front/src/server.ts` importing this module
  * (through `forward.ts`) is what makes a missing token a refusal to boot rather
@@ -18,6 +18,10 @@
  * that is *not* a refusal to boot: every other screen reads the api and keeps
  * working without it, so its absence is the settings forward's 503 rather than
  * the whole console's crash.
+ *
+ * ADR 136 adds `BOARD_SERVICE_URL`, for the board-service's four writes. It has
+ * no token: the board-service takes none, and refuses any request carrying a
+ * browser `Origin` instead (`board_service/app.py:_http`).
  */
 
 // `tsconfig.json` sets `types: ["vite/client"]`, which admits no Node globals,
@@ -77,3 +81,20 @@ export const CONFIG_WRITER_TOKEN = process.env["CONFIG_WRITER_TOKEN"]?.trim() ||
  * file write under a lock, so nothing argues for a longer wait than the api's.
  */
 export const CONFIG_WRITER_TIMEOUT_MS = 5000;
+
+/**
+ * Where the board-service answers its four console writes (`docs/decisions.md`
+ * ADR 136). The default is the compose service name and its port, 8792, the way
+ * `API_BASE_URL`'s is. Trimmed as the others are, so a trailing slash in the
+ * environment cannot become `//api/backlog`. No `VITE_` prefix: the address is
+ * the server half's topology, and a failure body names the service, never it.
+ */
+export const BOARD_SERVICE_URL = (
+  process.env["BOARD_SERVICE_URL"] || "http://board-service:8792"
+).replace(/\/+$/, "");
+
+/**
+ * ADR 7's number once more, as its own constant: each write is one task file
+ * written under its lock, so nothing argues for a longer wait than the api's.
+ */
+export const BOARD_SERVICE_TIMEOUT_MS = 5000;
