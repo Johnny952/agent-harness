@@ -1,3 +1,10 @@
+---
+status: built
+approved: 2026-10-11
+built: 2026-10-12
+supersedes: []
+---
+
 # Task split — epics, and the arquitecto's backstop for a task that spans surfaces
 
 **Status:** design, approved by the user on 2026-10-11 together with

@@ -1,3 +1,10 @@
+---
+status: building
+approved: 2026-10-11
+built: null
+supersedes: [board.md]
+---
+
 # Board service — the harness's own board, kept by agents over MCP
 
 **Status:** design, approved by the user on 2026-10-11. Step 1 of *How it

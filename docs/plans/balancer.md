@@ -1,3 +1,10 @@
+---
+status: built
+approved: null
+built: 2026-09-28
+supersedes: []
+---
+
 # Plan: a conversational balancer over the account pool
 
 Status: complete. `status`, `release-account` and `run-phase` are real verbs;

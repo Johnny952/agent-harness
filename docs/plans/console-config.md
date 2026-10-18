@@ -1,3 +1,10 @@
+---
+status: built
+approved: null
+built: 2026-10-17
+supersedes: []
+---
+
 # Plan: editing the dispatcher's settings from the console
 
 **Status:** designed 2026-10-15 by T-055, and nothing is built. The decisions

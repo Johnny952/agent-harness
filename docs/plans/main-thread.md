@@ -1,3 +1,10 @@
+---
+status: design
+approved: 2026-10-11
+built: null
+supersedes: []
+---
+
 # Main thread — the conversation lives in the console, on an account the person assigns
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built.

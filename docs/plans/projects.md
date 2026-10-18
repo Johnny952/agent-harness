@@ -1,3 +1,10 @@
+---
+status: design
+approved: 2026-10-11
+built: null
+supersedes: []
+---
+
 # Projects — one board per project, chosen from a sidebar, each with its own key
 
 **Status:** design, agreed in outline by the user on 2026-10-11, not built. It

@@ -1,3 +1,10 @@
+---
+status: building
+approved: null
+built: null
+supersedes: []
+---
+
 # Plan: wiring the console in `front/`
 
 Status: **tier 1 is built on both sides and closed, and the Jinja board is

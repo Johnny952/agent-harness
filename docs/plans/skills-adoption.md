@@ -1,3 +1,10 @@
+---
+status: building
+approved: null
+built: null
+supersedes: []
+---
+
 # Skills adoption — which outside skills the harness takes, and which it does not
 
 **Status:** proposed by the main thread on 2026-10-11 at the user's ask, not

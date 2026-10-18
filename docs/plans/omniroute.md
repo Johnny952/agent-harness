@@ -1,3 +1,10 @@
+---
+status: idea
+approved: null
+built: null
+supersedes: []
+---
+
 # OmniRoute — an optional gateway for non-Claude models, switched from the console
 
 **Status:** an idea recorded by the main thread on 2026-10-11 at the

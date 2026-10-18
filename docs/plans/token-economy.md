@@ -1,3 +1,10 @@
+---
+status: building
+approved: null
+built: null
+supersedes: []
+---
+
 # Token economy — what one window buys, and sizing tasks to fit it
 
 **Status:** P5 is built — T-024, 2026-10-11, under `docs/decisions.md` ADR 53;
