@@ -11,6 +11,7 @@ from dispatcher import (
     allowlist,
     command_run,
     context_transfer,
+    debt,
     docker_exec,
     handoff,
     learnings,
@@ -184,6 +185,56 @@ def _run_migrate(cfg: Config) -> None:
         print("nothing to migrate")
     if report.refused:
         raise SystemExit(EXIT_BLOCKED)
+
+
+def _run_import_debt(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:
+    """`import-debt`: every open entry of a debt index as a `proposed` item (ADR 131).
+
+    The one-time filing of the entries the index held before the dispatcher
+    mirrored new ones, through the writer that mirroring uses, so a second
+    run, or one after a cycle mirrored some, files nothing twice. The index
+    is the project checkout's (`--project`, read in a container as the
+    dispatcher reads it) or a file on this host (`--index`).
+    """
+    if args.index is not None:
+        try:
+            text = Path(args.index).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read {args.index}: {exc}", file=sys.stderr)
+            raise SystemExit(EXIT_BLOCKED) from None
+        source = args.index
+    else:
+        container = cleanup_container(cfg)
+        if container is None:
+            parser.error("no accounts configured: nothing to read the index in")
+        project_dir = f"{cfg.projects_root}/{args.project}"
+        proc = docker_exec.run_docker_exec(container, project_dir, ["cat", project_docs.DEBT_INDEX])
+        if proc.returncode != 0:
+            print(
+                f"cannot read {project_docs.DEBT_INDEX} in {project_dir}: "
+                f"{(proc.stderr or '').strip() or 'no such file'}",
+                file=sys.stderr,
+            )
+            raise SystemExit(EXIT_BLOCKED)
+        text = proc.stdout
+        source = f"{args.project}:{project_docs.DEBT_INDEX}"
+    try:
+        results = tasks.file_debt(cfg.hive_tasks_dir, debt.index_rows(text), dry_run=args.dry_run)
+    except tasks.BoardWriteError as exc:
+        print(f"not imported: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_BLOCKED) from None
+    new = [result for result in results if result["created"]]
+    for result in results:
+        if result["created"]:
+            verb = "would file" if args.dry_run else f"filed as {result['id']}"
+        else:
+            verb = f"already {result['id']}"
+        print(f"{result['debt_id']}: {verb} (priority {result['priority']}): {result['title']}")
+    prefix = "dry run: " if args.dry_run else ""
+    print(
+        f"{prefix}{len(results)} open entr{'y' if len(results) == 1 else 'ies'} in {source}; "
+        f"{len(new)} {'to file' if args.dry_run else 'filed'}, {len(results) - len(new)} already filed"
+    )
 
 
 def _resolve_description(
@@ -696,11 +747,32 @@ def main() -> None:
         "again when that cycle has ended.",
     )
 
+    import_debt_parser = sub.add_parser(
+        "import-debt",
+        help="File every open entry of a debt index as a proposed backlog item, "
+        "source debt, tag debt, its priority from the entry's impact (ADR 131). "
+        "Run it once; a second run, like the mirroring after each cycle, files "
+        "nothing twice. --dry-run prints what it would file and writes nothing.",
+    )
+    import_debt_source = import_debt_parser.add_mutually_exclusive_group(required=True)
+    import_debt_source.add_argument(
+        "--project", metavar="SLUG",
+        help=f"Read {project_docs.DEBT_INDEX} of this project's checkout, in a container",
+    )
+    import_debt_source.add_argument(
+        "--index", metavar="PATH", help="Read the index from this file instead",
+    )
+    import_debt_parser.add_argument(
+        "--dry-run", action="store_true", help="Print what would be filed; write nothing",
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
 
     if args.command == "migrate":
         _run_migrate(cfg)
+    elif args.command == "import-debt":
+        _run_import_debt(args, cfg, parser)
     elif args.command == "run-task":
         _require_migrated(cfg, parser)
         description = _resolve_description(args, cfg, parser)

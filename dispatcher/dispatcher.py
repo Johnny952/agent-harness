@@ -2070,6 +2070,64 @@ def _file_accepted_debt(
     return filed
 
 
+def _mirror_filed_debt(
+    cfg: Config, task_id: str, slug: str, filed: list[tuple[str, debt.Declaration]]
+) -> list[dict]:
+    """File each entry the auditor just wrote as a `proposed` backlog item (ADR 131).
+
+    After the auditor, because its row carries the impact the item's priority
+    comes from, and read from the branch it wrote on. An entry the index does
+    not show (a read that failed, a row the auditor did not write) is filed
+    from its declaration with no impact; one the index shows resolved is not
+    filed. `tasks.propose_debt` is idempotent on the entry id, so a re-run
+    files nothing twice. Never fails the cycle: the index is still the record,
+    and `dispatch import-debt` files what this missed.
+    """
+    if not filed:
+        return []
+    rows: dict[str, dict] = {}
+    container = cleanup_container(cfg)
+    if container is not None:
+        worktree = (
+            f"{docker_exec.task_worktrees_dir(cfg.projects_root, slug, task_id)}"
+            f"/{docker_exec.WRITER_WORKTREE_NAME}"
+        )
+        try:
+            rows = {
+                row["id"]: row
+                for row in debt.index_rows(debt.read_index(container, worktree))
+                if row["id"]
+            }
+        except Exception as exc:
+            logger.warning("task %s: could not read %s: %s", task_id, project_docs.DEBT_INDEX, exc)
+    wanted = []
+    for entry, declaration in filed:
+        row = rows.get(entry)
+        if row is None:
+            logger.warning(
+                "task %s: debt entry %s is not in the index; filing its backlog item "
+                "from the declaration, with no impact", task_id, entry,
+            )
+            row = debt.declared_row(entry, declaration)
+        wanted.append(row)
+    try:
+        results = tasks.file_debt(cfg.hive_tasks_dir, wanted)
+    except Exception as exc:
+        logger.warning(
+            "task %s: could not file its debt as backlog items: %s; "
+            "`dispatch import-debt` files them later", task_id, exc,
+        )
+        return []
+    for result in results:
+        logger.info(
+            "task %s: debt entry %s %s backlog item %s (priority %s)",
+            task_id, result["debt_id"],
+            "filed as" if result["created"] else "already has",
+            result["id"], result["priority"],
+        )
+    return results
+
+
 def cleanup_container(cfg: Config) -> str | None:
     """Which container to run worktree housekeeping in.
 
@@ -3329,6 +3387,7 @@ def run_single_phase(
                 )
             return None
         if final:
+            _mirror_filed_debt(cfg, task_id, slug, filed)
             # Said out loud because the difference is invisible from the task
             # file: a task closed this way was closed by a phase, not by a
             # cycle that read a verdict, and the merge a finished `run-task`
@@ -3850,6 +3909,7 @@ def _cycle_rounds(
     audited = run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed))
     if audited is None:
         return _stopped(ctx)
+    _mirror_filed_debt(cfg, task_id, slug, filed)
     ctx.completed = True
 
     if cfg.auto_approves(slug):

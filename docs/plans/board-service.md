@@ -576,6 +576,19 @@ Each step is a single surface, built in this order:
      order. Not built: 5d, debt as backlog items with `tags: [debt]`, the
      one-time import of the open entries in `docs/debt/`, and `impact` in
      the debt index.
+   - **Built 2026-10-18** by T-086 (`docs/decisions.md` ADR 131), the fourth
+     bullet: `impact` (`risk`, `cost`, `cosmetic`) as the last column of the
+     debt index, written by the auditor and read by name, a missing or other
+     value being `none`; it maps to `high`, `normal`, `low`, and `none` to
+     `normal`. `debt_id` in the frontmatter links an item to its entry,
+     checked on read and served by `board_list` and `board_get`; `card`
+     stays `none` (ADR 59). `tasks.propose_debt` files an entry as a
+     `proposed` item, `source: debt`, `tags: [debt]`, at the end of its
+     bucket, under `CREATE_LOCK` and idempotent on `debt_id`. The
+     dispatcher files each entry after the auditor, and
+     `dispatch import-debt` (`--project` or `--index`, `--dry-run`) files
+     the open entries already in the index. Step 5 is complete; step 8 (the
+     console) and step 9 remain.
 6. **`phase` in the frontmatter.** The dispatcher writes and clears it around
    each phase, and the api serves it.
    **Built 2026-10-18** by T-081 (`docs/decisions.md` ADR 126): `phase` in
