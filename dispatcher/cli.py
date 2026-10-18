@@ -699,6 +699,11 @@ def main() -> None:
         help="The tasks to run, each with a stored description; repeatable",
     )
     queue_parser.add_argument(
+        "--ready", type=int, default=0, metavar="N",
+        help="Add the first N tasks of the board's Ready order after the listed ones; "
+        "the listed order is kept (ADR 132)",
+    )
+    queue_parser.add_argument(
         "--limit", type=int,
         help="The ceiling in measured tokens from the usage log (ADR 79)",
     )
@@ -1117,17 +1122,26 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
             f"--parallel: at most {len(cfg.accounts)}, one cycle per configured account"
         )
     if args.resume:
-        if args.task_ids or args.limit is not None or args.project or args.parallel != 1:
+        if (
+            args.task_ids or args.ready or args.limit is not None or args.project
+            or args.parallel != 1
+        ):
             parser.error("--resume takes the queue's own project, tasks, limit and parallelism")
         try:
             queue = queue_mod.resume(cfg, args.resume)
         except queue_mod.QueueError as exc:
             parser.error(str(exc))
     else:
-        if not args.project or not args.task_ids or args.limit is None:
-            parser.error("run-queue needs --project, --task-id and --limit, or --resume")
+        if args.ready < 0:
+            parser.error("--ready: at least 0")
+        if not args.project or not (args.task_ids or args.ready) or args.limit is None:
+            parser.error(
+                "run-queue needs --project, --task-id or --ready, and --limit, or --resume"
+            )
         try:
-            queue = queue_mod.plan(cfg, args.project, args.task_ids, args.limit)
+            queue = queue_mod.plan(
+                cfg, args.project, args.task_ids, args.limit, ready=args.ready
+            )
         except queue_mod.QueueError as exc:
             parser.error(str(exc))
         queue.parallel = args.parallel

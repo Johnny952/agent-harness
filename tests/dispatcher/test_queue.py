@@ -151,6 +151,152 @@ def test_a_task_with_a_bad_source_is_refused(cfg):
         queue_mod.plan(cfg, "proj", ["T-1"], limit=10)
 
 
+# --- The Ready order (ADR 130, ADR 132) ---------------------------------------
+
+
+def _place(cfg, task_id, priority=None, rank=None):
+    """Set a task's bucket and rank on its file, as `task_edit` leaves them."""
+    path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.priority = priority
+    task.rank = rank
+    context_transfer.write_task_file(path, task)
+
+
+def _ids(queue):
+    return [e.task_id for e in queue.entries]
+
+
+def test_ready_picks_by_bucket_then_rank_then_id(cfg):
+    for task_id in ("T-1", "T-2", "T-3", "T-4", "T-10"):
+        _task(cfg, task_id)
+    _place(cfg, "T-1", rank=2048)
+    _place(cfg, "T-2", priority="high", rank=4096)
+    _place(cfg, "T-3", priority="low")
+    _place(cfg, "T-4", rank=1024)
+    # Unranked sorts as 0, ahead of the ranked, and T-10 after T-4 by number.
+    _place(cfg, "T-10", rank=1024)
+
+    queue = queue_mod.plan(cfg, "proj", [], limit=10, ready=4)
+
+    assert _ids(queue) == ["T-2", "T-4", "T-10", "T-1"]
+    assert all(e.from_ready for e in queue.entries)
+    assert queue.passed_over == []
+
+
+def test_ready_lifts_a_dependency_to_the_bucket_of_what_waits_on_it(cfg):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2")
+    _task(cfg, "T-3", depends_on=["T-2"])
+    _place(cfg, "T-2", priority="low")
+    _place(cfg, "T-3", priority="high")
+
+    queue = queue_mod.plan(cfg, "proj", [], limit=10, ready=3)
+
+    # T-3 is not ready, its dependency is not merged; it lifts T-2 to high.
+    assert _ids(queue) == ["T-2", "T-1"]
+
+
+def test_ready_takes_only_what_can_start(cfg):
+    _task(cfg, "T-1")
+    tasks.mark_merged(cfg.hive_tasks_dir, "T-1", "main")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    _task(cfg, "T-3", depends_on=["T-9"])
+    _task(cfg, "T-4")
+    tasks.handoff(cfg.hive_tasks_dir, "T-4", "proposed", "")
+    _place(cfg, "T-4", priority="high")
+    _task(cfg, "T-5")
+    tasks.handoff(cfg.hive_tasks_dir, "T-5", "done", "")
+
+    queue = queue_mod.plan(cfg, "proj", [], limit=10, ready=5)
+
+    # Merged, waiting on an unknown task, in the backlog, or not pending: none taken.
+    assert _ids(queue) == ["T-2"]
+
+
+def test_listed_tasks_keep_their_order_and_ready_ones_follow(cfg):
+    for task_id in ("T-1", "T-2", "T-3", "T-4"):
+        _task(cfg, task_id)
+    _place(cfg, "T-1", priority="high")
+    _place(cfg, "T-4", priority="low")
+
+    queue = queue_mod.plan(cfg, "proj", ["T-4", "T-2"], limit=10, ready=5)
+
+    # The owner's list first, as given, then the rest of Ready, without repeats.
+    assert _ids(queue) == ["T-4", "T-2", "T-1", "T-3"]
+    assert [e.from_ready for e in queue.entries] == [False, False, True, True]
+
+
+def test_a_listed_task_that_depends_on_a_ready_one_still_waits_for_it(cfg):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+
+    queue = queue_mod.plan(cfg, "proj", ["T-2"], limit=10, ready=1)
+
+    assert _ids(queue) == ["T-1", "T-2"]
+
+
+def test_ready_passes_over_a_task_plan_would_refuse(cfg):
+    tasks.handoff(cfg.hive_tasks_dir, "T-1", "pending", "")
+    _task(cfg, "T-2")
+    _task(cfg, "T-3")
+
+    queue = queue_mod.plan(cfg, "proj", [], limit=10, ready=1)
+
+    assert _ids(queue) == ["T-2"]
+    assert queue.passed_over == ["task T-1 has no description"]
+    shown = queue_mod.confirmation(cfg, queue)
+    assert "T-2  Do T-2.  [from Ready]" in shown
+    assert "Passed over from the Ready order:\n  task T-1 has no description" in shown
+
+
+def test_a_listed_task_is_still_refused(cfg):
+    tasks.handoff(cfg.hive_tasks_dir, "T-1", "pending", "")
+    _task(cfg, "T-2")
+    with pytest.raises(queue_mod.QueueError, match="no description"):
+        queue_mod.plan(cfg, "proj", ["T-1"], limit=10, ready=1)
+
+
+def test_nothing_ready_and_nothing_listed_is_refused(cfg):
+    _task(cfg, "T-1", depends_on=["T-2"])
+    _task(cfg, "T-2", depends_on=["T-1"])
+    with pytest.raises(queue_mod.QueueError, match="no task is ready"):
+        queue_mod.plan(cfg, "proj", [], limit=10, ready=2)
+    with pytest.raises(queue_mod.QueueError, match="negative"):
+        queue_mod.plan(cfg, "proj", ["T-1"], limit=10, ready=-1)
+
+
+def test_ready_runs_in_the_order_it_picked(cfg, accounts, monkeypatch):
+    for task_id in ("T-1", "T-2", "T-3"):
+        _task(cfg, task_id)
+    _place(cfg, "T-3", priority="high")
+    fake = _install(monkeypatch, cfg, {t: {} for t in ("T-1", "T-2", "T-3")})
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", [], 10_000, ready=3), sleep=_no_sleep)
+
+    assert fake.started == ["T-3", "T-1", "T-2"]
+    assert queue.status == queue_mod.Q_DONE
+
+
+def test_the_pick_is_saved_and_a_file_from_before_it_loads(cfg):
+    tasks.handoff(cfg.hive_tasks_dir, "T-1", "pending", "")
+    _task(cfg, "T-2")
+    queue = queue_mod.plan(cfg, "proj", [], limit=10, ready=1)
+    path = queue_mod.save(cfg, queue)
+
+    loaded = queue_mod.load(cfg, queue.queue_id)
+    assert loaded.entries[0].from_ready is True
+    assert loaded.passed_over == queue.passed_over
+
+    data = json.loads(Path(path).read_text())
+    del data["passed_over"]
+    del data["entries"][0]["from_ready"]
+    Path(path).write_text(json.dumps(data))
+    old = queue_mod.load(cfg, queue.queue_id)
+    assert old.entries[0].from_ready is False
+    assert old.passed_over == []
+
+
 def test_failed_dependency_skips_dependents_and_the_rest_go_on(cfg, accounts, monkeypatch):
     _task(cfg, "T-1")
     _task(cfg, "T-2", depends_on=["T-1"])
@@ -395,6 +541,30 @@ def test_cli_yes_runs_the_queue(tmp_path, accounts, monkeypatch, capsys):
     assert code == 0
     assert fake.started == ["T-1", "T-2"]
     assert "done" in capsys.readouterr().out
+
+
+def test_cli_ready_adds_tasks_in_ready_order(tmp_path, accounts, monkeypatch, capsys):
+    cfg = _make_config(tmp_path)
+    for task_id in ("T-1", "T-2", "T-3"):
+        _task(cfg, task_id)
+    _place(cfg, "T-3", priority="high")
+    fake = _install(monkeypatch, cfg, {t: {} for t in ("T-1", "T-2", "T-3")})
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
+                "--task-id", "T-2", "--ready", "2", "--limit", "500", "--yes")
+
+    assert code == 0
+    assert fake.started == ["T-2", "T-3", "T-1"]
+    assert "2. T-3  Do T-3.  [from Ready]" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [
+    ["--project", "proj", "--limit", "500"],
+    ["--project", "proj", "--ready", "-1", "--limit", "500"],
+    ["--resume", "q-20261017T000000Z-abcd", "--ready", "1"],
+])
+def test_cli_ready_usage_errors(tmp_path, accounts, monkeypatch, argv):
+    assert _cli(monkeypatch, tmp_path, "run-queue", *argv, "--yes") == 2
 
 
 def test_cli_refuses_parallel_above_one(tmp_path, accounts, monkeypatch):

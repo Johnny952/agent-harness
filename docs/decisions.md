@@ -8413,3 +8413,65 @@ an entry does not close its item: the operator drops it.
   change the operator did not make, from a cell any task can edit.
 - A `debt` status or a separate debt list: `source`, `tags` and `debt_id`
   carry it, and the backlog's order already applies.
+
+## ADR 132 — The queue tops up from the Ready order after the listed tasks, picked once at plan time
+
+**Status:** accepted (T-087, 2026-10-18). Lets the dispatcher's queue use the
+board's Ready order (ADR 130: the bucket lifted by what waits on it, then the
+rank, then the id). Keeps ADR 79 and charter C-4: what runs is what the
+confirmation screen showed, and a resume never picks. Keeps every check
+`plan` makes and every rule the queue runs by: merged dependencies, surface
+and whole-repo exclusivity, the limit.
+
+**Context.** Until now a queue was exactly the task ids the operator typed,
+reordered only so that a dependency inside the queue runs first. The board
+now keeps an order of what is ready to start, and the operator ranks the
+backlog there. The queue did not read it, so the ranking had no effect on
+what ran. Open questions: whether the Ready order replaces the operator's
+list or adds to it, when it is read, and what happens to a ready task the
+queue's checks would refuse.
+
+**Decision.**
+
+1. *`run-queue --ready N` adds the first N ready tasks.*
+   `queue.plan(..., ready=n)` reads `tasks.ready_order` over every task file
+   (`read_all_tasks`), the order `board_list` serves. It takes, in that order,
+   the first `n` tasks that are not already listed. `--task-id` becomes
+   optional when `--ready` is given. A negative count is refused, and so is a
+   queue left with no task.
+2. *The operator's list keeps its order.* Listed tasks come first, as
+   typed. Picked tasks follow, in Ready order. `_ordered` still moves a task
+   only as far as a dependency inside the queue requires. A picked task has
+   its dependencies merged, so it is never held back. It moves ahead of the
+   listed tasks only when one of them depends on it.
+3. *A ready task the checks would refuse is passed over.* The same checks run
+   on it as on a listed task (`_entry`: a description, in sections, and
+   `dispatch_problems`). A refusal does not refuse the queue. The task is
+   skipped, the next ready one is taken, and the reason goes into the
+   queue's `passed_over`. A listed task that fails a check still refuses the
+   queue.
+4. *The pick is read once, before the confirmation screen.* Each picked entry
+   carries `from_ready` and is shown with `[from Ready]`. The passed-over
+   reasons are shown under "Passed over from the Ready order". Both are
+   saved in the queue file. A resume runs the saved entries and never reads
+   the Ready order again. Both new fields have defaults, so a queue file from
+   before them loads.
+5. *Running is unchanged.* The scheduler, `_next`, `_waits`, the write
+   windows and the limit act on the entries' order as before. Only ready
+   tasks are picked: a task that becomes ready while the queue runs is left
+   for the next queue.
+
+**Consequences.** Ranking the backlog on the board now decides what an
+unlisted queue runs. A queue can be planned from the board alone
+(`--ready N` without `--task-id`). The Ready order is read once per plan.
+The front does not start queues, and its board is unchanged.
+
+**Ruled out.**
+- Reordering the operator's list by the Ready order: the list is the
+  operator's explicit choice, and it is what C-4 confirms.
+- Picking again on resume or while the queue runs: the run would differ from
+  the confirmed one.
+- Refusing the whole queue for one ready task with a bad file: the operator
+  did not list it, and the screen names it.
+- Picking tasks whose dependencies merge during the queue: what the screen
+  shows would then depend on how the run goes.
