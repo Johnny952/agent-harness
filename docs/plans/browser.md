@@ -1,3 +1,10 @@
+---
+status: approved
+approved: 2026-10-09
+built: null
+supersedes: []
+---
+
 # Browser — giving the phases a headless Chromium, shared from one volume
 
 **Status:** decided, nothing built. `docs/decisions.md` **ADR 43** records the

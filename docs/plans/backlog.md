@@ -1,3 +1,10 @@
+---
+status: idea
+approved: null
+built: null
+supersedes: []
+---
+
 # Backlog — open work that is written down nowhere else
 
 The text below was moved here on 2026-10-13 by T-037 from the *Future work*

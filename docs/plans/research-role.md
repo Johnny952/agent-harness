@@ -1,3 +1,10 @@
+---
+status: design
+approved: null
+built: null
+supersedes: []
+---
+
 # Research role — an investigador that reads the web and cites it, before the arquitecto
 
 **Status:** proposed by the main thread on 2026-10-11 at the user's ask, not

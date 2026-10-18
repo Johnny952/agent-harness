@@ -1,3 +1,10 @@
+---
+status: built
+approved: 2026-10-15
+built: 2026-10-17
+supersedes: []
+---
+
 # Autonomy — fewer stops for a person, and more than one task per project
 
 **Status:** built. Designed by the main thread on 2026-10-15 at the user's

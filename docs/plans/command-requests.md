@@ -1,3 +1,10 @@
+---
+status: building
+approved: 2026-10-11
+built: null
+supersedes: []
+---
+
 # Command requests — a phase asks for a command it may not run, aimed at the right container
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built.

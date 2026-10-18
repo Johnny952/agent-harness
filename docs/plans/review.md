@@ -1,3 +1,10 @@
+---
+status: building
+approved: 2026-10-11
+built: null
+supersedes: []
+---
+
 # Review — a person approves a task's diff in the console before it merges
 
 **Status:** design, approved in outline by the user on 2026-10-11. The console

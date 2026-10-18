@@ -1,3 +1,10 @@
+---
+status: building
+approved: 2026-10-11
+built: null
+supersedes: []
+---
+
 # Roadmap view — the project's path, newest to oldest, derived rather than written
 
 **Status:** idea, accepted in outline by the user on 2026-10-11, not designed
@@ -116,6 +123,12 @@ stands.
    dates it was approved and built, and `supersedes`, the plans it replaces,
    when any. It is the one new thing written, once per plan, and kept by
    whoever changes the plan's status.
+
+   **Note 2026-10-17** (T-071): the frontmatter is written, and it does not
+   replace the prose *Status* line. Both stay: the frontmatter is the state
+   a reader parses, the prose line says why. `tests/test_plan_frontmatter.py`
+   keeps the frontmatter valid. This plan is `building` from here: the first
+   piece of the cheap form is written, the backfill, route and screen are not.
 2. **An optional `plan` field on tasks and epics.** It is written only when
    set, like `epic`, and the arquitecto fills it when it proposes. So is
    `supersedes`, the task or epic the new work replaces.
@@ -156,6 +169,16 @@ route, the front screen (behind its own ask for a build).
 - **Which plans count.** `board.md` and `front.md` are older and broader than
   one initiative. Whether they are rows, or split into the phases they
   describe, is decided when the frontmatter is written.
+
+  **Note 2026-10-17** (T-071): rows. Each of `board.md` and `front.md` has one
+  frontmatter, not one per phase or tier. `board-service.md` carries
+  `supersedes: [board.md]`, and `board.md` is `superseded`, not `building`:
+  its own header says it is superseded in part, its later phases are
+  re-planned in `board-service.md`, and nothing more is built from it. Its
+  Phases 0–2 stay as the record of what was built. `front.md` is `building`:
+  tiers 1 and 2 are built, tier 3 is not. `built` carries a date only when
+  `status` is `built`, so a superseded or partly built plan has
+  `built: null`.
 - **A structured relation line on new ADRs.** Reading the prose conventions
   breaks the day one is written differently. New ADRs could carry a line such
   as `**Relation:** supersedes 30`, with old ones left as they are and still

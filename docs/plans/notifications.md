@@ -1,3 +1,10 @@
+---
+status: design
+approved: 2026-10-11
+built: null
+supersedes: []
+---
+
 # Notifications — the console tells the person when it needs them
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built.

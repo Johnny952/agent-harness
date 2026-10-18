@@ -1,3 +1,10 @@
+---
+status: superseded
+approved: null
+built: null
+supersedes: []
+---
+
 # Plan: a board for this harness
 
 > **Superseded in part (proposed, 2026-10-10).** `docs/plans/board-service.md`

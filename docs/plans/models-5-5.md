@@ -1,3 +1,10 @@
+---
+status: built
+approved: 2026-10-11
+built: 2026-10-11
+supersedes: []
+---
+
 # Models 5.5 — pinned model IDs, explicit effort, and prompts fit for unattended phases
 
 **Status:** proposed by the main thread on 2026-10-11 at the user's ask.
