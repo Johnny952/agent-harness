@@ -296,6 +296,12 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "tags": [],
         "rank": None,
         "debt_id": None,
+        # The epic fields of a plain task (ADR 137): no parent, no sub-tasks,
+        # not merged, and the Goal's first line for a title.
+        "epic": None,
+        "split_into": [],
+        "merged": False,
+        "title": "Do the thing",
         # No `body`, and the fixture above wrote one: it is the detail route's
         # alone (`docs/decisions.md` ADR 21). Asserting the whole dict is what
         # makes moving it into `_task` fail here rather than pass quietly.
@@ -443,6 +449,10 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
         "tags": [],
         "rank": None,
         "debt_id": None,
+        "epic": None,
+        "split_into": [],
+        "merged": False,
+        "title": None,
     }
 
     assert _get(harness, "/api/tasks").get_json() == {"data": [row], "warnings": []}
@@ -523,6 +533,108 @@ def test_a_bad_backlog_field_is_a_warning_and_the_row_is_still_served(
         assert [warning.split(": its ")[1].split()[0] for warning in body["warnings"]] == [
             "priority", "tags", "rank", "debt_id",
         ]
+
+
+# --- epic fields (ADR 137) ------------------------------------------------
+
+
+def _both_rows(harness: types.SimpleNamespace, task_id: str) -> list[dict]:
+    """The task's row off the list route and off the detail route, warnings checked empty."""
+    listed = _get(harness, "/api/tasks").get_json()
+    detail = _get(harness, f"/api/tasks/{task_id}").get_json()
+    assert listed["warnings"] == [] and detail["warnings"] == []
+    [row] = [row for row in listed["data"] if row["task_id"] == task_id]
+    return [row, detail["data"]]
+
+
+def test_both_task_routes_serve_an_epic_and_its_sub_tasks(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-9", status="epic", split_into=["T-10", "T-11"])
+    _task(harness.tasks_dir, "T-10", status="pending", epic="T-9")
+    _task(harness.tasks_dir, "T-11", status="pending", epic="T-9", depends_on=["T-10"])
+
+    for row in _both_rows(harness, "T-9"):
+        assert row["split_into"] == ["T-10", "T-11"] and row["epic"] is None
+    for row in _both_rows(harness, "T-10"):
+        assert row["epic"] == "T-9" and row["split_into"] == []
+
+
+def test_a_merged_task_is_served_merged_true_and_not_its_record(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(
+        harness.tasks_dir,
+        "T-1",
+        status="done",
+        merged={"into": "main", "at": "2026-10-18T10:00:00+00:00"},
+    )
+    _task(harness.tasks_dir, "T-2", status="done")
+
+    for row in _both_rows(harness, "T-1"):
+        assert row["merged"] is True
+    for row in _both_rows(harness, "T-2"):
+        assert row["merged"] is False
+
+
+def test_a_frontmatter_title_wins_over_the_goal(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", title="  The epic view  ", description=_DESCRIPTION)
+
+    for row in _both_rows(harness, "T-1"):
+        assert row["title"] == "The epic view"
+
+
+def test_with_no_frontmatter_title_the_goal_line_is_the_title_cut_short(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", description=_DESCRIPTION)
+    long_goal = "## Goal\n\n" + "x" * 300 + "\n\n## Done when\n\ny\n"
+    _task(harness.tasks_dir, "T-2", title="   ", description=long_goal)
+
+    for row in _both_rows(harness, "T-1"):
+        assert row["title"] == "Do the thing"
+    for row in _both_rows(harness, "T-2"):
+        assert len(row["title"]) == task_store.DISPLAY_TITLE_CHARS
+        assert row["title"].endswith("…")
+
+
+def test_no_title_and_no_readable_goal_is_a_null_title(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    _task(harness.tasks_dir, "T-2")
+    # Written past `write_description`, which refuses it: a hand edit's prose.
+    raw = Path(task_store.description_path(harness.tasks_dir, "T-2"))
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text("just prose\n")
+
+    for task_id in ("T-1", "T-2"):
+        for row in _both_rows(harness, task_id):
+            assert row["title"] is None
+    # The prose is still served as the description: only the title falls away.
+    assert _both_rows(harness, "T-2")[0]["description"] == "just prose\n"
+
+
+def test_the_api_and_the_board_service_title_one_task_alike(tmp_path: Path) -> None:
+    """ADR 133: the two services answer one task the same way — one rule, not two."""
+    from board_service import app as board
+
+    assert board.TITLE_CHARS == task_store.DISPLAY_TITLE_CHARS
+    for title, description in [("T", _DESCRIPTION), (None, _DESCRIPTION), (None, None), (3, "x")]:
+        assert board._title({"title": title}, description) == task_store.display_title(
+            title, description
+        )
+
+
+def test_a_split_into_that_is_not_a_list_is_served_as_written(tmp_path: Path) -> None:
+    """Not mended and not a warning here: `tasks.epic_problems` names it (ADR 137)."""
+    harness = _harness(tmp_path)
+    Path(context_transfer.task_file_path(harness.tasks_dir, "T-9")).write_text(
+        "---\ntask_id: T-9\nstatus: epic\nowner: null\ndepends_on: []\n"
+        "heartbeat: null\nsplit_into: T-10\n---\n\nbody\n"
+    )
+
+    for row in _both_rows(harness, "T-9"):
+        assert row["split_into"] == "T-10"
 
 
 # --- /api/ready ------------------------------------------------------------

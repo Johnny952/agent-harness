@@ -1066,7 +1066,9 @@ def _task(
     The fields are `TaskFile`'s, but for `description` — the text of the task's
     `description.md` as `dispatcher/tasks.py:read_description` returned it,
     served verbatim and `null` when there is none — and this invents none but
-    `lock_expired`, which is argued at `_lock_expired`. No card: the task
+    `lock_expired`, which is argued at `_lock_expired`, and the two derived
+    ones the board service serves too: `merged` as a boolean and `title`
+    (ADR 133, ADR 137). No card: the task
     file is the board's data and nothing mirrors it (`docs/decisions.md`
     ADR 59).
 
@@ -1108,6 +1110,22 @@ def _task(
         "tags": task_store.normal_tags(task.tags),
         "rank": task.rank,
         "debt_id": task.debt_id,
+        # The epic fields, for the console's epic view (board-service plan
+        # step 8, ADR 137). `epic` is the parent epic's id on a sub-task,
+        # `null` when absent; `split_into` is an epic's sub-task ids in order,
+        # [] otherwise. Both are the file's, served as written: a non-list
+        # `split_into` is not mended here, and `dispatcher/tasks.py:
+        # epic_problems` is where the dispatcher names it.
+        "epic": task.epic,
+        "split_into": task.split_into,
+        # A boolean, as `board_service/app.py:board_list` serves it (ADR 133):
+        # the file's `{"into", "at"}` record is the dispatcher's, and "has it
+        # merged" is the reader's question.
+        "merged": bool(task.merged),
+        # `tasks.display_title`, the board service's rule and not a copy of it:
+        # the frontmatter `title`, else the Goal's first line cut short, else
+        # `null` (ADR 125, ADR 129, ADR 137).
+        "title": task_store.display_title(task.title, description),
     }
 
 
