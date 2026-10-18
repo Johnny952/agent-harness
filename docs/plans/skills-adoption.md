@@ -75,6 +75,11 @@ For any project with a UI:
 - The browser image goes into the registry mirror, so the gate does not
   pull it on every run.
 
+**Prerequisite, noted 2026-10-17.** The gate needs the dind, and this host
+has no `sysbox-runc`, so `dind-cuenta1` cannot start. Sysbox is installed
+before step 3 below starts. That is the decision under `docs/ROADMAP.md`
+stage 1, *Sysbox for the dind sidecars*.
+
 ### 3. A design skill
 
 For projects with a front:

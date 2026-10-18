@@ -1041,6 +1041,18 @@ logins.
    - Sysbox for the dind sidecars (confirmed missing, V0.1 FAIL — no
      `sysbox-runc` runtime, which also blocks V0.7): install sysbox, add a
      verification-only privileged-`dind` compose override, or defer both.
+     Decided 2026-10-17: install sysbox, later, before
+     `docs/plans/skills-adoption.md` step 3 (the E2E gate) starts. No
+     privileged override: the deploy (`docker-compose.coolify.yml`) runs the
+     sidecars on `sysbox-runc` too, so a privileged dind would verify a
+     runtime that never ships, and it hands the model's commands near-root
+     on the host. Nothing needs the dind before then; mapping records what
+     it cannot bring up as unverified (ADR 115). Before installing: check
+     that the sysbox release supports this host's kernel (7.0), and expect
+     the install to restart dockerd, which stops every container on the
+     host. It needs sudo, so the owner runs it. After it, bring up
+     `dind-cuenta1` by name (`--force-recreate --no-deps`) and run V0.7 and
+     T-068's check 4 (a project brought up in the dind under `-p`).
    - `safe.directory` and git identity in the image (confirmed, V0.9:
      the dubious-ownership and missing-identity errors both reproduce as
      predicted). Fixed 2026-09-19: the agent image's system gitconfig now
