@@ -18,7 +18,12 @@ from tests.dispatcher.test_dispatcher import (  # noqa: F401 - fixtures used by 
     fake_git,
 )
 
-BOARD_TOOLS = ["mcp__board__board_list", "mcp__board__board_get"]
+BOARD_TOOLS = [
+    "mcp__board__board_list",
+    "mcp__board__board_get",
+    "mcp__board__backlog_propose",
+    "mcp__board__task_comment",
+]
 
 
 def _server(mcp_config: str) -> dict:
@@ -35,8 +40,11 @@ def test_the_service_and_the_dispatcher_read_one_table() -> None:
     assert board_app.ROLE_TOOLS is board_mcp.ROLE_TOOLS
     assert board_app.OPERATOR == board_mcp.OPERATOR == "operator"
     assert board_mcp.ROLE_TOOLS == {
-        "operator": ("board_list", "board_get"),
-        "arquitecto": ("board_list", "board_get"),
+        "operator": (
+            "board_list", "board_get", "backlog_propose", "task_edit", "task_comment",
+            "backlog_accept",
+        ),
+        "arquitecto": ("board_list", "board_get", "backlog_propose", "task_comment"),
     }
 
 
@@ -143,6 +151,7 @@ def test_the_board_names_follow_the_project_allowlist_with_no_repeat(tmp_path) -
 
     assert flags["allowed_tools"] == [
         "mcp__board__board_get", "Bash(uv sync)", "mcp__board__board_list",
+        "mcp__board__backlog_propose", "mcp__board__task_comment",
     ]
 
 

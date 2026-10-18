@@ -38,7 +38,13 @@ mounts everything read-only; the operator's session registers it with
 of step 5 is built by T-082 (`docs/implementations/T-082.md`,
 `docs/decisions.md` ADR 127): the backlog statuses, `priority` and `source`
 in the frontmatter, `open_cycle` refusing a backlog item, and the per-task
-lock of section 5, a write lock separate from the ownership lock. Step 6 is
+lock of section 5, a write lock separate from the ownership lock. The second
+part of step 5 is built by T-084 (`docs/implementations/T-084.md`,
+`docs/decisions.md` ADR 129): `backlog_propose`, `task_edit`, `task_comment`
+and `backlog_accept`, written by `dispatcher/tasks.py` under `task_lock`,
+over MCP and the console's HTTP endpoints, with the source and author taken
+from the role; compose mounts the service's `.hive` read-write and puts it
+on `console_net` as well, approved 2026-10-18. Step 6 is
 built by T-081 (`docs/implementations/T-081.md`, `docs/decisions.md` ADR 126).
 Step 7 is built by T-083 (`docs/implementations/T-083.md`, `docs/decisions.md`
 ADR 128): the arquitecto's phases get `--mcp-config` for the service at
@@ -540,6 +546,18 @@ Each step is a single surface, built in this order:
      built: the write tools and the read-write mount (5b), `tags` and `rank`
      with the *Ready* order (5c), and debt in the backlog with its import
      and `impact` (5d).
+   - **Built 2026-10-18** by T-084 (`docs/decisions.md` ADR 129), the second
+     bullet: `backlog_propose`, `task_edit`, `task_comment` and
+     `backlog_accept` as writers in `dispatcher/tasks.py` (`propose`,
+     `edit_task`, `add_comment`, `accept`) under `task_lock`, served over
+     `POST /mcp?role=` and over `POST /api/backlog`, `PATCH /api/tasks/<id>`,
+     `POST /api/tasks/<id>/comments` and `POST /api/tasks/<id>/accept`.
+     `source` and the comment's author come from the role. A create is
+     idempotent on a `title` in the frontmatter, and an epic is all or
+     nothing. The arquitecto gets `backlog_propose` and `task_comment`, and
+     the operator gets all four. Compose mounts `.hive` read-write (config
+     stays `:ro`) and adds `console_net`. Not built: `tags` and `rank` (5c),
+     and debt in the backlog (5d).
 6. **`phase` in the frontmatter.** The dispatcher writes and clears it around
    each phase, and the api serves it.
    **Built 2026-10-18** by T-081 (`docs/decisions.md` ADR 126): `phase` in

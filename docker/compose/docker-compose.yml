@@ -146,14 +146,14 @@ services:
     networks:
       - console_net
 
-  # The board service (docs/decisions.md ADR 124 and ADR 125): the board's MCP
-  # server, and from board-service step 5 its write side. It reads the hive
-  # through dispatcher/tasks.py, and for now every mount is :ro; the hive
-  # becomes writable with step 5's first write. No docker socket, no .data, no
-  # projects, no git credential: the pushes stay on the dispatcher. It is on
-  # ia_harness_net for the phases (step 7); console_net comes with the
-  # console's writes (step 5). It publishes loopback only, for the operator's
-  # Claude Code session on the host.
+  # The board service (docs/decisions.md ADR 124, ADR 125 and ADR 129): the
+  # board's MCP server and its write side. It reads and writes the hive through
+  # dispatcher/tasks.py, under task_lock, so the hive is mounted read-write,
+  # locks/ included; config is :ro. No docker socket, no .data, no projects, no
+  # git credential: the pushes stay on the dispatcher. It is on ia_harness_net
+  # for the phases (step 7) and on console_net for the console's writes
+  # (step 5). It publishes loopback only, for the operator's Claude Code
+  # session on the host.
   board-service:
     build:
       context: ../..
@@ -162,11 +162,12 @@ services:
     ports:
       - "127.0.0.1:8792:8792"
     volumes:
-      - ../../.hive:/data/.hive:ro
+      - ../../.hive:/data/.hive
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
     networks:
       - ia_harness_net
+      - console_net
 
   # TLS in front of the console (docs/decisions.md ADR 100). In this file only:
   # in Coolify its own proxy ends TLS, and a second one would fight it for 80

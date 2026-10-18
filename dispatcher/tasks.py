@@ -56,9 +56,17 @@ by `field_problems`. Nothing in the backlog runs: `dispatch_problems` is what
 `open_cycle` and `queue.plan` refuse a task for, and `acquire_lock` refuses a
 backlog task itself, as the backstop.
 
+The board service's write tools (section 6, ADR 129) end here too: `propose`
+files a task or an epic as `proposed`, `edit_task` changes one before it has
+started, `add_comment` appends to its `comments.jsonl` and `accept` is the
+person's move out of the backlog. Each checks everything before it writes and
+refuses with one `BoardWriteError`. A new id is taken under the `CREATE_LOCK`
+write lock, which `accept_drafts` holds as well, so two creates never take
+the same number.
+
 Every task-file writer holds the task's write lock (`task_lock`) across its
 read and its write, so two writers — the heartbeat thread and the phase it
-runs under, two dispatcher processes, and the board service once it writes —
+runs under, two dispatcher processes, and the board service —
 cannot both read the same file and the second write the first one's change
 away. It is a `flock` on `<hive root>/locks/<task_id>.lock`, a different thing from the
 ownership the frontmatter records: the `owner` and `heartbeat` that
@@ -126,8 +134,26 @@ PRIORITIES = ("high", "normal", "low")
 DEFAULT_PRIORITY = "normal"
 #: Who proposed an item.
 SOURCES = ("operator", "arquitecto", "debt")
+#: Where `accept` takes a backlog item from, and where it may put one
+#: (section 6's `backlog_accept`). `dropped` is final.
+ACCEPT_FROM = ("proposed", "deferred")
+ACCEPT_TO = (ACCEPTED_STATUS, "deferred", "dropped")
+#: The longest title a board write stores. A title is one line to scan.
+MAX_TITLE_CHARS = 200
+#: The longest comment `add_comment` appends. A comment is a note, not a file.
+MAX_COMMENT_CHARS = 20_000
+#: The longest comment author: a role, or `operator`.
+MAX_AUTHOR_CHARS = 64
+#: Under `locks/`, the lock every write that creates a task id or sets a title
+#: holds (ADR 129), so the scan for a free id or a clashing title and the write
+#: are one step. Not a task id: none starts with `_`.
+CREATE_LOCK = "_create"
+#: The comments' file, beside the description (section 2).
+COMMENTS_FILE = "comments.jsonl"
 
 _LEGACY_KEY = "description"
+#: A comment's `commit`: an abbreviated or full git object name.
+_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 #: Shaped like a queue id (`queue._QUEUE_ID`), with its own prefix.
 _DRAFT_ID_RE = re.compile(r"^d-\d{8}T\d{6}Z-[0-9a-f]{4}$")
 #: A draft's name is its file's stem and what its siblings' `depends_on` say.
@@ -1465,41 +1491,44 @@ def accept_drafts(
     if problems:
         raise DraftError(draft_id, problems)
 
-    number, width = _next_task_number(hive_dir)
-    for draft in targets:
-        # A draft already in the record is a run that died part way: same id.
-        if draft.name not in record:
-            record[draft.name] = f"T-{number:0{width}d}"
-            number += 1
-    ids = {draft.name: record[draft.name] for draft in targets}
-    for task_id in ids.values():
-        _refuse_unmigrated(hive_dir, task_id)
-    context_transfer._write_atomic(
-        os.path.join(draft_set_dir(hive_dir, draft_id), ACCEPTED_FILE),
-        yaml.safe_dump(record, sort_keys=False),
-    )
+    # The create lock (ADR 129) from the scan for a free id to the last task
+    # file: a `backlog_propose` meanwhile would otherwise take the same number.
+    with task_lock(hive_dir, CREATE_LOCK):
+        number, width = _next_task_number(hive_dir)
+        for draft in targets:
+            # A draft already in the record is a run that died part way: same id.
+            if draft.name not in record:
+                record[draft.name] = f"T-{number:0{width}d}"
+                number += 1
+        ids = {draft.name: record[draft.name] for draft in targets}
+        for task_id in ids.values():
+            _refuse_unmigrated(hive_dir, task_id)
+        context_transfer._write_atomic(
+            os.path.join(draft_set_dir(hive_dir, draft_id), ACCEPTED_FILE),
+            yaml.safe_dump(record, sort_keys=False),
+        )
 
-    for draft in targets:
-        task_id = ids[draft.name]
-        # The description first, as `migrate` and `file_split` do.
-        if read_description(hive_dir, task_id) is None:
-            write_description(hive_dir, task_id, draft.description)
-        path = context_transfer.task_file_path(hive_dir, task_id)
-        with task_lock(hive_dir, task_id):
-            if os.path.exists(path):
-                continue
-            _write_task_file(
-                path,
-                context_transfer.TaskFile(
-                    task_id=task_id,
-                    status="pending",
-                    owner=None,
-                    depends_on=[record[dep] for dep in draft.depends_on],
-                    heartbeat=None,
-                    body="",
-                    epic=None,
-                ),
-            )
+        for draft in targets:
+            task_id = ids[draft.name]
+            # The description first, as `migrate` and `file_split` do.
+            if read_description(hive_dir, task_id) is None:
+                write_description(hive_dir, task_id, draft.description)
+            path = context_transfer.task_file_path(hive_dir, task_id)
+            with task_lock(hive_dir, task_id):
+                if os.path.exists(path):
+                    continue
+                _write_task_file(
+                    path,
+                    context_transfer.TaskFile(
+                        task_id=task_id,
+                        status="pending",
+                        owner=None,
+                        depends_on=[record[dep] for dep in draft.depends_on],
+                        heartbeat=None,
+                        body="",
+                        epic=None,
+                    ),
+                )
     return ids
 
 
@@ -1604,3 +1633,685 @@ def migrate(hive_dir: str, ttl_seconds: int) -> MigrateReport:
             context_transfer.write_task_file(task_path, task)
             moved.append((task_id, path))
     return MigrateReport(moved=moved, emptied=emptied, refused=refused, already=already)
+
+
+# The board's write tools (`docs/plans/board-service.md` section 6, ADR 129).
+# `board_service` serves them as `backlog_propose`, `task_edit`, `task_comment`
+# and `backlog_accept`. None moves a task once it is on the board, and none
+# dispatches: `in_progress`, `phase`, `done`, `blocked` and `merged` stay the
+# dispatcher's and the merge's.
+
+
+class BoardWriteError(ValueError):
+    """A board write that will not be made. One error, every problem; nothing was written."""
+
+    def __init__(self, subject: str, problems: list[str]) -> None:
+        super().__init__(f"{subject}: " + "; ".join(problems))
+        self.subject = subject
+        self.problems = list(problems)
+
+
+class NoTaskError(BoardWriteError):
+    """A board write naming a task that has no task file."""
+
+    def __init__(self, task_id: str) -> None:
+        super().__init__(f"task {task_id}", ["there is no such task"])
+        self.task_id = task_id
+
+
+def comments_path(hive_dir: str, task_id: str) -> str:
+    """The task's `comments.jsonl`, beside its description. `ValueError` for a bad id."""
+    return os.path.join(os.path.dirname(description_path(hive_dir, task_id)), COMMENTS_FILE)
+
+
+def _title_problems(title: object, what: str) -> list[str]:
+    if not isinstance(title, str) or not title.strip():
+        return [f"{what} is blank"]
+    if "\n" in title or "\r" in title:
+        return [f"{what} is more than one line"]
+    if len(title.strip()) > MAX_TITLE_CHARS:
+        return [f"{what} is longer than {MAX_TITLE_CHARS} characters"]
+    return []
+
+
+def _description_problems(text: object, what: str) -> list[str]:
+    if not isinstance(text, str):
+        return [f"{what} is not text"]
+    try:
+        parse_description(text)
+    except DescriptionError as exc:
+        return [f"{what} {exc}"]
+    return []
+
+
+def _priority_problems(priority: object) -> list[str]:
+    if priority is not None and priority not in PRIORITIES:
+        return [f"priority is {priority!r}, not one of {', '.join(PRIORITIES)}"]
+    return []
+
+
+def _check_id(task_id: object) -> str:
+    """A task id a board write may name, or `BoardWriteError`."""
+    if not isinstance(task_id, str) or not context_transfer._is_single_path_component(task_id):
+        raise BoardWriteError(f"task {task_id!r}", ["that is not a task id"])
+    if is_draft_id(task_id):
+        raise BoardWriteError(
+            f"task {task_id}",
+            ["that names drafts, not a task; accept them with `dispatch accept-drafts`"],
+        )
+    return task_id
+
+
+def _board_task(hive_dir: str, task_id: str) -> tuple[str, context_transfer.TaskFile]:
+    """The task file's path and contents. `NoTaskError` when there is none."""
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    if not os.path.isfile(path):
+        raise NoTaskError(task_id)
+    _refuse_unmigrated(hive_dir, task_id)
+    return path, context_transfer.read_task_file(path)
+
+
+def _find_titled(
+    hive_dir: str, title: str, epic: str | None, exclude: str | None = None
+) -> tuple[str, context_transfer.TaskFile] | None:
+    """The task titled `title` in epic `epic` (None: outside any epic), if one is.
+
+    The scope section 6's idempotence is on, "its title within its epic". A
+    task with no `title` (one filed before ADR 129) never matches, and a file
+    that will not read is skipped: it is not a title anyone can see.
+    """
+    for task_id in sorted(context_transfer.list_task_ids(hive_dir)):
+        if task_id == exclude:
+            continue
+        task, _ = _read_for_check(hive_dir, task_id)
+        if task is not None and task.title == title and (task.epic or None) == epic:
+            return task_id, task
+    return None
+
+
+def _depends_problems(hive_dir: str, task_id: str | None, deps: object) -> list[str]:
+    """What is wrong with a `depends_on` naming tasks outside any epic."""
+    if not isinstance(deps, list) or not all(isinstance(dep, str) for dep in deps):
+        return ["depends_on is not a list of task ids"]
+    problems = []
+    seen: set[str] = set()
+    for dep in deps:
+        if dep in seen:
+            problems.append(f"depends_on names {dep} more than once")
+            continue
+        seen.add(dep)
+        if dep == task_id:
+            problems.append("depends_on names the task itself")
+        elif is_draft_id(dep):
+            problems.append(f"depends_on names {dep}, which is drafts, not a task")
+        else:
+            dependency, why = _read_for_check(hive_dir, dep)
+            if dependency is None:
+                problems.append(f"depends_on: {why}")
+    return problems
+
+
+def _reaches(hive_dir: str, start: list[str], target: str) -> bool:
+    """Does following `depends_on` from `start` reach `target`? Unreadable files end a path."""
+    stack, seen = list(start), set()
+    while stack:
+        task_id = stack.pop()
+        if task_id == target:
+            return True
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        task, _ = _read_for_check(hive_dir, task_id)
+        if task is not None and isinstance(task.depends_on, list):
+            stack.extend(dep for dep in task.depends_on if isinstance(dep, str))
+    return False
+
+
+def _write_new(
+    hive_dir: str, task: context_transfer.TaskFile, description: str
+) -> None:
+    """Write a proposed task's file and description where either is missing.
+
+    The task file first: it is `proposed`, so nothing runs it while its
+    description is still to come, and a retry finds it by its title and
+    writes the description then (ADR 129). Under the task's write lock, around
+    the check, so a file made since is kept.
+    """
+    path = context_transfer.task_file_path(hive_dir, task.task_id)
+    with task_lock(hive_dir, task.task_id):
+        if not os.path.exists(path):
+            _write_task_file(path, task)
+        if read_description(hive_dir, task.task_id) is None:
+            write_description(hive_dir, task.task_id, description)
+
+
+def _proposed(
+    task_id: str,
+    title: str,
+    source: str,
+    priority: str | None,
+    depends_on: list[str],
+    epic: str | None = None,
+    split_into: list[str] | None = None,
+) -> context_transfer.TaskFile:
+    return context_transfer.TaskFile(
+        task_id=task_id,
+        status="proposed",
+        owner=None,
+        depends_on=list(depends_on),
+        heartbeat=None,
+        body="",
+        epic=epic,
+        split_into=list(split_into or []),
+        priority=priority,
+        source=source,
+        title=title,
+    )
+
+
+def _epic_entries(tasks: object) -> tuple[list[tuple[str, str, list[int]]], list[str]]:
+    """An epic's tasks as (title, description, after), and what is wrong with them.
+
+    `after` is 1-based positions of earlier entries, `split_problems`' rule:
+    naming only earlier entries is what makes a cycle impossible.
+    """
+    if not isinstance(tasks, list):
+        return [], ["tasks is not a list"]
+    problems = []
+    if not _SPLIT_MIN <= len(tasks) <= _SPLIT_MAX:
+        problems.append(
+            f"an epic has {_SPLIT_MIN} to {_SPLIT_MAX} tasks, this one has {len(tasks)}"
+        )
+    entries: list[tuple[str, str, list[int]]] = []
+    titles: list[str] = []
+    for position, entry in enumerate(tasks, start=1):
+        what = f"task {position}"
+        if not isinstance(entry, dict):
+            problems.append(f"{what} is not an object")
+            continue
+        unknown = sorted(set(entry) - {"title", "description", "after"}, key=str)
+        if unknown:
+            problems.append(f"{what} has an unknown field {unknown[0]!r}")
+        title, description = entry.get("title"), entry.get("description")
+        after = entry.get("after")
+        after = [] if after is None else after
+        problems.extend(_title_problems(title, f"{what}: its title"))
+        problems.extend(_description_problems(description, f"{what}: its description"))
+        if isinstance(title, str) and title.strip():
+            if title.strip() in titles:
+                problems.append(f"{what}: another task of the epic has the title {title.strip()!r}")
+            titles.append(title.strip())
+        if not isinstance(after, list):
+            problems.append(f"{what}: after is not a list of positions")
+            after = []
+        seen: list[int] = []
+        for item in after:
+            # `type() is int`, so True is not position 1.
+            if type(item) is not int:
+                problems.append(f"{what}: after names {item!r}, which is not an integer")
+            elif item in seen:
+                problems.append(f"{what}: after names {item} more than once")
+            else:
+                seen.append(item)
+                if not 1 <= item < position:
+                    problems.append(f"{what}: after names {item}, which is not a task before it")
+        entries.append((title.strip() if isinstance(title, str) else "", description, seen))
+    return entries, problems
+
+
+def propose(
+    hive_dir: str,
+    *,
+    title: str,
+    description: str,
+    source: str,
+    priority: str | None = None,
+    depends_on: list[str] | None = None,
+    tasks: list[dict] | None = None,
+) -> dict:
+    """Section 6's `backlog_propose`: a task, or an epic with its tasks, as `proposed`.
+
+    A single task gets the next free `T-<n>`. An epic (`tasks` given) gets one
+    for itself, `split_into` and its description holding the goal, and its 2
+    to 4 tasks are `<epic>-S<n>`, as `file_split` names them, each `proposed`
+    with `epic` set and `depends_on` from its `after`. `source` is required
+    (ADR 127, point 9) and `priority` is the proposer's suggestion; both go on
+    every file written.
+
+    Everything is checked before anything is written, and every problem is
+    reported in one `BoardWriteError`, so an epic is all or nothing. A create
+    is idempotent on its title within its epic (section 6): a proposal whose
+    title a task outside any epic already has is answered with that task,
+    `created: false`, when it asks for the same thing — and a run that died
+    part way is finished by it — and refused when it asks for something else.
+    Returns `{"id", "created", "tasks"}`, the last the epic's task ids.
+    """
+    problems = _title_problems(title, "its title")
+    problems += _description_problems(description, "its description")
+    if source not in SOURCES:
+        problems.append(f"its source is {source!r}, not one of {', '.join(SOURCES)}")
+    problems += _priority_problems(priority)
+    deps: list[str] = [] if depends_on is None else depends_on
+    entries: list[tuple[str, str, list[int]]] | None = None
+    if tasks is not None:
+        if deps:
+            problems.append("an epic takes no depends_on; its tasks state theirs in `after`")
+        entries, entry_problems = _epic_entries(tasks)
+        problems += entry_problems
+    else:
+        problems += _depends_problems(hive_dir, None, deps)
+    if problems:
+        raise BoardWriteError("the proposal", problems)
+    title = title.strip()
+
+    with task_lock(hive_dir, CREATE_LOCK):
+        found = _find_titled(hive_dir, title, None)
+        if found is not None:
+            return _propose_again(hive_dir, found, title, description, deps, entries, source, priority)
+        number, width = _next_task_number(hive_dir)
+        task_id = f"T-{number:0{width}d}"
+        if entries is None:
+            _write_new(hive_dir, _proposed(task_id, title, source, priority, deps), description)
+            return {"id": task_id, "created": True, "tasks": []}
+        ids = [f"{task_id}-S{n}" for n in range(1, len(entries) + 1)]
+        # The parent's lock, then each child's: `close_epic` says why that
+        # order is the only one.
+        with task_lock(hive_dir, task_id):
+            _write_new(
+                hive_dir, _proposed(task_id, title, source, priority, [], split_into=ids), description
+            )
+            for child_id, (child_title, child_text, after) in zip(ids, entries):
+                child = _proposed(
+                    child_id, child_title, source, priority,
+                    [ids[i - 1] for i in after], epic=task_id,
+                )
+                _write_new(hive_dir, child, child_text)
+        return {"id": task_id, "created": True, "tasks": ids}
+
+
+def _propose_again(
+    hive_dir: str,
+    found: tuple[str, context_transfer.TaskFile],
+    title: str,
+    description: str,
+    deps: list[str],
+    entries: list[tuple[str, str, list[int]]] | None,
+    source: str,
+    priority: str | None,
+) -> dict:
+    """A proposal whose title is taken: the same ask, finished; another ask, refused."""
+    task_id, task = found
+    hint = "change it with task_edit, or propose it under another title"
+    if entries is None:
+        if task.split_into:
+            raise BoardWriteError(f"task {task_id}", [f"an epic already has the title {title!r}"])
+        differs = []
+        stored = read_description(hive_dir, task_id)
+        if stored is not None and stored != description:
+            differs.append("description")
+        if list(task.depends_on or []) != deps:
+            differs.append("depends_on")
+        if differs:
+            raise BoardWriteError(
+                f"task {task_id}",
+                [f"it already has the title {title!r}, with another {' and '.join(differs)}; {hint}"],
+            )
+        if stored is None:
+            _write_new(hive_dir, task, description)
+        return {"id": task_id, "created": False, "tasks": []}
+
+    if not task.split_into:
+        raise BoardWriteError(f"task {task_id}", [f"a task that is not an epic already has the title {title!r}"])
+    ids = list(task.split_into)
+    differs = []
+    stored = read_description(hive_dir, task_id)
+    if stored is not None and stored != description:
+        differs.append("its description")
+    if len(ids) != len(entries):
+        differs.append(f"{len(ids)} tasks, not {len(entries)}")
+    missing = []
+    for position, (child_id, (child_title, child_text, after)) in enumerate(zip(ids, entries), start=1):
+        child, _ = _read_for_check(hive_dir, child_id)
+        child_deps = [ids[i - 1] for i in after]
+        if child is None:
+            missing.append((child_id, child_title, child_text, child_deps))
+            continue
+        child_stored = read_description(hive_dir, child_id)
+        if (
+            child.title != child_title
+            or child.epic != task_id
+            or list(child.depends_on or []) != child_deps
+            or (child_stored is not None and child_stored != child_text)
+        ):
+            differs.append(f"another task {position} ({child_id})")
+        elif child_stored is None:
+            missing.append((child_id, child_title, child_text, child_deps))
+    if differs:
+        raise BoardWriteError(
+            f"epic {task_id}",
+            [f"it already has the title {title!r}, with {', '.join(differs)}; {hint}"],
+        )
+    with task_lock(hive_dir, task_id):
+        if stored is None:
+            _write_new(hive_dir, task, description)
+        for child_id, child_title, child_text, child_deps in missing:
+            child = _proposed(
+                child_id, child_title, task.source or source, task.priority or priority,
+                child_deps, epic=task_id,
+            )
+            _write_new(hive_dir, child, child_text)
+    return {"id": task_id, "created": False, "tasks": ids}
+
+
+def _started(hive_dir: str, task: context_transfer.TaskFile) -> str | None:
+    """Why `task_edit` may no longer change this task, or None while it has not started.
+
+    A backlog item has not. A `pending` one has not while no dispatcher holds
+    it, nothing is merged and its task file has no handoff. An epic has not
+    while none of its tasks has. Anything else is under way or over.
+    """
+    if task.status in BACKLOG_STATUSES:
+        return None
+    if task.status == ACCEPTED_STATUS:
+        if task.owner:
+            return f"a dispatcher holds it ({task.owner})"
+        if task.merged:
+            return "it is merged"
+        if task.body.strip():
+            return "its task file has handoffs"
+        return None
+    if task.status == "epic" and task.split_into and not task.epic:
+        for child_id in task.split_into:
+            child, _ = _read_for_check(hive_dir, child_id)
+            why = None if child is None else _started(hive_dir, child)
+            if why:
+                return f"its task {child_id} has started: {why}"
+        return None
+    return f"its status is {task.status}"
+
+
+def edit_task(
+    hive_dir: str,
+    task_id: str,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+    depends_on: list[str] | None = None,
+    priority: str | None = None,
+) -> dict:
+    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, while not started.
+
+    `None` leaves a field as it is. The title stays unique within its epic,
+    so a later propose cannot be confused about what it names. A task of an
+    epic depends on its siblings only, and an epic on nothing; outside an
+    epic, `depends_on` names tasks that exist and makes no cycle. Every
+    problem is reported in one `BoardWriteError` and nothing is written.
+    Returns `{"id", "changed"}`, the fields whose value changed.
+    """
+    task_id = _check_id(task_id)
+    if title is None and description is None and depends_on is None and priority is None:
+        raise BoardWriteError(
+            f"task {task_id}", ["nothing to change: give title, description, depends_on or priority"]
+        )
+    problems = [] if title is None else _title_problems(title, "the title")
+    if description is not None:
+        problems += _description_problems(description, "the description")
+    problems += _priority_problems(priority)
+    if problems:
+        raise BoardWriteError(f"task {task_id}", problems)
+    title = None if title is None else title.strip()
+
+    # The create lock before the task's, as `propose` takes them, when a title
+    # is to be checked against every other one.
+    create = task_lock(hive_dir, CREATE_LOCK) if title is not None else contextlib.nullcontext()
+    with create, task_lock(hive_dir, task_id):
+        path, task = _board_task(hive_dir, task_id)
+        why = _started(hive_dir, task)
+        if why:
+            problems.append(f"it has started ({why}); task_edit changes a task only before that")
+        if title is not None and title != task.title:
+            clash = _find_titled(hive_dir, title, task.epic or None, exclude=task_id)
+            if clash is not None:
+                where = f"epic {task.epic}" if task.epic else "the tasks outside any epic"
+                problems.append(f"{clash[0]} already has the title {title!r} in {where}")
+        if depends_on is not None:
+            problems += _edit_depends_problems(hive_dir, task_id, task, depends_on)
+        if problems:
+            raise BoardWriteError(f"task {task_id}", problems)
+
+        changed = []
+        if description is not None and read_description(hive_dir, task_id) != description:
+            write_description(hive_dir, task_id, description)
+            changed.append("description")
+        for field, value in (("title", title), ("depends_on", depends_on), ("priority", priority)):
+            if value is not None and getattr(task, field) != value:
+                setattr(task, field, list(value) if field == "depends_on" else value)
+                changed.append(field)
+        if set(changed) - {"description"}:
+            _write_task_file(path, task)
+    return {"id": task_id, "changed": changed}
+
+
+def _edit_depends_problems(
+    hive_dir: str, task_id: str, task: context_transfer.TaskFile, deps: object
+) -> list[str]:
+    if task.split_into and not task.epic:
+        return ["an epic takes no depends_on; its tasks state theirs"]
+    if not task.epic:
+        problems = _depends_problems(hive_dir, task_id, deps)
+        if not problems:
+            problems = [
+                f"depends_on names {dep}, which depends on {task_id}: that is a cycle"
+                for dep in deps if _reaches(hive_dir, [dep], task_id)
+            ]
+        return problems
+    if not isinstance(deps, list) or not all(isinstance(dep, str) for dep in deps):
+        return ["depends_on is not a list of task ids"]
+    parent, why = _read_for_check(hive_dir, task.epic)
+    if parent is None:
+        return [f"its epic {why}"]
+    siblings = [child for child in parent.split_into if child != task_id]
+    problems = [
+        f"depends_on names {dep}, which is not a sibling in epic {task.epic}"
+        for dep in deps if dep not in siblings
+    ]
+    if len(set(deps)) != len(deps):
+        problems.append("depends_on names a task more than once")
+    problems += [
+        f"depends_on names {dep}, which depends on {task_id}: that is a cycle"
+        for dep in deps if dep in siblings and _reaches(hive_dir, [dep], task_id)
+    ]
+    return problems
+
+
+def add_comment(
+    hive_dir: str,
+    task_id: str,
+    author: str,
+    text: str,
+    *,
+    file: str | None = None,
+    line: int | None = None,
+    commit: str | None = None,
+) -> dict:
+    """Section 6's `task_comment`: append one line to the task's `comments.jsonl`.
+
+    The line is `{"at", "author", "text"}`, and on a diff `file`, `line` and
+    `commit` too, all three or none (section 2). Any task with a task file may
+    be commented on, whatever its status: comments are kept for good. The
+    append is one `write` on an `O_APPEND` file under the task's write lock, so
+    two comments never interleave. Returns `{"id", "comment", "comment_count"}`.
+    """
+    task_id = _check_id(task_id)
+    problems = []
+    if not isinstance(author, str) or not author.strip() or len(author) > MAX_AUTHOR_CHARS or any(
+        ch.isspace() for ch in author
+    ):
+        problems.append(f"the author is {author!r}, not a role")
+    if not isinstance(text, str) or not text.strip():
+        problems.append("the text is blank")
+    elif len(text) > MAX_COMMENT_CHARS:
+        problems.append(f"the text is longer than {MAX_COMMENT_CHARS} characters")
+    anchor = (file, line, commit)
+    if any(value is not None for value in anchor):
+        if any(value is None for value in anchor):
+            problems.append("a comment on a diff gives file, line and commit, all three")
+        else:
+            if (
+                not isinstance(file, str) or not file.strip() or file != file.strip()
+                or "\n" in file or os.path.isabs(file) or ".." in Path(file).parts
+            ):
+                problems.append(f"file is {file!r}, not a path inside the repository")
+            if type(line) is not int or line < 1:
+                problems.append(f"line is {line!r}, not a line number")
+            if not isinstance(commit, str) or not _COMMIT_RE.match(commit):
+                problems.append(f"commit is {commit!r}, not a commit hash")
+    if problems:
+        raise BoardWriteError(f"task {task_id}", problems)
+
+    comment: dict = {
+        "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "author": author,
+        "text": text,
+    }
+    if file is not None:
+        comment.update(file=file, line=line, commit=commit)
+    data = (json.dumps(comment, ensure_ascii=False) + "\n").encode("utf-8")
+    path = comments_path(hive_dir, task_id)
+    with task_lock(hive_dir, task_id):
+        _board_task(hive_dir, task_id)
+        context_transfer._makedirs_readable(
+            context_transfer.hive_root(hive_dir), os.path.dirname(path)
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        with open(path, "rb") as fh:
+            count = sum(1 for raw in fh if raw.strip())
+    return {"id": task_id, "comment": comment, "comment_count": count}
+
+
+def accept(
+    hive_dir: str, task_id: str, to: str = ACCEPTED_STATUS, priority: str | None = None
+) -> dict:
+    """Section 6's `backlog_accept`: `proposed`/`deferred` → `pending`, `deferred` or `dropped`.
+
+    A person's act (section 4): the service gives it to the operator alone.
+    `priority` confirms or changes the proposer's bucket. Asking for the
+    status a task already has is a no-op, so a retry is safe. A task on the
+    board is refused, whatever `to` says: no tool moves it.
+
+    An epic carries its tasks: accepted, it becomes `status: epic` and each of
+    its `proposed` tasks `pending`, while one left `deferred` stays out
+    without holding the rest; dropped, its backlog tasks are dropped with it;
+    deferred, it goes alone. A task of an epic is accepted on its own only once
+    its epic is. Returns `{"id", "status", "changed", "children"}`, the last
+    each of an epic's tasks with its status after the call.
+    """
+    task_id = _check_id(task_id)
+    problems = []
+    if to not in ACCEPT_TO:
+        problems.append(f"to is {to!r}, not one of {', '.join(ACCEPT_TO)}")
+    problems += _priority_problems(priority)
+    if problems:
+        raise BoardWriteError(f"task {task_id}", problems)
+    with task_lock(hive_dir, task_id):
+        path, task = _board_task(hive_dir, task_id)
+        if task.split_into and not task.epic:
+            return _accept_epic(hive_dir, task_id, path, task, to, priority)
+        status = task.status
+        if status == to:
+            _refuse_priority_on_noop(task_id, task, to, priority)
+            return {"id": task_id, "status": to, "changed": False, "children": {}}
+        _refuse_from(task_id, status)
+        if to == ACCEPTED_STATUS and task.epic:
+            parent, why = _read_for_check(hive_dir, task.epic)
+            if parent is None or parent.status != "epic":
+                raise BoardWriteError(
+                    f"task {task_id}",
+                    [f"its epic {task.epic} is not accepted yet ({why or 'status ' + parent.status});"
+                     " accept the epic"],
+                )
+        task.status = to
+        if priority is not None:
+            task.priority = priority
+        _write_task_file(path, task)
+    return {"id": task_id, "status": to, "changed": True, "children": {}}
+
+
+def _refuse_priority_on_noop(
+    task_id: str, task: context_transfer.TaskFile, to: str, priority: str | None
+) -> None:
+    if priority is not None and effective_priority(task) != priority:
+        raise BoardWriteError(
+            f"task {task_id}",
+            [f"it is already {to}; change its priority with task_edit"],
+        )
+
+
+def _refuse_from(task_id: str, status: str) -> None:
+    if status in ACCEPT_FROM:
+        return
+    if status == "dropped":
+        why = "it is dropped, which is final; propose it again"
+    else:
+        why = f"it is on the board (status {status}); no tool moves a task once it is there"
+    raise BoardWriteError(f"task {task_id}", [why])
+
+
+def _accept_epic(
+    hive_dir: str,
+    task_id: str,
+    path: str,
+    task: context_transfer.TaskFile,
+    to: str,
+    priority: str | None,
+) -> dict:
+    """`accept` on an epic, under its lock: the parent's, then each child's."""
+    current = ACCEPTED_STATUS if task.status == "epic" else task.status
+    ids = list(task.split_into)
+    with contextlib.ExitStack() as stack:
+        for child_id in ids:
+            if isinstance(child_id, str) and context_transfer._is_single_path_component(child_id):
+                stack.enter_context(task_lock(hive_dir, child_id))
+        children: dict[str, tuple[str, context_transfer.TaskFile]] = {}
+        problems = []
+        for child_id in ids:
+            child, why = _read_for_check(hive_dir, child_id)
+            if child is None:
+                problems.append(f"{why}; propose the epic again to finish it")
+            elif child.epic != task_id:
+                problems.append(f"{child_id}: its epic is {child.epic or 'not set'}, not {task_id}")
+            else:
+                children[child_id] = (context_transfer.task_file_path(hive_dir, child_id), child)
+        if current == to:
+            _refuse_priority_on_noop(task_id, task, to, priority)
+            return {
+                "id": task_id, "status": task.status, "changed": False,
+                "children": {cid: child.status for cid, (_, child) in children.items()},
+            }
+        _refuse_from(task_id, task.status)
+        if problems:
+            raise BoardWriteError(f"epic {task_id}", problems)
+        moves = {
+            ACCEPTED_STATUS: {"proposed": ACCEPTED_STATUS},
+            "dropped": {"proposed": "dropped", "deferred": "dropped"},
+            "deferred": {},
+        }[to]
+        for child_path, child in children.values():
+            if child.status in moves:
+                child.status = moves[child.status]
+                if priority is not None:
+                    child.priority = priority
+                _write_task_file(child_path, child)
+        # The parent last, so an epic is on the board only once its tasks are.
+        task.status = "epic" if to == ACCEPTED_STATUS else to
+        if priority is not None:
+            task.priority = priority
+        _write_task_file(path, task)
+        return {
+            "id": task_id, "status": task.status, "changed": True,
+            "children": {cid: child.status for cid, (_, child) in children.items()},
+        }

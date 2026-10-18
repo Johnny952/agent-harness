@@ -876,17 +876,20 @@ def test_the_writer_publishes_only_loopback_8791(compose_file: str) -> None:
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
 def test_console_net_holds_the_console_side_and_no_agent_network(compose_file: str) -> None:
     """ADR 109: the writer, the console and caddy are on `console_net` and not on
-    `ia_harness_net`; the api is on both because it needs the collector."""
+    `ia_harness_net`; the api is on both because it needs the collector, and the
+    board service because the phases call it and the console writes through it
+    (ADR 129)."""
     compose = _load(compose_file)
     services = compose["services"]
 
-    expected = {"api", "console", "config-writer"}
+    expected = {"api", "console", "config-writer", "board-service"}
     if compose_file == "docker-compose.yml":
         expected.add("caddy")
     assert _on_console_net(services) == expected
-    for name in expected - {"api"}:
+    for name in expected - {"api", "board-service"}:
         assert services[name]["networks"] == ["console_net"], name
-    assert sorted(services["api"]["networks"]) == ["console_net", "ia_harness_net"]
+    for name in ("api", "board-service"):
+        assert sorted(services[name]["networks"]) == ["console_net", "ia_harness_net"], name
     assert "console_net" in compose["networks"]
     assert "name" not in (compose["networks"]["console_net"] or {})
     assert "config_writer_net" not in compose["networks"]
@@ -949,13 +952,13 @@ def test_no_agent_or_sidecar_joins_console_net() -> None:
 
 
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
-def test_the_board_service_mounts_everything_read_only_and_no_socket(compose_file: str) -> None:
-    """Step 4 writes nothing: the hive, config.yaml and config.d, all `:ro`;
-    no socket, no .data, no projects, no credentials."""
+def test_the_board_service_writes_only_the_hive_and_mounts_no_socket(compose_file: str) -> None:
+    """Step 5 writes the hive (ADR 129), locks/ included; config.yaml and
+    config.d stay `:ro`; no socket, no .data, no projects, no credentials."""
     board = _load(compose_file)["services"]["board-service"]
 
     assert board["volumes"] == [
-        "../../.hive:/data/.hive:ro",
+        "../../.hive:/data/.hive",
         "../../config.yaml:/app/config.yaml:ro",
         "../../config.d:/app/config.d:ro",
     ]
@@ -966,11 +969,11 @@ def test_the_board_service_mounts_everything_read_only_and_no_socket(compose_fil
 
 
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
-def test_the_board_service_publishes_only_loopback_8792_on_the_agents_network(
+def test_the_board_service_publishes_only_loopback_8792_on_both_networks(
     compose_file: str,
 ) -> None:
     board = _load(compose_file)["services"]["board-service"]
 
     assert board["ports"] == ["127.0.0.1:8792:8792"]
-    assert board["networks"] == ["ia_harness_net"]
+    assert board["networks"] == ["ia_harness_net", "console_net"]
 
