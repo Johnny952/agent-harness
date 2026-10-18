@@ -18,7 +18,18 @@ import {
 import { Markdown } from "@/components/console/markdown";
 import { PhaseList, PhasePill } from "@/components/console/payload";
 import { InPhaseTable, LearningStatus } from "@/components/console/learnings";
-import { debtQuery, learningsQuery, phasesQuery, taskQuery, usageQuery } from "@/lib/api/queries";
+import { DescriptionSections } from "@/components/console/task-description";
+import { CommentThread } from "@/components/console/task-comments";
+import { EpicView } from "@/components/console/task-epic";
+import {
+  commentsQuery,
+  debtQuery,
+  learningsQuery,
+  phasesQuery,
+  taskQuery,
+  usageQuery,
+} from "@/lib/api/queries";
+import { isEpic } from "@/lib/backlog";
 import { ROLES } from "@/lib/api/types";
 import type { ApiResult, Phase, Task, UsageGroup, UsageLine } from "@/lib/api/types";
 import {
@@ -61,6 +72,9 @@ function TaskDetailPage() {
   const phases = useQuery(phasesQuery(taskId));
   const learnings = useQuery(learningsQuery);
   const usage = useQuery(usageQuery(taskId));
+  // The thread's own read, here only for its warnings; `CommentThread` reads the
+  // same key, so this is one request, not two.
+  const comments = useQuery(commentsQuery(taskId));
 
   // Broken is a query that failed, and it never degrades into an empty state:
   // `docs/ui.md` *Absent, empty and broken are three different things*. A 404 and
@@ -87,6 +101,7 @@ function TaskDetailPage() {
     ...(phases.data?.warnings ?? []),
     ...(learnings.data?.warnings ?? []),
     ...(usage.data?.warnings ?? []),
+    ...(comments.data?.warnings ?? []),
   ];
   // Debt ids are shaped `T-011-D1`, and `task_id` is that split. ADR 17.
   const taskDebt = (debt.data?.data ?? []).filter((d) => d.task_id === taskId);
@@ -99,9 +114,23 @@ function TaskDetailPage() {
   const taskLearnings = (learnings.data?.data ?? []).filter(
     (l) => l.task === taskId || l.carried_by === taskId,
   );
-  // `null` is a task with no `description.md`, and the header says so. No
+  // The header names the task by its title and, for a sub-task, the epic it
+  // belongs to (ADR 139); the description has its own region below. No
   // subtitle while `t` is `null`: nothing has read a task to say it of.
-  const subtitle = t ? (t.description ?? <Absent label="no description" />) : undefined;
+  const subtitle = t ? (
+    <>
+      {typeof t.title === "string" && t.title ? t.title : <Absent label="no title" />}
+      {typeof t.epic === "string" && t.epic && (
+        <>
+          {" · part of "}
+          <Link to="/tasks/$taskId" params={{ taskId: t.epic }} className="hover:text-foreground">
+            <Mono>{t.epic}</Mono>
+          </Link>
+        </>
+      )}
+    </>
+  ) : undefined;
+  const epicView = t !== null && (isEpic(t) || t.status === "epic");
 
   return (
     <AppShell>
@@ -144,6 +173,28 @@ function TaskDetailPage() {
                 withLabel
               />
             </Field>
+            <Field label="phase">
+              {/* The api's own judgement of the lock, never re-derived: a phase
+                  beside an expired lock is a dead dispatcher's (ADR 126). */}
+              {typeof t.phase === "string" && t.phase ? (
+                <span className="flex items-center gap-1.5">
+                  <Mono className="text-[11px]">{t.phase}</Mono>
+                  {t.lock_expired === true && (
+                    <span
+                      className={cn(
+                        "rounded-sm border px-1 text-[10px] uppercase",
+                        gateTone.warning,
+                      )}
+                      title="The lock this phase holds has expired: the dispatcher that ran it is gone, so the phase is not running."
+                    >
+                      stale
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <Absent label="between phases" />
+              )}
+            </Field>
             <Field label="depends on">
               {!Array.isArray(t.depends_on) ? (
                 <Malformed got={t.depends_on} want="a list" />
@@ -166,6 +217,23 @@ function TaskDetailPage() {
               )}
             </Field>
           </div>
+
+          <section className="panel px-3 py-3">
+            <h2 className="label-xs mb-2">description</h2>
+            <DescriptionSections description={t.description} />
+          </section>
+
+          {epicView && (
+            <section className="panel px-3 py-3">
+              <h2 className="label-xs mb-2">the tasks this epic was split into</h2>
+              <EpicView epic={t} />
+            </section>
+          )}
+
+          <section className="panel px-3 py-3">
+            <h2 className="label-xs mb-2">comments</h2>
+            <CommentThread taskId={taskId} />
+          </section>
 
           <DependencyGraph task={t} />
 
