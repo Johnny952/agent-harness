@@ -142,6 +142,17 @@ stands.
    they already follow: a struck-through heading, "supersedes", "narrows",
    and the charter's **Amended:** block. No historical record is edited for
    the view (*Decisions*, 5).
+
+   **Note 2026-10-17** (T-072): built, in part. `GET /api/roadmap?project=`
+   reads the plans from the project checkout's `docs/plans/` (the api image
+   carries no harness docs) with the reader `tests/test_plan_frontmatter.py`
+   now imports, `observability/api/plans.py`, and the tasks from the hive. It
+   returns the three bands and `no_plan`, the tasks with no plan, split into
+   not merged and merged by month. A plan with no frontmatter or an invalid
+   one is listed in `future` with `status: null` and a warning. Tasks are per
+   harness: no task file carries a project key or a `plan` today, so every task
+   lands in `no_plan` until the backfill and item 2. ADRs and charter entries
+   are not read yet; that is a later step.
 5. **The screen.** A vertical list in the three bands, each plan expanding to
    its epics and each epic to its tasks, with the *full history* and *current
    only* filter.
@@ -183,6 +194,11 @@ route, the front screen (behind its own ask for a build).
   breaks the day one is written differently. New ADRs could carry a line such
   as `**Relation:** supersedes 30`, with old ones left as they are and still
   read from their prose. Decided when the route is built.
+
+  **Note 2026-10-17** (T-072): deferred to the step that reads ADRs. The
+  route as built reads plans and tasks only, no ADR and no charter entry, so
+  there is no reader yet whose breakage the line would prevent, nor one to
+  show what the line must hold. It stays open until that step.
 - **Debt.** Whether accepted debt items show in the future band, or only on
   the board and the debt screen.
 
