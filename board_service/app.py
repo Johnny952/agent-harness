@@ -6,8 +6,9 @@ ADR 124). It serves the two read tools, `board_list` and `board_get`, and the
 four write tools, `backlog_propose`, `task_edit`, `task_comment` and
 `backlog_accept` (ADR 129); the same four are under `/api/` for the console,
 as the operator. None moves a task once it is on the board, and none
-dispatches. Two more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
-`start` or a `cancel` in the dispatcher's action queue (ADR 142, ADR 151).
+dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
+`start`, a `cancel` or a `command_verdict` in the dispatcher's action queue
+(ADR 142, ADR 151).
 
 Everything here reads and writes through `dispatcher/tasks.py` and
 `dispatcher/context_transfer.py`, so there is no second copy of the task file
@@ -30,6 +31,7 @@ import datetime as dt
 import hmac
 import json
 import os
+import re
 import sys
 
 import yaml
@@ -659,7 +661,7 @@ def create_app(config_path: str) -> Flask:
     def http_accept(task_id: str):
         return _http(hive_dir, "backlog_accept", task_id)
 
-    # The action queue's two creators (ADR 142, ADR 151): behind a bearer, and
+    # The action queue's three creators (ADR 142, ADR 151): behind a bearer, and
     # the queue is made on the first create, never here.
 
     @app.post("/api/tasks/<task_id>/start")
@@ -689,7 +691,35 @@ def create_app(config_path: str) -> Flask:
 
         return _action(actions_token, make)
 
+    @app.post("/api/tasks/<task_id>/command-requests/<n>/verdict")
+    def http_verdict(task_id: str, n: str):
+        def make(body: dict):
+            unknown = sorted(set(body) - {"project", "verdict", "comment", "prefix"})
+            if unknown:
+                raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+            if not _POSITIVE_INT.fullmatch(n):
+                raise actions.ActionRefused(
+                    400, f"request number {n!r} is not an integer of at least 1"
+                )
+            # Whether request `n` exists and is still open is not read here:
+            # `run_command_request` refuses it on claim and the action ends
+            # failed with the reason (T-106).
+            return actions.create(
+                state_dir, "command_verdict", project=body.get("project"), task_id=task_id,
+                params={
+                    "n": int(n), "verdict": body.get("verdict"),
+                    "comment": body.get("comment"), "prefix": body.get("prefix"),
+                },
+                actor="operator",
+            )
+
+        return _action(actions_token, make)
+
     return app
+
+
+#: A command request's number in the verdict route's path: 1-based, no sign.
+_POSITIVE_INT = re.compile(r"[1-9][0-9]*")
 
 
 def _bearer_ok(token: str) -> bool:
