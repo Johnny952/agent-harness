@@ -55,14 +55,20 @@ class ScheduledCycle:
     `arquitecto_barrier` makes every arquitecto wait for the others, so the
     test fails unless they run at once; `window_barrier` does the same inside
     the write window. `hold` keeps a window open a while, so an overlapping
-    task has time to try for it.
+    task has time to try for it. `before_window(task_id, scheduler)` runs
+    just before the cycle asks for its window and `in_window(task_id,
+    scheduler)` just after it gets it, so a test can order the windows by
+    events instead of by `hold`.
     """
 
-    def __init__(self, cfg, *, arquitecto_barrier=None, window_barrier=None, hold=0.0):
+    def __init__(self, cfg, *, arquitecto_barrier=None, window_barrier=None, hold=0.0,
+                 before_window=None, in_window=None):
         self.cfg = cfg
         self.arquitecto_barrier = arquitecto_barrier
         self.window_barrier = window_barrier
         self.hold = hold
+        self.before_window = before_window
+        self.in_window = in_window
         self.events: list[tuple[str, str]] = []
         self.scheduler = None
         self._lock = threading.Lock()
@@ -82,9 +88,13 @@ class ScheduledCycle:
             self.arquitecto_barrier.wait(timeout=5)
         _usage(cfg, task_id, 100)
         entries = core._task_surface(tasks.read_description(cfg.hive_tasks_dir, task_id))
+        if self.before_window is not None:
+            self.before_window(task_id, scheduler)
         scheduler.enter_write_window(task_id, entries)
         try:
             self._log(task_id, "enter")
+            if self.in_window is not None:
+                self.in_window(task_id, scheduler)
             if self.window_barrier is not None:
                 self.window_barrier.wait(timeout=5)
             time.sleep(self.hold(task_id) if callable(self.hold) else self.hold)
@@ -147,15 +157,53 @@ def test_disjoint_surfaces_write_at_once(cfg, monkeypatch):
     assert windows["T-1"][0] < windows["T-2"][1] and windows["T-2"][0] < windows["T-1"][1]
 
 
-def test_a_whole_repo_task_writes_alone(cfg, monkeypatch):
+_DEADLINE = 10.0
+
+
+def _wait_until(predicate, what):
+    """Poll `predicate` until it holds, failing the test past a generous deadline."""
+    deadline = time.monotonic() + _DEADLINE
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        time.sleep(0.005)
+
+
+@pytest.mark.parametrize("first", ["T-1", "T-2"])
+def test_a_whole_repo_task_writes_alone(cfg, monkeypatch, first):
+    # T-1 claims the whole repo, T-2 one file. Whichever takes its window
+    # first keeps it until the other is seen waiting for its own, so the
+    # second really asked while the first was writing; it must not enter
+    # until the first has left. Ordered by events, not by `hold` (T-065-D1):
+    # with sleeps alone, either cycle could reach its window first.
     _task(cfg, "T-1", "Whatever it needs.")
     _task(cfg, "T-2", "`front/app.ts`")
-    fake = ScheduledCycle(cfg, hold=0.1)
+    second = {"T-1": "T-2", "T-2": "T-1"}[first]
+    first_in = threading.Event()
 
-    _run(cfg, monkeypatch, fake, ["T-1", "T-2"])
+    def before_window(task_id, scheduler):
+        if task_id == second:
+            assert first_in.wait(timeout=_DEADLINE), f"{first} never entered its window"
 
+    def in_window(task_id, scheduler):
+        if task_id == first:
+            first_in.set()
+            _wait_until(
+                lambda: second in scheduler._waiting, f"{second} to wait for its window",
+            )
+            # Give a wrongly granted window every chance to show up.
+            time.sleep(0.05)
+
+    fake = ScheduledCycle(cfg, before_window=before_window, in_window=in_window)
+
+    queue = _run(cfg, monkeypatch, fake, ["T-1", "T-2"])
+
+    assert queue.status == queue_mod.Q_DONE
     windows = _windows_of(fake.events)
-    assert windows["T-1"][1] < windows["T-2"][0]
+    assert windows[first][1] < windows[second][0]
+    assert fake.scheduler.windows == [
+        (first, "enter"), (first, "leave"), (second, "enter"), (second, "leave"),
+    ]
 
 
 def test_the_queue_order_decides_a_contested_window(cfg, monkeypatch):
