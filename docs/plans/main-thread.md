@@ -8,14 +8,9 @@ supersedes: []
 # Main thread — the conversation lives in the console, on an account the person assigns
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built
-<<<<<<< HEAD
 as a whole; step 1 is built: the thread records and the model list by T-109
-(2026-10-19), the primary override the same day (ADR 176).
-=======
-as a whole; step 1 is built by T-109 (2026-10-19), narrowed to the thread
-records and the model list, the primary override pending; step 2 is built by
+(2026-10-19), the primary override the same day (ADR 176); step 2 is built by
 T-110 (2026-10-19, ADR 173).
->>>>>>> agent/task/T-110
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
