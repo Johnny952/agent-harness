@@ -756,13 +756,14 @@ record of the work and as the way back if the merge turns out to be wrong.
 A merge that lands is recorded on the task file, as a `merged` block naming
 the branch and the time, and `merge-task` prints `task <id>: recorded as
 merged into <branch>`. That block is what another task's `depends_on` waits
-for: `done` is not enough. When the task was the last sub-task of an epic to
-merge, the epic's own file is set to `done` and the verb prints `epic <id>:
-every sub-task is merged, so it is done`. A re-run on a branch already
-merged writes the block only where the file has none, which is how a task
-merged before the record existed gets one. A record that could not be
-written is reported on stderr and the exit is still 0, because the branch
-did land (`docs/decisions.md` ADR 60).
+for: `done` is not enough. When the task was the last open sub-task of an
+epic, the others merged or dropped, the epic's own file is set to `done`
+and the verb prints
+`epic <id>: every sub-task is merged or dropped, so it is done`. A re-run on
+a branch already merged writes the block only where the file has none, which
+is how a task merged before the record existed gets one. A record that
+could not be written is reported on stderr and the exit is still 0, because
+the branch did land (`docs/decisions.md` ADR 60).
 
 To have a cycle do this by itself the moment the auditor signs off, set
 `merge_on_done: true` in `config.yaml`. It defaults to `false`, because

@@ -2739,7 +2739,7 @@ def record_merge(
             recorded.append(f"task {task_id}: recorded as merged into {outcome.target}")
         closed = tasks.close_epic(hive, task_id)
         if closed:
-            recorded.append(f"epic {closed}: every sub-task is merged, so it is done")
+            recorded.append(f"epic {closed}: every sub-task is merged or dropped, so it is done")
     except FileNotFoundError:
         return recorded, f"task {task_id}: it has no task file, so the merge is not recorded"
     except Exception as exc:
