@@ -87,6 +87,7 @@ externally-managed.
 | `dispatcher/handoff.py` | What one role leaves the next, as pointers rather than prose, and the budgets that hold it to a size. |
 | `dispatcher/project_docs.py` | This contract. Where a project's docs live, what each role owes them, and the frontmatter above. |
 | `dispatcher/learnings.py` | The inbox of things a run discovered, and the retirement of ones a later run disproved. |
+| `dispatcher/actions.py` | The action queue of `docs/decisions.md` ADR 142: a file queue under `<state_dir>/actions/` (`pending/`, `claimed/`, `done/`) the board service will `create` into and the worker will `claim`, `finish` and `recover`, with the `KINDS` registry and its 400/409 refusals. Step 1 of the ADR's split; nothing calls it yet (`docs/implementations/T-099.md`). |
 | `dispatcher/debt.py` | The debt index, one row per deferred thing. Its `card` column stays and is written `none`: nothing mirrors a row (`docs/decisions.md` ADR 59). |
 | `dispatcher/role_skills.py` | Delivers the vendored `skills/` to a role per call, one `--plugin-dir` each, rather than installing them in the shared config volume. |
 | `dispatcher/subagents.py` | The subagent definitions a role is given. |
