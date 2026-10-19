@@ -1,6 +1,6 @@
 """dispatcher/worker.py: the action worker (docs/decisions.md ADR 142, 148).
 
-`run_task_cycle` is faked; the loop is driven by `Worker.tick()` and
+`run_task_cycle` and `run_command_request` are faked; the loop is driven by `Worker.tick()` and
 `Worker.join()`, so nothing sleeps beyond Event waits that fail rather than hang.
 """
 
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from dispatcher import actions, tasks, worker as worker_mod
+from dispatcher import actions, command_run, tasks, worker as worker_mod
 from dispatcher import dispatcher as core
 from tests.dispatcher.test_dispatcher import _make_config
 from tests.dispatcher.test_queue import _task
@@ -55,6 +55,28 @@ class Cycle:
         return core.CycleOutcome.FINISHED
 
 
+class Verdict:
+    """A fake `run_command_request`, held and raising the way `Cycle` is."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.entered = threading.Event()
+        self.gate: threading.Event | None = None
+        self.raises: Exception | None = None
+        self.outcome = core.CycleOutcome.FINISHED
+
+    def __call__(self, cfg, task_id, slug, n, verdict, comment=None, by="operator",
+                 prefix=None):
+        self.calls.append({"task_id": task_id, "slug": slug, "n": n, "verdict": verdict,
+                           "comment": comment, "by": by, "prefix": prefix})
+        self.entered.set()
+        if self.raises is not None:
+            raise self.raises
+        if self.gate is not None:
+            assert self.gate.wait(WAIT)
+        return self.outcome
+
+
 @pytest.fixture
 def cfg(tmp_path):
     return _make_config(tmp_path)
@@ -65,6 +87,15 @@ def cycle(monkeypatch):
     fake = Cycle()
     monkeypatch.setattr(core, "run_task_cycle", fake)
     return fake
+
+
+@pytest.fixture
+def verdicts(monkeypatch):
+    fake = Verdict()
+    monkeypatch.setattr(command_run, "run_command_request", fake)
+    yield fake
+    if fake.gate is not None:
+        fake.gate.set()
 
 
 @pytest.fixture
@@ -105,6 +136,12 @@ def start(cfg, task_id, project="proj", note=None, make_task=True):
         _task(cfg, task_id)
     return actions.create(cfg.state_dir, "start", project=project, task_id=task_id,
                           note=note)
+
+
+def verdict(cfg, task_id="T-1", project="proj", **params):
+    params = {"n": 1, "verdict": "run", **params}
+    return actions.create(cfg.state_dir, "command_verdict", project=project,
+                          task_id=task_id, params=params)
 
 
 def cancel(cfg, target):
@@ -359,17 +396,135 @@ def test_an_unknown_kind_fails(cfg, worker, cycle):
     assert state == "done" and got["status"] == "failed" and got["error"] == "unknown kind"
 
 
-def test_command_verdict_and_turn_stay_pending_untouched(cfg, worker, cycle):
-    v = actions.create(cfg.state_dir, "command_verdict", project="proj", task_id="T-1",
-                       params={"n": 1, "verdict": "run"})
+def test_turn_stays_pending_untouched(cfg, worker, cycle):
     t = actions.create(cfg.state_dir, "turn", params={"thread": "x", "text": "hi"})
-    root = actions.actions_dir(cfg.state_dir) / "pending"
-    before = {a["id"]: (root / f"{a['id']}.json").read_bytes() for a in (v, t)}
+    path = actions.actions_dir(cfg.state_dir) / "pending" / f"{t['id']}.json"
+    before = path.read_bytes()
     worker.tick()
     worker.tick()
-    for aid, data in before.items():
-        assert (root / f"{aid}.json").read_bytes() == data
+    assert path.read_bytes() == before
     assert worker.running == {}
+
+
+# ---- command_verdict --------------------------------------------------------
+
+
+def test_a_verdict_is_carried_with_the_actor_as_by(cfg, worker, verdicts):
+    rec = verdict(cfg, verdict="allow", comment="fine", prefix=2)
+    worker.tick()
+    worker.join()
+    assert verdicts.calls == [{"task_id": "T-1", "slug": "proj", "n": 1, "verdict": "allow",
+                               "comment": "fine", "by": "operator", "prefix": 2}]
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "done" and got["error"] is None
+    assert got["started_at"] is not None
+    assert got["result"] == {"n": 1, "verdict": "allow", "outcome": "finished",
+                             "blocked_reason": None}
+
+
+def test_a_refused_verdict_fails_with_its_reason(cfg, worker, verdicts):
+    verdicts.raises = command_run.VerdictRefused("task T-1: this block already\nhas a verdict")
+    rec = verdict(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed"
+    assert got["error"] == "task T-1: this block already has a verdict"
+    assert worker.running == {}
+
+
+def test_a_verdict_that_raises_otherwise_fails(cfg, worker, verdicts):
+    verdicts.raises = OSError("disk")
+    rec = verdict(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed" and got["error"] == "OSError: disk"
+
+
+def test_a_verdict_waits_for_an_account(cfg, worker, verdicts, accounts):
+    accounts["open"] = False
+    rec = verdict(cfg)
+    worker.tick()
+    state, got = where(cfg, rec["id"])
+    assert state == "pending" and got["waiting"] == "account"
+    assert verdicts.calls == []
+    accounts["open"] = True
+    worker.tick()
+    worker.join()
+    assert where(cfg, rec["id"])[1]["status"] == "done"
+
+
+def test_a_claimed_verdict_is_interrupted_on_recovery(cfg, worker, verdicts):
+    rec = verdict(cfg)
+    assert actions.claim(cfg.state_dir, rec["id"]) is not None
+    assert worker.recover() == [(rec["id"], "interrupted")]
+    worker.tick()
+    worker.join()
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "interrupted"
+    assert "command-resume" in got["error"]
+    assert verdicts.calls == []
+
+
+def test_a_verdict_waits_for_a_start_on_its_project(cfg, worker, cycle, verdicts):
+    cycle.hold("T-1")
+    s = start(cfg, "T-1")
+    v = verdict(cfg, task_id="T-2")
+    worker.tick()
+    cycle.wait_entered("T-1")
+    state, got = where(cfg, v["id"])
+    assert state == "pending" and got["waiting"] == "project"
+    assert verdicts.calls == []
+    cycle.release("T-1")
+    worker.join()
+    worker.tick()
+    worker.join()
+    assert where(cfg, s["id"])[1]["status"] == "done"
+    assert where(cfg, v["id"])[1]["status"] == "done"
+
+
+def test_a_start_waits_for_a_verdict_on_its_project(cfg, worker, cycle, verdicts):
+    verdicts.gate = threading.Event()
+    v = verdict(cfg, task_id="T-2")
+    s = start(cfg, "T-1")
+    other = start(cfg, "T-3", project="beta")
+    worker.tick()
+    assert verdicts.entered.wait(WAIT)
+    state, got = where(cfg, s["id"])
+    assert state == "pending" and got["waiting"] == "project"
+    verdicts.gate.set()
+    worker.join()
+    assert where(cfg, other["id"])[1]["status"] == "done"
+    worker.tick()
+    worker.join()
+    assert where(cfg, v["id"])[1]["status"] == "done"
+    assert [c[0] for c in cycle.calls] == ["T-3", "T-1"]
+
+
+def test_a_cancel_on_a_running_verdict_fails_and_changes_nothing(cfg, worker, verdicts):
+    verdicts.gate = threading.Event()
+    v = verdict(cfg)
+    worker.tick()
+    assert verdicts.entered.wait(WAIT)
+    c = cancel(cfg, v["id"])
+    worker.tick()
+    got = where(cfg, c["id"])[1]
+    assert got["status"] == "failed" and worker_mod.VERDICT_NOT_CANCELLABLE in got["error"]
+    assert where(cfg, v["id"])[0] == "claimed"
+    verdicts.gate.set()
+    worker.join()
+    assert where(cfg, v["id"])[1]["status"] == "done"
+
+
+def test_a_cancel_on_a_pending_verdict_cancels_it(cfg, worker, verdicts, accounts):
+    accounts["open"] = False
+    v = verdict(cfg)
+    c = cancel(cfg, v["id"])
+    worker.tick()
+    assert where(cfg, v["id"])[1]["status"] == "cancelled"
+    assert where(cfg, c["id"])[1]["status"] == "done"
+    assert verdicts.calls == []
 
 
 # ---- heartbeat, shutdown ----------------------------------------------------

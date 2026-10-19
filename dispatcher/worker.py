@@ -2,10 +2,10 @@
 ADR 142 split item 2, ADR 148).
 
 One worker at a time (a `flock` on `actions/worker.lock`), one pass every
-`POLL_SECONDS`. A `cancel` runs at once on the loop thread; a `start` is
-claimed when its project is free and an account is open and runs in its own
-thread. The handlers are in `HANDLERS`, not in `actions.KINDS` (ADR 148, 1).
-`command_verdict` and `turn` have none yet: they stay pending, untouched.
+`POLL_SECONDS`. A `cancel` runs at once on the loop thread; a `start` or a
+`command_verdict` is claimed when its project is free and an account is open
+and runs in its own thread. The handlers are in `HANDLERS`, not in
+`actions.KINDS` (ADR 148, 1). `turn` has none yet: it stays pending, untouched.
 Stdlib only.
 """
 
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dispatcher import actions, context_transfer, tasks
+from dispatcher import actions, command_run, context_transfer, tasks
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
 from dispatcher.config import Config
@@ -35,6 +35,10 @@ HEARTBEAT = "worker.json"
 POLL_SECONDS = 2.0
 ACCOUNT_POLL_SECONDS = float(queue_mod.WAIT_POLL_SECONDS)
 STOPPED_ERROR = "the worker stopped; the cycle was held at a phase boundary"
+VERDICT_NOT_CANCELLABLE = (
+    "a running command_verdict cannot be cancelled: its verdict is recorded "
+    "before the command runs (ADR 119)"
+)
 
 
 class WorkerLocked(Exception):
@@ -166,7 +170,7 @@ class Worker:
         if busy:
             self._wait(record, "project")
             return
-        if kind == "start" and not self._account_open():
+        if actions.KINDS[kind].spends_quota and not self._account_open():
             self._wait(record, "account")
             return
         claimed = actions.claim(self.state_dir, aid)
@@ -268,6 +272,31 @@ def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
         actions.finish(sd, record["id"], "done", result=result)
 
 
+def _command_verdict(worker: Worker, record: dict, _cancelled=None) -> None:
+    """Carry the owner's verdict (ADR 142, 8): `run_command_request` records
+    it, runs the command on *run*, resumes the phase and goes on with the
+    cycle. A refusal ran nothing and ends the action `failed` with its reason."""
+    cfg, sd = worker.cfg, worker.state_dir
+    params = record["params"]
+    record["started_at"] = _utc_now().isoformat()
+    actions.rewrite(sd, record)
+    try:
+        outcome = command_run.run_command_request(
+            cfg, record["task_id"], record["project"], params["n"], params["verdict"],
+            params.get("comment"), by=record["actor"], prefix=params.get("prefix"),
+        )
+    except command_run.VerdictRefused as exc:
+        actions.finish(sd, record["id"], "failed", error=_one_line(str(exc)))
+        return
+    task = _read_task(cfg, record["task_id"])
+    actions.finish(sd, record["id"], "done", result={
+        "n": params["n"], "verdict": params["verdict"], "outcome": outcome.value,
+        "blocked_reason": (
+            task.blocked_reason if outcome is core.CycleOutcome.BLOCKED and task else None
+        ),
+    })
+
+
 def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
     sd = worker.state_dir
     root = actions.actions_dir(sd)
@@ -305,6 +334,8 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
         if tgt.get("kind") == "start" and entry is not None:
             entry.cancelled.set()
             end("done", target=target, target_status="running")
+        elif tgt.get("kind") == "command_verdict":
+            end("failed", f"target {target}: {VERDICT_NOT_CANCELLABLE}")
         else:
             end("failed", f"target {target} is a running {tgt.get('kind')}; "
                           "it cannot be cancelled")
@@ -316,7 +347,7 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
         end("failed", f"target {target} already finished as {tgt.get('status')}")
 
 
-HANDLERS = {"start": _start, "cancel": _cancel}
+HANDLERS = {"start": _start, "cancel": _cancel, "command_verdict": _command_verdict}
 
 
 # ---- the verb ---------------------------------------------------------------
