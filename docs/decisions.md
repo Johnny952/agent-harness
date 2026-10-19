@@ -9868,3 +9868,45 @@ entry's.
 - *Failing the pick on an unknown name.* The writer refuses one already, so
   only a hand edit gets there, and stopping the queue for it is worse than
   ranking by `config.yaml`'s primary.
+
+## ADR 179 — `worker.HANDLERS` is the one registry of a kind's handler; `actions.Kind` has no `handler` slot
+
+**Status:** accepted (T-101, 2026-10-19). Resolves `docs/debt/T-100-D1.md`.
+It supersedes the words "its handler" in ADR 142 decision 6, *How a kind is
+added*, and the sentence "`Kind.handler` in `KINDS` stays `None`" in ADR 148
+decision 1, with the first bullet of ADR 148's *Consequences*. The rest of
+ADR 142 and ADR 148 stands.
+
+**Context.** ADR 142 decision 6 has the `KINDS` registry in
+`dispatcher/actions.py` give each kind's handler. ADR 148 decision 1 put the
+handlers in `dispatcher/worker.py` `HANDLERS` instead, because a handler
+calls the dispatcher core and `actions.py` must stay importable by the board
+service without it, and left `Kind.handler` declared and `None` on every
+kind. Nothing read the slot. A dead field that reads as the place to wire a
+handler is where a later task would put one, and the worker would never look
+there (T-100-D1).
+
+**Decision.**
+1. *The slot is removed.* `actions.Kind` carries a kind's contract only: its
+   `params` validation, its serial key, whether it spends quota and what
+   recovery does with it (ADR 142 decisions 7 and 8). It has no `handler`
+   field.
+2. *One registry for the run.* A kind's handler is an entry in
+   `worker.HANDLERS`, kind name to handler, and nowhere else. ADR 142
+   decision 6's *How a kind is added* reads: an entry in `KINDS` for the
+   kind's contract, an entry in `worker.HANDLERS` for its run, a
+   board-service route that creates it, and tests of all three. A kind in
+   `KINDS` with no entry in `HANDLERS` is left in `pending/` untouched, as
+   ADR 148 decision 1 says.
+
+**Consequences.**
+- Adding a kind still touches two modules, `actions.py` and `worker.py`,
+  now with nothing in the first that suggests otherwise.
+- `actions.py` still imports nothing of the dispatcher core.
+
+**Ruled out.**
+- Keeping the slot with a comment pointing at `worker.HANDLERS`: a field
+  nothing sets or reads, kept only to be explained.
+- Moving the handlers into `KINDS`: ADR 148 decision 1 and its *Ruled out*
+  still hold; `actions.py` would import the core, or `worker.py` would
+  mutate another module's frozen registry at import.

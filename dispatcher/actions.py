@@ -197,8 +197,6 @@ class Kind:
     recovery: str
     #: The `error` line recovery writes when it interrupts.
     interrupted_error: str | None
-    #: The worker's (ADR 142 split item 2); nothing here sets it.
-    handler: Callable | None = None
 
 
 KINDS: dict[str, Kind] = {
