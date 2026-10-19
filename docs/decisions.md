@@ -9759,3 +9759,153 @@ read by step 2's worker and step 3's api.
   read: a write at boot or from a reader, for a record nobody asked for.
 - Picking another model silently when the account changes: the person would
   find the thread on a model they did not choose.
+
+## ADR 173 — A `turn` runs one streamed `claude -p` on the thread's own account, read-only by flags, and logs it between two harness lines
+
+**Status:** accepted (T-110, 2026-10-19). ADR 142 split item 10,
+`docs/plans/main-thread.md` step 2. Builds on ADR 142 (decisions 6–8), ADR
+148, ADR 169 and ADR 170; supersedes nothing. The `Kind.handler` slot
+(`docs/debt/T-100-D1.md`) stays as it is.
+
+**Context.** `turn` is in `actions.KINDS` (serial key `thread:<id>`,
+recovery `interrupt`, `spends_quota`) with no entry in `worker.HANDLERS`, so
+it stays pending. The plan fixes the transport (`stream-json`, `--resume`,
+`conversations/<thread>.jsonl`, *Decisions* 4 and 6) and the rule that the
+thread writes no code (`docs/plans/balancer.md`, *The conversational thread
+does not write code*), and leaves the flags, the log's own lines and a
+cooling account to this ADR. ADR 142 decision 6 asks a kind that spends
+quota to name what authorizes it.
+
+**Decision.**
+
+1. *What authorizes a turn.* The person's message, sent from the console's
+   conversation, authorizes that one turn and nothing more: C-1 and C-8, as
+   *Amended* 2026-10-11, make the console's thread the one conversation,
+   and C-12 *Amended* the same day puts that conversation in the console.
+   Under C-4 the worker runs it once: it never retries a turn, resumes one
+   that failed, or starts one of its own, and C-4's handoff-resume amendment
+   does not reach the main thread.
+2. *The handler.* `worker.HANDLERS["turn"]`. It reads the record with
+   `threads.read_thread(cfg.hive_tasks_dir, thread)`; `NoThreadError` or
+   `UnreadableThreadError`, a `status` of `archived`, an `account` that is
+   not in `cfg.accounts`, or a parked account (5) ends the action `failed`
+   with one line of error, before anything is logged or spent. The turn
+   runs on the record's `account`, `model` and `effort` (its current
+   values, which are the last segment's), resuming the last segment's
+   `session_id` when it has one. A turn whose thread already has one
+   running stays pending with `waiting: thread`.
+3. *The command.* Built in `dispatcher/docker_exec.py` and run through the
+   same `docker exec -w <workdir> <container>` argv `run_docker_exec`
+   builds, but with `subprocess.Popen` so lines are read as they come.
+   No second path to the socket. In order:
+
+   `sh -c 'echo "$$"; exec "$@"' ia-harness-turn timeout --kill-after=30
+   1800 claude [--resume <id>] --model <m> --effort <e> --permission-mode
+   dontAsk --permission-prompts none --allowed-tools <allow…>
+   --disallowed-tools Write Edit NotebookEdit -p <text> --output-format
+   stream-json --verbose`
+
+   - The `sh` prints its pid on the first line and `exec`s the rest, so
+     that pid is the in-container `timeout`; the script is a literal and
+     the argv goes in as positional arguments, so nothing is interpolated.
+     The first line is read as the pid and never logged.
+   - `timeout` bounds a turn at `TURN_TIMEOUT_SECONDS = 1800` in the
+     container, as a phase's is bounded (killing the host client does not
+     stop the process inside).
+   - `dontAsk` denies every call no rule allows, and `--permission-prompts
+     none` says nobody answers a prompt, so no SDK host could grant one;
+     `--disallowed-tools` denies the three writers outright,
+     above any allow rule or mode. Not `cfg.permission_mode` and not
+     `cfg.allowed_tools`: those are the phases' grants.
+   - The allowlist, `TURN_ALLOWED_TOOLS`: `Read`, `Glob`, `Grep`,
+     `Bash(ls*)`, `Bash(pwd)`, `Bash(wc*)`, `Bash(git status*)`,
+     `Bash(git branch --list*)`, `Bash(git rev-parse*)`. No `--mcp-config`
+     (the dispatch tool is step 6), no `--plugin-dir`, no `--add-dir`.
+   - `--verbose` because the CLI refuses `-p` with `stream-json` without it.
+   - The workdir is `<projects_root>/<project>` for a thread with a project
+     and `projects_root` for one without. A thread's project never changes
+     (ADR 170, 5), so every turn of a thread runs in one directory, which
+     is where the CLI keeps the session `--resume` looks up.
+4. *The log.* `<hive root>/conversations/<thread>.jsonl`
+   (`context_transfer.hive_root`), made with `_makedirs_readable`, opened
+   for append, one line per write and flushed at once, never rewritten. Two
+   writers are added to `dispatcher/threads.py`: `conversation_path` and
+   `append_conversation`. One turn at a time per thread (the serial key) is
+   what keeps the lines of two turns apart; recovery runs before the loop.
+   - First, the harness line `{"type": "ia_harness", "event":
+     "turn_start", "at", "action", "actor", "text", "account", "model",
+     "effort", "session_id"}`: the person's message, which the stream does
+     not echo, and the session resumed (null on a fresh one). It is written
+     just after `started_at`, just before the exec.
+   - Then each stdout line of the stream, verbatim, when it parses as a
+     JSON object. A line that does not is written as `{"type":
+     "ia_harness", "event": "unparsed", "at", "line"}`. No stream event has
+     the type `ia_harness`.
+   - Last, `{"type": "ia_harness", "event": "turn_end", "at", "action",
+     "status", "error", "session_id"}`, with the action's final status.
+     Every `turn_start` gets one `turn_end`: from the handler, or from
+     `Worker.recover` for a turn left claimed with a `started_at` (8). A
+     turn refused before it started writes neither.
+5. *A parked account.* When `state_machine.get_state` of the thread's
+   account is in `PARKED_STATES` (pre-cooldown, cooling or login expired),
+   the turn ends `failed`, naming the account and its state, and nothing
+   runs. The worker never picks another account and never waits: moving the
+   thread is the person's act (`main-thread.md` *Decisions* 3), and a turn
+   that waited would run hours later on its own. No `/usage` probe is run
+   for it. The worker's pool-wide account check, which is for a start
+   (ADR 148, 5), does not apply to `turn`. A turn takes no holder slot in
+   the account's state file: a conversation and a phase share an account
+   (`balancer.md`).
+6. *The session.* After the stream, the `session_id` of its `system`/`init`
+   event, when it differs from the one the turn resumed (null included), is
+   written into the thread's last segment by `threads.update(...,
+   session_id=...)` under the thread's lock. The new keyword opens no
+   segment and is not a field of the board-service PATCH route. A session
+   recorded is what the next turn resumes.
+7. *How it ends.* A `result` event with `is_error` false ends it `done`,
+   `result` `{session_id, total_cost_usd, usage, num_turns}` copied from
+   that event. With `is_error` true, or no `result` event, it ends `failed`:
+   the error is the event's `subtype` and `result` text, or the exit status
+   and the stderr tail, on one line. The CLI's `result` stays in the log
+   either way. A refusal for rate limit parks nothing here.
+8. *Cancel, crash, shutdown.*
+   - `Running` gains `kill`, set by the handler once it has the pid: a
+     `docker exec <container> kill -TERM <pid>` (coreutils `timeout` passes
+     the signal on), then the host client is waited for. A `cancel` of a
+     claimed `turn` sets `cancelled` and calls `kill` (ADR 142, 7) and
+     itself ends `done`, `target_status: running`; the handler checks
+     `cancelled` again once `kill` is set, so a cancel that came first still
+     stops it. The turn ends `cancelled`, its `turn_end` says so.
+   - After a crash, `actions.recover` already ends a claimed `turn`
+     `interrupted` with "interrupted before the turn finished", never run
+     again. `Worker.recover` then writes the `turn_end` for each one that
+     has `started_at`.
+   - On SIGTERM or SIGINT, after the loop stops claiming, the worker calls
+     `kill` on every running turn before it joins; each ends `interrupted`
+     with the error "the worker stopped during the turn". A turn has no
+     boundary inside it to hold at, as a start has between phases (ADR 148,
+     4), and letting it run on would depend on the stop grace period and
+     leave a `claude` running unseen in the container. It never goes back
+     to `pending/` (C-4).
+
+**Consequences.**
+- A message to a cooling account fails at once; the console shows the
+  error and offers the move, and sending again is a new turn.
+- The thread can read but not run a program or read git history: `git log`,
+  `git show` and `git diff` all take `--output=<file>`, which writes. A
+  wider read set is a later ADR.
+- A turn's cost is in its `result` and in the log, not in a task's usage
+  log (ADR 53): a turn belongs to no task.
+- Step 3's api reads `conversations/<thread>.jsonl`; a reader groups a turn
+  by its `turn_start` and `turn_end`, and may meet a final line cut short.
+
+**Ruled out.**
+- Sending a turn to another account, or waiting on a cooling one: the
+  person's call (*Decisions* 3).
+- `acceptEdits` with the three writers denied: it leaves the CLI's own
+  read-only Bash set and every other non-prompting tool to the CLI's
+  version; `dontAsk` with an allowlist is the set this ADR names.
+- Killing the turn by `pkill -f` on its session id: a fresh turn has none
+  in its argv.
+- Rewriting the log's stream lines into a harness envelope: a reader should
+  parse what the CLI wrote.
