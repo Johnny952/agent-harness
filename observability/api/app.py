@@ -55,6 +55,8 @@ from dispatcher import (
     project_docs,
     state_machine,
 )
+# Aliased like `tasks`: `create_app` names its `/api/threads` view `threads`.
+from dispatcher import threads as thread_store
 # Aliased: `create_app` names its `/api/tasks` view `tasks`.
 from dispatcher import tasks as task_store
 # Aliased: `/api/actions` reads the worker's heartbeat; for two constants,
@@ -991,6 +993,31 @@ def create_app(
             "worker": _worker_heartbeat(root / action_worker.HEARTBEAT, warnings),
         }
         return _envelope(data, warnings)
+
+    @app.get("/api/threads")
+    @requires_auth
+    def threads():
+        """Every thread record under `<hive root>/threads/`, as written (ADR 170, 177).
+
+        `docs/plans/main-thread.md` step 3. The order is
+        `thread_store.read_threads`'s: the main thread first, then by
+        `created`, oldest first. Archived threads are served with their
+        `status` and filtered by the console, so this route takes no query
+        parameters. A file that does not parse, or is not a JSON object, is a
+        warning and the rest are still served. Read through `/data/.hive:ro`:
+        no directory is made, and a hive with no `threads/` is an empty list.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        try:
+            records, warnings = thread_store.read_threads(cfg.hive_tasks_dir)
+        except OSError as exc:
+            # `read_threads` turns an absent directory into an empty list; one
+            # it cannot list (permissions, a file in its place) is this warning.
+            root = thread_store.threads_root(cfg.hive_tasks_dir)
+            return _envelope([], [f"{root}: unreadable threads directory: {exc}"])
+        return _envelope(records, warnings)
 
     return app
 
