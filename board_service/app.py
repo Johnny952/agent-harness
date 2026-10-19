@@ -6,7 +6,8 @@ ADR 124). It serves the two read tools, `board_list` and `board_get`, and the
 four write tools, `backlog_propose`, `task_edit`, `task_comment` and
 `backlog_accept` (ADR 129); the same four are under `/api/` for the console,
 as the operator. None moves a task once it is on the board, and none
-dispatches.
+dispatches. Two more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
+`start` or a `cancel` in the dispatcher's action queue (ADR 142, ADR 151).
 
 Everything here reads and writes through `dispatcher/tasks.py` and
 `dispatcher/context_transfer.py`, so there is no second copy of the task file
@@ -26,6 +27,7 @@ the network from naming another role, and is not meant to.
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import json
 import os
 import sys
@@ -33,13 +35,14 @@ import sys
 import yaml
 from flask import Flask, jsonify, request
 
-from dispatcher import context_transfer
+from dispatcher import actions, context_transfer
 from dispatcher import tasks as task_store
 from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS
 from dispatcher.config import PHASE_ROLES, load_config
 
 CONFIG_PATH = "/app/config.yaml"
 PORT = 8792
+ACTIONS_TOKEN_ENV = "BOARD_ACTIONS_TOKEN"
 
 #: Every role the service knows. A role outside it is a misspelt URL, answered
 #: 400, rather than a role that silently gets no tools. `OPERATOR` is the
@@ -591,6 +594,9 @@ def create_app(config_path: str) -> Flask:
     """The service over the hive `config_path` names, loaded once as the api loads it."""
     cfg = load_config(config_path)
     hive_dir = cfg.hive_tasks_dir
+    state_dir = cfg.state_dir
+    # Read once, as the config is: rotating it is a restart (ADR 151, 5).
+    actions_token = os.environ.get(ACTIONS_TOKEN_ENV, "")
     app = Flask(__name__)
 
     @app.get("/health")
@@ -653,7 +659,73 @@ def create_app(config_path: str) -> Flask:
     def http_accept(task_id: str):
         return _http(hive_dir, "backlog_accept", task_id)
 
+    # The action queue's two creators (ADR 142, ADR 151): behind a bearer, and
+    # the queue is made on the first create, never here.
+
+    @app.post("/api/tasks/<task_id>/start")
+    def http_start(task_id: str):
+        def make(body: dict):
+            unknown = sorted(set(body) - {"project", "note"})
+            if unknown:
+                raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+            return actions.create(
+                state_dir, "start", project=body.get("project"), task_id=task_id,
+                note=body.get("note"), actor="operator",
+                ready=lambda _project, tid: tid in task_store.ready_order(
+                    task_store.read_all_tasks(hive_dir)
+                ),
+            )
+
+        return _action(actions_token, make)
+
+    @app.post("/api/actions/<action_id>/cancel")
+    def http_cancel(action_id: str):
+        def make(body: dict):
+            if body:
+                raise actions.ActionRefused(400, "a cancel takes an empty body")
+            return actions.create(
+                state_dir, "cancel", params={"target": action_id}, actor="operator"
+            )
+
+        return _action(actions_token, make)
+
     return app
+
+
+def _bearer_ok(token: str) -> bool:
+    scheme, _, presented = request.headers.get("Authorization", "").partition(" ")
+    presented = presented.strip()
+    if scheme.lower() != "bearer" or not presented:
+        return False
+    return hmac.compare_digest(presented.encode(), token.encode())
+
+
+def _action(token: str, make):
+    """One action route: ADR 151's guards in order, then `make(body)`'s record as 201.
+
+    The token is never put in an answer or a log.
+    """
+    if request.headers.get("Origin"):
+        return jsonify({"error": "no browser origin may call this service"}), 403
+    if not token:
+        return jsonify({"error": "the action routes are off: no BOARD_ACTIONS_TOKEN is set"}), 503
+    if not _bearer_ok(token):
+        return (
+            jsonify({"error": "a bearer token is required"}), 401,
+            {"WWW-Authenticate": "Bearer"},
+        )
+    if request.args:
+        return jsonify({"error": f"unknown query parameter {sorted(request.args)[0]!r}"}), 400
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "the body is not a JSON object"}), 400
+    try:
+        record = make(body)
+    except actions.ActionRefused as exc:
+        return jsonify({"error": exc.reason}), exc.status
+    except OSError as exc:
+        return jsonify({"error": f"the action queue could not be written: {exc}"}), 503
+    return jsonify(record), 201
 
 
 def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 200):

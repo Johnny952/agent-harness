@@ -9271,3 +9271,69 @@ boundary", which ADR 142 does not name a status for.
   order.
 - Sending a held start back to `pending/` on shutdown: it may have spent,
   and a restart would run it again with no person's act (C-4).
+
+## ADR 151 — The action routes: the project is the body's, Ready is read across the one hive, and the token is checked before the body
+
+**Status:** accepted (T-102, 2026-10-19). Narrows ADR 142 where it left
+room for step 3 of its split (`board_service/app.py`); it supersedes
+nothing.
+
+**Context.** ADR 142 names the two routes, their body (`project`, `note`),
+the bearer `BOARD_ACTIONS_TOKEN` and the 503 without it. It does not say
+which Ready a start is checked against when task cards carry no `project`
+(its *Consequences*, and `docs/plans/projects.md` *Decisions*, 3), what a
+cancel's body is, when the token is read, or in which order the guards
+answer. Split item 6, the console's forward, is built against whatever
+this task answers.
+
+**Decision.**
+
+1. *The project is the body's.* A start's body is a JSON object with
+   `project` (required, the slug rule of `actions.validate`) and `note`
+   (optional, text or null), and no other key: anything else is 400. The
+   service's config names no project, so there is nothing to default to.
+   `params` is not taken from the body; `actions.create` writes
+   `{"limit": null}` until board-service step 9 sets it.
+2. *Ready is the one hive's.* The `ready(project, task_id)` the route
+   passes to `actions.create` is `task_id in
+   tasks.ready_order(tasks.read_all_tasks(hive_dir))`, over the service's
+   own `hive_tasks_dir`; `project` is not read, because no task card
+   carries one. A task id the hive has no file for is not in Ready, so
+   it is 409 like any other. The slug is not checked against
+   `projects_root` either: the board service does not mount the
+   projects, and a wrong slug fails at the worker's `open_cycle`.
+3. *A cancel's body is `{}`.* The target is the path's id, checked by
+   `actions.validate` (400 when it is not an action id). The route does
+   not look for the target on disk: the worker's cancel names a missing
+   or finished one in its `failed` line (ADR 148, 3), and the board
+   service stays a creator that reads nothing of the queue but its lock.
+4. *The guards answer in this order:* an `Origin` is 403; then the token
+   (unset or empty 503, a missing, non-Bearer or wrong bearer 401 with
+   `WWW-Authenticate: Bearer`); then a query string 400; then a body that
+   is not a JSON object 400; then `ActionRefused`, its own status. So a
+   caller without the token learns nothing about the body it sent.
+5. *The token is read once,* from the environment when `create_app`
+   builds the app, as the config is; changing it is a restart. The
+   comparison is `hmac.compare_digest` on encoded bytes, with an empty
+   presented value refused before it, in the service's own module:
+   `observability/auth.py` is not in the board service's image. The token
+   is never logged or put in an answer.
+6. *The queue directories are made on the first create,* by
+   `actions.create`, never at app build: a service whose state mount is
+   absent (step 5 not yet built) still starts, and its other routes run.
+
+**Consequences.**
+- A start for a task of another project's hive is refused 409 until task
+  cards carry `project`; there is one hive today, so none exists.
+- The console's forward (split item 6) sends `{"project", "note"}` and
+  `{}`, with the bearer, and reads 201 with the record or `{"error"}`.
+- Rotating `BOARD_ACTIONS_TOKEN` restarts the board service.
+
+**Ruled out.**
+- The project from config: none is named there, and `projects.md`'s
+  record does not exist yet.
+- A 404 for a cancel whose target is not on disk: it reads `claimed/` and
+  `done/`, which ADR 142 gives the board service no reason to read, and
+  races the worker's moves anyway.
+- Importing `observability/auth.py`: a new `COPY` in the board service's
+  image for one comparison.
