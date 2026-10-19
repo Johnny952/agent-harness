@@ -73,6 +73,9 @@ MAX_LIST_TASKS = 2000
 TITLE_CHARS = task_store.DISPLAY_TITLE_CHARS
 #: The longest text filter. A filter is a word or a phrase.
 MAX_TEXT_CHARS = 200
+#: The longest turn message (ADR 181, 3): it is one argv element of `docker
+#: exec`, and Linux caps a single argument at 128 KiB.
+MAX_TURN_TEXT_CHARS = 20_000
 
 #: What a task's files can fail with; the api's `_UNREADABLE`, for its reasons.
 _UNREADABLE = (OSError, TypeError, ValueError, KeyError, yaml.YAMLError)
@@ -681,7 +684,7 @@ def create_app(config_path: str) -> Flask:
     def http_accept(task_id: str):
         return _http(hive_dir, "backlog_accept", task_id)
 
-    # The action queue's three creators (ADR 142, ADR 151): behind a bearer, and
+    # The action queue's four creators (ADR 142, ADR 151, ADR 181): behind a bearer, and
     # the queue is made on the first create, never here.
 
     @app.post("/api/tasks/<task_id>/start")
@@ -730,6 +733,34 @@ def create_app(config_path: str) -> Flask:
                     "n": int(n), "verdict": body.get("verdict"),
                     "comment": body.get("comment"), "prefix": body.get("prefix"),
                 },
+                actor="operator",
+            )
+
+        return _action(actions_token, make)
+
+    @app.post("/api/threads/<thread_id>/turns")
+    def http_turn(thread_id: str):
+        def make(body: dict):
+            unknown = sorted(set(body) - {"text"})
+            if unknown:
+                raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise actions.ActionRefused(400, "text must be a non-empty string")
+            if len(text) > MAX_TURN_TEXT_CHARS:
+                raise actions.ActionRefused(
+                    400, f"text is longer than {MAX_TURN_TEXT_CHARS} characters"
+                )
+            try:
+                thread = thread_store.read_thread(hive_dir, thread_id)
+            except thread_store.NoThreadError as exc:
+                raise actions.ActionRefused(404, str(exc)) from None
+            except thread_store.UnreadableThreadError as exc:
+                raise actions.ActionRefused(409, str(exc)) from None
+            if thread.get("status") == "archived":
+                raise actions.ActionRefused(409, f"thread {thread_id} is archived")
+            return actions.create(
+                state_dir, "turn", params={"thread": thread_id, "text": text},
                 actor="operator",
             )
 
