@@ -185,6 +185,15 @@ worker like a turn or a start: `account_add`, `account_login`,
 pseudo-terminal lives in the worker, and the console reaches it only
 through those actions and the URL and status the worker writes back.
 
+**Decided 2026-10-19** by T-097 (`docs/decisions.md` ADR 142): the worker is
+a `worker` compose service built from the dispatcher's image, the one
+long-running service with the socket, and one at a time under a `flock`. The
+queue is JSON files under `<state_dir>/actions/` (`pending/`, `claimed/`,
+`done/`), created by the board service from the console's routes and moved
+only by the worker; not the hive, which the agents mount read-write. The
+account kinds above are named in its record and each is added under its own
+ADR. Step 3 of *The order across the plans* is that ADR's split.
+
 ### 6. The phone is a first-class place for a few screens
 
 Pushes (`notifications.md`) bring the person to the console on a phone. So

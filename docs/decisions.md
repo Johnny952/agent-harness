@@ -8943,3 +8943,273 @@ dropping stay on the Backlog screen.
   source would hide a pairing it keeps.
 - Showing "not imported" while the tasks read is down: that is a claim about
   items the read never saw.
+
+## ADR 142 — The action queue is files under `<state_dir>/actions/`, written by the board service and drained by one `worker` service that alone holds the socket
+
+**Status:** accepted (T-097, 2026-10-19). A design: it builds nothing, and
+the tasks under *The split* build it. Settles "a queue and a worker", which
+`docs/plans/server-deployment.md` (*Decisions*, 5, and step 3 of *The order
+across the plans*), `docs/plans/board-service.md` (*Starting development*,
+step 9), `docs/plans/front.md` (*Tier 3*), `docs/plans/main-thread.md`
+(*Decisions*, 4), `docs/plans/command-requests.md` (step 4, *Amended*) and
+`docs/plans/projects.md` (*Decisions*, 2 and 4) each name and none shapes.
+Reads ADR 75 (no database), ADR 79 and ADR 83 (`dispatcher/queue.py`),
+ADR 119 and ADR 120 (the verdict function), ADR 124 (the board service, and
+its *Ruled out*: no queue-and-worker before a write needs one; starting a
+cycle from the console is that write) and ADR 136 (the console's forward).
+
+**Context.** The console must start things that need the docker socket: a
+task's cycle, its cancel, a command request's verdict, a main-thread turn,
+and later the account and project actions. Charter C-8 and `board.md`
+(*Actions go through a queue, not a socket*) put the socket out of every web
+process: the api stays `GET`-only and the board service has none (ADR 124).
+C-4 lets nothing spend quota that a person did not authorize, and C-12 makes
+*Start development* and a command-request verdict such authorizations. Two
+facts of the stack shape the answer. Every agent container mounts `.hive`
+read-write (`docker/compose/docker-compose.agents.yml`), so a file there is
+one an agent can write. And no agent mounts `dispatcher_state`, which the api
+already mounts read-only and the `dispatcher` service read-write.
+
+**Decision.**
+
+1. *The worker is a compose service of its own, `worker`.* Built from
+   `docker/dispatcher/Dockerfile`, running a new verb, `dispatch worker`,
+   with `restart: unless-stopped`, behind a `worker` profile so a stack runs
+   without it until the operator opts in. Its mounts are the `dispatcher`
+   service's (the socket, `dispatcher_state`, `.hive`, `claude_shared`, the
+   project keys, `config.yaml` and `config.d`), its network is
+   `ia_harness_net` only, and it publishes no port: nothing calls it, it
+   reads files. It is the one long-running service with
+   `/var/run/docker.sock`; the `dispatcher` profile service stays the
+   operator's one-shot CLI. The api, the board service, the console and
+   the config writer never get the socket.
+2. *One worker at a time.* `dispatch worker` takes a non-blocking `flock` on
+   `<state_dir>/actions/worker.lock` and exits 2, naming the lock, when it
+   is held. The kernel drops the lock with the process, so a crash never
+   wedges the queue (the reason T-008-D1 chose `flock` over `O_EXCL`). Each
+   loop it rewrites `<state_dir>/actions/worker.json`, `{pid, started_at,
+   beat_at}`, so a reader can say that no worker is running.
+3. *The queue is files under `<state_dir>/actions/`, not the hive.* Four
+   directories: `tmp/`, `pending/`, `claimed/` and `done/`, one JSON file
+   per action named `<id>.json`. Not the hive, because an agent can write
+   there, and a file an agent can write must never start a run (C-4).
+   - *Who writes.* The board service creates an action: it writes the
+     record to `tmp/` and renames it into `pending/`. That is all it ever
+     does to the queue. Every later move and rewrite is the worker's:
+     `pending/` → `claimed/` by `os.rename` (the claim), a rewrite of a
+     record in place by write-and-replace, and `claimed/` → `done/` when it
+     ends. One creator and one mover per file, so no two processes race
+     for one rename.
+   - *Mounts.* The board service gets one new mount,
+     `dispatcher_state/actions` read-write at `<state_dir>/actions`, and
+     nothing else of the state dir: not the account files, the usage log
+     or the allowlists, which ADR 121 keeps out of every agent's reach and
+     which a service agents can call must not hold either. The api reads
+     the queue through its existing `/state:ro`.
+   - *The directory is the state's authority.* A record in `pending/` is
+     waiting, in `claimed/` is running, in `done/` is finished; its
+     `status` names how it finished.
+4. *`dispatcher/queue.py` stays separate, and lends parts.* ADR 79's queue
+   is a list the owner confirmed in one yes, under C-4 *Amended*, with an
+   order, a limit and a resume, kept in one file the CLI process rewrites
+   whole. An action is one request from the console, under C-12, written by
+   another process. Wrapping a start as a one-task queue would bring the
+   yes prompt, the topological order and `--resume` along with it, and a
+   second process writing `queues/<id>.json` would race the first. What is
+   shared is code: the worker's `start` calls `run_task_cycle` with
+   `authorized=True` and a `may_start_phase` hook (ADR 79, 3), asks whether
+   an account may take a phase with the check `queue.py` uses
+   (`_account_open`, made public when built), and step 9's limit counts
+   spend with `queue.measured_tokens`.
+5. *The record.* One JSON object, `version: 1`:
+   - `id`: `a-<UTC %Y%m%dT%H%M%S%f>Z-<4 hex>`, so name order is the order
+     taken;
+   - `kind`; `project` (a slug, or null for an account kind); `task_id`
+     (or null); `params`, the kind's own fields (below);
+   - `actor`: who asked. `operator` until sign-in exists
+     (`server-deployment.md`, *Decisions*, 1), then the user's name;
+   - `note`: free text or null, `start` only, no longer than a comment;
+   - `created_at`, `claimed_at`, `started_at`, `finished_at`: UTC ISO
+     strings or null. `started_at` is written, by replace, just before the
+     first call that can spend quota or change state outside the queue;
+   - `status`: `pending`, `running`, `done`, `failed`, `cancelled` or
+     `interrupted`; `waiting`: null, `project`, `thread` or `account`, set
+     by the worker on a pending record it passed over;
+   - `result`: the kind's outcome on `done` (for `start` and
+     `command_verdict`, the `CycleOutcome`'s status and blocked reason);
+     `error`: one line on `failed` and `interrupted`, else null.
+6. *The kinds.* In scope now:
+   - `start` — `task_id`, `project`; `params.limit` reserved as null until
+     board-service step 9 sets it;
+   - `cancel` — `params.target`, the action id it cancels;
+   - `command_verdict` — `task_id`, `project`; `params` `n`, `verdict`
+     (`run`, `deny` or `allow`), `comment`, `prefix`;
+   - `turn` — `params.thread`, `params.text`.
+
+   Named for later, not built by the split below: `account_add`,
+   `account_login`, `account_pause`, `account_remove`,
+   `account_delete_volume`, `project_clone`, `project_init`,
+   `project_keygen`, `project_check`. The board service refuses an unknown
+   kind with 400, and the worker moves one it finds to `done/` as `failed`,
+   "unknown kind", never skipping it in silence.
+
+   *How a kind is added.* An entry in one registry in
+   a new actions module in the dispatcher package, `KINDS`, giving the kind's `params`
+   validation (run by the board service on write and by the worker on
+   claim), its handler, its serial key (decision 8), whether it spends
+   quota, and what recovery does with it (decision 7); a board-service
+   route that creates it; and tests of all three. Every new kind comes
+   with its own ADR, and one that spends quota or reaches a credential
+   names the charter entry that authorizes it.
+7. *Claiming and crash recovery.*
+   - *The loop.* Every 2 seconds the worker lists `pending/` in name order.
+     A `cancel` is run at once. Any other kind is claimed only when its
+     serial key is free and, for `start`, an account may take a phase;
+     otherwise the worker sets `waiting` and passes on to the next, so a
+     busy project does not hold up another project's start. A claim is the
+     rename, then a rewrite with `status: running` and `claimed_at`, then a
+     thread running the handler, as `run-queue --parallel` runs cycles in
+     threads (ADR 83). The handler's end rewrites the record and renames
+     it to `done/`.
+   - *Before the first loop*, the worker settles every record left in
+     `claimed/`, which only a dead worker leaves, by its kind's rule:
+     - `start` with no `started_at` goes back to `pending/`: its cycle never
+       opened, so nothing was spent. With `started_at` it is `interrupted`
+       and never run again (ADR 79, 5): running it again is a new *Start*
+       by a person (C-4). The dead cycle's task lock is the reaper's
+       (ADR 126).
+     - `command_verdict` is `interrupted`: ADR 119 records the verdict
+       before the command runs, so the function would refuse a second
+       call. The error names `dispatch command-resume` (ADR 120).
+     - `turn` is `interrupted`; the thread's log shows the turn cut off.
+     - `cancel` is run again; it is idempotent.
+     - A later kind declares its own rule. One that spends quota, or that
+       makes or deletes a key, a volume or a container, is never run again.
+   - *Idempotency at the door.* The board service holds a `flock` on
+     `<state_dir>/actions/write.lock` while it checks and creates, and
+     refuses with 409 a `start` for a task that already has a `start` in
+     `pending/` or `claimed/`, a `command_verdict` for a task that already
+     has one there, and a `start` for a task not in *Ready* (status
+     `pending`, every dependency merged, not a backlog item). The worker
+     checks again on claim, and `open_cycle` and ADR 119's one verdict per
+     block are the last word.
+   - *Cancel.* A `cancel` whose target is in `pending/` moves the target to
+     `done/` as `cancelled`: nothing of it ran. On a running `start` it
+     makes the cycle's `may_start_phase` answer no: the phase that is
+     running finishes, the cycle is held at the next phase boundary as the
+     limit holds it (ADR 79, 3), and the start ends `cancelled`, its result
+     naming the last phase that ran. Going on is a new *Start*. On a running
+     `turn` it kills the exec (`main-thread.md`, *Decisions*, 4). On a
+     running `command_verdict`, or a target already in `done/`, the cancel
+     ends `failed` and changes nothing. This is *the dispatcher's own stop*
+     that `board-service.md` names for a start whose phase has begun,
+     reached through the queue.
+8. *Rules the worker keeps.*
+   - *One cycle per project.* `start` and `command_verdict` share the serial
+     key `project:<slug>`, since a verdict resumes a cycle; `turn` has
+     `thread:<id>`; the account and project kinds will take
+     `account:<name>` and `project:<slug>`. At most one claimed action per
+     key, any number of keys at once, so two projects run side by side
+     (`projects.md`, *Decisions*, 5).
+   - *The note.* When the worker takes a `start` with a `note`, it writes
+     it once as a comment by the action's `actor` (`operator` today) in the
+     task's `comments.jsonl` through `dispatcher/tasks.py`, records
+     `noted_at` in `result`, and only then sets `started_at`; a start sent
+     back to `pending/` by recovery is not commented twice.
+   - *Verdicts.* `command_verdict` calls
+     `command_run.run_command_request(cfg, task_id, project, n, verdict,
+     comment, by=actor, prefix=prefix)`, the function T-074 built for this
+     worker, and a `VerdictRefused` ends the action `failed` with its
+     reason. The verdict is the owner's C-12 act; the worker carries it.
+   - *Only a person's act fills the queue.* The board service creates
+     actions from its console routes alone, never from an MCP tool and never
+     for a role. Because it also listens on `ia_harness_net`, where the
+     agents are (ADR 124), its action routes require a bearer,
+     `BOARD_ACTIONS_TOKEN`, that only the console holds and adds in its
+     forward; without the variable they answer 503 and the rest of the
+     service runs. The worker creates no action, retries none and starts
+     nothing on a timer (C-4).
+   - *The spending limit* is board-service step 9's to decide. This ADR
+     only reserves `params.limit` and names the `may_start_phase` hook as
+     where it is checked.
+
+**The split.** In build order, one surface each. `after` names what must be
+merged first.
+
+1. The actions module (new), the contract. The record, the id, `KINDS` with
+   the four kinds' validation, `create` (tmp then rename, under
+   `write.lock`, with the refusals of decision 7), `read_all` (tolerant: a
+   file that does not parse is a warning, not an error), and the worker's
+   primitives `claim`, `rewrite`, `finish` and `recover`. Tests: a create
+   is atomic and lands in `pending/`; ids sort in creation order; a claim
+   succeeds once; each refusal; each kind's recovery rule; an unknown kind.
+2. The worker: `dispatch worker`, the lock, the heartbeat, the loop, the
+   serial keys and `waiting`, and the `start` and `cancel` handlers. After
+   1. Tests, with `run_task_cycle` faked: a second worker exits 2; one
+   claimed start per project and two projects at once; a start waits for
+   an account; the note is commented once; a cancel on pending and on
+   running; a start interrupted before and after `started_at`.
+3. The board service's routes: `POST /api/tasks/<id>/start` (body
+   `project`, `note`) and `POST /api/actions/<id>/cancel`, behind
+   `BOARD_ACTIONS_TOKEN`, answering 201 with the record. After 1. Tests:
+   the token, 503 without it, each 409, the record written.
+4. The read api: `GET /api/actions`, the pending records in take order with
+   `waiting`, the claimed ones, the newest `done/` ones up to a limit, and
+   the worker's heartbeat with a `stale` flag, in the `{data, warnings}`
+   envelope. After 1. Tests: each state, a bad file as a warning, no
+   heartbeat file.
+5. Compose: the `worker` service of decision 1, the board service's
+   `actions` mount, `BOARD_ACTIONS_TOKEN` for the board service and the
+   console, and the README and `scripts/configure.sh` lines. A change to
+   `docker/compose/` needs the user's approval. After 2 and 3. Tests: the
+   compose invariants (the socket in `worker` and `dispatcher` only; the
+   board service mounts `actions`, not `/state`).
+6. The console: the forward of the two action routes with the token, and
+   *Start development* on the Board's *Ready* cards with the note box.
+   What the confirmation shows and the limit are board-service step 9's,
+   decided in that task. After 3 and 4. Tests: the forward's exact
+   pairs and token; the button hidden for a queued or running task.
+7. The console's `/queue` screen over `GET /api/actions`, with *Cancel* on
+   each pending or running start and a line when the worker's heartbeat is
+   stale. After 4 and 6. Tests: each state, empty, stale, a failed read.
+8. The worker's `command_verdict` handler. After 2. Tests: the call with
+   the actor as `by`, a refusal as `failed`, recovery as `interrupted`.
+9. The board service's verdict route, `POST
+   /api/tasks/<id>/command-requests/<n>/verdict`. After 3 and 8. The
+   buttons in Approvals are `command-requests.md` step 6's.
+10. The worker's `turn` handler, after 2, once `main-thread.md`'s composer
+    has its charter ruling; its route and screen are that plan's steps.
+
+**Consequences.**
+- The console can start a cycle with no socket in any web process, and the
+  queue is legible on disk: `ls` shows what waits, what runs and what ended.
+- A start reaches the worker within about two seconds. A signal from the
+  board service to the worker is its own ADR, when that is too slow.
+- The worker's project rule sees only the actions it claimed. A cycle the
+  operator starts by hand with `run-task` or `run-queue` on the same
+  project is invisible to it until task cards carry `project`
+  (`projects.md`, *Decisions*, 3).
+- `done/` grows by one file per action. Pruning it is a task of its own
+  when its size asks for one.
+- Nothing runs while the `worker` profile is off; the heartbeat lets the
+  `/queue` screen say so rather than show a queue that never moves.
+
+**Ruled out.**
+- The queue in the hive: every agent mounts it read-write, and an agent's
+  file would start a run no person authorized (C-4).
+- A database or SQLite table: ADR 75 keeps the console's writes in files,
+  the api already reads files, and a rename is an atomic claim.
+- Storing actions in `dispatcher/queue.py`'s `queues/<id>.json`, or making a
+  start a one-task queue: decision 4.
+- The socket in the board service, or actions run inline in it or in the
+  api: C-8, and ADR 124.
+- The board service mounting the whole state dir: it would reach the
+  allowlists and the account files.
+- The board service moving `pending/` files itself to cancel: two movers
+  of one file race; the worker is the only mover.
+- Several workers with leases: a lease expires under a cycle of hours. One
+  worker and a `flock` that dies with it.
+- A process per action: the worker's lock already says which claimed
+  records are orphans, and threads are how ADR 83 runs cycles.
+- Re-running any action that may have spent quota after a crash: C-4.
+- An MCP tool that enqueues: `main-thread.md` step 6, under its own ADR.
