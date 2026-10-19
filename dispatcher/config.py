@@ -28,6 +28,9 @@ class AccountConfig:
     #: `dind` or `service` resolves to it, and an account without one refuses
     #: those kinds (`docs/decisions.md` ADR 118).
     dind: str | None = None
+    #: The models a thread may pick on this account, replacing the top-level
+    #: `thread_models` for it (`docs/decisions.md` ADR 169). None is "use that".
+    models: list[str] | None = None
 
 
 #: The config keys the board seam read, all refused now that it is gone
@@ -135,6 +138,9 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
     ),
     "role_model": _editable(
         "mapping", "Item 0 names it. It is a map, replaced whole, and validated against the roles."
+    ),
+    "thread_models": _editable(
+        "list", "The models a thread may pick (ADR 169). A list, replaced whole, checked on the merge."
     ),
     "mapping_model": _editable("string", "Like default_model, for the cartografo (ADR 66)."),
     "default_effort": _editable("effort", "It is one of EFFORT_LEVELS, checked."),
@@ -321,6 +327,16 @@ class Config:
     #: None sends no `--mcp-config` and no board tool names to any phase,
     #: which is exactly the behaviour before the service existed.
     board_mcp_url: str | None = board_mcp.DEFAULT_URL
+    #: The models a thread may pick, for an account that names none of its own
+    #: (`docs/decisions.md` ADR 169). The loader always sets it.
+    thread_models: list[str] = dataclasses.field(default_factory=list)
+
+    def thread_models_for(self, account_name: str) -> list[str]:
+        """The models a thread on `account_name` may pick; `KeyError` if unknown."""
+        for account in self.accounts:
+            if account.name == account_name:
+                return list(account.models if account.models is not None else self.thread_models)
+        raise KeyError(account_name)
 
     def auto_approves(self, slug: str) -> bool:
         """Whether a finished task of `slug` goes through the automatic approve."""
@@ -401,6 +417,21 @@ def _check_effort(key: str, level: object) -> str:
     if not isinstance(level, str) or level not in EFFORT_LEVELS:
         raise ValueError(f"{key} must be one of: {', '.join(EFFORT_LEVELS)}")
     return level
+
+
+def _check_models(key: str, value: object) -> list[str]:
+    """A list of model IDs: not a string, not empty, each a non-empty string,
+    stripped, none twice. Which IDs exist is the CLI's to say (ADR 169)."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{key} must be a non-empty list of model IDs")
+    models = []
+    for model in value:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"{key} entries must be non-empty model IDs")
+        if model.strip() in models:
+            raise ValueError(f"{key} names {model.strip()!r} twice")
+        models.append(model.strip())
+    return models
 
 
 def _load_max_handoff_resumes(raw: dict) -> int:
@@ -742,6 +773,8 @@ def _build_config(raw: dict) -> Config:
                 f"account {account.name}: dind must be a non-empty string, "
                 f"the account's dind container, not {dind!r}"
             )
+        if account.models is not None:
+            account.models = _check_models(f"account {account.name}: models", account.models)
         accounts.append(account)
     primary_account = _load_primary_account(raw, accounts)
     quota_threshold_pct = raw.get("quota_threshold_pct", 90)
@@ -780,6 +813,11 @@ def _build_config(raw: dict) -> Config:
     ):
         raise ValueError("gates_test_timeout_seconds must be a positive integer")
     _refuse_board_keys(raw)
+    default_model = raw.get("default_model", "claude-opus-5-5")
+    thread_models = raw.get("thread_models")
+    thread_models = [default_model] if thread_models is None else _check_models(
+        "thread_models", thread_models
+    )
     return Config(
         accounts=accounts,
         quota_threshold_pct=quota_threshold_pct,
@@ -796,7 +834,8 @@ def _build_config(raw: dict) -> Config:
         hive_tasks_dir=raw["hive_tasks_dir"],
         state_dir=raw["state_dir"],
         collector_url=raw["collector_url"],
-        default_model=raw.get("default_model", "claude-opus-5-5"),
+        default_model=default_model,
+        thread_models=thread_models,
         permission_mode=_load_permission_mode(raw),
         allowed_tools=_load_allowed_tools(raw),
         mapping_allowed_tools=_load_allowed_tools(raw, "mapping_allowed_tools"),

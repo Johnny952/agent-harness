@@ -7,7 +7,9 @@ supersedes: []
 
 # Main thread — the conversation lives in the console, on an account the person assigns
 
-**Status:** design, accepted in outline by the user on 2026-10-11, not built.
+**Status:** design, accepted in outline by the user on 2026-10-11, not built
+as a whole; step 1 is built by T-109 (2026-10-19), narrowed to the thread
+records and the model list, the primary override pending.
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -242,7 +244,10 @@ Each step is a single surface. Steps 2 onward need `board-service.md`'s queue
 and worker.
 
 1. The thread records and the primary override: written by the board
-   service, read by the dispatcher's picker.
+   service, read by the dispatcher's picker. Built by T-109, narrowed on
+   2026-10-19: the records (`dispatcher/threads.py`, `POST /api/threads`,
+   `PATCH /api/threads/<id>`, ADR 170) and the model list (ADR 169); the
+   primary override is pending, the primary stays `primary_account`.
 2. The worker's `turn` action and the stream written to
    `conversations/*.jsonl`. It shares board Phase 5's transport.
 3. The api routes `GET /api/threads` and `GET /api/threads/<id>/events`.
@@ -268,8 +273,8 @@ day (C-12, *Amended*).
 - **What seeds a new session.** Which durable state a fresh segment is given
   at its start, and how big it may be (`token-economy.md`), is decided at
   step 5.
-- **Model per thread.** The console offers whatever models the thread's
-  account may use; how that list is known is decided at step 1.
+- **Model per thread.** Settled on 2026-10-19 (ADR 169): the list is config,
+  `thread_models` with an optional `models` per account, never probed.
 - **A message mid-turn.** Queued as the next turn is the default (*Decisions*,
   4). Whether one can also interrupt the current turn is decided at step 5.
 
