@@ -213,7 +213,7 @@ def board_get(hive_dir: str, task_id: str) -> dict:
     """Section 6's `board_get`: one task or epic's frontmatter, description and comment count.
 
     The description is served verbatim, as `read_description` returns it, and
-    `null` when the task has none. The comment count is the lines of
+    `null` when the task has none. The comment count is the comments in
     `comments.jsonl`, 0 when the file is absent; `task_comment` appends to it.
     Raises `ToolError` for an id that names no task. Never writes.
     """
@@ -262,15 +262,16 @@ def _frontmatter(path: str) -> dict:
 
 
 def _comment_count(hive_dir: str, task_id: str, warnings: list[str]) -> int | None:
-    """Non-blank lines of the task's `comments.jsonl`: 0 when absent, None when unreadable.
+    """The comments in the task's `comments.jsonl`: 0 when absent, None when unreadable.
 
-    Counted, not parsed: a count is what section 6 serves, and the comments
-    themselves are the file a phase is pointed to (section 2).
+    A count is what section 6 serves, and the comments themselves are the file
+    a phase is pointed to (section 2). A line that is not a comment is not
+    counted and is a warning naming the file and its line, as the read api
+    skips and names it, so the count is the thread the console shows (ADR 169).
     """
     path = task_store.comments_path(hive_dir, task_id)
     try:
-        with open(path, "rb") as fh:
-            return sum(1 for line in fh if line.strip())
+        return task_store.count_comments(path, warnings)
     except (FileNotFoundError, NotADirectoryError):
         return 0
     except OSError as exc:

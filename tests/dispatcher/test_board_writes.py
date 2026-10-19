@@ -521,6 +521,18 @@ def test_comments_append_and_count(tmp_path: Path) -> None:
     assert tasks.comments_path(hive, "T-001") == str(tmp_path / "hive" / "board" / "T-001" / "comments.jsonl")
 
 
+def test_the_count_skips_lines_that_are_not_comments(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001")
+    path = Path(tasks.comments_path(hive, "T-001"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"at": "2026-10-18T10:00:00Z", "auth\n["a list"]\n\n')
+
+    result = tasks.add_comment(hive, "T-001", "operator", "Looks right.")
+
+    assert result["comment_count"] == 1
+
+
 @pytest.mark.parametrize(
     "author, text, anchor, needle",
     [

@@ -9592,3 +9592,38 @@ required like `CONFIG_WRITER_TOKEN` or optional like `CONSOLE_PROJECT`.
   it, so compose's warning would be one the operator learns to ignore.
 - Creating `dispatcher_state/actions` from `scripts/configure.sh`: docker
   makes it on first mount, owned by the root both services run as.
+
+## ADR 169 — A comment count counts the lines a reader shows as comments, by one rule in `dispatcher/tasks.py`
+
+**Status:** accepted (operator, out of cycle, 2026-10-19). Amends ADR 125
+step 7 (`board_get`'s comment count) and the context of ADR 135 ("no reader
+in `dispatcher/` parses the file").
+
+**Context.** ADR 125 defined `board_get`'s `comment_count` as the non-blank
+lines of `board/<id>/comments.jsonl`, and `tasks.add_comment` returned the
+same count. The read api's thread (ADR 135) skips a line that is not a
+comment — not JSON, not an object, or without a string `at`, `author` and
+`text` — with a warning. A file with a bad line therefore counted more
+comments than the console's thread showed (`docs/implementations/T-090.md`,
+*Pending*).
+
+**Decision.**
+1. *`tasks.parse_comment_line`* is the one rule for what a line is: a JSON
+   object with a string `at`, `author` and `text`. The read api's `_comment`
+   calls it and keeps its own diff-anchor handling, which never drops a
+   comment; the problem words are unchanged.
+2. *`tasks.count_comments`* counts the non-blank lines that rule accepts.
+   `board_get`'s `comment_count` and `add_comment`'s `comment_count` are
+   that count; absent is still 0 and unreadable still `null` with a warning.
+3. *A skipped line is a `board_get` warning*, `<path>: line <n>: <problem>`,
+   the read api's words for the same line. `add_comment` returns no
+   warnings and names none.
+
+**Consequences.**
+- The count equals the thread's length except when the read api's own
+  bounds cut the thread (`MAX_COMMENTS_BYTES`, `MAX_COMMENTS`), which it
+  names in its own warnings; the count reads the whole file.
+
+**Ruled out.**
+- Keeping a raw line count beside the parsed one: no caller wants the
+  number of lines that are not comments, and the warnings name them.

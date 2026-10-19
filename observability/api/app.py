@@ -176,7 +176,7 @@ MAX_COMMENTS_BYTES = 1024 * 1024
 
 #: The keys a comment line may carry across this api: `tasks.add_comment`'s
 #: three, and the diff anchor's three. Anything else on a line is dropped.
-_COMMENT_KEYS = ("at", "author", "text")
+_COMMENT_KEYS = task_store.COMMENT_KEYS
 _ANCHOR_KEYS = ("file", "line", "commit")
 
 #: The most plans one `/api/roadmap` answer carries. Five hundred because a plan
@@ -686,10 +686,10 @@ def create_app(
         """A task's comment thread, oldest first: `{"task_id", "comments"}`.
 
         The lines `dispatcher/tasks.py:add_comment` appends to the task's
-        `comments.jsonl`, parsed here because no reader in `dispatcher/`
-        parses them (the board service only counts them). A line that is not
+        `comments.jsonl`, each line judged by `tasks.parse_comment_line`, the
+        rule the board service's count applies too. A line that is not
         a comment is a warning naming the file and its line, and the rest of
-        the thread is still served. `docs/decisions.md` ADR 135.
+        the thread is still served. `docs/decisions.md` ADR 135, ADR 169.
         """
         rejected = _reject_unknown_parameters(frozenset())
         if rejected is not None:
@@ -1364,17 +1364,9 @@ def _comment(line: bytes) -> tuple[dict | None, str | None]:
     the wrong type — is served without it, with the problem, because its text
     is still readable. Only the six known keys cross; nothing is mended.
     """
-    try:
-        value = json.loads(line)
-    except ValueError as exc:
-        # `UnicodeDecodeError` is a `ValueError`, so bytes that are not UTF-8
-        # land here too.
-        return None, f"not a JSON line ({exc}), skipped"
-    if not isinstance(value, dict):
-        return None, f"not a JSON object but a {type(value).__name__}, skipped"
-    missing = [key for key in _COMMENT_KEYS if not isinstance(value.get(key), str)]
-    if missing:
-        return None, f"no string {', '.join(missing)}, skipped"
+    value, problem = task_store.parse_comment_line(line)
+    if value is None:
+        return None, problem
     comment = {key: value[key] for key in _COMMENT_KEYS}
     present = [key for key in _ANCHOR_KEYS if key in value]
     if not present:
