@@ -571,13 +571,26 @@ variable is set; the tasks, task and tail screens are unaffected
 (`docs/decisions.md` ADR 24 for the name, ADR 32 for the retirement that freed it).
 `docs/decisions.md` ADR 9 says why `scripts/configure.sh` does not prompt for it.
 
-One service in those files is deliberately kept out of that default set,
-behind a Compose profile. Stage-0 verification found it by running the
+`BOARD_ACTIONS_TOKEN` is optional (`scripts/configure.sh` writes it): it is the
+bearer of the board service's action routes, given to the `board-service` and
+the `console` only. Without it both answer 503 on Start and Cancel; after
+rotating it, restart both. The board service also mounts
+`dispatcher_state/actions` (never the whole state dir), the queue the `worker`
+below drains (`docs/decisions.md` ADR 142, ADR 166).
+
+Two services in those files are deliberately kept out of that default set,
+behind a Compose profile. Stage-0 verification found the first by running the
 two-liner above:
 
 - `dispatcher` (`profiles: ["dispatcher"]`) is a template, not a service
   (`restart: "no"`, placeholder `--task-id`/`--project`). Ungated, a bare
   `up -d` fired it and ran a task. See step 5.
+- `worker` (`profiles: ["worker"]`) is the one long-running service with the
+  docker socket, with the dispatcher's mounts. Start it with
+  `docker compose -f docker/compose/docker-compose.yml --profile worker up -d worker`.
+  It carries out the queue actions the console files, so Start and Cancel from
+  the console need it running. `dispatcher_state/actions` does not exist until
+  docker creates it, root-owned, on the first mount.
 
 There was a second, `vibe-kanban` behind a `kanban` profile. The service,
 its profile and its volume declaration were removed with the board
@@ -1230,6 +1243,10 @@ one-click import:
   so it never joins the resource's default running set. Run it ad hoc —
   Coolify's "Execute Command" on this resource, or plain SSH:
   `docker compose -f docker/compose/docker-compose.coolify.yml --profile dispatcher run --rm dispatcher --config /app/config.yaml run-task --task-id <id> --project <name>`.
+- `worker` is gated behind its own profile (`profiles: ["worker"]`), so the
+  default running set does not include it either. Start it with
+  `docker compose -f docker/compose/docker-compose.coolify.yml --profile worker up -d worker`;
+  see step 4 for what it does.
 
 TLS here is Coolify's, not Caddy's: set the domain on the `console` service in
 Coolify's UI (port 8790) and let Coolify's proxy issue the certificate. Do not
@@ -1264,7 +1281,8 @@ with the repo).
   will not start without them), and `API_TOKEN` (required: the resource now
   includes the `console` service, which will not start without it),
   `CONFIG_WRITER_TOKEN` (required: the `config-writer` service exits without it)
-  and optionally `CONSOLE_PROJECT`, through Coolify's own environment-variables UI on
+  and optionally `CONSOLE_PROJECT` and `BOARD_ACTIONS_TOKEN` (the console's Start
+  and Cancel answer 503 without it), through Coolify's own environment-variables UI on
   the resource instead of a `.env` file — Coolify substitutes `${VARS}` into
   compose the same way.
 - **Per-account Claude Pro OAuth login** is an interactive, browser-based

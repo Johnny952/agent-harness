@@ -695,6 +695,11 @@ if [ "$setup_credentials" = "y" ]; then
             echo "# (127.0.0.1:8791; docs/decisions.md ADR 75, ADR 109). Required: the"
             echo "# writer refuses to start without it. Given to it and the console only."
             echo "CONFIG_WRITER_TOKEN=$(gen_token)"
+            echo "# The bearer of the board service's action routes (start, cancel,"
+            echo "# verdict; docs/decisions.md ADR 142, ADR 157). Read by the board"
+            echo "# service and the console only. Optional: both answer 503 on those"
+            echo "# routes without it. Rotate it by changing it and restarting both."
+            echo "BOARD_ACTIONS_TOKEN=$(gen_token)"
             # The collector's tokens (docs/decisions.md ADR 72). Required, like
             # API_TOKEN: the collector refuses to start without them. Generated
             # here with the rest because a hand-picked token is a guessable one.

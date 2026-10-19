@@ -32,6 +32,9 @@
 #     never starts as part of the resource's default `up` — Coolify (or you,
 #     over SSH) runs it ad hoc. See the README's "Deploying with Coolify"
 #     section.
+#   - `worker` is gated the same way, behind the `worker` profile: the one
+#     long-running service with the docker socket, started with
+#     `--profile worker up -d worker` (docs/decisions.md ADR 142, ADR 166).
 #
 # Still required before/at first deploy, same as the split-file path:
 #   - A config.yaml at the repo root (e.g. via a Coolify pre-deployment
@@ -55,6 +58,9 @@
 #     should exist before the first deploy (scripts/configure.sh makes it);
 #     otherwise docker creates it root-owned, which the root writer can still
 #     use (ADR 110).
+#   - BOARD_ACTIONS_TOKEN, optional: a long random string shared by the
+#     `board-service` and the `console`. Without it the console's Start and
+#     Cancel answer 503 (docs/decisions.md ADR 157).
 #   - COLLECTOR_READ_TOKEN and one COLLECTOR_WRITE_TOKEN_<ACCOUNT> per
 #     account (docs/decisions.md ADR 72; <ACCOUNT> is the account name
 #     uppercased, `-` as `_`): distinct long random strings, the ones
@@ -134,7 +140,7 @@ services:
       - console_net
 
   # The console, mirrored from docker-compose.yml (see its comment): no volume,
-  # no docker socket, API_TOKEN and CONFIG_WRITER_TOKEN only. Published on
+  # no docker socket, API_TOKEN, CONFIG_WRITER_TOKEN and BOARD_ACTIONS_TOKEN. Published on
   # loopback like the services around it; docs/decisions.md ADR 97. On
   # console_net only (ADR 109). Coolify's proxy reaches it over the network
   # Coolify attaches itself, not ia_harness_net (ADR 109 *Coolify*).
@@ -151,6 +157,8 @@ services:
       - CONSOLE_PROJECT=${CONSOLE_PROJECT:-}
       - CONFIG_WRITER_URL=http://config-writer:8791
       - CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}
+      # Optional: the action routes answer 503 without it (ADR 157).
+      - BOARD_ACTIONS_TOKEN=${BOARD_ACTIONS_TOKEN:-}
     depends_on:
       - api
     networks:
@@ -177,6 +185,8 @@ services:
   # The board service, mirrored from docker-compose.yml (see its comment):
   # the hive read-write and config :ro, no socket, ia_harness_net and
   # console_net, loopback 8792; docs/decisions.md ADR 124, ADR 125 and ADR 129.
+  # Plus the `actions` queue mount and the optional BOARD_ACTIONS_TOKEN (ADR 142
+  # decision 3, ADR 166).
   board-service:
     build:
       context: ../..
@@ -188,6 +198,9 @@ services:
       - ../../.hive:/data/.hive
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
+      - ../../dispatcher_state/actions:/state/actions
+    environment:
+      - BOARD_ACTIONS_TOKEN=${BOARD_ACTIONS_TOKEN:-}
     networks:
       - ia_harness_net
       - console_net
@@ -225,6 +238,29 @@ services:
       - ../../.data/credentials/projects:/run/secrets/projects
       - ../../config.yaml:/app/config.yaml:ro
       # The writer's overrides, read-only here; see docker-compose.yml.
+      - ../../config.d:/app/config.d:ro
+    depends_on:
+      - collector
+    networks:
+      - ia_harness_net
+
+  # The worker, mirrored from docker-compose.yml (see its comment): the one
+  # long-running service with the docker socket, behind the `worker` profile,
+  # with the dispatcher's mounts; docs/decisions.md ADR 142 and ADR 166.
+  worker:
+    profiles: ["worker"]
+    build:
+      context: ../..
+      dockerfile: docker/dispatcher/Dockerfile
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "worker"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../dispatcher_state:/state
+      - ../../.hive:/data/.hive
+      - claude_shared:/root/.claude
+      - ../../.data/credentials/projects:/run/secrets/projects
+      - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
     depends_on:
       - collector
