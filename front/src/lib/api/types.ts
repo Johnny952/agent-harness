@@ -551,6 +551,45 @@ export interface AcceptTaskBody {
   priority?: TaskPriority;
 }
 
+/** One record of the action queue, as `dispatcher/actions.py:create` writes it. ADR 160. */
+export interface ActionRecord {
+  version: number;
+  id: string;
+  kind: string;
+  project: string | null;
+  task_id: string | null;
+  params: Record<string, unknown> | null;
+  actor: string;
+  note: string | null;
+  created_at: string;
+  claimed_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+  /** `account` or `project` while the worker holds a pending one back; else null. */
+  waiting: string | null;
+  result: unknown;
+  error: string | null;
+}
+
+/** `GET /api/actions` (`observability/api/app.py:action_queue`). */
+export interface ActionQueue {
+  pending: ActionRecord[];
+  claimed: ActionRecord[];
+  done: ActionRecord[];
+  done_total: number;
+  worker: {
+    heartbeat: Record<string, unknown> | null;
+    stale: boolean;
+    stale_after_seconds: number;
+  };
+}
+
+/** `POST /api/tasks/<id>/start`: exactly `{note}`, the forward refuses any other key (ADR 157). */
+export interface StartTaskBody {
+  note: string | null;
+}
+
 /**
  * `backlog_accept`'s answer. `children` is an epic's sub-tasks and where each
  * went, `{}` for a plain task; `epic_closed` is the epic a drop closed (ADR 134).

@@ -45,11 +45,17 @@
  * not in an envelope, so they go through `readBare`, and a refusal is an
  * `ApiError` with the service's own message and status. There is no mock for any
  * of the six: like the settings writes, they are real `fetch`es in every mode.
+ *
+ * **One more read and one more write for the Board's Ready card** (ADR 160):
+ * `getActionQueue` reads `GET /api/actions` (the api's envelope) and `startTask`
+ * is `POST /api/tasks/<id>/start`, bare like the six.
  */
 import type {
   AcceptTaskBody,
   AcceptTaskResult,
   Account,
+  ActionQueue,
+  ActionRecord,
   ApiResult,
   ChatThread,
   CommandRequestState,
@@ -68,6 +74,7 @@ import type {
   ReadyOrder,
   Roadmap,
   Settings,
+  StartTaskBody,
   Task,
   TaskComments,
   TaskDetail,
@@ -433,6 +440,30 @@ export function commentTask(taskId: string, body: CommentTaskBody): Promise<Comm
  */
 export function acceptTask(taskId: string, body: AcceptTaskBody = {}): Promise<AcceptTaskResult> {
   return readBare<AcceptTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}/accept`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * The action queue as the worker holds it: `GET /api/actions`, the api's envelope.
+ *
+ * `limit=1` because the Board reads `pending` and `claimed`, which the api serves
+ * whole, and has no use for the finished list. Not `listActions`: that is the
+ * `/queue` draft's mock with its own shape (`docs/decisions.md` ADR 160 part 1).
+ */
+export function getActionQueue(): Promise<ApiResult<ActionQueue>> {
+  return readEnvelope<ActionQueue>("/api/actions?limit=1");
+}
+
+/**
+ * Queue a task's development cycle: `POST /api/tasks/<id>/start`. The body is
+ * exactly `{note}` and the forward 400s any other key (ADR 157 part 1); a refusal
+ * is an `ApiError` with the board-service's message.
+ */
+export function startTask(taskId: string, note: string | null): Promise<ActionRecord> {
+  const body: StartTaskBody = { note };
+  return readBare<ActionRecord>(`/api/tasks/${encodeURIComponent(taskId)}/start`, {
     method: "POST",
     body,
   });

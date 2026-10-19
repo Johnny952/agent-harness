@@ -26,8 +26,9 @@
  * their arithmetic is `lib/board.test.ts`'s, and this file checks the screen
  * draws it (ADR 140).
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { toast } from "sonner";
 import {
   RouterContextProvider,
   createMemoryHistory,
@@ -36,8 +37,11 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { Route, TaskCard } from "./index";
-import { renderRoute } from "@/test/render-route";
-import type { Task } from "@/lib/api/types";
+import { renderRoute, type Served } from "@/test/render-route";
+import type { ActionQueue, ActionRecord, Task } from "@/lib/api/types";
+
+// `renderRoute` draws no Toaster, so the toast is asserted at its call.
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
 // never runs, and every render would stack in one document.
@@ -71,6 +75,37 @@ const TASK: Task = {
   merged: false,
   title: null,
 };
+
+const EMPTY_QUEUE: ActionQueue = {
+  pending: [],
+  claimed: [],
+  done: [],
+  done_total: 0,
+  worker: { heartbeat: null, stale: true, stale_after_seconds: 30 },
+};
+
+/** An action record as `dispatcher/actions.py:create` writes it, a start by default. */
+function action(taskId: string, over: Partial<ActionRecord> = {}): ActionRecord {
+  return {
+    version: 1,
+    id: `act-${taskId}`,
+    kind: "start",
+    project: "ia-harness",
+    task_id: taskId,
+    params: null,
+    actor: "operator",
+    note: null,
+    created_at: "2026-10-19T12:00:00Z",
+    claimed_at: null,
+    started_at: null,
+    finished_at: null,
+    status: "pending",
+    waiting: null,
+    result: null,
+    error: null,
+    ...over,
+  };
+}
 
 /** The one route a card links to, and no component mounted on it. */
 function cardRouter() {
@@ -169,6 +204,7 @@ describe("the Board's search over a task with no description", () => {
   async function board() {
     await renderRoute(Route, "/", {
       "/api/tasks": { data: [task("T-101", null), task("T-102", "the pool screen")] },
+      "/api/actions": { data: EMPTY_QUEUE },
       "/api/ready": { data: [] },
       "/api/accounts": { data: [] },
       "/api/debt": { data: [] },
@@ -201,6 +237,7 @@ describe("the board's columns and swimlanes", () => {
   async function board(tasks: Task[], ready: ReadyAnswer = { data: [] }) {
     return renderRoute(Route, "/", {
       "/api/tasks": { data: tasks },
+      "/api/actions": { data: EMPTY_QUEUE },
       "/api/ready": ready,
       "/api/accounts": { data: [] },
       "/api/debt": { data: [] },
@@ -392,5 +429,141 @@ describe("the board's columns and swimlanes", () => {
     await board([task("T-291", { title: "the board's lanes", description: "long text" })]);
     expect(await screen.findByText("the board's lanes")).toBeTruthy();
     expect(screen.getByText("T-291").closest("a")?.getAttribute("href")).toBe("/tasks/T-291");
+  });
+});
+
+describe("Start development on a Ready card", () => {
+  const task = (task_id: string): Task => ({ ...TASK, task_id, status: "pending" });
+
+  type QueueAnswer = { data: ActionQueue } | { status: number; error: string };
+
+  async function board(queue: QueueAnswer = { data: EMPTY_QUEUE }, extra: Served = {}) {
+    const out = await renderRoute(Route, "/", {
+      "/api/tasks": { data: [task("T-301"), task("T-302")] },
+      "/api/actions": queue,
+      "/api/ready": { data: ["T-301"] },
+      "/api/accounts": { data: [] },
+      "/api/debt": { data: [] },
+      ...extra,
+    });
+    await screen.findByText("T-301");
+    return out;
+  }
+
+  const queueOf = (over: Partial<ActionQueue>): { data: ActionQueue } => ({
+    data: { ...EMPTY_QUEUE, ...over },
+  });
+
+  const column = (key: string) => document.querySelector(`[data-column="${key}"]`) as HTMLElement;
+  const startButton = () => screen.queryByRole("button", { name: "Start development" });
+
+  async function open() {
+    fireEvent.click(await screen.findByRole("button", { name: "Start development" }));
+    return await screen.findByRole("dialog");
+  }
+
+  it("shows the button on a Ready card and not on a Waiting one", async () => {
+    await board();
+    expect(
+      await within(column("ready")).findByRole("button", { name: "Start development" }),
+    ).toBeTruthy();
+    expect(within(column("waiting")).queryByRole("button")).toBeNull();
+    expect(within(column("waiting")).getByText("T-302")).toBeTruthy();
+  });
+
+  it("shows Queued, and what it waits for, instead of the button for a pending start", async () => {
+    await board(queueOf({ pending: [action("T-301", { waiting: "account" })] }));
+    expect(await screen.findByText("Queued, waiting for an account")).toBeTruthy();
+    expect(startButton()).toBeNull();
+  });
+
+  it("shows Queued alone for a pending start nothing holds back", async () => {
+    await board(queueOf({ pending: [action("T-301")] }));
+    expect(await screen.findByText("Queued")).toBeTruthy();
+    expect(startButton()).toBeNull();
+  });
+
+  it("shows Running instead of the button for a claimed start", async () => {
+    await board(queueOf({ claimed: [action("T-301", { status: "claimed" })] }));
+    expect(await screen.findByText("Running")).toBeTruthy();
+    expect(startButton()).toBeNull();
+  });
+
+  it("is not hidden by another task's start or by another kind of action", async () => {
+    await board(
+      queueOf({
+        pending: [action("T-302"), action("T-301", { kind: "cancel", id: "act-cancel" })],
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "Start development" })).toBeTruthy();
+  });
+
+  it("still offers the button, and says the read failed, when /api/actions does not answer", async () => {
+    await board({ status: 500, error: "boom" });
+    expect(await screen.findByRole("button", { name: "Start development" })).toBeTruthy();
+    expect(screen.getByText(/\/api\/actions did not answer/)).toBeTruthy();
+  });
+
+  it("sends the note with the start, and reads the queue again", async () => {
+    const { sent } = await board(undefined, {
+      "POST /api/tasks/T-301/start": { data: action("T-301") },
+    });
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText(/Note/), { target: { value: " go slowly " } });
+    const before = sent.filter((r) => r.path === "/api/actions").length;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const post = sent.find((r) => r.method === "POST");
+    expect(post?.path).toBe("/api/tasks/T-301/start");
+    expect(post?.body).toEqual({ note: " go slowly " });
+    await waitFor(() =>
+      expect(sent.filter((r) => r.path === "/api/actions").length).toBeGreaterThan(before),
+    );
+  });
+
+  it("sends a blank note as null", async () => {
+    const { sent } = await board(undefined, {
+      "POST /api/tasks/T-301/start": { data: action("T-301") },
+    });
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText(/Note/), { target: { value: "  \n " } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null });
+  });
+
+  it("toasts a refusal and keeps the dialog and the note", async () => {
+    await board(undefined, {
+      "POST /api/tasks/T-301/start": {
+        status: 409,
+        error: "a start for task T-301 is already queued",
+      },
+    });
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText(/Note/), { target: { value: "keep me" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("a start for task T-301 is already queued"),
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect((within(dialog).getByLabelText(/Note/) as HTMLTextAreaElement).value).toBe("keep me");
+  });
+
+  it("refuses a note over the comment limit before sending it", async () => {
+    await board();
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText(/Note/), {
+      target: { value: "x".repeat(20001) },
+    });
+    expect(
+      (within(dialog).getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(within(dialog).getByText(/20,001 characters, over the 20,000/)).toBeTruthy();
+  });
+
+  it("does not follow the card's link when the button is clicked", async () => {
+    const { router } = await board();
+    await open();
+    expect(router.state.location.pathname).toBe("/");
   });
 });
