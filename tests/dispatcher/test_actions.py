@@ -253,6 +253,22 @@ def test_recover_moves_a_final_record_left_in_claimed(tmp_path):
     assert names(tmp_path, "claimed") == []
 
 
+def test_recover_moves_a_final_record_left_in_pending(tmp_path):
+    rec = record_of("start", status="cancelled", finished_at="2026-01-01T00:00:00+00:00")
+    hand_write(tmp_path, "pending", rec)
+    assert actions.recover(tmp_path) == [(rec["id"], "moved to done")]
+    assert read(tmp_path, "done", rec["id"]) == rec
+    assert names(tmp_path, "pending") == []
+
+
+def test_claim_refuses_a_final_record_left_in_pending(tmp_path):
+    rec = record_of("start", status="cancelled", finished_at="2026-01-01T00:00:00+00:00")
+    hand_write(tmp_path, "pending", rec)
+    assert actions.claim(tmp_path, rec["id"]) is None
+    assert read(tmp_path, "done", rec["id"]) == rec
+    assert names(tmp_path, "claimed") == [] and names(tmp_path, "pending") == []
+
+
 def test_recover_leaves_pending_and_unparseable_alone(tmp_path):
     hand_write(tmp_path, "pending", record_of("start"))
     bad = tmp_path / "actions" / "claimed" / "a-x.json"

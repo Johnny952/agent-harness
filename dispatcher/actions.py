@@ -402,7 +402,8 @@ def finish(
     """Write the final status and move the record to `done/`.
 
     Rewrite, then rename: a crash between leaves a final record in its old
-    directory, which `recover` moves on.
+    directory (`pending/` or `claimed/`), which `recover` moves on and `claim`
+    refuses.
     """
     if status not in FINAL:
         raise ValueError(f"{status!r} is not a final status")
@@ -419,7 +420,8 @@ def finish(
 
 def claim(state_dir, action_id: str) -> dict | None:
     """Take a pending action: it succeeds once. None if it is already taken,
-    gone, unreadable (left in `claimed/`) or invalid (finished as failed)."""
+    gone, unreadable (left in `claimed/`), already final (moved to `done/`
+    unchanged) or invalid (finished as failed)."""
     root = ensure_dirs(state_dir)
     try:
         os.rename(root / PENDING / f"{action_id}.json", root / CLAIMED / f"{action_id}.json")
@@ -429,6 +431,10 @@ def claim(state_dir, action_id: str) -> dict | None:
     try:
         record = _load(path)
     except (OSError, ValueError):
+        return None
+    if record.get("status") in FINAL:
+        # `finish` rewrote it and crashed before the rename: it is over.
+        os.rename(path, root / DONE / path.name)
         return None
     problems = validate(record)
     if problems:
@@ -449,8 +455,8 @@ def recover(state_dir) -> list[tuple[str, str]]:
     for state, record in entries:
         aid = record["id"]
         kind = KINDS.get(record.get("kind"))
-        if state == CLAIMED and record.get("status") in FINAL:
-            os.rename(root / CLAIMED / f"{aid}.json", root / DONE / f"{aid}.json")
+        if record.get("status") in FINAL:
+            os.rename(root / state / f"{aid}.json", root / DONE / f"{aid}.json")
             done.append((aid, "moved to done"))
         elif kind is None:
             finish(state_dir, aid, "failed", error=UNKNOWN_KIND)
