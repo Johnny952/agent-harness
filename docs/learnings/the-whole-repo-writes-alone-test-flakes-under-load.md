@@ -4,10 +4,13 @@
 `tests/dispatcher/test_parallel_queue.py::test_a_whole_repo_task_writes_alone`
 and your diff touches nothing under `dispatcher/` or that test file.
 
-**Status:** unconfirmed — seen by T-061's auditor (shared inbox, not filed
-then) and again by T-062's auditor, both on diffs with no `dispatcher/` file.
-T-065's implementador saw it a third time (failed, then 14 passed on the
-rerun), and it is now debt `T-065-D1` in `docs/debt/README.md`. Not diagnosed.
+**Status:** retired 2026-10-19: debt `T-065-D1` is resolved. The cause was
+found and it was the test's: it asserted which task wrote first, and the
+scheduler orders only tasks already waiting, so T-2 could legally write first
+— exactly the `assert 5 < 2` log. The test now orders the two windows with an
+event and a poll on the scheduler's waiters, in both directions. If it fails
+now, it is a real failure of the write window; do not treat it as this flake.
+Earlier: seen by T-061's and T-062's auditors and by T-065's implementador.
 
 ## Symptom
 
@@ -21,16 +24,18 @@ FAILED tests/dispatcher/test_parallel_queue.py::test_a_whole_repo_task_writes_al
 
 ## Why
 
-The test runs two fake cycles through `ScheduledCycle(cfg, hold=0.1)` and
-asserts their windows do not overlap, so it depends on wall-clock scheduling;
-under the load of the rest of the suite the order has come out wrong. The
-exact race is suspected, not proved.
+The test ran two fake cycles through `ScheduledCycle(cfg, hold=0.1)` and
+asserted that T-1's window came first. `_Scheduler.enter_write_window` lets the
+queue order decide only between tasks already waiting, so when T-2's thread
+asked first it wrote first, and T-1 after it: no overlap, but the six-event log
+`T-1 arq, T-2 arq, T-2 enter, T-2 leave, T-1 enter, T-1 leave` gives
+`assert 5 < 2`. Proved on 2026-10-19 (see `docs/debt/T-065-D1.md`).
 
 ## Rule
 
-Re-run the file alone and then the whole suite once before treating the
-failure as yours; if it passes and your diff has no `dispatcher/` change,
-report it as a flake under `risks` rather than fixing around it.
+Retired. Before 2026-10-19 the rule was to re-run the file and the suite and
+report a flake. Now a failure of this test is a real one. To order threads in
+a queue test, use an event and a poll with a generous deadline, not `hold`.
 
 ## Evidence
 
