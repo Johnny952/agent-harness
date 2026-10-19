@@ -62,7 +62,7 @@ from dispatcher import tasks as task_store
 # Aliased: `/api/actions` reads the worker's heartbeat; for two constants,
 # never called, as `docker_exec` is.
 from dispatcher import worker as action_worker
-from dispatcher.config import Config, load_config
+from dispatcher.config import Config, load_config, refresh_primary
 from observability import auth
 from observability.api import plans as plan_frontmatter
 from observability.collector import db
@@ -411,6 +411,9 @@ def create_app(
         if rejected is not None:
             return rejected
         data, warnings = [], []
+        # The primary is the one key read live (ADR 176, ADR 178): the console
+        # moves it while this process runs on the config it loaded at boot.
+        refresh_primary(cfg)
         for account in cfg.accounts:
             # One JSON document per account, named after it — the shape
             # `state_machine._state_path` writes. Named here so a warning can
@@ -419,7 +422,8 @@ def create_app(
             # Everything the config knows, before the `try`: an unreadable state
             # file nulls what the state file says and nothing the config says.
             # `is_primary` is `load_config`'s, read from the top-level
-            # `primary_account` — `docs/decisions.md` ADR 17. The three
+            # `primary_account` — `docs/decisions.md` ADR 17 — and re-marked
+            # by `refresh_primary` above. The three
             # thresholds are the pool's and are repeated on every row because
             # the envelope has no slot beside `data` for a pool-wide fact:
             # ADR 20, narrowing ADR 18. They come off the `cfg` `create_app`

@@ -10020,3 +10020,50 @@ quota to name what authorizes it.
   in its argv.
 - Rewriting the log's stream lines into a harness envelope: a reader should
   parse what the CLI wrote.
+
+## ADR 178 — The board service and the api read the primary override live too
+
+**Status:** accepted (2026-10-19). `docs/plans/main-thread.md` step 1, the
+gap ADR 176 left: its *Consequences* kept the board service and the api on
+the primary they loaded at boot. Builds on ADR 170 and ADR 176; supersedes
+nothing.
+
+**Context.** ADR 176 made `pick_idle_account` call `refresh_primary(cfg)`, so
+the dispatcher follows a primary the console moves with no restart. The
+board service and the api load their config once, in `create_app`, and two
+of their answers read the primary: a new thread with no account defaults to
+`cfg.primary_account` (ADR 170, 2), and `GET /api/accounts` serves each
+account's `is_primary`. Until a restart, both answered with the old primary.
+
+**Decision.**
+1. *The thread default reads it live.* `dispatcher/threads.py`'s
+   `_default_account` calls `refresh_primary(cfg)` before it reads
+   `cfg.primary_account`. It is the one read in the thread records, so the
+   board service's `POST /api/threads` follows the override, and so would any
+   other caller of `create`. An account given in the body is not touched.
+2. *The api's mark reads it live.* `GET /api/accounts` calls
+   `refresh_primary(cfg)` once per request, before it builds the rows, so
+   every row's `is_primary` comes from the same read.
+3. *Still only the primary.* Every other override applies when each process
+   starts, as ADR 75 and ADR 176 say. The fallbacks are ADR 176's: a missing
+   file or key is `config.yaml`'s primary with no warning, and an unusable
+   override is `config.yaml`'s with a warning in that service's log.
+4. *The mounts already reach the file.* In `docker/compose/docker-compose.yml`
+   both services mount `config.d` read-only at `/app/config.d`, beside
+   `/app/config.yaml`, which is where `load_config` looks by default. The
+   mount is of the directory, not of the file, so the config writer's
+   `os.replace` is seen on the next read. No compose change.
+
+**Consequences.** A primary moved from the console shows on the next thread
+created and on the next read of the accounts, with no restart of either
+service. Each such request reads one small file more. The board service's
+routes that never read the primary (`PATCH /api/threads/<id>`, the board's
+writes) do not re-read it.
+
+**Ruled out.**
+- *Reloading the config per request.* It would make every key live in two
+  more processes, which ADR 75 did not decide, and a bad save of any key
+  could then fail a request.
+- *Calling `refresh_primary` in the board service's route instead.* The read
+  is in `_default_account`; refreshing next to it keeps a future caller of
+  `create` from repeating the gap.

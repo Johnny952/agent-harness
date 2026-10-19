@@ -55,6 +55,24 @@ def test_patch_answers_200_and_opens_a_segment(client):
     assert (record["model"], record["title"], len(record["segments"])) == ("m2", "n", 2)
 
 
+def test_a_thread_with_no_account_follows_a_primary_override_saved_after_boot(tmp_path, hive):
+    """ADR 178: the default account is the primary the override names now,
+    with no reload of the config the service loaded at boot."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        CONFIG_YAML.format(hive=hive)
+        .replace("/data/dispatcher_state", str(tmp_path / "state"))
+        .replace("agent-cuenta1\n", "agent-cuenta1\n  - name: cuenta2\n    container: agent-cuenta2\n")
+        + "thread_models: [m1, m2]\nprimary_account: cuenta1\n"
+    )
+    (tmp_path / "config.d").mkdir()
+    client = create_app(str(path)).test_client()
+    assert make(client).get_json()["account"] == "cuenta1"
+
+    (tmp_path / "config.d" / "overrides.yaml").write_text("primary_account: cuenta2\n")
+    assert make(client).get_json()["account"] == "cuenta2"
+
+
 def test_no_bearer_is_needed(client):
     assert make(client).status_code == 201
 
