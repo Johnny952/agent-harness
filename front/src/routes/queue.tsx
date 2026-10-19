@@ -1,13 +1,29 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { Bot, User } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
-import { Absent, EmptyState, ErrorState, Mono, PageHeader } from "@/components/console/primitives";
-import { actionBackendQuery, actionsQuery } from "@/lib/api/queries";
-import { commandLine, enqueueAction } from "@/lib/api/client";
-import type { ActionVerb, QueuedAction } from "@/lib/api/types";
+import {
+  Absent,
+  Banner,
+  EmptyState,
+  ErrorState,
+  Malformed,
+  Mono,
+  PageHeader,
+  WarningBanner,
+} from "@/components/console/primitives";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { actionQueueListQuery, cancelActionMutation } from "@/lib/api/queries";
+import type { ActionQueue, ActionRecord } from "@/lib/api/types";
 import { agoSeconds, formatAge } from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
@@ -19,183 +35,174 @@ export const Route = createFileRoute("/queue")({
       {
         name: "description",
         content:
-          "The action queue: running, waiting and failed commands, who enqueued them, and the live output tail.",
+          "The action queue: pending actions in the order the worker takes them, the running ones, and the newest finished, with Cancel on a queued or running start.",
       },
       { property: "og:title", content: "Queue — harness operations console" },
-      { property: "og:description", content: "Start and watch harness commands." },
+      { property: "og:description", content: "Watch and cancel the worker's queued actions." },
     ],
   }),
   component: QueuePage,
 });
 
-const VERBS: ActionVerb[] = [
-  "run-task",
-  "run-phase",
-  "merge-task",
-  "cleanup-task",
-  "release-account",
-  "bootstrap-project",
-];
+type Stage = "pending" | "claimed" | "done";
 
-const stateTone: Record<QueuedAction["state"], string> = {
-  running: "text-info border-info/50 bg-info/10",
-  queued: "text-muted-foreground border-border-strong bg-surface-2",
-  succeeded: "text-success border-success/50 bg-success/10",
+const statusTone: Record<string, string> = {
+  done: "text-success border-success/50 bg-success/10",
   failed: "text-destructive border-destructive/60 bg-destructive/10",
+  interrupted: "text-warning border-warning/50 bg-warning/10",
 };
+const mutedTone = "text-muted-foreground border-border-strong bg-surface-2";
+
+/** The Board's wording for a held-back pending record (ADR 160 part 3). */
+function waitingText(waiting: string): string {
+  if (waiting === "account") return "waiting for an account";
+  if (waiting === "project") return "waiting for the project";
+  return `waiting: ${waiting}`;
+}
 
 function QueuePage() {
   const now = useNow();
-  const actions = useQuery(actionsQuery);
-  const { data: backendUp } = useQuery(actionBackendQuery);
-  const [pending, setPending] = useState<{ verb: ActionVerb; args: string[] } | null>(null);
-  const [argText, setArgText] = useState("");
-  const [confirmText, setConfirmText] = useState("");
+  const queue = useQuery(actionQueueListQuery);
+  const qc = useQueryClient();
+  const cancel = useMutation(cancelActionMutation(qc));
+  const [target, setTarget] = useState<ActionRecord | null>(null);
 
-  const rows = actions.data ?? [];
-  const running = rows.filter((a) => a.state === "running");
-  const waiting = rows.filter((a) => a.state === "queued");
-  const finished = rows.filter((a) => a.state === "succeeded" || a.state === "failed");
+  const q: ActionQueue | undefined = queue.data?.data;
+  const done = q && Array.isArray(q.done) ? q.done : null;
+  const empty =
+    q !== undefined &&
+    Array.isArray(q.pending) &&
+    q.pending.length === 0 &&
+    Array.isArray(q.claimed) &&
+    q.claimed.length === 0 &&
+    done !== null &&
+    done.length === 0 &&
+    q.done_total === 0;
 
-  const destructive = pending?.verb === "cleanup-task";
-  const confirmTarget = pending?.args[0] ?? "";
-  const canConfirm = !destructive || confirmText === confirmTarget;
-
-  async function run() {
-    if (!pending) return;
-    try {
-      await enqueueAction(pending.verb, pending.args);
-      toast.success(`Enqueued ${pending.verb} ${pending.args.join(" ")}`);
-      void actions.refetch();
-    } catch {
-      toast.error("The action backend refused the command. Nothing was started.");
-    }
-    setPending(null);
-    setConfirmText("");
-    setArgText("");
-  }
+  const confirm = () => {
+    if (!target) return;
+    const id = target.id;
+    cancel.mutate(id, {
+      onSuccess: () => toast.success(`Cancel of ${id} queued`),
+      onError: (e) => toast.error(e instanceof Error ? e.message : `${id} was not cancelled`),
+      onSettled: () => setTarget(null),
+    });
+  };
 
   return (
     <AppShell>
       <PageHeader
         title="Queue"
-        subtitle="Every action is confirmed with the exact command that will run."
-        right={<RefreshedAt at={actions.dataUpdatedAt} />}
+        subtitle="What the worker will take, what it is running, and what it finished."
+        right={<RefreshedAt at={queue.dataUpdatedAt} />}
       />
 
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
-        <input
-          value={argText}
-          onChange={(e) => setArgText(e.target.value)}
-          placeholder="arguments, e.g. T-013"
-          className="mono w-48 rounded-sm border border-border bg-surface px-2 py-1 text-[11px] outline-none focus:border-ring"
-        />
-        {VERBS.map((v) => (
-          <button
-            key={v}
-            disabled={backendUp === false}
-            onClick={() =>
-              setPending({ verb: v, args: argText.trim().split(/\s+/).filter(Boolean) })
-            }
-            className={cn(
-              "mono rounded-sm border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-40",
-              v === "cleanup-task"
-                ? "border-destructive/50 text-destructive hover:bg-destructive/10"
-                : "border-border text-muted-foreground hover:bg-surface-2 hover:text-foreground",
-            )}
-          >
-            {v}
-          </button>
-        ))}
-      </div>
+      <WarningBanner warnings={queue.data?.warnings ?? []} />
+      {q && <WorkerLine worker={q.worker} now={now} />}
 
-      {actions.isError ? (
+      {queue.isError ? (
         <ErrorState
           title="The action queue could not be read"
-          body="Commands may still be running on the host. Do not re-enqueue until this screen loads again."
+          body="GET /api/actions did not answer. Actions may still be running on the host."
         />
-      ) : actions.isLoading ? (
+      ) : queue.isLoading || !q ? (
         <p className="px-4 py-6 text-xs text-muted-foreground">Reading queue…</p>
-      ) : rows.length === 0 ? (
+      ) : empty ? (
         <EmptyState
-          title="The queue is empty"
-          body="Nothing is running or waiting. Pick a verb above to enqueue the first command."
+          title="Nothing has been queued"
+          body="A Ready card's Start development on the Board queues the first one."
         />
       ) : (
         <div className="space-y-4 p-4">
-          <Group title={`Running · ${running.length}`}>
-            {running.map((a) => (
-              <ActionRow key={a.id} action={a} now={now} showTail />
-            ))}
-            {running.length === 0 && <Idle text="Nothing is running." />}
+          <Group title={`Pending · ${Array.isArray(q.pending) ? q.pending.length : 0}`}>
+            <Rows
+              label="pending"
+              rows={q.pending}
+              stage="pending"
+              now={now}
+              onCancel={setTarget}
+              none="Nothing is waiting."
+            />
           </Group>
-          <Group title={`Waiting · ${waiting.length}`}>
-            {waiting.map((a) => (
-              <ActionRow key={a.id} action={a} now={now} />
-            ))}
-            {waiting.length === 0 && <Idle text="Nothing is waiting." />}
+          <Group title={`Running · ${Array.isArray(q.claimed) ? q.claimed.length : 0}`}>
+            <Rows
+              label="claimed"
+              rows={q.claimed}
+              stage="claimed"
+              now={now}
+              onCancel={setTarget}
+              none="Nothing is running."
+            />
           </Group>
-          <Group title={`Finished · ${finished.length}`}>
-            {finished.map((a) => (
-              <ActionRow key={a.id} action={a} now={now} showTail={a.state === "failed"} />
-            ))}
+          <Group
+            title={
+              done === null
+                ? "Finished"
+                : q.done_total > done.length
+                  ? `Finished · ${done.length} of ${q.done_total}`
+                  : `Finished · ${done.length}`
+            }
+          >
+            <Rows
+              label="done"
+              rows={q.done}
+              stage="done"
+              now={now}
+              onCancel={setTarget}
+              none="Nothing has finished."
+            />
           </Group>
         </div>
       )}
 
-      {pending && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4">
-          <div className="panel w-full max-w-lg p-4">
-            <h2 className="text-sm font-semibold">
-              {destructive ? "Destructive action" : "Confirm action"}
-            </h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              This runs on the harness host immediately:
-            </p>
-            <pre className="mono mt-2 overflow-x-auto rounded-sm border border-border bg-surface-2 px-2 py-2 text-[11px]">
-              {commandLine(pending.verb, pending.args)}
-            </pre>
-            {destructive && (
-              <div className="mt-3">
-                <p className="text-[11px] text-destructive">
-                  cleanup-task removes the worktrees and locks for{" "}
-                  <Mono>{confirmTarget || "—"}</Mono>. Type the task id to confirm.
-                </p>
-                <input
-                  value={confirmText}
-                  onChange={(e) => setConfirmText(e.target.value)}
-                  placeholder={confirmTarget || "T-000"}
-                  className="mono mt-1.5 w-full rounded-sm border border-destructive/50 bg-surface px-2 py-1 text-[11px] outline-none"
-                />
-              </div>
-            )}
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                onClick={() => {
-                  setPending(null);
-                  setConfirmText("");
-                }}
-                className="rounded-sm border border-border px-3 py-1 text-[11px] text-muted-foreground hover:text-foreground"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={!canConfirm}
-                onClick={run}
-                className={cn(
-                  "rounded-sm px-3 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40",
-                  destructive
-                    ? "bg-destructive text-destructive-foreground"
-                    : "bg-primary text-primary-foreground",
-                )}
-              >
-                Run
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Dialog open={target !== null} onOpenChange={(o) => !o && setTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancel {target?.task_id ?? target?.id}?</DialogTitle>
+            <DialogDescription>
+              Action <span className="mono">{target?.id}</span>
+              {target?.task_id ? ` for ${target.task_id}` : ""}. Confirming queues a cancel; the
+              worker carries it out.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" type="button" onClick={() => setTarget(null)}>
+              Keep it
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={cancel.isPending}
+              onClick={confirm}
+            >
+              Cancel action
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
+  );
+}
+
+/** The worker's heartbeat as the api judged it; never recomputed here. */
+function WorkerLine({ worker, now }: { worker: ActionQueue["worker"]; now: number }) {
+  if (!worker) return null;
+  if (worker.heartbeat === null) {
+    return (
+      <Banner tone="warning">
+        No worker has written a heartbeat, so nothing is being taken from the queue.
+      </Banner>
+    );
+  }
+  if (!worker.stale) return null;
+  const beat = worker.heartbeat["beat_at"];
+  const age = typeof beat === "string" ? agoSeconds(beat, now) : null;
+  return (
+    <Banner tone="warning">
+      The worker's heartbeat is older than {worker.stale_after_seconds} seconds
+      {age !== null ? ` (last beat ${formatAge(age)} ago)` : ""}, so nothing is being taken from the
+      queue.
+    </Banner>
   );
 }
 
@@ -210,53 +217,108 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function Idle({ text }: { text: string }) {
-  return <p className="px-3 py-2 text-[11px] text-muted-foreground">{text}</p>;
+function Rows({
+  label,
+  rows,
+  stage,
+  now,
+  onCancel,
+  none,
+}: {
+  label: string;
+  rows: unknown;
+  stage: Stage;
+  now: number;
+  onCancel: (a: ActionRecord) => void;
+  none: string;
+}) {
+  if (!Array.isArray(rows)) {
+    return (
+      <p className="px-3 py-2">
+        <Malformed label={label} got={rows} want="a list" />
+      </p>
+    );
+  }
+  if (rows.length === 0) {
+    return <p className="px-3 py-2 text-[11px] text-muted-foreground">{none}</p>;
+  }
+  return (
+    <>
+      {(rows as ActionRecord[]).map((a) => (
+        <ActionRow key={a.id} action={a} stage={stage} now={now} onCancel={onCancel} />
+      ))}
+    </>
+  );
 }
 
 function ActionRow({
   action,
+  stage,
   now,
-  showTail = false,
+  onCancel,
 }: {
-  action: QueuedAction;
+  action: ActionRecord;
+  stage: Stage;
   now: number;
-  showTail?: boolean;
+  onCancel: (a: ActionRecord) => void;
 }) {
-  const Icon = action.enqueued_by === "operator" ? User : Bot;
+  const [since, stamp] =
+    stage === "pending"
+      ? [action.created_at, "queued"]
+      : stage === "claimed"
+        ? [action.claimed_at, "claimed"]
+        : [action.finished_at, "finished"];
+  const age = agoSeconds(since, now);
+  const param = action.params?.["target"];
+  const target = typeof param === "string" ? param : null;
   return (
     <div className="px-3 py-2">
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
-        <Mono className="text-muted-foreground">{action.id}</Mono>
-        <span
-          className={cn(
-            "rounded-sm border px-1.5 py-[1px] text-[10px] uppercase tracking-wide",
-            stateTone[action.state],
-          )}
-        >
-          {action.state}
-        </span>
-        <Mono>{commandLine(action.verb, action.args)}</Mono>
-        <span
-          className="ml-auto inline-flex items-center gap-1 text-[10px] text-muted-foreground"
-          title={
-            action.enqueued_by === "operator" ? "Enqueued by the operator" : "Enqueued by an agent"
-          }
-        >
-          <Icon className="size-3" />
-          {action.enqueued_by} · {formatAge(agoSeconds(action.enqueued_at, now))} ago
-        </span>
-      </div>
-      {showTail &&
-        (action.output_tail ? (
-          <pre className="mono mt-1.5 max-h-40 overflow-auto rounded-sm border border-border bg-surface-2 px-2 py-1.5 text-[10px] text-muted-foreground">
-            {action.output_tail}
-          </pre>
+        <Mono className="font-medium">{action.kind}</Mono>
+        {action.task_id ? <Mono>{action.task_id}</Mono> : <Absent label="no task" />}
+        {action.project ? (
+          <Mono className="text-muted-foreground">{action.project}</Mono>
         ) : (
-          <p className="mt-1.5">
-            <Absent label="no output yet" />
-          </p>
-        ))}
+          <Absent label="no project" />
+        )}
+        {target && <Mono className="text-muted-foreground">→ {target}</Mono>}
+        {stage === "done" && (
+          <span
+            className={cn(
+              "rounded-sm border px-1.5 py-[1px] text-[10px] uppercase tracking-wide",
+              statusTone[action.status] ?? mutedTone,
+            )}
+          >
+            {action.status}
+          </span>
+        )}
+        {stage === "pending" && action.waiting && (
+          <span className="text-[10px] text-warning">{waitingText(action.waiting)}</span>
+        )}
+        <span className="text-muted-foreground">{action.actor}</span>
+        {action.note ? (
+          <span className="text-muted-foreground">{action.note}</span>
+        ) : (
+          <Absent label="no note" />
+        )}
+        <span className="ml-auto text-[10px] text-muted-foreground">
+          {age === null ? <Absent /> : `${stamp} ${formatAge(age)} ago`}
+        </span>
+        {stage !== "done" && action.kind === "start" && (
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            aria-label={`Cancel ${action.id}`}
+            onClick={() => onCancel(action)}
+          >
+            Cancel
+          </Button>
+        )}
+      </div>
+      {stage === "done" && action.error && (
+        <p className="mt-1.5 text-[11px] text-destructive">{action.error}</p>
+      )}
     </div>
   );
 }

@@ -685,24 +685,6 @@ export interface HookEvent {
   created_at: string;
 }
 
-export type ActionVerb =
-  | "run-task"
-  | "run-phase"
-  | "merge-task"
-  | "cleanup-task"
-  | "release-account"
-  | "bootstrap-project";
-
-export interface QueuedAction {
-  id: string;
-  verb: ActionVerb;
-  args: string[];
-  enqueued_by: "operator" | "agent";
-  state: "queued" | "running" | "succeeded" | "failed";
-  enqueued_at: string;
-  output_tail: string | null;
-}
-
 export interface ChatToolCall {
   id: string;
   name: string;

@@ -6,7 +6,6 @@ import type {
   LastProbe,
   LearningEntry,
   Phase,
-  QueuedAction,
   Task,
 } from "../types";
 
@@ -21,10 +20,10 @@ import type {
  * catches a type that drifts from the route, and so a later task has a fixture it
  * can trust the shape of.
  *
- * `mockActions` and `mockThreads` still back `listActions` and `listThreads`,
- * whose routes are tier 3 of
- * `docs/plans/front.md`, and they carry no `warnings`: ADR 25 says a fixture for a
- * route with no producer cannot rehearse an envelope.
+ * `mockThreads` still backs `listThreads`, whose route is tier 3 of
+ * `docs/plans/front.md`, and it carries no `warnings`: ADR 25 says a fixture for a
+ * route with no producer cannot rehearse an envelope. `mockActions` went with the
+ * Queue draft's mock (ADR 163).
  */
 
 /** Fixtures are anchored to "now" so heartbeat freshness is realistic. */
@@ -681,58 +680,6 @@ export function mockLearnings(): LearningEntry[] {
     },
   );
   return base;
-}
-
-export function mockActions(): QueuedAction[] {
-  return [
-    {
-      id: "A-501",
-      verb: "run-phase",
-      args: ["T-011", "revisor", "--round", "2"],
-      enqueued_by: "agent",
-      state: "running",
-      enqueued_at: iso(250),
-      output_tail:
-        "[revisor] loading handoff envelope from P-1103\n[revisor] 4 files in diff\n[revisor] reading harness/config/budgets.py\n[revisor] reading tests/test_budgets.py\n[revisor] drafting round 2 notes...",
-    },
-    {
-      id: "A-502",
-      verb: "run-task",
-      args: ["T-013"],
-      enqueued_by: "operator",
-      state: "queued",
-      enqueued_at: iso(180),
-      output_tail: null,
-    },
-    {
-      id: "A-503",
-      verb: "release-account",
-      args: ["cuenta2"],
-      enqueued_by: "operator",
-      state: "failed",
-      enqueued_at: iso(700),
-      output_tail:
-        "error: account cuenta2 is inside a provider cooldown (1180s remaining)\nrefused by pool manager",
-    },
-    {
-      id: "A-504",
-      verb: "merge-task",
-      args: ["T-004"],
-      enqueued_by: "agent",
-      state: "succeeded",
-      enqueued_at: iso(4200),
-      output_tail: "merged 3 commits into main as 4f1ac2d",
-    },
-    {
-      id: "A-505",
-      verb: "cleanup-task",
-      args: ["T-002"],
-      enqueued_by: "operator",
-      state: "succeeded",
-      enqueued_at: iso(5200),
-      output_tail: "removed worktree /srv/worktrees/T-002-*",
-    },
-  ];
 }
 
 export function mockThreads(): ChatThread[] {

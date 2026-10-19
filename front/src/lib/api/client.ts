@@ -12,7 +12,7 @@
  *
  * Everything else still resolves from `./mock/fixtures` and `./mock/ops-fixtures`,
  * because the routes behind them are tier 3 of `docs/plans/front.md`:
- * `listActions`, `enqueueAction` and `listThreads` are never coming here at
+ * `listThreads` is never coming here at
  * all — ADR 19 puts the write surface
  * in another service with its own credential, and C-1 has not ruled on the chat
  * dock. A screen reading one of those says so on itself rather than looking
@@ -48,7 +48,9 @@
  *
  * **One more read and one more write for the Board's Ready card** (ADR 160):
  * `getActionQueue` reads `GET /api/actions` (the api's envelope) and `startTask`
- * is `POST /api/tasks/<id>/start`, bare like the six.
+ * is `POST /api/tasks/<id>/start`, bare like the six. `getActionQueue` takes the
+ * finished-list `limit` and `cancelAction` is `POST /api/actions/<id>/cancel`,
+ * both for the Queue screen (ADR 163).
  */
 import type {
   AcceptTaskBody,
@@ -70,7 +72,6 @@ import type {
   Phase,
   ProposeBacklogBody,
   ProposeBacklogResult,
-  QueuedAction,
   ReadyOrder,
   Roadmap,
   Settings,
@@ -80,7 +81,7 @@ import type {
   TaskDetail,
   UsageGroup,
 } from "./types";
-import { mockActions, mockThreads } from "./mock/fixtures";
+import { mockThreads } from "./mock/fixtures";
 
 export class ApiError extends Error {
   constructor(
@@ -99,9 +100,9 @@ const latency = () => new Promise((r) => setTimeout(r, 120));
  * control which fakes a failure is a fixture wearing a button — so that function
  * and its `isActionBackendDown` reader are gone, with no callers anywhere in
  * `front/src` to mourn them. Nothing flips this now, and nothing will until there
- * is a real write surface to be down. Kept because four mock helpers below read
- * it, and deleting it would reshape four more functions that have no route
- * either. (Three of them write; the fourth is `pingActionBackend`. The
+ * is a real write surface to be down. Kept because three mock helpers below read
+ * it, and deleting it would reshape three more functions that have no route
+ * either. (Two of them write; the third is `pingActionBackend`. The
  * role-model save that used to be a writer left with its mock, ADR 113, and the
  * backlog's completion toggle with the backlog's mock, ADR 138.)
  */
@@ -448,12 +449,24 @@ export function acceptTask(taskId: string, body: AcceptTaskBody = {}): Promise<A
 /**
  * The action queue as the worker holds it: `GET /api/actions`, the api's envelope.
  *
- * `limit=1` because the Board reads `pending` and `claimed`, which the api serves
- * whole, and has no use for the finished list. Not `listActions`: that is the
- * `/queue` draft's mock with its own shape (`docs/decisions.md` ADR 160 part 1).
+ * `limit` is how many finished records to ask for. The Board passes nothing and
+ * gets 1: it reads `pending` and `claimed`, which the api serves whole, and has
+ * no use for the finished list (ADR 160 part 1). `/queue` passes 20 (ADR 163).
  */
-export function getActionQueue(): Promise<ApiResult<ActionQueue>> {
-  return readEnvelope<ActionQueue>("/api/actions?limit=1");
+export function getActionQueue(limit = 1): Promise<ApiResult<ActionQueue>> {
+  return readEnvelope<ActionQueue>(`/api/actions?limit=${limit}`);
+}
+
+/**
+ * Cancel a queued or running start: `POST /api/actions/<id>/cancel` with an empty
+ * body. The answer is the new *cancel* action the board-service queued, not the
+ * start; the worker carries the cancel out (ADR 163 part 5).
+ */
+export function cancelAction(actionId: string): Promise<ActionRecord> {
+  return readBare<ActionRecord>(`/api/actions/${encodeURIComponent(actionId)}/cancel`, {
+    method: "POST",
+    body: {},
+  });
 }
 
 /**
@@ -519,40 +532,14 @@ async function readBare<T>(path: string, write?: BoardWrite): Promise<T> {
 
 /* ── Still fixtures: tier 3, and the ones that never land ───────────────── */
 
-export async function listActions(): Promise<QueuedAction[]> {
-  await latency();
-  return mockActions();
-}
-
 export async function listThreads(): Promise<ChatThread[]> {
   await latency();
   return mockThreads();
 }
 
-export async function enqueueAction(
-  verb: QueuedAction["verb"],
-  args: string[],
-): Promise<QueuedAction> {
-  await latency();
-  if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
-  return {
-    id: `A-${Math.floor(Math.random() * 900 + 100)}`,
-    verb,
-    args,
-    enqueued_by: "operator",
-    state: "queued",
-    enqueued_at: new Date().toISOString(),
-    output_tail: null,
-  };
-}
-
 export async function pingActionBackend(): Promise<boolean> {
   await latency();
   return !actionBackendDown;
-}
-
-export function commandLine(verb: string, args: string[]): string {
-  return `harness ${verb} ${args.join(" ")}`.trim();
 }
 
 /* ── Sessions, tokens, approvals ─────────────────────────────────────── */
