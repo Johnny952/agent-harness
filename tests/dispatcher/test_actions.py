@@ -163,7 +163,7 @@ def test_a_finished_start_does_not_refuse_a_new_one(tmp_path):
 
 def test_a_task_not_ready_is_refused_409_and_nothing_is_written(tmp_path):
     with pytest.raises(ActionRefused) as err:
-        create(tmp_path, "start", **START, ready=lambda t: False)
+        create(tmp_path, "start", **START, ready=lambda p, t: False)
     assert err.value.status == 409 and "T-1" in err.value.reason
     assert names(tmp_path, "pending") == [] and names(tmp_path, "tmp") == []
 
@@ -171,15 +171,23 @@ def test_a_task_not_ready_is_refused_409_and_nothing_is_written(tmp_path):
 def test_ready_is_asked_only_for_start(tmp_path):
     seen = []
 
-    def ready(task_id):
-        seen.append(task_id)
+    def ready(project, task_id):
+        seen.append((project, task_id))
         return True
 
     create(tmp_path, "command_verdict", **VERDICT, ready=ready)
     create(tmp_path, "turn", **TURN, ready=ready)
     assert seen == []
     create(tmp_path, "start", **START, ready=ready)
-    assert seen == ["T-1"]
+    assert seen == [("proj", "T-1")]
+
+
+def test_the_same_task_id_in_two_projects_is_not_a_duplicate(tmp_path):
+    create(tmp_path, "start", project="a", task_id="T-1")
+    create(tmp_path, "start", project="b", task_id="T-1")
+    create(tmp_path, "command_verdict", **{**VERDICT, "project": "a"})
+    create(tmp_path, "command_verdict", **{**VERDICT, "project": "b"})
+    assert len(names(tmp_path, "pending")) == 4
 
 
 def test_kinds_carry_serial_key_and_quota(tmp_path):

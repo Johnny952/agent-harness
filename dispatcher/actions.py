@@ -327,11 +327,12 @@ def create(
     params=None,
     actor: str = "operator",
     note=None,
-    ready: Callable[[str], bool] | None = None,
+    ready: Callable[[str, str], bool] | None = None,
 ) -> dict:
     """Validate, then write a pending action; returns the record.
 
-    `ready` is the board service's check that a `start`'s task is in Ready.
+    `ready(project, task_id)` is the board service's check that a `start`'s
+    task is in that project's Ready list.
     ADR 142 decision 7 has it made while the creator holds the lock, so it is
     called here, inside `write.lock`; `None` skips it.
     """
@@ -354,11 +355,13 @@ def create(
         if kind in _ONE_PER_TASK:
             held, _ = _scan(root, (PENDING, CLAIMED))
             if any(
-                e.record.get("kind") == kind and e.record.get("task_id") == task_id
+                e.record.get("kind") == kind
+                and e.record.get("project") == project
+                and e.record.get("task_id") == task_id
                 for e in held
             ):
                 raise ActionRefused(409, f"a {kind} for task {task_id} is already queued")
-        if kind == "start" and ready is not None and not ready(task_id):
+        if kind == "start" and ready is not None and not ready(project, task_id):
             raise ActionRefused(409, f"task {task_id} is not in Ready")
         # The id is taken under the lock, so ids sort in the order creates land.
         record["id"] = new_id()
