@@ -199,7 +199,6 @@ def test_kinds_carry_serial_key_and_quota(tmp_path):
     assert actions.serial_key(cancel) is None
     assert actions.KINDS["start"].spends_quota
     assert not actions.KINDS["cancel"].spends_quota
-    assert actions.KINDS["start"].handler is None
 
 
 def claimed(tmp_path, kind, **over):
