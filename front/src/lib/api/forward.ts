@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Twelve console paths map one-to-one
- * onto twelve api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Thirteen console paths map one-to-one
+ * onto thirteen api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,13 +24,14 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose twelve routes, count and
+ * deliberately not entries of `FORWARDED`, whose thirteen routes, count and
  * rejection message describe the api alone.
  *
- * **Four method and path pairs go to the board-service** (`docs/decisions.md`
- * ADR 136): `POST /api/backlog`, `PATCH /api/tasks/<id>`,
- * `POST /api/tasks/<id>/comments` and `POST /api/tasks/<id>/accept`, onto the
- * same paths there. They are matched by method *and* path before the read-only
+ * **Six method and path pairs go to the board-service** (`docs/decisions.md`
+ * ADR 136, ADR 157): `POST /api/backlog`, `PATCH /api/tasks/<id>`,
+ * `POST /api/tasks/<id>/comments`, `POST /api/tasks/<id>/accept`, and the two
+ * action routes `POST /api/tasks/<id>/start` and `POST /api/actions/<id>/cancel`,
+ * onto the same paths there; the last two carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
  * `POST /api/tasks` is still the 405, a `GET /api/backlog` still the 404. They
@@ -45,6 +46,7 @@ import {
   CONFIG_WRITER_TOKEN,
   CONFIG_WRITER_URL,
   CONSOLE_PROJECT,
+  BOARD_ACTIONS_TOKEN,
   BOARD_SERVICE_TIMEOUT_MS,
   BOARD_SERVICE_URL,
 } from "./server-env";
@@ -78,6 +80,9 @@ const FORWARDED: Record<string, readonly string[]> = {
   // takes no parameter here and reads the hive, not a project, so nothing is
   // copied and no `?project=` is added.
   "/api/ready": [],
+  // The action queue (`docs/decisions.md` ADR 142, T-103). Hive-wide like
+  // `/api/ready`, so no `?project=` is added and none of the browser's is copied.
+  "/api/actions": ["limit"],
 };
 
 /**
@@ -125,6 +130,12 @@ const TASK_COMMENTS = /^\/api\/tasks\/([^/]+)\/comments$/;
 /** Accepting a backlog item: a `POST` to the board-service, never a read. */
 const TASK_ACCEPT = /^\/api\/tasks\/([^/]+)\/accept$/;
 
+/** Starting a task (ADR 142, ADR 157): a `POST` to the board-service, with the actions bearer. */
+const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
+
+/** Cancelling an action: a `POST` to the board-service, with the actions bearer. */
+const ACTION_CANCEL = /^\/api\/actions\/([^/]+)\/cancel$/;
+
 /** Proposing a backlog item: a `POST` to the board-service, never a read. */
 const BACKLOG = "/api/backlog";
 
@@ -157,7 +168,8 @@ const SETTINGS_KEY = /^\/api\/settings\/([^/]+)$/;
 const WRITER = "the config-writer service";
 
 type Resolution =
-  { kind: "forward"; target: string } | { kind: "reject"; status: number; error: string };
+  | { kind: "forward"; target: string; action?: "start" | "cancel" }
+  | { kind: "reject"; status: number; error: string };
 
 /**
  * The api's answer to a request the console forwards, or `null` for a request
@@ -175,7 +187,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the four exact pairs: a method
+  // Also before the read-only check, and only for the six exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -360,14 +372,36 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the four writes goes, or `null` for any
+ * Where on the board-service one of the six writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
+ * The two action routes are `POST` only and carry `action` (ADR 157).
  */
 function boardTarget(method: string, path: string): Resolution | null {
   if (method === "POST" && path === BACKLOG) {
     return { kind: "forward", target: `${BOARD_SERVICE_URL}${BACKLOG}` };
+  }
+  if (method === "POST") {
+    const start = TASK_START.exec(path);
+    const cancel = start ? null : ACTION_CANCEL.exec(path);
+    const hit = start ?? cancel;
+    if (hit) {
+      const what = start ? "task" : "action";
+      let id: string;
+      try {
+        id = decodeURIComponent(hit[1]!);
+      } catch {
+        return { kind: "reject", status: 404, error: `${path} is not a readable ${what} id.` };
+      }
+      const route = start ? "tasks" : "actions";
+      const tail = start ? "start" : "cancel";
+      return {
+        kind: "forward",
+        target: `${BOARD_SERVICE_URL}/api/${route}/${encodeURIComponent(id)}/${tail}`,
+        action: start ? "start" : "cancel",
+      };
+    }
   }
   const pattern =
     method === "PATCH"
@@ -414,8 +448,16 @@ function boardTarget(method: string, path: string): Resolution | null {
  * `MAX_BOARD_BODY_BYTES` (413), under the console's own
  * `Content-Type: application/json`. `Origin` above all: the board-service
  * refuses any request that carries one (its guard against a browser), and the
- * console's server half is not a browser. No token either: the board-service
- * takes none. No query string: the board-service refuses one.
+ * console's server half is not a browser. No query string: the board-service
+ * refuses one.
+ *
+ * The four backlog writes carry no token: the board-service takes none there.
+ * The two action routes (ADR 157, on ADR 151) carry `Authorization: Bearer
+ * BOARD_ACTIONS_TOKEN`, and after the CSRF checks above, in this order: 503 if
+ * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
+ * body may hold only `note` (else 400, `project` included: the project is the
+ * console's, set here); the upstream body is rebuilt from it. A cancel sends `{}`.
+ * The token is in no response and no log.
  */
 async function forwardBoard(request: Request, url: URL, resolved: Resolution): Promise<Response> {
   if (resolved.kind === "reject") {
@@ -441,19 +483,54 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     );
   }
 
-  const body = await readBounded(request, MAX_BOARD_BODY_BYTES);
-  if (body === null) {
+  const action = resolved.action;
+  if (action && !BOARD_ACTIONS_TOKEN) {
+    return jsonResponse(
+      {
+        error:
+          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s action routes. ` +
+          "Set it to the board-service's token and restart the console.",
+      },
+      503,
+    );
+  }
+  if (action === "start" && !CONSOLE_PROJECT) {
+    return jsonResponse(
+      {
+        error:
+          "CONSOLE_PROJECT is not set, so the console cannot say which project a start is for. " +
+          "Set it and restart the console.",
+      },
+      503,
+    );
+  }
+
+  const read = await readBounded(request, MAX_BOARD_BODY_BYTES);
+  if (read === null) {
     return jsonResponse(
       { error: `A write to ${BOARD} takes at most ${MAX_BOARD_BODY_BYTES} bytes.` },
       413,
     );
   }
 
+  let body: ArrayBuffer | string = read;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (action) {
+    headers["Authorization"] = `Bearer ${BOARD_ACTIONS_TOKEN}`;
+    if (action === "cancel") {
+      body = "{}";
+    } else {
+      const note = startNote(read);
+      if (typeof note === "object" && note !== null) return jsonResponse(note, 400);
+      body = JSON.stringify({ project: CONSOLE_PROJECT, note: note ?? null });
+    }
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch(resolved.target, {
       method: request.method,
-      headers: { "Content-Type": "application/json" },
+      headers,
       body,
       signal: AbortSignal.timeout(BOARD_SERVICE_TIMEOUT_MS),
     });
@@ -480,6 +557,38 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     status: upstream.status,
     headers: contentType ? { "content-type": contentType } : {},
   });
+}
+
+/**
+ * A start's `note` from the browser's body: a string, `null` or `undefined` for
+ * absent, or `{ error }` for a 400. Only `note` may be present; `project` is the
+ * console's (ADR 157 part 1), so a browser one is refused rather than ignored.
+ */
+function startNote(bytes: ArrayBuffer): string | null | undefined | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return { error: "A start's body must be a JSON object." };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { error: "A start's body must be a JSON object." };
+  }
+  const fields = parsed as Record<string, unknown>;
+  for (const key of Object.keys(fields)) {
+    if (key === "note") continue;
+    return {
+      error:
+        key === "project"
+          ? "A start's body may not name a project: the project is the console's."
+          : `A start's body may hold only a note, not ${JSON.stringify(key)}.`,
+    };
+  }
+  const note = fields["note"];
+  if (note !== undefined && note !== null && typeof note !== "string") {
+    return { error: "A start's note must be a string." };
+  }
+  return note;
 }
 
 /**
@@ -552,7 +661,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the twelve.
+      // `%zz` and friends. A path the console cannot read is not one of the thirteen.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -567,7 +676,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the twelve routes the console forwards.`,
+      error: `${path} is not one of the thirteen routes the console forwards.`,
     };
   }
 

@@ -26,6 +26,7 @@ vi.mock("./server-env", () => ({
   CONFIG_WRITER_TIMEOUT_MS: 5000,
   BOARD_SERVICE_URL: "http://board.test:8792",
   BOARD_SERVICE_TIMEOUT_MS: 5000,
+  BOARD_ACTIONS_TOKEN: "actions-token",
 }));
 
 const BASE = "http://api.test:8789";
@@ -96,7 +97,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/threads"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/threads is not one of the twelve routes the console forwards.",
+      error: "/api/threads is not one of the thirteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -216,6 +217,17 @@ describe("the task comments read", () => {
     const answer = await forwardApiRequest(get("/api/tasks/%zz/comments"));
     expect(answer?.status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("the action queue read", () => {
+  it("forwards /api/actions with limit only, and the api's bearer", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/actions?limit=1&project=x&foo=y"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/actions?limit=1`);
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({
+      Authorization: "Bearer test-token",
+    });
   });
 });
 
@@ -412,7 +424,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the twelve routes the console forwards.",
+      error: "/api/settingsx is not one of the thirteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -634,6 +646,215 @@ describe("the board-service writes", () => {
   });
 });
 
+/** ADR 157: start and cancel, forwarded with the actions bearer. */
+describe("the board-service action routes", () => {
+  function post(path: string, body: string, headers = {}, method = "POST"): Request {
+    return get(path, {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  function sent(fetchMock: ReturnType<typeof stubApi>): RequestInit {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return fetchMock.mock.calls[0]![1]!;
+  }
+
+  const HEADERS = { "Content-Type": "application/json", Authorization: "Bearer actions-token" };
+
+  it("forwards a start with the bearer and the console's project", async () => {
+    const fetchMock = stubApi('{"id":"A-1"}', 201);
+    const answer = await forwardApiRequest(post("/api/tasks/T-014/start", '{"note":"go"}'));
+    expect(answer?.status).toBe(201);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/T-014/start`);
+    const init = sent(fetchMock);
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual(HEADERS);
+    expect(init.body).toBe('{"project":"ia-harness","note":"go"}');
+  });
+
+  it("sends a null note for an empty object or a null note", async () => {
+    for (const body of ["{}", '{"note":null}']) {
+      const fetchMock = stubApi();
+      await forwardApiRequest(post("/api/tasks/T-014/start", body));
+      expect(sent(fetchMock).body).toBe('{"project":"ia-harness","note":null}');
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("forwards a cancel with the bearer and an empty object, whatever the browser sent", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post("/api/actions/A-1/cancel", '{"x":1}'));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/actions/A-1/cancel`);
+    const init = sent(fetchMock);
+    expect(init.headers).toEqual(HEADERS);
+    expect(init.body).toBe("{}");
+  });
+
+  it("re-encodes an id and 404s one it cannot read, on both", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post("/api/tasks/..%2fx/start", "{}"));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/..%2Fx/start`);
+    vi.restoreAllMocks();
+    const second = stubApi();
+    await forwardApiRequest(post("/api/actions/..%2fx/cancel", "{}"));
+    expect(target(second)).toBe(`${BOARD}/api/actions/..%2Fx/cancel`);
+    vi.restoreAllMocks();
+    const none = stubApi();
+    expect((await forwardApiRequest(post("/api/tasks/%zz/start", "{}")))?.status).toBe(404);
+    expect((await forwardApiRequest(post("/api/actions/%zz/cancel", "{}")))?.status).toBe(404);
+    expect(none).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '{"project":"other"}',
+    '{"note":"a","x":1}',
+    '{"note":5}',
+    "[]",
+    '"x"',
+    "null",
+    "not json",
+    "",
+  ])("400s a start body of %j, sending nothing", async (body) => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(post("/api/tasks/T-014/start", body));
+    expect(answer?.status).toBe(400);
+    expect(typeof (await answer!.json()).error).toBe("string");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still answers the CSRF refusals first", async () => {
+    const fetchMock = stubApi();
+    const type = await forwardApiRequest(
+      post("/api/tasks/T-014/start", "{}", { "content-type": "text/plain" }),
+    );
+    expect(type?.status).toBe(415);
+    const site = await forwardApiRequest(
+      post("/api/actions/A-1/cancel", "{}", { "sec-fetch-site": "cross-site" }),
+    );
+    expect(site?.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves every other method on these paths as it was", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/tasks/T-014/start")))?.status).toBe(404);
+    expect((await forwardApiRequest(get("/api/actions/A-1/cancel")))?.status).toBe(404);
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      const start = await forwardApiRequest(post("/api/tasks/T-014/start", "{}", {}, method));
+      const cancel = await forwardApiRequest(post("/api/actions/A-1/cancel", "{}", {}, method));
+      expect([start?.status, cancel?.status]).toEqual([405, 405]);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("gives the four backlog writes no Authorization", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post("/api/tasks/T-014/accept", "{}"));
+    expect(sent(fetchMock).headers).toEqual({ "Content-Type": "application/json" });
+  });
+
+  it("passes a 401 back with its body but without WWW-Authenticate", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response('{"error":"bad token"}', {
+          status: 401,
+          headers: { "content-type": "application/json", "www-authenticate": "Bearer" },
+        }),
+    );
+    const answer = await forwardApiRequest(post("/api/actions/A-1/cancel", "{}"));
+    expect(answer?.status).toBe(401);
+    expect(await answer?.text()).toBe('{"error":"bad token"}');
+    expect(answer?.headers.has("www-authenticate")).toBe(false);
+  });
+
+  it("puts the token in no response", async () => {
+    const answers: Response[] = [];
+    stubApi('{"id":"A-1"}', 201);
+    answers.push((await forwardApiRequest(post("/api/tasks/T-014/start", "{}")))!);
+    answers.push((await forwardApiRequest(post("/api/tasks/T-014/start", "[]")))!);
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    answers.push((await forwardApiRequest(post("/api/actions/A-1/cancel", "{}")))!);
+    expect(answers.map((a) => a.status)).toEqual([201, 400, 502]);
+    for (const answer of answers) {
+      for (const [, value] of answer.headers) expect(value).not.toContain("actions-token");
+      expect(await answer.text()).not.toContain("actions-token");
+    }
+  });
+});
+
+/** ADR 157's two 503s, each under a second mock of `server-env.ts`. */
+describe("the action routes without their configuration", () => {
+  async function configured(overrides: Record<string, unknown>) {
+    vi.resetModules();
+    vi.doMock("./server-env", () => ({
+      API_BASE_URL: "http://api.test:8789",
+      API_TOKEN: "test-token",
+      CONSOLE_PROJECT: "ia-harness",
+      API_TIMEOUT_MS: 5000,
+      CONFIG_WRITER_URL: "http://writer.test:8791",
+      CONFIG_WRITER_TOKEN: "writer-token",
+      CONFIG_WRITER_TIMEOUT_MS: 5000,
+      BOARD_SERVICE_URL: "http://board.test:8792",
+      BOARD_SERVICE_TIMEOUT_MS: 5000,
+      BOARD_ACTIONS_TOKEN: "actions-token",
+      ...overrides,
+    }));
+    const forward = await import("./forward");
+    vi.doUnmock("./server-env");
+    return forward.forwardApiRequest;
+  }
+
+  function post(path: string, headers = {}): Request {
+    return get(path, {
+      method: "POST",
+      body: "{}",
+      headers: { "content-type": "application/json", ...headers },
+    });
+  }
+
+  it("503s start and cancel naming BOARD_ACTIONS_TOKEN, sending nothing", async () => {
+    const forward = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    for (const path of ["/api/tasks/T-014/start", "/api/actions/A-1/cancel"]) {
+      const answer = await forward(post(path));
+      expect(answer?.status).toBe(503);
+      expect(answer?.headers.get("content-type")).toBe("application/json");
+      expect((await answer!.json()).error).toContain("BOARD_ACTIONS_TOKEN is not set");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still 415s before the token, and still forwards the backlog writes", async () => {
+    const forward = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    const answer = await forward(post("/api/tasks/T-014/start", { "content-type": "text/plain" }));
+    expect(answer?.status).toBe(415);
+    expect((await forward(post("/api/tasks/T-014/accept")))?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/T-014/accept`);
+  });
+
+  it("503s a start without CONSOLE_PROJECT, but still forwards a cancel", async () => {
+    const forward = await configured({ CONSOLE_PROJECT: null });
+    const fetchMock = stubApi();
+    const answer = await forward(post("/api/tasks/T-014/start"));
+    expect(answer?.status).toBe(503);
+    expect((await answer!.json()).error).toContain("CONSOLE_PROJECT is not set");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await forward(post("/api/actions/A-1/cancel")))?.status).toBe(200);
+    expect(fetchMock.mock.calls[0]![1]!.body).toBe("{}");
+  });
+});
+
 /**
  * `CONFIG_WRITER_TOKEN` unset. The value is read when `server-env.ts` is imported,
  * so the module graph is reset and re-imported under a second mock rather than
@@ -652,6 +873,7 @@ describe("the settings forward without CONFIG_WRITER_TOKEN", () => {
       CONFIG_WRITER_TIMEOUT_MS: 5000,
       BOARD_SERVICE_URL: "http://board.test:8792",
       BOARD_SERVICE_TIMEOUT_MS: 5000,
+      BOARD_ACTIONS_TOKEN: "actions-token",
     }));
     const forward = await import("./forward");
     vi.doUnmock("./server-env");
