@@ -52,6 +52,7 @@ already a row here.
 | `T-037-D1` | **Resolved 2026-10-13 by T-037.** `docs/README.md` *Docs* had no row for `docs/plans/backlog.md`, and its root `README.md` row still said "the prioritized work. Long." Introduced | A role reading `docs/README.md` *Docs* to find open work no plan covers, or a task adding a doc under `docs/plans/` | One row for the backlog and one clause on the `README.md` row in `docs/README.md` *Docs*, taken by T-037's auditor. Detail: [T-037-D1](T-037-D1.md) | none | none |
 | `T-039-D1` | **Resolved 2026-10-14 by T-039.** `docs/README.md` called all of `docs/superpowers/` vendored and not to be edited, which is wrong for the project's own design spec and plans, and said the pointers gate greps it. Found | A task that edits a file under `docs/superpowers/`, or a phase applying the `docs/README.md` rule about that directory to another phase's diff | Narrow the sentence to say the files are this project's records, edited only where a task names one, and outside the pointers gate (`docs/decisions.md` ADR 38), taken by T-039's auditor. Detail: [T-039-D1](T-039-D1.md) | none | none |
 | `T-065-D1` | `tests/dispatcher/test_parallel_queue.py` `test_a_whole_repo_task_writes_alone` asserts that two `ScheduledCycle(hold=0.1)` windows do not overlap, so it rests on sleep timing and fails a full `python3 -m pytest` intermittently (`assert 5 < 2`). Found | A task whose pytest gate fails on that test with `assert 5 < 2` on a diff with no `dispatcher/` change, or a task editing `tests/dispatcher/test_parallel_queue.py` or the scheduler it drives | Make the test wait on the scheduled cycles' own events (an event or barrier each fake cycle sets) instead of relying on `hold` timing; until then follow `docs/learnings/the-whole-repo-writes-alone-test-flakes-under-load.md`. Detail: [T-065-D1](T-065-D1.md) | none | cost |
+| `T-100-D1` | The `handler` slot of `actions.Kind` stays `None` for every kind in `actions.KINDS` and nothing reads it: the worker's handlers live in `worker.HANDLERS` (`docs/decisions.md` ADR 148, decision 1). Introduced | A task adding a worker handler for a new action kind, or editing `actions.Kind` or `actions.KINDS` | Remove `Kind.handler` and reword ADR 142 decision 6 through a superseding ADR, so `worker.HANDLERS` is the one registry; ADR 148 is why it is there now. Detail: [T-100-D1](T-100-D1.md) | none | cosmetic |
 
 `card` is `none` on every row because no card exists to point at. That was
 first an accident of configuration — this harness never had a board set, so
@@ -382,3 +383,8 @@ T-065's implementador declared one entry, `found`: the timing-flaky
 `test_a_whole_repo_task_writes_alone`, already a learning since T-061/T-062.
 The revisor accepted it and it is filed open as `T-065-D1`; `dispatcher/` was
 outside the task's surface.
+
+T-100 resolved no earlier row. Its arquitecto and implementador declared one
+debt, `introduced`: the unused `Kind.handler` slot. The revisor accepted it and
+it is filed open as `T-100-D1`, impact `cosmetic`: ADR 148 already says where
+handlers go.

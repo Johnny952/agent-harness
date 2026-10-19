@@ -5,7 +5,7 @@
 as failed or skipped in a phase where `id -u` prints 0.
 
 **Status:** unconfirmed — reported by T-097's implementador (shared inbox),
-carried by T-099.
+carried by T-099 and T-100.
 
 ## Symptom
 
