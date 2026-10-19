@@ -2338,3 +2338,30 @@ def test_head_commit_is_none_on_a_git_error(monkeypatch) -> None:
     monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], lambda args: (128, "", "fatal\n")))
 
     assert docker_exec_mod.head_commit(_CONTAINER, _PROJECT) is None
+
+
+def test_turn_command_builds_the_read_only_streamed_argv() -> None:
+    command = docker_exec_mod.turn_command(
+        "hi", resume_session_id="s-1", model="opus", effort="low",
+        permission_mode="dontAsk", allowed_tools=["Read", "Bash(ls*)"],
+        disallowed_tools=["Write", "Edit"], timeout_seconds=60,
+    )
+    assert command[:4] == docker_exec_mod.TURN_PID_WRAPPER
+    rest = command[4:]
+    assert rest[:3] == ["timeout", "--kill-after=30", "60"]
+    assert rest[rest.index("--resume") + 1] == "s-1"
+    assert rest[rest.index("--allowed-tools") + 1:rest.index("--disallowed-tools")] == [
+        "Read", "Bash(ls*)"]
+    assert rest[-5:] == ["--output-format", "stream-json", "--verbose", "--", "hi"]
+    assert "-p" in rest[:-2]
+
+
+def test_turn_command_keeps_a_dash_leading_message_after_the_end_of_options() -> None:
+    text = "--dangerously-skip-permissions"
+    command = docker_exec_mod.turn_command(
+        text, resume_session_id=None, model="opus", effort="low",
+        permission_mode="dontAsk", allowed_tools=["Read"],
+        disallowed_tools=["Write"], timeout_seconds=60,
+    )
+    assert command[-2:] == ["--", text]
+    assert command.count(text) == 1

@@ -5,7 +5,8 @@ One worker at a time (a `flock` on `actions/worker.lock`), one pass every
 `POLL_SECONDS`. A `cancel` runs at once on the loop thread; a `start` or a
 `command_verdict` is claimed when its project is free and an account is open
 and runs in its own thread. The handlers are in `HANDLERS`, not in
-`actions.KINDS` (ADR 148, 1). `turn` has none yet: it stays pending, untouched.
+`actions.KINDS` (ADR 148, 1). A `turn` runs a streamed `claude -p` in a thread's
+container and logs it (ADR 173).
 Stdlib only.
 """
 
@@ -22,8 +23,11 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
-from dispatcher import actions, command_run, context_transfer, tasks
+from dispatcher import (
+    actions, command_run, context_transfer, docker_exec, state_machine, tasks, threads,
+)
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
 from dispatcher.config import Config
@@ -39,6 +43,16 @@ VERDICT_NOT_CANCELLABLE = (
     "a running command_verdict cannot be cancelled: its verdict is recorded "
     "before the command runs (ADR 119)"
 )
+# A conversation turn (ADR 173). The thread writes no code: dontAsk denies what
+# no rule allows, and the three writers are denied outright.
+TURN_TIMEOUT_SECONDS = 1800
+TURN_PERMISSION_MODE = "dontAsk"
+TURN_ALLOWED_TOOLS = (
+    "Read", "Glob", "Grep", "Bash(ls*)", "Bash(pwd)", "Bash(wc*)",
+    "Bash(git status*)", "Bash(git branch --list*)", "Bash(git rev-parse*)",
+)
+TURN_DISALLOWED_TOOLS = ("Write", "Edit", "NotebookEdit")
+TURN_STOPPED_ERROR = "the worker stopped during the turn"
 
 
 class WorkerLocked(Exception):
@@ -79,6 +93,8 @@ class Running:
     action_id: str
     thread: threading.Thread | None
     cancelled: threading.Event
+    #: Set by a `turn` handler once it has the pid; stops the process.
+    kill: Callable[[], None] | None = None
 
 
 class Worker:
@@ -114,7 +130,25 @@ class Worker:
         done = actions.recover(self.state_dir)
         for aid, what in done:
             logger.info("worker: recovered %s: %s", aid, what)
+            if what == "interrupted":
+                self._close_interrupted_turn(aid)
         return done
+
+    def _close_interrupted_turn(self, aid: str) -> None:
+        """A turn that died with its worker has a `turn_start` and no
+        `turn_end`: write it (ADR 173, 4)."""
+        path = actions.actions_dir(self.state_dir) / actions.DONE / f"{aid}.json"
+        try:
+            record = actions._load(path)
+            if record.get("kind") != "turn" or not record.get("started_at"):
+                return
+            threads.append_conversation(
+                self.cfg.hive_tasks_dir, record["params"]["thread"],
+                _harness_line("turn_end", action=aid, status="interrupted",
+                              error=record.get("error"), session_id=None),
+            )
+        except (OSError, ValueError, KeyError, threads.ThreadRefused):
+            logger.exception("worker: could not close the log of turn %s", aid)
 
     def stop(self) -> None:
         self.stopping.set()
@@ -134,6 +168,10 @@ class Worker:
             self.beat()
             self.tick()
             self.stopping.wait(interval)
+        with self._lock:
+            kills = [r.kill for r in self.running.values() if r.kill]
+        for kill in kills:  # a turn has no boundary to hold at (ADR 173, 8)
+            kill()
         self.join()
 
     # ---- one pass -----------------------------------------------------------
@@ -168,9 +206,10 @@ class Worker:
         with self._lock:
             busy = key is not None and key in self.running
         if busy:
-            self._wait(record, "project")
+            self._wait(record, "thread" if kind == "turn" else "project")
             return
-        if actions.KINDS[kind].spends_quota and not self._account_open():
+        # A turn is held to its own thread's account by the handler (ADR 173, 5).
+        if kind != "turn" and actions.KINDS[kind].spends_quota and not self._account_open():
             self._wait(record, "account")
             return
         claimed = actions.claim(self.state_dir, aid)
@@ -331,8 +370,10 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
             entry = next(
                 (r for r in worker.running.values() if r.action_id == target), None
             )
-        if tgt.get("kind") == "start" and entry is not None:
+        if tgt.get("kind") in ("start", "turn") and entry is not None:
             entry.cancelled.set()
+            if entry.kill is not None:
+                entry.kill()
             end("done", target=target, target_status="running")
         elif tgt.get("kind") == "command_verdict":
             end("failed", f"target {target}: {VERDICT_NOT_CANCELLABLE}")
@@ -347,7 +388,128 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
         end("failed", f"target {target} already finished as {tgt.get('status')}")
 
 
-HANDLERS = {"start": _start, "cancel": _cancel, "command_verdict": _command_verdict}
+def _harness_line(event: str, **fields) -> dict:
+    return {"type": "ia_harness", "event": event, "at": _utc_now().isoformat(), **fields}
+
+
+def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
+    """One conversation turn (ADR 173): a streamed `claude -p` on the thread's
+    own account, no code written, every line of it appended to the thread's log
+    as it is read."""
+    cfg, sd, aid = worker.cfg, worker.state_dir, record["id"]
+    thread_id, text = record["params"]["thread"], record["params"]["text"]
+
+    def refuse(reason: str) -> None:
+        actions.finish(sd, aid, "failed", error=_one_line(reason))
+
+    try:
+        thread = threads.read_thread(cfg.hive_tasks_dir, thread_id)
+    except threads.ThreadRefused as exc:
+        refuse(str(exc))
+        return
+    if thread.get("status") == "archived":
+        refuse(f"thread {thread_id} is archived")
+        return
+    account = next((a for a in cfg.accounts if a.name == thread.get("account")), None)
+    if account is None:
+        refuse(f"thread {thread_id} names account {thread.get('account')!r}, which is not configured")
+        return
+    state = state_machine.get_state(sd, account.name)
+    if state in state_machine.PARKED_STATES:
+        refuse(f"account {account.name} is {state.value}; move the thread to another account")
+        return
+    segment = thread["segments"][-1]
+    resumed = segment.get("session_id")
+    project = thread.get("project")
+    workdir = os.path.join(cfg.projects_root, project) if project else cfg.projects_root
+    command = docker_exec.turn_command(
+        text, resume_session_id=resumed, model=thread["model"], effort=thread["effort"],
+        permission_mode=TURN_PERMISSION_MODE, allowed_tools=TURN_ALLOWED_TOOLS,
+        disallowed_tools=TURN_DISALLOWED_TOOLS, timeout_seconds=TURN_TIMEOUT_SECONDS,
+    )
+
+    def log(line) -> None:
+        threads.append_conversation(cfg.hive_tasks_dir, thread_id, line)
+
+    record["started_at"] = _utc_now().isoformat()
+    actions.rewrite(sd, record)
+    log(_harness_line(
+        "turn_start", action=aid, actor=record.get("actor"), text=text,
+        account=account.name, model=thread["model"], effort=thread["effort"],
+        session_id=resumed,
+    ))
+    with worker._lock:
+        entry = next((r for r in worker.running.values() if r.action_id == aid), None)
+
+    status, error, result, session = "failed", None, None, None
+    try:
+        proc = docker_exec.open_docker_exec(account.container, workdir, command)
+        try:
+            first = True
+            for raw in proc.stdout:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                if first:
+                    first = False
+                    if raw.isdigit():
+                        pid = int(raw)
+                        if entry is not None:
+                            entry.kill = lambda: docker_exec.kill_in_container(
+                                account.container, pid)
+                            if cancelled.is_set() or worker.stopping.is_set():
+                                entry.kill()
+                        continue
+                try:
+                    event = json.loads(raw)
+                except ValueError:
+                    event = None
+                if not isinstance(event, dict):
+                    log(_harness_line("unparsed", line=raw))
+                    continue
+                log(raw)
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    session = event.get("session_id") or session
+                elif event.get("type") == "result":
+                    result = event
+            proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if cancelled.is_set():
+            status = "cancelled"
+        elif worker.stopping.is_set() and result is None:
+            status, error = "interrupted", TURN_STOPPED_ERROR
+        elif result is not None and not result.get("is_error"):
+            status = "done"
+        else:
+            if result is not None:
+                error = f"{result.get('subtype')}: {result.get('result')}"
+            else:
+                proc.stderr.seek(0)
+                error = f"claude exited {proc.returncode} with no result: {proc.stderr.read()[-500:]}"
+    except Exception as exc:
+        logger.exception("worker: turn %s raised", aid)
+        error = f"{type(exc).__name__}: {exc}"
+    error = _one_line(error) if error else None
+    if session and session != resumed:
+        try:
+            threads.update(cfg.hive_tasks_dir, cfg, thread_id, session_id=session)
+        except threads.ThreadRefused:
+            logger.exception("worker: could not record the session of %s", thread_id)
+    log(_harness_line("turn_end", action=aid, status=status, error=error,
+                      session_id=session or resumed))
+    summary = None
+    if status == "done":
+        summary = {k: result.get(k) for k in
+                   ("session_id", "total_cost_usd", "usage", "num_turns")}
+    actions.finish(sd, aid, status, result=summary, error=error)
+
+
+HANDLERS = {
+    "start": _start, "cancel": _cancel, "command_verdict": _command_verdict, "turn": _turn,
+}
 
 
 # ---- the verb ---------------------------------------------------------------

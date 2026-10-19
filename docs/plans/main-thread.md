@@ -8,8 +8,14 @@ supersedes: []
 # Main thread — the conversation lives in the console, on an account the person assigns
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built
+<<<<<<< HEAD
 as a whole; step 1 is built: the thread records and the model list by T-109
 (2026-10-19), the primary override the same day (ADR 176).
+=======
+as a whole; step 1 is built by T-109 (2026-10-19), narrowed to the thread
+records and the model list, the primary override pending; step 2 is built by
+T-110 (2026-10-19, ADR 173).
+>>>>>>> agent/task/T-110
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -253,7 +259,9 @@ and worker.
    reads it on each pick, so a change needs no restart; an override naming
    no configured account falls back to `config.yaml`'s with a warning.
 2. The worker's `turn` action and the stream written to
-   `conversations/*.jsonl`. It shares board Phase 5's transport.
+   `conversations/*.jsonl`. It shares board Phase 5's transport. Built by
+   T-110 (2026-10-19): `worker.HANDLERS["turn"]`, read-only by flags, the log
+   between `turn_start` and `turn_end` lines (ADR 173).
 3. The api routes `GET /api/threads` and `GET /api/threads/<id>/events`.
    `GET /api/threads` is built (2026-10-19, ADR 177): every record, the main
    thread first and then by `created`, archived ones with their status.

@@ -6,6 +6,7 @@ import logging
 import re
 import shlex
 import subprocess
+import tempfile
 from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
@@ -25,11 +26,39 @@ def run_docker_exec(
     env: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        _docker_exec_argv(container, workdir, command, env),
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _docker_exec_argv(
+    container: str, workdir: str, command: list[str], env: dict[str, str] | None = None,
+) -> list[str]:
     full_command = ["docker", "exec", "-w", workdir]
     for key, value in (env or {}).items():
         full_command += ["-e", f"{key}={value}"]
-    full_command += [container, *command]
-    return subprocess.run(full_command, capture_output=True, text=True, timeout=timeout)
+    return [*full_command, container, *command]
+
+
+def open_docker_exec(container: str, workdir: str, command: list[str]) -> subprocess.Popen:
+    """`run_docker_exec`'s argv, started and not waited for: stdout is a pipe
+    the caller reads line by line, stderr goes to a temporary file (read it
+    from `proc.stderr` after `wait()`), so neither pipe can fill and block."""
+    return subprocess.Popen(
+        _docker_exec_argv(container, workdir, command),
+        stdout=subprocess.PIPE, stderr=tempfile.TemporaryFile(mode="w+"),
+        text=True, bufsize=1,
+    )
+
+
+def kill_in_container(container: str, pid: int) -> None:
+    """SIGTERM a process inside the container (killing the host `docker exec`
+    client does not stop it). Best effort: it may already have exited."""
+    try:
+        run_docker_exec(container, "/", ["kill", "-TERM", str(pid)], timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("could not signal pid %s in %s", pid, container)
 
 
 def _output_tail(proc: subprocess.CompletedProcess, limit: int = 500) -> str:
@@ -171,6 +200,43 @@ def exec_claude(
         return ClaudeResult(session_id=None, result_text=diagnostic, raw={})
 
     return ClaudeResult(session_id=parsed.get("session_id"), result_text=parsed.get("result") or "", raw=parsed)
+
+
+#: The first line a turn prints is the pid of the in-container `timeout` (the
+#: `sh` prints it and `exec`s the rest), which is what `kill_in_container` needs.
+TURN_PID_WRAPPER = ["sh", "-c", 'echo "$$"; exec "$@"', "ia-harness-turn"]
+
+
+def turn_command(
+    prompt: str,
+    *,
+    resume_session_id: str | None,
+    model: str,
+    effort: str,
+    permission_mode: str,
+    allowed_tools: Sequence[str],
+    disallowed_tools: Sequence[str],
+    timeout_seconds: int,
+) -> list[str]:
+    """The argv of one conversation turn (docs/decisions.md ADR 173, 3): a
+    streamed `claude -p`, no-code by flags. Every flag is restated on a
+    `--resume`; nothing is inherited from the session."""
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    command = ["claude"]
+    if resume_session_id:
+        command += ["--resume", resume_session_id]
+    command += ["--model", model, "--effort", effort]
+    command += ["--permission-mode", permission_mode, "--permission-prompts", "none"]
+    # Variadic like exec_claude's lists: they sit ahead of `-p`.
+    command += ["--allowed-tools", *allowed_tools]
+    command += ["--disallowed-tools", *disallowed_tools]
+    # The person's text goes last, after `--`, so a message that starts with
+    # `-` is a prompt and never a flag that could lift the no-code set.
+    command += ["-p", "--output-format", "stream-json", "--verbose", "--", prompt]
+    return [
+        *TURN_PID_WRAPPER, "timeout", "--kill-after=30", str(timeout_seconds), *command,
+    ]
 
 
 # git translates its messages, and the tolerated-error checks below match the
