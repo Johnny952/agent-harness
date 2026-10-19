@@ -548,7 +548,7 @@ def test_compose_passes_a_quoted_bcrypt_hash_through_intact(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
-@pytest.mark.parametrize("variable", ["CONSOLE_PROJECT"])
+@pytest.mark.parametrize("variable", ["CONSOLE_PROJECT", "BOARD_ACTIONS_TOKEN"])
 def test_an_optional_variable_carries_an_empty_default(
     compose_file: str, variable: str
 ) -> None:
@@ -954,18 +954,72 @@ def test_no_agent_or_sidecar_joins_console_net() -> None:
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
 def test_the_board_service_writes_only_the_hive_and_mounts_no_socket(compose_file: str) -> None:
     """Step 5 writes the hive (ADR 129), locks/ included; config.yaml and
-    config.d stay `:ro`; no socket, no .data, no projects, no credentials."""
+    config.d stay `:ro`; the one state mount is the actions queue (ADR 142
+    decision 3, ADR 166), never the whole state dir; no socket, no .data, no
+    projects, no credentials. The only variable is the optional actions token."""
     board = _load(compose_file)["services"]["board-service"]
 
     assert board["volumes"] == [
         "../../.hive:/data/.hive",
         "../../config.yaml:/app/config.yaml:ro",
         "../../config.d:/app/config.d:ro",
+        "../../dispatcher_state/actions:/state/actions",
     ]
+    assert "/state" not in [v.split(":")[1] for v in board["volumes"]]
     assert "docker.sock" not in yaml.safe_dump(board)
     assert board["build"] == {"context": "../..", "dockerfile": "board_service/Dockerfile"}
     assert "profiles" not in board
-    assert "environment" not in board
+    assert _environment(board) == {"BOARD_ACTIONS_TOKEN": "${BOARD_ACTIONS_TOKEN:-}"}
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_only_the_worker_and_the_dispatcher_mount_the_docker_socket(
+    compose_file: str,
+) -> None:
+    services = _load(compose_file)["services"]
+
+    assert {
+        name for name, s in services.items() if "docker.sock" in yaml.safe_dump(s)
+    } == {"worker", "dispatcher"}
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_worker_is_the_dispatchers_mounts_behind_its_own_profile(
+    compose_file: str,
+) -> None:
+    """ADR 142 decision 1, ADR 166: the long-running twin of the dispatcher."""
+    services = _load(compose_file)["services"]
+    worker, dispatcher = services["worker"], services["dispatcher"]
+
+    assert worker["profiles"] == ["worker"]
+    assert worker["restart"] == "unless-stopped"
+    assert worker["command"] == ["--config", "/app/config.yaml", "worker"]
+    assert worker["networks"] == ["ia_harness_net"]
+    assert "ports" not in worker
+    assert worker["volumes"] == dispatcher["volumes"]
+    assert worker["depends_on"] == dispatcher["depends_on"]
+    assert worker["build"] == dispatcher["build"]
+    assert _environment(worker) == _environment(dispatcher)
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_the_actions_token_reaches_only_the_board_service_and_the_console(
+    deployment: str,
+) -> None:
+    services = _deployment_services(deployment)
+
+    holders = {
+        name
+        for name, service in services.items()
+        if "BOARD_ACTIONS_TOKEN" in _variables_read_by(service)
+    }
+    assert holders == {"board-service", "console"}
+
+
+def test_configure_writes_the_actions_token() -> None:
+    text = (CADDYFILE.parent.parent.parent / "scripts" / "configure.sh").read_text()
+
+    assert 'echo "BOARD_ACTIONS_TOKEN=$(gen_token)"' in text
 
 
 @pytest.mark.parametrize("compose_file", BOTH_FILES)

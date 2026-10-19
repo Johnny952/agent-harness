@@ -9543,3 +9543,52 @@ any other verb from the console.
 - Keying the screen `["actions"]`: a start's invalidation would miss it.
 - `alert-dialog.tsx`: its action closes before the write settles, so the
   in-flight state could not be shown.
+
+## ADR 166 — The `worker` compose service copies the dispatcher's mounts, the board service mounts `actions` alone, and `BOARD_ACTIONS_TOKEN` is optional
+
+**Status:** accepted (T-108, 2026-10-19). Step 5 of ADR 142's split, in
+`docker/compose/docker-compose.yml` and `docker/compose/docker-compose.coolify.yml`.
+Narrows ADR 142 decisions 1, 3 and 8; supersedes nothing.
+
+**Context.** ADR 142 named the `worker` service, the board service's one
+new mount and the bearer its action routes check (ADR 151, ADR 157), and
+left their compose spelling to this step. Two spellings are choices a later
+edit could undo without knowing they were made: how the worker's mounts
+relate to the `dispatcher` service's, and whether `BOARD_ACTIONS_TOKEN` is
+required like `CONFIG_WRITER_TOKEN` or optional like `CONSOLE_PROJECT`.
+
+**Decision.**
+1. *The worker's volumes equal the dispatcher's, entry for entry*, in both
+   files, and its `depends_on` and (empty) environment are the
+   dispatcher's too. It differs in `profiles: ["worker"]`,
+   `restart: unless-stopped` and a real `command`,
+   `["--config", "/app/config.yaml", "worker"]`. It sits after `dispatcher`
+   in the Coolify file, above the agent pairs, so `render_coolify_compose`
+   copies it verbatim. The docker socket is mounted by `worker` and
+   `dispatcher` and no other service.
+2. *The board service mounts `../../dispatcher_state/actions:/state/actions`,
+   read-write*, beside its three existing mounts and never the whole
+   `dispatcher_state`: `/state` is `state_dir` in `config.example.yaml`, so
+   `<state_dir>/actions` resolves inside the container with no config key.
+   The host directory does not exist until the first `up`; docker creates
+   it as root, which both services run as, so no step makes it beforehand.
+3. *`BOARD_ACTIONS_TOKEN` is spelt `${BOARD_ACTIONS_TOKEN:-}`* on
+   `board-service` and `console` and reaches no other service. Both start
+   without it and answer 503 on the action routes only, so an unset token
+   is a stack with no Start or Cancel, not one that fails to boot; the bare
+   form would make compose warn on every command for a feature the operator
+   may not have opted into (the `worker` profile is opt-in as well).
+   `scripts/configure.sh` generates it with `gen_token` beside
+   `CONFIG_WRITER_TOKEN`.
+
+**Consequences.**
+- A mount added to `dispatcher` must be added to `worker`;
+  `tests/integration/test_compose_invariants.py` fails until it is.
+- An `.env` written before this ADR has no token: the console's Start and
+  Cancel answer 503 until it is added and both services restart.
+
+**Ruled out.**
+- The bare `${BOARD_ACTIONS_TOKEN}`: neither holder refuses to start without
+  it, so compose's warning would be one the operator learns to ignore.
+- Creating `dispatcher_state/actions` from `scripts/configure.sh`: docker
+  makes it on first mount, owned by the root both services run as.

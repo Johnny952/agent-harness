@@ -95,8 +95,8 @@ services:
 
   # The console (`front/`, docs/decisions.md ADR 15, ADR 24 and ADR 97): built
   # for Node by docker/console/Dockerfile. It reads only through the api, so it
-  # has no volume and no docker socket, and it holds API_TOKEN and
-  # CONFIG_WRITER_TOKEN: never COLLECTOR_READ_TOKEN or a write token. It is on
+  # has no volume and no docker socket, and it holds API_TOKEN,
+  # CONFIG_WRITER_TOKEN and BOARD_ACTIONS_TOKEN: never COLLECTOR_READ_TOKEN or a write token. It is on
   # console_net only (ADR 109), so no agent container can call it.
   #
   # API_TOKEN is bare `${API_TOKEN}`: the console refuses to boot without it, so
@@ -120,6 +120,8 @@ services:
       # The token is bare like API_TOKEN (ADR 109 part 4).
       - CONFIG_WRITER_URL=http://config-writer:8791
       - CONFIG_WRITER_TOKEN=${CONFIG_WRITER_TOKEN}
+      # The queue's Start and Cancel (ADR 157). Optional: 503 without it.
+      - BOARD_ACTIONS_TOKEN=${BOARD_ACTIONS_TOKEN:-}
     depends_on:
       - api
     networks:
@@ -154,6 +156,10 @@ services:
   # for the phases (step 7) and on console_net for the console's writes
   # (step 5). It publishes loopback only, for the operator's Claude Code
   # session on the host.
+  #
+  # The one state mount is `actions` (ADR 142 decision 3, ADR 166), the queue
+  # the worker drains; never the whole state dir. BOARD_ACTIONS_TOKEN gates the
+  # action routes and is optional: they answer 503 without it (ADR 157).
   board-service:
     build:
       context: ../..
@@ -165,6 +171,9 @@ services:
       - ../../.hive:/data/.hive
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
+      - ../../dispatcher_state/actions:/state/actions
+    environment:
+      - BOARD_ACTIONS_TOKEN=${BOARD_ACTIONS_TOKEN:-}
     networks:
       - ia_harness_net
       - console_net
@@ -254,6 +263,32 @@ services:
       # The writer's overrides, read-only here (docs/decisions.md ADR 75): the
       # directory, not the file, because the writer swaps the file with a
       # rename. configure.sh creates it so docker does not make it root-owned.
+      - ../../config.d:/app/config.d:ro
+    depends_on:
+      - collector
+    networks:
+      - ia_harness_net
+
+  # The worker (docs/decisions.md ADR 142 decision 1 and ADR 166): the one
+  # long-running service with the docker socket. `dispatch worker` drains
+  # <state_dir>/actions/, the queue the board service writes (ADR 142, ADR 148),
+  # so the console's Start and Cancel only happen while it runs. Behind the
+  # `worker` profile: `docker compose --profile worker up -d worker`. Its mounts
+  # are the dispatcher's, copied, and must stay equal to them.
+  worker:
+    profiles: ["worker"]
+    build:
+      context: ../..
+      dockerfile: docker/dispatcher/Dockerfile
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "worker"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../dispatcher_state:/state
+      - ../../.hive:/data/.hive
+      - claude_shared:/root/.claude
+      - ../../.data/credentials/projects:/run/secrets/projects
+      - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
     depends_on:
       - collector

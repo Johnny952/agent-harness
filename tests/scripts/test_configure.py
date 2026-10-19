@@ -114,7 +114,8 @@ def _assert_tokens(env: dict[str, str], names: list[str]) -> None:
     agent-<name> to exactly that value, every entry spelt out literally."""
     keys = {f"COLLECTOR_WRITE_TOKEN_{name.upper().replace('-', '_')}" for name in names}
     assert {key for key in env if key.startswith("COLLECTOR_WRITE_TOKEN_")} == keys
-    for key in keys | {"API_TOKEN", "COLLECTOR_READ_TOKEN", "CONFIG_WRITER_TOKEN"}:
+    singles = {"API_TOKEN", "COLLECTOR_READ_TOKEN", "CONFIG_WRITER_TOKEN", "BOARD_ACTIONS_TOKEN"}
+    for key in keys | singles:
         ok = bool(TOKEN.fullmatch(env[key]))
         assert ok, f"{key} is not 64 hex characters"
 
@@ -126,7 +127,7 @@ def _assert_tokens(env: dict[str, str], names: list[str]) -> None:
         assert ok, f"COLLECTOR_WRITE_TOKENS binds {source_app} to another value than its own key"
     assert "${" not in raw, "the map must spell its tokens out, not as substitutions"
     # Every token distinct: a shared one is an agent able to post as another.
-    tokens = [env[key] for key in keys | {"API_TOKEN", "COLLECTOR_READ_TOKEN", "CONFIG_WRITER_TOKEN"}]
+    tokens = [env[key] for key in keys | singles]
     assert len(set(tokens)) == len(tokens)
 
 
