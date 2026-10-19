@@ -9759,3 +9759,52 @@ read by step 2's worker and step 3's api.
   read: a write at boot or from a reader, for a record nobody asked for.
 - Picking another model silently when the account changes: the person would
   find the thread on a model they did not choose.
+
+## ADR 177 — `GET /api/threads` serves every record as written: main first then by `created`, archived ones included
+
+**Status:** accepted (2026-10-19). `docs/plans/main-thread.md` step 3, the
+list route only; `GET /api/threads/<id>/events` waits for the conversation
+log's format (T-110). Builds on ADR 170; supersedes nothing.
+
+**Context.** Step 3 serves the thread records ADR 170 keeps under
+`<hive root>/threads/` to the console's selector (*Decisions* 5). Left open:
+the order of the list after the main thread, and what to do with an archived
+thread.
+
+**Decision.**
+1. *The route.* `GET /api/threads` in `observability/api/app.py`, behind the
+   api's auth, answering the usual envelope. `data` is the list of records,
+   each served whole as `dispatcher/threads.py` wrote it (`id`, `title`,
+   `project`, `account`, `model`, `effort`, `segments`, `created`, `status`,
+   `task`): the current triple is the record's top-level `account`, `model`
+   and `effort`, and `segments` is the history the separators are drawn from.
+   The module is imported as `thread_store`, so the view can be named
+   `threads`. The reading is `thread_store.read_threads`; no parsing here.
+2. *The order* is `read_threads`'s: the main thread first, then by
+   `created`, oldest first. It is stable: a thread keeps its place in the
+   selector while the person talks to another. "Most recently active" would
+   need the last turn's time, which lives in the conversation log step 2
+   writes and is not built, and it would reorder the selector under the
+   person's pointer.
+3. *Archived threads are served* with `status: "archived"`, and the console
+   filters them. The route takes no query parameters (any is a 400, as on
+   every route here). The list is a handful of small records, so one answer
+   serves both the selector and a later "archived" view, and nothing is left
+   out of a read without the reader seeing why.
+4. *Bad files.* A record that does not parse or is not a JSON object is a
+   warning naming it (`read_threads`), and the rest are served. A threads
+   path that cannot be listed (not a directory, no permission) is an empty
+   list and one warning, never a 500; an absent one is an empty list and no
+   warning. No main thread is an answer too: the console then asks the board
+   service to make it (ADR 170, 4).
+
+**Consequences.**
+- The compose service already mounts the hive root at `/data/.hive:ro`, so
+  the route needs no new mount.
+- A record's shape is not re-checked here: a hand-edited field is served as
+  written, as a task's frontmatter is.
+
+**Ruled out.**
+- Filtering archived threads by default behind an `include_archived` flag: a
+  parameter to validate for a list this small, and a default that hides rows.
+- Reading the files in the api itself: a second copy of the format.

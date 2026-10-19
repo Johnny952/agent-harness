@@ -251,6 +251,10 @@ and worker.
 2. The worker's `turn` action and the stream written to
    `conversations/*.jsonl`. It shares board Phase 5's transport.
 3. The api routes `GET /api/threads` and `GET /api/threads/<id>/events`.
+   `GET /api/threads` is built (2026-10-19, ADR 177): every record, the main
+   thread first and then by `created`, archived ones with their status.
+   `GET /api/threads/<id>/events` is pending: it waits for the conversation
+   log's format (T-110).
 4. The screen, read-only: threads and conversations with the switch. A front
    task, behind its own ask for a build.
 5. The composer and *stop*, now that *Decisions*, 1 is ruled.
