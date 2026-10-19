@@ -58,17 +58,20 @@ class ScheduledCycle:
     task has time to try for it. `before_window(task_id, scheduler)` runs
     just before the cycle asks for its window and `in_window(task_id,
     scheduler)` just after it gets it, so a test can order the windows by
-    events instead of by `hold`.
+    events instead of by `hold`. `after_spend(task_id)` runs once the cycle
+    has written its last usage line, still holding its slot, so a test can
+    keep every cycle running until all of them have spent.
     """
 
     def __init__(self, cfg, *, arquitecto_barrier=None, window_barrier=None, hold=0.0,
-                 before_window=None, in_window=None):
+                 before_window=None, in_window=None, after_spend=None):
         self.cfg = cfg
         self.arquitecto_barrier = arquitecto_barrier
         self.window_barrier = window_barrier
         self.hold = hold
         self.before_window = before_window
         self.in_window = in_window
+        self.after_spend = after_spend
         self.events: list[tuple[str, str]] = []
         self.scheduler = None
         self._lock = threading.Lock()
@@ -99,6 +102,8 @@ class ScheduledCycle:
                 self.window_barrier.wait(timeout=5)
             time.sleep(self.hold(task_id) if callable(self.hold) else self.hold)
             _usage(cfg, task_id, 100)
+            if self.after_spend is not None:
+                self.after_spend(task_id)
             tasks.mark_merged(cfg.hive_tasks_dir, task_id, "main")
             self._log(task_id, "leave")
         finally:
@@ -243,7 +248,15 @@ def test_the_limit_is_read_live_across_cycles(cfg, monkeypatch):
     _task(cfg, "T-1", "`a.py`")
     _task(cfg, "T-2", "`b.py`")
     _task(cfg, "T-3", "`c.py`")
-    fake = ScheduledCycle(cfg, arquitecto_barrier=threading.Barrier(2))
+    # Neither cycle ends until both have written all they spend, so the slot
+    # that frees first is offered with 400 already on the logs (T-065-D1):
+    # without it, one cycle could end while the other had spent only its
+    # first 100, and the third start on a live 300.
+    spent = threading.Barrier(2)
+    fake = ScheduledCycle(
+        cfg, arquitecto_barrier=threading.Barrier(2),
+        after_spend=lambda task_id: spent.wait(timeout=_DEADLINE),
+    )
 
     # Two cycles spend 400 between them; the third never starts.
     queue = _run(cfg, monkeypatch, fake, ["T-1", "T-2", "T-3"], limit=400)
