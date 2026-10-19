@@ -14,7 +14,7 @@ import secrets
 
 from dispatcher import actions, context_transfer
 from dispatcher import tasks as task_store
-from dispatcher.config import EFFORT_LEVELS, Config
+from dispatcher.config import EFFORT_LEVELS, Config, refresh_primary
 
 THREADS_DIR_NAME = "threads"
 MAIN_ID = "main"
@@ -88,6 +88,9 @@ def _check_triple(cfg: Config, account: str, model: str, effort: str) -> None:
 
 
 def _default_account(cfg: Config) -> str:
+    # Re-read, as the picker does: the board service loads its config once,
+    # and the console moves the primary while it runs (ADR 176, ADR 178).
+    refresh_primary(cfg)
     return cfg.primary_account or cfg.accounts[0].name
 
 

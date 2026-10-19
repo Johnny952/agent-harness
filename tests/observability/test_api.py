@@ -1195,6 +1195,22 @@ def test_the_primary_account_is_marked_and_the_rest_are_not(tmp_path: Path) -> N
     ]
 
 
+def test_the_primary_mark_follows_an_override_saved_after_boot(tmp_path: Path) -> None:
+    """ADR 178: `refresh_primary` re-marks the pool on each request, so a
+    primary the console moves shows without restarting the api."""
+    harness = _harness(tmp_path, accounts=("cuenta1", "cuenta2"), primary_account="cuenta1")
+    overrides = tmp_path / "config.d" / "overrides.yaml"
+    overrides.parent.mkdir()
+    overrides.write_text("primary_account: cuenta2\n")
+
+    body = _get(harness, "/api/accounts").get_json()
+
+    assert [(row["name"], row["is_primary"]) for row in body["data"]] == [
+        ("cuenta1", False),
+        ("cuenta2", True),
+    ]
+
+
 def test_the_thresholds_on_a_row_are_the_configured_ones(tmp_path: Path) -> None:
     """`docs/decisions.md` ADR 18 and ADR 20: configured, not compiled in.
 
