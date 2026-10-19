@@ -9385,3 +9385,78 @@ carry a credential, `BOARD_ACTIONS_TOKEN`.
   page the choice ADR 24 keeps on the server.
 - A refusal to boot without the token: every other screen works without it,
   as ADR 112 ruled for the writer's token.
+
+## ADR 160 — The Ready card's *Start development*: one new action-queue read, a start known by kind and task id, and a button outside the card's link
+
+**Status:** accepted (T-105-S2, 2026-10-19). Builds the board half of ADR
+142 step 9 on ADR 157's forward and the api's `GET /api/actions` (ADR 142
+step 4). Supersedes nothing.
+
+**Context.** `docs/plans/board-service.md` *Starting development: a button
+on the board* puts *Start development* on each Ready card and hides it for a
+task already queued or running. The console already has a `/queue` draft
+(`queue.tsx`) over a mock `listActions` whose `QueuedAction` shape is not the
+api's, keyed `["actions"]`. `TaskCard` is one `<Link>`, so a button inside it
+would navigate, and the card is mounted in tests with no `QueryClient`. The
+queue record carries `project`, but the browser never learns
+`CONSOLE_PROJECT` (ADR 24, ADR 157).
+
+**Decision.**
+
+1. *A second, real reader of the queue.* `getActionQueue()` reads
+   `/api/actions?limit=1` through `readEnvelope` into `ActionQueue`
+   (`pending`, `claimed`, `done`, `done_total`, `worker`), each record an
+   `ActionRecord` as `dispatcher/actions.py:create` writes it. Its query key
+   is `["action-queue"]`, not `["actions"]`: the draft's key holds a
+   different shape, and one key with two `queryFn`s would hand either
+   screen the other's rows. `listActions`, `actionsQuery`, `enqueueAction`
+   and `QueuedAction` stay as they are until the Queue screen is built.
+2. *A start is matched by `kind` and `task_id` only.* A record with
+   `kind === "start"` and the card's `task_id` in `pending` makes the card
+   *Queued*; in `claimed`, *Running*. `project` is not compared: the browser
+   has no project to compare it with, and there is one hive (ADR 151, 2).
+   `done` is not read: a finished start leaves the queue, and the card's
+   column then says where the task is.
+3. *The card's states* (Ready column only, never Waiting nor the `pending`
+   column of a failed ready read):
+   - actions read loading: no button and no label;
+   - a pending start: *Queued*, plus *waiting for an account* or *waiting
+     for the project* when `waiting` is `account` or `project`, another
+     non-null value printed as served; no button;
+   - a claimed start: *Running*; no button;
+   - neither: the button;
+   - actions read failed: the button, and one `BrokenBanner` line saying the
+     queued state cannot be shown and that the board-service refuses a
+     duplicate start (409), so a second press starts nothing twice.
+   The api's `warnings` on the read join the screen's `WarningBanner`.
+   Nothing about the worker's heartbeat, a cost, a pool or a limit is shown.
+4. *The button is outside the link.* `TaskCard` stays presentational and
+   takes an optional `footer` node, drawn after the `<Link>` inside one
+   bordered wrapper. The start control is its own component, mounted by
+   `BoardPage` into that slot, so the card's tests need no query client.
+5. *The confirmation is `components/ui/dialog.tsx`,* not `alert-dialog.tsx`:
+   an alert dialog's action closes it, and a refusal must leave it open with
+   the note kept. It names the task, says that confirming queues its cycle,
+   and holds one optional note. A blank or whitespace note is sent as
+   `null` and is never a problem; any other note is checked by
+   `commentProblem`, and Start is disabled while it has one or while the
+   write is in flight. Success is `toast.success` and closes the dialog;
+   a refusal is `toast.error` with the served message, as Backlog's.
+6. *After the write,* settled or refused, `["action-queue"]` and `["tasks"]`
+   are invalidated, so the card shows *Queued* from the queue itself and
+   not from the 201's record.
+
+**Consequences.**
+- The board polls one more route at `POLL_MS`.
+- When `/queue` is wired it should read `getActionQueue` and retire the
+  draft's mock and its `["actions"]` key in the same change.
+- Two consoles of different projects on one hive would each show the
+  other's start as *Queued*; that waits for `docs/plans/projects.md`.
+
+**Ruled out.**
+- Rewriting `listActions` and `QueuedAction` in place: it reshapes
+  `queue.tsx`, which is step 7's.
+- Hiding the button when the queue read failed: a working start would be
+  lost to a read error, and the 409 already stops a duplicate.
+- Showing *Queued* from the mutation's own result: the poll is the
+  record, and a cancel from elsewhere would leave the card lying.
