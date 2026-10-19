@@ -38,3 +38,10 @@ T-062 auditor, 2026-10-17: the full suite failed once (1 failed, 2107 passed,
 10 skipped), then `python3 -m pytest -q tests/dispatcher/test_parallel_queue.py`
 printed 14 passed and the full suite 2108 passed, 10 skipped. T-061's auditor
 reported the same sequence the same day.
+
+T-105-S2 auditor, 2026-10-19, on a diff touching only `front/` and `docs/`:
+the full suite failed on it twice running, and so did the file run alone
+(`1 failed, 13 passed`); only `-k whole_repo` passed. So "re-run the file"
+does not always clear it. The assertion also fixes the order (T-1's window
+first): with six events, `assert 5 < 2` fits T-2 writing first and T-1 after
+it, which is still "writes alone" — suspected, not proved.
