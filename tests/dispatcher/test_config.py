@@ -12,6 +12,7 @@ from dispatcher.config import (
     REMOVED_BOARD_KEYS,
     Config,
     load_config,
+    refresh_primary,
 )
 
 CONFIG_YAML = """
@@ -579,6 +580,108 @@ def test_load_config_rejects_a_primary_that_is_not_a_name(tmp_path: Path, bad_va
         load_config(str(config_path))
 
 
+def _primary_marks(cfg: Config) -> list[tuple[str, bool]]:
+    return [(a.name, a.is_primary) for a in cfg.accounts]
+
+
+def test_a_primary_override_applies_without_a_reload(tmp_path: Path) -> None:
+    """The console writes primary_account to config.d/overrides.yaml through
+    the config writer, and the next pick reads it from the same Config the
+    dispatcher started with: no restart (ADR 176)."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta1\n")
+    cfg = load_config(str(config_path))
+    overrides = tmp_path / "config.d" / "overrides.yaml"
+    overrides.parent.mkdir()
+    overrides.write_text("primary_account: cuenta2\n")
+
+    assert refresh_primary(cfg) == "cuenta2"
+
+    assert cfg.primary_account == "cuenta2"
+    assert _primary_marks(cfg) == [("cuenta1", False), ("cuenta2", True)]
+
+
+def test_removing_the_primary_override_goes_back_to_config_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta1\n")
+    overrides = tmp_path / "config.d" / "overrides.yaml"
+    overrides.parent.mkdir()
+    overrides.write_text("primary_account: cuenta2\nreserve_pct: 40\n")
+    cfg = load_config(str(config_path))
+    assert cfg.primary_account == "cuenta2"
+
+    overrides.write_text("reserve_pct: 40\n")
+    refresh_primary(cfg)
+    assert _primary_marks(cfg) == [("cuenta1", True), ("cuenta2", False)]
+
+    overrides.unlink()
+    assert refresh_primary(cfg) == "cuenta1"
+
+
+def test_an_override_naming_no_account_falls_back_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Startup refuses this (ADR 75), but a pick must not fail on it: the
+    primary is config.yaml's, and the log says why."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta1\n")
+    cfg = load_config(str(config_path))
+    overrides = tmp_path / "config.d" / "overrides.yaml"
+    overrides.parent.mkdir()
+    overrides.write_text("primary_account: cuenta2\n")
+    refresh_primary(cfg)
+
+    overrides.write_text("primary_account: cuenta3\n")
+    with caplog.at_level("WARNING", logger="dispatcher.config"):
+        assert refresh_primary(cfg) == "cuenta1"
+
+    assert _primary_marks(cfg) == [("cuenta1", True), ("cuenta2", False)]
+    assert "'cuenta3' is not a configured account" in caplog.text
+    assert "config.yaml's (cuenta1)" in caplog.text
+
+
+def test_an_unreadable_override_falls_back_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta2\n")
+    cfg = load_config(str(config_path))
+    overrides = tmp_path / "config.d" / "overrides.yaml"
+    overrides.parent.mkdir()
+    overrides.write_text("primary_account: [unclosed\n")
+
+    with caplog.at_level("WARNING", logger="dispatcher.config"):
+        assert refresh_primary(cfg) == "cuenta2"
+
+    assert "cannot be read" in caplog.text
+
+
+def test_with_no_primary_in_config_yaml_a_bad_override_leaves_none(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+    cfg = load_config(str(config_path))
+    overrides = tmp_path / "config.d" / "overrides.yaml"
+    overrides.parent.mkdir()
+    overrides.write_text("primary_account: cuenta2\n")
+    refresh_primary(cfg)
+    assert cfg.primary_account == "cuenta2"
+
+    overrides.write_text("primary_account: 44\n")
+
+    assert refresh_primary(cfg) is None
+    assert _primary_marks(cfg) == [("cuenta1", False), ("cuenta2", False)]
+
+
+def test_a_config_built_by_hand_keeps_its_primary(tmp_path: Path) -> None:
+    """Without a file behind it there is no override to read."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nprimary_account: cuenta2\n")
+    cfg = dataclasses.replace(load_config(str(config_path)), overrides_path=None)
+
+    assert refresh_primary(cfg) == "cuenta2"
+    assert _primary_marks(cfg) == [("cuenta1", False), ("cuenta2", True)]
+
+
 def test_load_config_reads_the_reserve(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(CONFIG_YAML + "\nreserve_pct: 40\n")
@@ -955,7 +1058,9 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
 
     load_config(str(config_path))
 
-    fields = {f.name for f in dataclasses.fields(Config)}
+    # Where the config came from, set by load_config, not keys (ADR 176).
+    sources = {"overrides_path", "config_primary_account"}
+    fields = {f.name for f in dataclasses.fields(Config)} - sources
     assert set(CONFIG_KEYS) == fields | set(REMOVED_BOARD_KEYS)
     assert set(values) | set(REMOVED_BOARD_KEYS) == set(CONFIG_KEYS)
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]

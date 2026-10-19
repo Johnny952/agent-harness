@@ -33,7 +33,7 @@ from dispatcher import (
     surface,
     tasks,
 )
-from dispatcher.config import DRAFT_ROLE, Config
+from dispatcher.config import DRAFT_ROLE, Config, refresh_primary
 from dispatcher.state_machine import AccountState
 
 logger = logging.getLogger(__name__)
@@ -338,6 +338,8 @@ def pick_idle_account(
     # state files and is idempotent, so a pick costs a stat per account and a
     # dispatcher killed mid-phase no longer retires its account for good.
     reap_stale_busy_accounts(cfg)
+    # The console may have moved the primary since the last pick (ADR 176).
+    refresh_primary(cfg)
     idle = state_machine.list_idle_accounts(cfg.state_dir, cfg.accounts)
     # A busy account with a free slot is available too, behind every account
     # that holds nothing; the sort is stable, so the primary still ranks last

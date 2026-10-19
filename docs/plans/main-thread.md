@@ -8,8 +8,8 @@ supersedes: []
 # Main thread — the conversation lives in the console, on an account the person assigns
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built
-as a whole; step 1 is built by T-109 (2026-10-19), narrowed to the thread
-records and the model list, the primary override pending.
+as a whole; step 1 is built: the thread records and the model list by T-109
+(2026-10-19), the primary override the same day (ADR 176).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -246,8 +246,12 @@ and worker.
 1. The thread records and the primary override: written by the board
    service, read by the dispatcher's picker. Built by T-109, narrowed on
    2026-10-19: the records (`dispatcher/threads.py`, `POST /api/threads`,
-   `PATCH /api/threads/<id>`, ADR 170) and the model list (ADR 169); the
-   primary override is pending, the primary stays `primary_account`.
+   `PATCH /api/threads/<id>`, ADR 170) and the model list (ADR 169). The
+   primary override is built the same day (ADR 176): the console saves
+   `primary_account` through the config writer, the settings service that
+   already owns `config.d/overrides.yaml` (ADR 75), and `pick_idle_account`
+   reads it on each pick, so a change needs no restart; an override naming
+   no configured account falls back to `config.yaml`'s with a warning.
 2. The worker's `turn` action and the stream written to
    `conversations/*.jsonl`. It shares board Phase 5's transport.
 3. The api routes `GET /api/threads` and `GET /api/threads/<id>/events`.

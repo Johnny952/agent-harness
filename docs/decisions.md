@@ -9808,3 +9808,63 @@ thread.
 - Filtering archived threads by default behind an `include_archived` flag: a
   parameter to validate for a list this small, and a default that hides rows.
 - Reading the files in the api itself: a second copy of the format.
+## ADR 176 — The primary override is the config writer's `primary_account`, read live by the picker
+
+**Status:** accepted (2026-10-19). `docs/plans/main-thread.md` step 1, the
+part ADR 170 left out: the primary override. Builds on ADR 75 and ADR 170;
+supersedes nothing.
+
+**Context.** *Decisions* 3 has the console change the primary by writing an
+override "through the board service", with `balancer.md`'s meaning (the
+primary is last in the pool and keeps its reserve), applied to the next pick,
+never moving a running phase. Most of it already existed: `primary_account`
+is an editable key of the config writer (ADR 75), so a save is validated by
+`load_config` (an unknown name is a 422), atomic (a temp file and
+`os.replace`, the previous version kept), locked (`flock` on
+`overrides.lock`) and logged. What did not hold was the timing. ADR 75 makes
+an override take effect on the next dispatcher invocation, and the queue's
+dispatcher is one long run that loaded its config once: the primary would
+move only on a restart.
+
+**Decision.**
+1. *The write is the config writer's.* The console moves the primary with
+   `PUT /settings/primary_account` and returns it to `config.yaml`'s with
+   `DELETE`, as for any editable key. No board-service route writes
+   `config.d/overrides.yaml`: ADR 75 gives that file one writer. That is how
+   this entry reads "through the board service": through the console's
+   service for settings, behind the same authentication.
+2. *The picker reads it live.* `pick_idle_account` calls
+   `dispatcher.config.refresh_primary(cfg)` before it lists the idle
+   accounts. It re-reads the overrides file and, when the name changed,
+   re-marks `is_primary` on every account and sets `cfg.primary_account`, in
+   place and under one lock, since the queue's cycles share the `Config`. So
+   the ranking, the reserve and the week pacing all follow on the next pick.
+   A phase already running keeps the account it was given.
+3. *Only `primary_account` is live.* Every other override still applies when
+   the dispatcher starts, as ADR 75 says. `load_config` records where it read
+   from (`Config.overrides_path`, left out of equality) and `config.yaml`'s
+   own primary (`Config.config_primary_account`). A `Config` built by hand
+   has no path and keeps its primary.
+4. *A bad override falls back, with a warning.* At start an override
+   `load_config` refuses is still an error. On a pick, an override naming no
+   configured account, or a file that cannot be read or parsed, makes the
+   primary `config.yaml`'s (none when it names none), and the log says why,
+   once per change of problem. A missing file or key is `config.yaml`'s
+   primary without a warning.
+
+**Consequences.** Moving the primary from the console takes effect on the
+next pick, with no restart, and the change is in `changes.jsonl` like any
+save. The board service and the api still read their config once, at boot,
+so until they restart a new thread defaults to the old primary's account
+(ADR 170, 2) and the api shows the old mark. Making those live is not this
+entry's.
+
+**Ruled out.**
+- *A board-service route writing the override.* A second writer of
+  `overrides.yaml`, outside the writer's lock and log.
+- *Reloading the whole config on each pick.* It would make every key live,
+  which ADR 75 did not decide, and a bad save of any key could then fail a
+  pick.
+- *Failing the pick on an unknown name.* The writer refuses one already, so
+  only a hand edit gets there, and stopping the queue for it is worse than
+  ranking by `config.yaml`'s primary.

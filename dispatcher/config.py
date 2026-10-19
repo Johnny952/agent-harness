@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
+import threading
 
 import yaml
 
 from dispatcher import board_mcp, docker_exec, project_docs, role_skills
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -330,6 +334,16 @@ class Config:
     #: The models a thread may pick, for an account that names none of its own
     #: (`docs/decisions.md` ADR 169). The loader always sets it.
     thread_models: list[str] = dataclasses.field(default_factory=list)
+    #: Where this config was loaded from, not config keys: `load_config` sets
+    #: both so `refresh_primary` can read the primary override live
+    #: (`docs/decisions.md` ADR 176). `overrides_path` None, as on a `Config`
+    #: built by hand, keeps the primary as loaded. `config_primary_account` is
+    #: `config.yaml`'s own `primary_account`, the fallback for an override
+    #: that does not name a configured account; None when it names none.
+    #: The path is left out of equality: two loads of the same values are the
+    #: same config wherever their files sit.
+    overrides_path: str | None = dataclasses.field(default=None, compare=False)
+    config_primary_account: str | None = None
 
     def thread_models_for(self, account_name: str) -> list[str]:
         """The models a thread on `account_name` may pick; `KeyError` if unknown."""
@@ -735,8 +749,15 @@ def load_config(path: str, *, overrides_path: str | None = None) -> Config:
     if overrides_path is None:
         overrides_path = os.path.join(os.path.dirname(path), "config.d", "overrides.yaml")
     overrides = _read_overrides(overrides_path)
-    if not overrides:
-        return _build_config(raw)
+    cfg = _build_merged(raw, overrides, overrides_path) if overrides else _build_config(raw)
+    cfg.overrides_path = overrides_path
+    base = raw.get("primary_account")
+    base = base.strip() if isinstance(base, str) else None
+    cfg.config_primary_account = base if any(a.name == base for a in cfg.accounts) else None
+    return cfg
+
+
+def _build_merged(raw: dict, overrides: dict, overrides_path: str) -> Config:
     try:
         return _build_config({**raw, **overrides})
     except ValueError as err:
@@ -747,6 +768,72 @@ def load_config(path: str, *, overrides_path: str | None = None) -> Config:
         raise _overrides_error(
             overrides_path, ", ".join(keys), str(err), plural=len(keys) > 1
         ) from err
+
+
+#: One refresh at a time: the queue runs cycles on threads that share one
+#: `Config`, and two refreshes interleaving their `is_primary` writes could
+#: leave two accounts marked.
+_primary_lock = threading.Lock()
+#: The last warning `refresh_primary` logged, so a bad override is said once
+#: per change of problem rather than on every pick of a recheck loop.
+_last_primary_warning: str | None = None
+
+
+def _override_primary(cfg: Config) -> tuple[str | None, str | None]:
+    """The primary the overrides file names now, else `config.yaml`'s, and
+    the warning to log when the override is not usable (ADR 176)."""
+    base = cfg.config_primary_account
+    try:
+        with open(cfg.overrides_path) as f:
+            loaded = yaml.safe_load(f)
+    except FileNotFoundError:
+        return base, None
+    except (OSError, yaml.YAMLError) as err:
+        return base, (
+            f"{cfg.overrides_path} cannot be read ({err}); the primary account "
+            f"is config.yaml's ({base or 'none'})"
+        )
+    if not isinstance(loaded, dict) or "primary_account" not in loaded:
+        return base, None
+    name = loaded["primary_account"]
+    if isinstance(name, str) and any(a.name == name.strip() for a in cfg.accounts):
+        return name.strip(), None
+    known = ", ".join(a.name for a in cfg.accounts) or "none"
+    return base, (
+        f"{cfg.overrides_path}: primary_account {name!r} is not a configured account "
+        f"(have: {known}); the primary account is config.yaml's ({base or 'none'})"
+    )
+
+
+def refresh_primary(cfg: Config) -> str | None:
+    """Re-read the primary override and re-mark the pool, in place.
+
+    The console changes the primary through the config writer's
+    `config.d/overrides.yaml` (ADR 75), and a change applies to the next pick
+    without a restart (`docs/plans/main-thread.md` *Decisions*, 3; ADR 176).
+    Only `primary_account` is read live; every other override still applies
+    when the dispatcher starts. An override that names no configured account
+    falls back to `config.yaml`'s primary with a warning instead of failing a
+    pick. A phase already running keeps its account: this only moves the mark
+    the next pick and its quota gate read.
+    """
+    global _last_primary_warning
+    if cfg.overrides_path is None:
+        return cfg.primary_account
+    name, warning = _override_primary(cfg)
+    with _primary_lock:
+        if warning is not None and warning != _last_primary_warning:
+            logger.warning("%s", warning)
+        _last_primary_warning = warning
+        if name != cfg.primary_account:
+            logger.warning(
+                "the primary account is now %s (was %s)",
+                name or "none", cfg.primary_account or "none",
+            )
+            for account in cfg.accounts:
+                account.is_primary = account.name == name
+            cfg.primary_account = name
+    return name
 
 
 def _build_config(raw: dict) -> Config:
