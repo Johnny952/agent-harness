@@ -10155,3 +10155,101 @@ written.
   ADR 173's, and a running turn has no `turn_end` to group by.
 - A 404 for a well-formed id with no log: a new thread has none until its
   first turn, and ADR 27 answers an id from a list with an empty 200.
+
+## ADR 181 — `POST /api/threads/<id>/turns` queues a `turn` behind the actions bearer; a message mid-turn queues, and *stop* is the cancel route
+
+**Status:** accepted (T-112, 2026-10-19). The board-service half of
+`docs/plans/main-thread.md` step 5, and the route ADR 142 decision 6 asks
+of a new kind (`turn`, whose handler ADR 173 built). Builds on ADR 142,
+ADR 151, ADR 170 and ADR 173; supersedes nothing. The composer and the
+stop button are a later front task.
+
+**Context.** `actions.KINDS["turn"]` validates `params` `{thread, text}`
+and serialises on `thread:<id>`, and `worker.HANDLERS["turn"]` runs it,
+but nothing writes one except by hand. The plan leaves two things to
+step 5 (*Open questions*): whether a message sent during a turn can
+interrupt it, and how big a message may be. `_validate_turn` only asks
+for a non-empty string, so it would take a message of blanks or of any
+length.
+
+**Decision.**
+
+1. *The route.* `POST /api/threads/<thread_id>/turns`, through the same
+   `_action` the start, cancel and verdict routes use, so ADR 151
+   decision 4's guards answer in its order (Origin 403, no token 503,
+   bad bearer 401, query 400, body not an object 400). It calls
+   `actions.create(state_dir, "turn", params={"thread": <path id>,
+   "text": <body text>}, actor="operator")`: `project`, `task_id` and
+   `note` are null. The thread's project is the record's, read by the
+   worker (ADR 173, 3), and a body cannot name another. The answer is
+   201 with the created record, as the start's is.
+2. *What authorizes it.* A turn spends quota, so it is behind the actions
+   bearer and not with the thread routes (ADR 170 put those outside it
+   because they spend none). The person's message, sent from the
+   console's conversation, authorizes that one turn and nothing more:
+   `docs/charter.md` C-1 and C-8 as *Amended* 2026-10-11 make the
+   console's thread the one conversation, C-12 *Amended* the same day
+   puts it in the console, and C-4 is met because a person sent this
+   message and the worker runs it once (ADR 173, 1).
+3. *The body.* A JSON object with `text` and no other key.
+   - Any other key is 400 `unknown field '<key>'`.
+   - `text` missing, null, not a string, empty or only whitespace is 400
+     `text must be a non-empty string`. A message of blanks would spend a
+     turn on nothing. The text is stored as sent, never stripped.
+   - `text` longer than `MAX_TURN_TEXT_CHARS = 20_000` characters
+     (`len` of the string) is 400 `text is longer than 20000 characters`.
+     The worker passes the text as one argv element of `docker exec`
+     (ADR 173, 3), and Linux refuses one argument over 128 KiB: 20,000
+     characters of four-byte UTF-8 is 80,000 bytes, under it with room.
+     It is also `MAX_COMMENT_CHARS`, the hive's other limit on a
+     person's free text. The constant lives in `board_service/app.py`;
+     `_validate_turn` is not changed.
+4. *The thread.* After the body, the route reads the thread with
+   `threads.read_thread(hive_dir, thread_id)`:
+   - `NoThreadError` (no file, or an id the module did not make) is 404
+     with its message, as `PATCH /api/threads/<id>` answers;
+   - `UnreadableThreadError` is 409, as the thread routes answer;
+   - a `status` of `archived` is 409 `thread <id> is archived`.
+   The read is outside the queue's `write.lock`. A thread archived
+   between the read and the claim is refused again by the worker, which
+   ends the turn `failed` before anything runs (ADR 173, 2). The route
+   checks neither the account nor its quota state: that is the worker's,
+   at claim time, when it can still change.
+5. *A message mid-turn queues.* No 409 for a second turn: `turn` is not
+   in `actions._ONE_PER_TASK`. Two posts on one thread make two pending
+   records with the same serial key `thread:<id>`; the worker runs them
+   one after the other in creation order, the second `waiting: thread`
+   while the first runs.
+6. *No interrupt.* A message never interrupts the running turn, and no
+   flag or route offers it. *Stop* is the existing
+   `POST /api/actions/<id>/cancel` with the running turn's action id,
+   unchanged: the route queues a `cancel` whose `params.target` is the
+   turn, and the worker kills a claimed turn or cancels a pending one
+   (ADR 173, 8). Stop-and-send is the person's two acts, a cancel and a
+   new message.
+
+**Consequences.**
+- The console's composer (a later front task) posts `{"text"}` with the
+  bearer, through the forward ADR 157 built for the other action routes,
+  and reads 201 with the record or `{"error"}`.
+- A queued turn runs on whatever account the thread names when it is
+  claimed, not when it was sent: a thread moved in between moves its
+  queued turns with it.
+- Messages sent while a turn runs pile up as separate turns, each one
+  spending; nothing merges them.
+- A message longer than 20,000 characters is refused at the door; one
+  that passes can still fail at the worker for another reason, which
+  the action's `error` says.
+
+**Ruled out.**
+- Interrupting the running turn when a message arrives: it would throw
+  away a turn already paid for, and the cancel route already stops one
+  on the person's word.
+- A 409 for a second turn while one is queued: the plan's default is to
+  queue (*Decisions*, 4).
+- The limit in `actions._validate_turn`: the worker would then fail a
+  record already queued under an older limit, and the board service is
+  the one creator today. A later creator (the MCP tool, step 6) that
+  writes a turn takes the same constant or moves it.
+- Checking the account's quota state at the door: it changes before the
+  claim, and ADR 173 decision 5 already refuses a parked account then.
