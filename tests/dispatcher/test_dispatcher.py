@@ -5248,6 +5248,21 @@ def test_the_picker_spends_a_worker_before_the_primary(tmp_path) -> None:
     assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta2"
 
 
+def test_the_picker_reads_a_primary_moved_since_the_last_pick(tmp_path) -> None:
+    """The console moved the primary to cuenta2 through the overrides file:
+    the next pick ranks cuenta2 last without a restart (ADR 176)."""
+    overrides = tmp_path / "overrides.yaml"
+    cfg = _make_pool_config(
+        tmp_path, overrides_path=str(overrides), config_primary_account="cuenta1"
+    )
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta2"
+
+    overrides.write_text("primary_account: cuenta2\n")
+
+    assert dispatcher_mod.pick_idle_account(cfg, role="implementador") == "cuenta1"
+    assert cfg.primary_account == "cuenta2"
+
+
 def test_a_pool_with_no_primary_keeps_the_config_order(tmp_path) -> None:
     """Every config written before this key existed is one of these, and it
     has to behave exactly as it did."""

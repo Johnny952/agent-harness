@@ -8,7 +8,7 @@ import yaml
 
 from config_writer import app as writer
 from config_writer.app import create_app, main
-from dispatcher.config import CONFIG_KEYS, DRAFT_ROLE, PHASE_ROLES, load_config
+from dispatcher.config import CONFIG_KEYS, DRAFT_ROLE, PHASE_ROLES, load_config, refresh_primary
 from dispatcher.project_docs import MAPPER_ROLE
 
 TOKEN = "writer-token"
@@ -145,6 +145,29 @@ def test_a_value_load_config_refuses_is_422_naming_the_real_file(client, cfg: Pa
     res = put(client, "pace_primary_week", "yes", None)
     assert res.status_code == 422
     assert "must be true or false" in res.get_json()["error"]
+
+
+def test_the_primary_is_moved_by_a_save_and_read_by_a_running_dispatcher(
+    client, cfg: Path
+) -> None:
+    """The primary override end to end (ADR 176): the writer refuses a name
+    that is no configured account, saves one that is, and a dispatcher that
+    loaded its config before the save reads it on its next pick."""
+    running = load_config(str(cfg))
+    assert running.primary_account is None
+
+    res = put(client, "primary_account", "cuenta3", None)
+    assert res.status_code == 422
+    assert "is not a configured account" in res.get_json()["error"]
+    assert not (d(cfg) / "overrides.yaml").exists()
+
+    assert put(client, "primary_account", "cuenta2", None).status_code == 200
+    assert refresh_primary(running) == "cuenta2"
+    assert [a.is_primary for a in running.accounts] == [False, True]
+
+    assert delete(client, "primary_account", get(client)["revision"]).status_code == 200
+    assert refresh_primary(running) is None
+    assert [a.is_primary for a in running.accounts] == [False, False]
 
 
 def test_a_broken_config_yaml_is_a_422_too(client, cfg: Path) -> None:
