@@ -919,6 +919,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "fallback_roles": ["revisor"],
         "default_model": "m",
         "role_model": {"revisor": "m"},
+        "thread_models": ["m"],
         "mapping_model": "m",
         "default_effort": "low",
         "role_effort": {"revisor": "low"},
@@ -959,7 +960,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     assert set(values) | set(REMOVED_BOARD_KEYS) == set(CONFIG_KEYS)
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
-        22,
+        23,
         17,
         2,
     )
@@ -1008,3 +1009,46 @@ def test_board_mcp_url_refuses_what_is_not_a_bare_http_url(tmp_path: Path, value
 
 def test_board_mcp_url_is_read_only_in_the_key_table() -> None:
     assert CONFIG_KEYS["board_mcp_url"].key_class == READ_ONLY
+
+
+def _load_models(tmp_path: Path, extra: str = "", account_models: str = "") -> Config:
+    config_path = tmp_path / "config.yaml"
+    text = CONFIG_YAML.replace(
+        "    container: agent-cuenta2\n", f"    container: agent-cuenta2\n{account_models}"
+    )
+    config_path.write_text(text + extra)
+    return load_config(str(config_path))
+
+
+def test_thread_models_default_to_the_default_model(tmp_path: Path) -> None:
+    cfg = _load_models(tmp_path)
+    assert cfg.thread_models == ["claude-opus-5-5"]
+    assert cfg.thread_models_for("cuenta1") == ["claude-opus-5-5"]
+    assert _load_models(tmp_path, "default_model: m1\n").thread_models == ["m1"]
+
+
+def test_thread_models_are_read_and_an_account_replaces_them(tmp_path: Path) -> None:
+    cfg = _load_models(
+        tmp_path, "thread_models: [a, ' b ']\n", account_models="    models: [c]\n"
+    )
+    assert cfg.thread_models == ["a", "b"]
+    assert cfg.thread_models_for("cuenta1") == ["a", "b"]
+    assert cfg.thread_models_for("cuenta2") == ["c"]
+    with pytest.raises(KeyError):
+        cfg.thread_models_for("nope")
+
+
+@pytest.mark.parametrize("value", ["a", "[]", "['']", "[1]", "[a, a]", "{a: b}"])
+def test_thread_models_refuses_a_bad_list(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ValueError, match="thread_models"):
+        _load_models(tmp_path, f"thread_models: {value}\n")
+
+
+@pytest.mark.parametrize("value", ["a", "[]", "['']", "[1]", "[a, a]"])
+def test_account_models_refuses_a_bad_list(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ValueError, match="account cuenta2: models"):
+        _load_models(tmp_path, account_models=f"    models: {value}\n")
+
+
+def test_thread_models_is_editable_in_the_key_table() -> None:
+    assert CONFIG_KEYS["thread_models"].key_class == EDITABLE

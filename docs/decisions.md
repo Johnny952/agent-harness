@@ -9627,3 +9627,135 @@ comments than the console's thread showed (`docs/implementations/T-090.md`,
 **Ruled out.**
 - Keeping a raw line count beside the parsed one: no caller wants the
   number of lines that are not comments, and the warnings name them.
+## ADR 169 — A thread's models are a list in config: `thread_models`, replaced per account by `models`
+
+**Status:** accepted (T-109, 2026-10-19). Settles `docs/plans/main-thread.md`
+*Open questions*, *Model per thread*, as the user ruled on 2026-10-19.
+Supersedes nothing.
+
+**Context.** The plan's *Decisions* 2 lets a thread pick its model, and left
+how the list of models an account may use is known to step 1. The CLI has no
+call that lists them, and probing an account spends quota.
+
+**Decision.**
+1. *`thread_models`*, top level in `config.yaml`: a list of model IDs in
+   `default_model`'s form. Absent or null, it is `[default_model]`, taken after
+   the overrides merge, so an override of `default_model` moves it too.
+2. *`models`*, optional on an entry of `accounts`: the same shape, and when
+   given it replaces `thread_models` for that account, whole.
+   `AccountConfig.models` is `None` when absent, and
+   `Config.thread_models_for(account_name)` answers the account's list or
+   `thread_models`; it raises `KeyError` for an unknown account.
+3. *Checked at load*, `ValueError` naming the key: a list (not a string), not
+   empty, each entry a non-empty string. Entries are stripped; a duplicate is
+   refused, so a list never shows one model twice. Nothing is probed: a model
+   the account cannot use fails at its turn (step 2), not here.
+4. *`CONFIG_KEYS` row*: `thread_models` is `editable`, kind `list`, like
+   `fallback_roles`; the merged result is what the checks of 3 run on, so a
+   bad override is refused with ADR 106's message. `accounts` stays
+   read-only, so `models` is edited in `config.yaml` only.
+
+**Consequences.**
+- The console's model picker (step 4) reads `thread_models_for` through a
+  route step 3 adds; this task serves no list over HTTP.
+- `default_model` itself is not required to be in `thread_models`: a thread
+  then defaults to the list's first entry (ADR 170, 2).
+
+**Ruled out.**
+- Probing `/model` or a test turn per account: it spends quota for a list
+  the operator already knows.
+- A per-account map at the top level (`thread_models: {cuenta1: [...]}`):
+  two places would name accounts, the disagreement `_load_primary_account`
+  in `dispatcher/config.py` already refuses for the primary.
+
+## ADR 170 — Thread records: `dispatcher/threads.py`, the main thread is the id `main`, two board-service routes
+
+**Status:** accepted (T-109, 2026-10-19). `docs/plans/main-thread.md` step 1,
+narrowed: no primary override (*Decisions* 3 stays `primary_account`).
+Builds on ADR 169; supersedes nothing.
+
+**Context.** *Decisions* 2 names a thread record's fields and that there is
+one main thread, the console's centre, with `task` empty; how the main thread
+is marked and when it is made was left to this task, under the rule that a
+second one can never exist. The record is written by the board service and
+read by step 2's worker and step 3's api.
+
+**Decision.**
+1. *The store.* `dispatcher/threads.py`, beside `dispatcher/tasks.py`, owns
+   `<hive root>/threads/<id>.json` (`context_transfer.hive_root`, so a sibling
+   of `tasks/`, `board/` and `locks/`). Functions: `create`, `read_thread`,
+   `read_threads` and `update`, all taking `hive_dir` (the hive tasks dir, as
+   every `tasks.py` function does) and the `Config` where accounts matter.
+   Every write is `context_transfer._write_atomic` after
+   `_makedirs_readable`, under `tasks.task_lock(hive_dir, "_thread-<id>")`:
+   the hive's existing write lock, under a name no task id can take.
+   `read_threads` lists `*.json` (never the `.tmp` leftovers), returns
+   `(records, warnings)`, the main thread first and then by `created`, and
+   turns a file that does not parse or is not a JSON object into a warning
+   naming it. `read_thread` raises `NoThreadError` for an absent id and
+   `UnreadableThreadError` for a file that does not parse.
+2. *The record*, exactly *Decisions* 2's fields: `id`, `title`, `project`,
+   `account`, `model`, `effort`, `segments`, `created`, `status`, `task`.
+   Times are UTC ISO-8601 (`datetime.now(timezone.utc).isoformat()`, a `now`
+   argument for tests). On create, `account` defaults to `primary_account`,
+   else the first account; `model` to `default_model` when it is in that
+   account's `thread_models_for`, else the list's first; `effort` to
+   `default_effort`. Each may be given, and is refused (`ThreadRefused`)
+   when it is an unknown account, a model not in the account's list, or not
+   one of `EFFORT_LEVELS`. `status` starts `open`; the statuses are `open`
+   and `archived`. `segments` starts as one
+   `{session_id: null, account, model, effort, from: created}`.
+3. *Ids.* An ordinary thread's id is `th-<YYYYmmddTHHMMSSZ>-<6 hex>`, made
+   by `create`; a file already there under the lock is a `ThreadRefused`, not
+   an overwrite. A path id matching neither form is `NoThreadError`, so no
+   path component is built from an id the module did not make.
+4. *The main thread is the id `main`*, and no field marks it: a second one
+   cannot exist because there is one file name for it, and the check and the
+   write are one step under `_thread-main`. It is made on request, by
+   `create(..., main=True)` (the console asks when step 3's read shows none),
+   never at boot or by a reader: neither service writes the hive on start,
+   and the read api cannot write. A second `main=True` raises
+   `ThreadExistsError`. Its `task` and `project` are null and cannot be given
+   with `main`; its title defaults to `Main thread`. It cannot be `archived`,
+   because the console opens on it.
+5. *Ordinary threads* need a `title` (non-empty after strip, at most
+   `tasks.MAX_TITLE_CHARS`). `project` is optional, null or a slug by
+   `actions._slug_problem`'s rule. `task` is optional, null or the id of a
+   task file that exists (`context_transfer.task_file_path`). Neither changes
+   after create.
+6. *Update* takes `title`, `account`, `model`, `effort`, `status`, at least
+   one. A value equal to the current one is no change. When `account`,
+   `model` or `effort` change, however many at once, one segment is appended
+   with the new triple, `from` now, and the last segment's `session_id`
+   (the session lives on `claude_shared`, *Decisions* 2). A new account
+   re-checks the model, the given one or else the current one, against the
+   new account's list, and refuses rather than picking another: moving
+   quota and model is the person's call. `title` and `status` open no
+   segment. Nothing here sets `session_id`; step 2's worker adds that writer.
+7. *Routes*, in `board_service/app.py`, beside `/api/backlog` and not behind
+   `BOARD_ACTIONS_TOKEN` (they spend no quota): `POST /api/threads`, body
+   `title`, `project`, `account`, `model`, `effort`, `task`, `main` (a JSON
+   boolean), 201 with the record; `PATCH /api/threads/<id>`, body `title`,
+   `account`, `model`, `effort`, `status`, 200 with the record. The guards and
+   their order are `_http`'s: a browser `Origin` 403, any query 400, a body
+   that is not a JSON object 400; then an unknown field 400, a field of the
+   wrong JSON type 400, a null taken as left out, an empty PATCH 400.
+   `ThreadRefused` is 400, `ThreadExistsError` and `UnreadableThreadError`
+   409, `NoThreadError` 404, an `OSError` from the write 503. Every error is
+   `{"error": <reason>}`.
+
+**Consequences.**
+- Step 3's api reads through `read_threads`/`read_thread`. Its views may be
+  named `threads`; import the module as `thread_store`, as `tasks` is
+  imported as `task_store` (`docs/learnings/the-apis-views-shadow-a-module-imported-as-tasks.md`).
+- Step 2's worker owns the first `session_id` and the new-session segment
+  (*Decisions* 7); both are writers it adds to this module.
+- An account removed from `config.yaml` leaves records naming it; reading
+  them still works, and an update re-checks only what it changes.
+
+**Ruled out.**
+- A `main: true` field: a field can be set on two files; a name cannot.
+- Making the main thread when the board service starts, or on the first
+  read: a write at boot or from a reader, for a record nobody asked for.
+- Picking another model silently when the account changes: the person would
+  find the thread on a model they did not choose.

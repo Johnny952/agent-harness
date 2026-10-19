@@ -39,6 +39,7 @@ from flask import Flask, jsonify, request
 
 from dispatcher import actions, context_transfer
 from dispatcher import tasks as task_store
+from dispatcher import threads as thread_store
 from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS
 from dispatcher.config import PHASE_ROLES, load_config
 
@@ -650,6 +651,24 @@ def create_app(config_path: str) -> Flask:
     def http_propose():
         return _http(hive_dir, "backlog_propose", None, created_status=201)
 
+    # The thread records (ADR 170): no quota is spent, so no bearer.
+
+    @app.post("/api/threads")
+    def http_thread_create():
+        def make(body: dict):
+            return thread_store.create(hive_dir, cfg, **body)
+
+        return _thread_http(make, _THREAD_CREATE_FIELDS, 201)
+
+    @app.patch("/api/threads/<thread_id>")
+    def http_thread_update(thread_id: str):
+        def make(body: dict):
+            if not body:
+                raise thread_store.ThreadRefused("nothing to change")
+            return thread_store.update(hive_dir, cfg, thread_id, **body)
+
+        return _thread_http(make, _THREAD_UPDATE_FIELDS, 200)
+
     @app.patch("/api/tasks/<task_id>")
     def http_edit(task_id: str):
         return _http(hive_dir, "task_edit", task_id)
@@ -757,6 +776,45 @@ def _action(token: str, make):
     except OSError as exc:
         return jsonify({"error": f"the action queue could not be written: {exc}"}), 503
     return jsonify(record), 201
+
+
+#: The body fields of the thread routes and their JSON type (ADR 170, 7).
+_THREAD_CREATE_FIELDS = {
+    "title": str, "project": str, "account": str, "model": str, "effort": str,
+    "task": str, "main": bool,
+}
+_THREAD_UPDATE_FIELDS = {
+    "title": str, "account": str, "model": str, "effort": str, "status": str,
+}
+
+
+def _thread_http(make, fields: dict, ok_status: int):
+    """One thread route: `_http`'s guards in order, then the body's fields, then `make(body)`."""
+    if request.headers.get("Origin"):
+        return jsonify({"error": "no browser origin may call this service"}), 403
+    if request.args:
+        return jsonify({"error": f"unknown query parameter {sorted(request.args)[0]!r}"}), 400
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "the body is not a JSON object"}), 400
+    unknown = sorted(set(body) - set(fields))
+    if unknown:
+        return jsonify({"error": f"unknown field {unknown[0]!r}"}), 400
+    body = {k: v for k, v in body.items() if v is not None}
+    for key, value in body.items():
+        if not isinstance(value, fields[key]):
+            return jsonify({"error": f"{key} must be a JSON {fields[key].__name__}"}), 400
+    try:
+        record = make(body)
+    except thread_store.NoThreadError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except (thread_store.ThreadExistsError, thread_store.UnreadableThreadError) as exc:
+        return jsonify({"error": str(exc)}), 409
+    except thread_store.ThreadRefused as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": f"the thread could not be written: {exc}"}), 503
+    return jsonify(record), ok_status
 
 
 def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 200):

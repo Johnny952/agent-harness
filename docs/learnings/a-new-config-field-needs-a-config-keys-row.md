@@ -3,8 +3,10 @@
 **When it applies:** you added, renamed or removed a key `load_config` reads in
 `dispatcher/config.py`, or a field on its `Config`.
 
-**Status:** unconfirmed. T-064's arquitecto and implementador both reported it
-(one source, one task). The auditor checked it against the test.
+**Status:** confirmed. T-064's arquitecto and implementador both reported it
+(one source, one task). The auditor checked it against the test. T-109 hit it
+again adding the editable `thread_models` (ADR 169): the editable count went
+22 to 23 and the key joined the test's `values` dict.
 
 ## What fails
 
