@@ -29,6 +29,7 @@ Two rules shape the whole module:
 
 It writes nothing, anywhere: `db.init_db` is never called (it runs
 `CREATE TABLE` and the events volume is read-only), the learnings read calls neither `ensure_dirs` nor `reconcile`,
+the actions read calls neither `actions.ensure_dirs` nor `actions.read_all` (which makes the queue's directories),
 and there is no docker socket on this service — `dispatcher/docker_exec.py`
 arrives as an import, for one frozenset, and is never called.
 """
@@ -45,6 +46,7 @@ import yaml
 from flask import Flask, jsonify, request
 
 from dispatcher import (
+    actions,
     command_run,
     context_transfer,
     debt,
@@ -55,6 +57,9 @@ from dispatcher import (
 )
 # Aliased: `create_app` names its `/api/tasks` view `tasks`.
 from dispatcher import tasks as task_store
+# Aliased: `/api/actions` reads the worker's heartbeat; for two constants,
+# never called, as `docker_exec` is.
+from dispatcher import worker as action_worker
 from dispatcher.config import Config, load_config
 from observability import auth
 from observability.api import plans as plan_frontmatter
@@ -201,6 +206,26 @@ MAX_ROADMAP_TASKS = 2000
 #: (`dispatcher/handoff.py`) and two filing roles, so a count of tasks bounds
 #: the rows.
 MAX_COMMAND_REQUEST_TASKS = 2000
+
+#: How many finished actions one `/api/actions` answer carries when the
+#: caller sends no `limit`. `done/` grows by one file per action and nothing
+#: prunes it yet (ADR 142, *Consequences*), so the route serves the newest end:
+#: fifty is a screen of history, and every file past it is never opened.
+DEFAULT_ACTIONS_DONE = 50
+
+#: The most finished actions one `/api/actions` answer carries, whatever
+#: `limit` asked for; the clamp reports itself in `warnings` on
+#: `MAX_EVENT_LIMIT`'s model. It bounds the files read as well as the rows
+#: served, since only the newest names are opened.
+MAX_ACTIONS_DONE = 500
+
+#: How old the worker's last beat may be before `/api/actions` calls it stale.
+#: The worker beats once a pass, every `worker.POLL_SECONDS` (2s) plus the
+#: pass's own work, so fifteen missed beats is a worker that is gone or wedged,
+#: not one that is slow. A pass that waits on an account's `/usage` probe can
+#: run past this and read stale until it ends; `beat_at` is served beside the
+#: flag, so a reader can tell a long pass from a dead worker.
+WORKER_STALE_SECONDS = 15 * action_worker.POLL_SECONDS
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
@@ -926,6 +951,46 @@ def create_app(
         rows.sort(key=_command_request_order)
         refused.sort(key=lambda row: (str(row["filed_at"] or ""), row["task_id"]))
         return _envelope({"requests": rows, "refused": refused}, warnings)
+
+    @app.get("/api/actions")
+    @requires_auth
+    def action_queue():
+        """The action queue under `<state_dir>/actions/`, and whether a worker runs.
+
+        Step 4 of ADR 142's split. `pending` in the order the worker takes
+        them (name order), each with the `waiting` the worker set; `claimed`,
+        the running ones, in name order; `done`, the newest `limit` by name,
+        newest first; and `worker`, the heartbeat `dispatcher/worker.py`
+        writes with a `stale` flag. The directory a record sits in is its
+        state (ADR 142, 3), so a record is served whole under the directory
+        it was found in. Read through `/state:ro`: no directory is made here,
+        and a queue that was never created is an empty one with no worker.
+        """
+        rejected = _reject_unknown_parameters(frozenset({"limit"}))
+        if rejected is not None:
+            return rejected
+        limit, rejected = _int_parameter("limit", DEFAULT_ACTIONS_DONE, positive=True)
+        if rejected is not None:
+            return rejected
+        warnings: list[str] = []
+        if limit > MAX_ACTIONS_DONE:
+            warnings.append(
+                f"limit={limit} is above this service's maximum of {MAX_ACTIONS_DONE}: "
+                f"answering the newest {MAX_ACTIONS_DONE} finished actions."
+            )
+            limit = MAX_ACTIONS_DONE
+        root = actions.actions_dir(cfg.state_dir)
+        pending, _ = _action_records(root / actions.PENDING, None, warnings)
+        claimed, _ = _action_records(root / actions.CLAIMED, None, warnings)
+        done, done_total = _action_records(root / actions.DONE, limit, warnings)
+        data = {
+            "pending": pending,
+            "claimed": claimed,
+            "done": done,
+            "done_total": done_total,
+            "worker": _worker_heartbeat(root / action_worker.HEARTBEAT, warnings),
+        }
+        return _envelope(data, warnings)
 
     return app
 
@@ -1828,6 +1893,77 @@ def _command_request_order(row: dict) -> tuple:
     """Pending first, then everything by `filed_at`, oldest first, then task and number."""
     n = row["n"] if isinstance(row["n"], int) else 0
     return (row["state"] != "pending", str(row["filed_at"] or ""), row["task_id"], n)
+
+
+# --- the action queue -----------------------------------------------------
+
+
+def _action_records(
+    directory: Path, newest: int | None, warnings: list[str]
+) -> tuple[list[dict], int]:
+    """The records in one queue directory, and how many files it holds.
+
+    `newest=None` serves every file in name order, which is the order the
+    worker takes them; a number serves only the last that many names, newest
+    first, and opens no other file. A directory that does not exist is empty
+    and no warning: the queue is made by its first writer, and a host that
+    never ran one has none. A file that does not read is a warning naming it,
+    parsed by `actions._load`, the queue's own reader, so a record this route
+    serves is one the worker would take.
+    """
+    try:
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".json"))
+    except FileNotFoundError:
+        return [], 0
+    except OSError as exc:
+        warnings.append(f"{directory}: cannot list the actions: {exc}")
+        return [], 0
+    total = len(names)
+    if newest is not None:
+        names = names[::-1][:newest]
+    records = []
+    for name in names:
+        path = directory / name
+        try:
+            records.append(actions._load(path))
+        except (OSError, ValueError) as exc:
+            warnings.append(f"{path}: unreadable action: {exc}")
+    return records, total
+
+
+def _worker_heartbeat(path: Path, warnings: list[str]) -> dict:
+    """`{heartbeat, stale, stale_after_seconds}` from the worker's `worker.json`.
+
+    No file is no worker: `heartbeat` null and `stale` true, with no warning,
+    since a stack runs without the `worker` profile (ADR 142, 1). A file that
+    does not read is a warning and the same answer. A `beat_at` that is not a
+    UTC ISO time serves the heartbeat as it is, stale, and says why. The pid is
+    served and not checked: it is the worker container's, not this one's.
+    """
+    answer = {"heartbeat": None, "stale": True, "stale_after_seconds": WORKER_STALE_SECONDS}
+    try:
+        with open(path) as f:
+            heartbeat = json.load(f)
+    except FileNotFoundError:
+        return answer
+    except (OSError, ValueError) as exc:
+        warnings.append(f"{path}: unreadable worker heartbeat: {exc}")
+        return answer
+    if not isinstance(heartbeat, dict):
+        warnings.append(f"{path}: unreadable worker heartbeat: not a JSON object")
+        return answer
+    answer["heartbeat"] = heartbeat
+    beat_at = heartbeat.get("beat_at")
+    try:
+        beat = dt.datetime.fromisoformat(beat_at)
+        if beat.tzinfo is None:
+            raise ValueError("no time zone")
+    except (TypeError, ValueError) as exc:
+        warnings.append(f"{path}: beat_at {beat_at!r} is not an ISO time: {exc}")
+        return answer
+    age = (dt.datetime.now(dt.timezone.utc) - beat).total_seconds()
+    answer["stale"] = age > WORKER_STALE_SECONDS
+    return answer
 
 
 if __name__ == "__main__":

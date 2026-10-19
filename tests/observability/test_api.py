@@ -46,6 +46,7 @@ ROUTES = [
     "/api/command-requests",
     "/api/ready",
     "/api/tasks/T-1/comments",
+    "/api/actions",
 ]
 
 
