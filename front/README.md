@@ -60,9 +60,9 @@ make with the operator, not a lockfile fix.**
 
 ### The five environment variables
 
-The console reads five names from its environment, and **none of them may take a
+The console reads seven names from its environment, and **none of them may take a
 `VITE_` prefix**: Vite inlines every `import.meta.env.VITE_*` into the client
-bundle, and two of the five are credentials. They are read in
+bundle, and three of the seven are credentials. They are read in
 `src/lib/api/server-env.ts`, on the server, once, at import.
 
 | Name | Default | When it is missing |
@@ -72,6 +72,8 @@ bundle, and two of the five are credentials. They are read in
 | `CONSOLE_PROJECT` | none | `?project=` is omitted from the debt call and the api picks the project — right for a harness with one checkout, and a self-describing 400 for the other kind |
 | `CONFIG_WRITER_URL` | `http://127.0.0.1:8791` — the config writer on the host; a trailing slash is trimmed | the default is used |
 | `CONFIG_WRITER_TOKEN` | none | **the console still starts.** Every `/api/settings` call answers a JSON 503 naming this variable instead, so the Settings screen says what to set rather than the console refusing to boot over one screen. Unset, empty and whitespace all count as unset. It is the token `config_writer/` reads |
+| `BOARD_SERVICE_URL` | `http://board-service:8792` — the compose network name; a trailing slash is trimmed | the default is used |
+| `BOARD_ACTIONS_TOKEN` | none | **the console still starts.** `POST /api/tasks/<id>/start` and `POST /api/actions/<id>/cancel` answer a JSON 503 naming this variable and send nothing. Unset, empty and whitespace all count as unset. It is the token the board-service reads for its action routes (ADR 157) |
 
 ```sh
 API_TOKEN=<the same token observability/api reads> \

@@ -1,10 +1,10 @@
 /**
- * The six names the console reads from its environment, validated at import.
+ * The seven names the console reads from its environment, validated at import.
  *
  * Server-only: this module reads the api's bearer token, and the one rule
  * `docs/decisions.md` ADR 15 calls easy to undo by accident is that the token is
  * read on the server or it is published — Vite inlines every
- * `import.meta.env.VITE_*` into the client bundle, so none of these six carries
+ * `import.meta.env.VITE_*` into the client bundle, so none of these seven carries
  * that prefix and none of them may grow it. `typeof window` below is the
  * mechanical half of that rule; `front/src/server.ts` importing this module
  * (through `forward.ts`) is what makes a missing token a refusal to boot rather
@@ -19,9 +19,13 @@
  * working without it, so its absence is the settings forward's 503 rather than
  * the whole console's crash.
  *
- * ADR 136 adds `BOARD_SERVICE_URL`, for the board-service's four writes. It has
- * no token: the board-service takes none, and refuses any request carrying a
- * browser `Origin` instead (`board_service/app.py:_http`).
+ * ADR 136 adds `BOARD_SERVICE_URL`, for the board-service's four backlog writes.
+ * Those carry no token: the board-service takes none there, and refuses any
+ * request carrying a browser `Origin` instead (`board_service/app.py:_http`).
+ *
+ * ADR 157 adds `BOARD_ACTIONS_TOKEN`, the bearer of the board-service's two action
+ * routes (ADR 151). Like the writer's token it is not a refusal to boot: unset,
+ * those two routes answer a 503 naming it.
  */
 
 // `tsconfig.json` sets `types: ["vite/client"]`, which admits no Node globals,
@@ -98,3 +102,12 @@ export const BOARD_SERVICE_URL = (
  * written under its lock, so nothing argues for a longer wait than the api's.
  */
 export const BOARD_SERVICE_TIMEOUT_MS = 5000;
+
+/**
+ * The bearer of the board-service's start and cancel routes (`docs/decisions.md`
+ * ADR 157, on ADR 151), or `null` when unset. Empty and whitespace-only read as
+ * unset, as `CONFIG_WRITER_TOKEN` does. Never thrown on here: `forward.ts`
+ * answers those two routes with a JSON 503 naming the variable, and the value is
+ * never logged or put in a response.
+ */
+export const BOARD_ACTIONS_TOKEN = process.env["BOARD_ACTIONS_TOKEN"]?.trim() || null;

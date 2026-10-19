@@ -9337,3 +9337,51 @@ this task answers.
   races the worker's moves anyway.
 - Importing `observability/auth.py`: a new `COPY` in the board service's
   image for one comparison.
+
+## ADR 157 — The console forwards the two action routes with the bearer, and the start's project is the console's
+
+**Status:** accepted (T-105-S1, 2026-10-19). Builds ADR 142 split item 6
+on ADR 151's contract; narrows ADR 151 *Consequences* for the console's
+side. Supersedes nothing.
+
+**Context.** ADR 151 makes a start's `project` the body's, required, with
+no default on the board service. The console's forward (ADR 136) stands
+between a browser and the board service; ADR 24 already rules that
+`?project=` on the api's reads is the console's `CONSOLE_PROJECT` and never
+the browser's. The two action routes are also the first board writes that
+carry a credential, `BOARD_ACTIONS_TOKEN`.
+
+**Decision.**
+
+1. *The project is the console's.* `forward.ts` writes the upstream start
+   body as `{"project": CONSOLE_PROJECT, "note": <note or null>}`. The
+   browser's body must be a JSON object whose only key is `note` (a
+   string, null, or absent); any other key, `project` included, or a body
+   that is not a JSON object, is the console's 400 and nothing is sent.
+   With `CONSOLE_PROJECT` unset a start is a 503 naming it.
+2. *A cancel sends `{}`* whatever the browser's body held, after the same
+   checks.
+3. *The token is the console's server half's,* `BOARD_ACTIONS_TOKEN` in
+   `server-env.ts`, read like `CONFIG_WRITER_TOKEN` (empty or whitespace is
+   unset), never a refusal to boot, never in an answer or a log. Unset, the
+   two routes answer a 503 naming it and nothing is sent.
+4. *Order:* the route match (undecodable id 404), then `forwardBoard`'s
+   CSRF checks (415, 403, 403), then the token 503, then (start only) the
+   project 503, then the 64 KiB bound (413), then the body's shape (400).
+   Upstream headers are `Content-Type: application/json` and
+   `Authorization: Bearer <token>` only.
+5. `GET /api/actions` joins `FORWARDED` with `limit` copied and no
+   `?project=`: the queue is the hive's, not a project's (ADR 142).
+
+**Consequences.**
+- A browser cannot start a task of another project through the console
+  until `docs/plans/projects.md` gives the console more than one; that
+  change re-opens part 1 rather than inheriting it.
+- A console without `CONSOLE_PROJECT` keeps every read and loses only the
+  start.
+
+**Ruled out.**
+- Passing the browser's `project` through: the console would then hand a
+  page the choice ADR 24 keeps on the server.
+- A refusal to boot without the token: every other screen works without it,
+  as ADR 112 ruled for the writer's token.
