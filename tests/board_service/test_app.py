@@ -343,7 +343,8 @@ def test_an_empty_or_missing_hive(tmp_path):
 
 def test_get(client, hive):
     task(hive, "T-1", epic="T-9", depends_on=["T-0"], heartbeat="2026-10-18T10:00:00Z")
-    (hive.parent / "board" / "T-1" / "comments.jsonl").write_text('{"a":1}\n\n{"a":2}\n')
+    comment = '{"at": "2026-10-18T10:00:00Z", "author": "operator", "text": "x"}'
+    (hive.parent / "board" / "T-1" / "comments.jsonl").write_text(f"{comment}\n\n{comment}\n")
     out = ok(client, "board_get", {"task_id": "T-1"})
     assert out["warnings"] == []
     item = out["item"]
@@ -353,6 +354,22 @@ def test_get(client, hive):
     assert item["comment_count"] == 2
     assert item["frontmatter"]["epic"] == "T-9"
     assert item["frontmatter"]["depends_on"] == ["T-0"]
+
+
+def test_get_counts_only_the_comments_the_thread_shows(client, hive):
+    task(hive, "T-1")
+    path = hive.parent / "board" / "T-1" / "comments.jsonl"
+    path.write_text(
+        '{"at": "2026-10-18T10:00:00Z", "author": "operator", "text": "kept"}\n'
+        '{"at": "2026-10-18T10:01:00Z", "auth\n'
+        '{"a": 1}\n'
+    )
+    out = ok(client, "board_get", {"task_id": "T-1"})
+    assert out["item"]["comment_count"] == 1
+    assert len(out["warnings"]) == 2
+    assert out["warnings"][0].startswith(f"{path}: line 2: not a JSON line (")
+    assert out["warnings"][0].endswith("), skipped")
+    assert out["warnings"][1] == f"{path}: line 3: no string at, author, text, skipped"
 
 
 def test_get_makes_yaml_dates_into_text(client, hive):

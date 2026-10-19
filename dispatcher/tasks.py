@@ -163,6 +163,8 @@ CREATE_LOCK = "_create"
 DEBT_TAG = "debt"
 #: The comments' file, beside the description (section 2).
 COMMENTS_FILE = "comments.jsonl"
+#: The keys that make a `comments.jsonl` line a comment: `add_comment`'s three.
+COMMENT_KEYS = ("at", "author", "text")
 
 _LEGACY_KEY = "description"
 #: A comment's `commit`: an abbreviated or full git object name.
@@ -1922,6 +1924,50 @@ def comments_path(hive_dir: str, task_id: str) -> str:
     return os.path.join(os.path.dirname(description_path(hive_dir, task_id)), COMMENTS_FILE)
 
 
+def parse_comment_line(line: bytes) -> tuple[dict | None, str | None]:
+    """One non-blank `comments.jsonl` line: `(value, None)`, or `(None, problem)`.
+
+    A line is a comment when it is a JSON object with a string `at`, `author`
+    and `text`, the three `add_comment` always writes; anything else is the
+    problem, worded to follow the file and its line in a warning. The value is
+    the whole object, unknown keys and a broken diff anchor included: what a
+    reader serves of it is the reader's. The one rule both the readers and the
+    counts apply, so a count is the comments a reader shows (ADR 172).
+    """
+    try:
+        value = json.loads(line)
+    except ValueError as exc:
+        # `UnicodeDecodeError` is a `ValueError`, so bytes that are not UTF-8
+        # land here too.
+        return None, f"not a JSON line ({exc}), skipped"
+    if not isinstance(value, dict):
+        return None, f"not a JSON object but a {type(value).__name__}, skipped"
+    missing = [key for key in COMMENT_KEYS if not isinstance(value.get(key), str)]
+    if missing:
+        return None, f"no string {', '.join(missing)}, skipped"
+    return value, None
+
+
+def count_comments(path: str, problems: list[str] | None = None) -> int:
+    """The comments in the `comments.jsonl` at `path`, by `parse_comment_line`.
+
+    Blank lines are not counted and not named; every other line that is not a
+    comment is appended to `problems`, when given, as `<path>: line <n>:
+    <problem>`, the read api's words for the same line. `OSError` propagates.
+    """
+    count = 0
+    with open(path, "rb") as fh:
+        for number, line in enumerate(fh, start=1):
+            if not line.strip():
+                continue
+            _, problem = parse_comment_line(line)
+            if problem is None:
+                count += 1
+            elif problems is not None:
+                problems.append(f"{path}: line {number}: {problem}")
+    return count
+
+
 def _title_problems(title: object, what: str) -> list[str]:
     if not isinstance(title, str) or not title.strip():
         return [f"{what} is blank"]
@@ -2590,8 +2636,7 @@ def add_comment(
             os.write(fd, data)
         finally:
             os.close(fd)
-        with open(path, "rb") as fh:
-            count = sum(1 for raw in fh if raw.strip())
+        count = count_comments(path)
     return {"id": task_id, "comment": comment, "comment_count": count}
 
 
