@@ -48,6 +48,7 @@ ROUTES = [
     "/api/tasks/T-1/comments",
     "/api/actions",
     "/api/threads",
+    "/api/threads/main/events",
 ]
 
 
