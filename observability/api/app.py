@@ -689,7 +689,7 @@ def create_app(
         `comments.jsonl`, each line judged by `tasks.parse_comment_line`, the
         rule the board service's count applies too. A line that is not
         a comment is a warning naming the file and its line, and the rest of
-        the thread is still served. `docs/decisions.md` ADR 135, ADR 169.
+        the thread is still served. `docs/decisions.md` ADR 135, ADR 172.
         """
         rejected = _reject_unknown_parameters(frozenset())
         if rejected is not None:

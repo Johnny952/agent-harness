@@ -267,7 +267,7 @@ def _comment_count(hive_dir: str, task_id: str, warnings: list[str]) -> int | No
     A count is what section 6 serves, and the comments themselves are the file
     a phase is pointed to (section 2). A line that is not a comment is not
     counted and is a warning naming the file and its line, as the read api
-    skips and names it, so the count is the thread the console shows (ADR 169).
+    skips and names it, so the count is the thread the console shows (ADR 172).
     """
     path = task_store.comments_path(hive_dir, task_id)
     try:

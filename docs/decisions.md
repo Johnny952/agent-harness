@@ -9593,7 +9593,7 @@ required like `CONFIG_WRITER_TOKEN` or optional like `CONSOLE_PROJECT`.
 - Creating `dispatcher_state/actions` from `scripts/configure.sh`: docker
   makes it on first mount, owned by the root both services run as.
 
-## ADR 169 — A comment count counts the lines a reader shows as comments, by one rule in `dispatcher/tasks.py`
+## ADR 172 — A comment count counts the lines a reader shows as comments, by one rule in `dispatcher/tasks.py`
 
 **Status:** accepted (operator, out of cycle, 2026-10-19). Amends ADR 125
 step 7 (`board_get`'s comment count) and the context of ADR 135 ("no reader

@@ -1932,7 +1932,7 @@ def parse_comment_line(line: bytes) -> tuple[dict | None, str | None]:
     problem, worded to follow the file and its line in a warning. The value is
     the whole object, unknown keys and a broken diff anchor included: what a
     reader serves of it is the reader's. The one rule both the readers and the
-    counts apply, so a count is the comments a reader shows (ADR 169).
+    counts apply, so a count is the comments a reader shows (ADR 172).
     """
     try:
         value = json.loads(line)
