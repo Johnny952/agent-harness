@@ -10187,9 +10187,10 @@ length.
    bearer and not with the thread routes (ADR 170 put those outside it
    because they spend none). The person's message, sent from the
    console's conversation, authorizes that one turn and nothing more:
-   `docs/charter.md` C-1 and C-8 as *Amended* 2026-10-11 make the
-   console's thread the one conversation, C-12 *Amended* the same day
-   puts it in the console, and C-4 is met because a person sent this
+   `docs/charter.md` C-1 *Amended* 2026-10-11 and C-8's closing ruling of
+   that day make the console's thread the one conversation, C-12
+   *Amended* the same day puts it in the console, and C-4 is met because
+   a person sent this
    message and the worker runs it once (ADR 173, 1).
 3. *The body.* A JSON object with `text` and no other key.
    - Any other key is 400 `unknown field '<key>'`.
