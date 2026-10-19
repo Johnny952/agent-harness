@@ -221,6 +221,15 @@ DEFAULT_ACTIONS_DONE = 50
 #: served, since only the newest names are opened.
 MAX_ACTIONS_DONE = 500
 
+#: How many log lines one `/api/threads/<id>/events` answer carries when the
+#: caller sends no `limit`. A turn streams a line per message and per tool
+#: result, so a turn is tens of lines and this is a screen of turns (ADR 180).
+DEFAULT_THREAD_EVENT_LIMIT = 500
+
+#: The most log lines one `/api/threads/<id>/events` answer carries; the clamp
+#: reports itself in `warnings` on `MAX_EVENT_LIMIT`'s model.
+MAX_THREAD_EVENT_LIMIT = 2000
+
 #: How old the worker's last beat may be before `/api/actions` calls it stale.
 #: The worker beats once a pass, every `worker.POLL_SECONDS` (2s) plus the
 #: pass's own work, so fifteen missed beats is a worker that is gone or wedged,
@@ -1022,6 +1031,68 @@ def create_app(
             root = thread_store.threads_root(cfg.hive_tasks_dir)
             return _envelope([], [f"{root}: unreadable threads directory: {exc}"])
         return _envelope(records, warnings)
+
+    @app.get("/api/threads/<thread_id>/events")
+    @requires_auth
+    def thread_events(thread_id: str):
+        """The thread's conversation log, one row per line (ADR 173, 4; ADR 180).
+
+        `docs/plans/main-thread.md` step 3. A row is `{"n", "event"}`: `n` is
+        the line's number in `conversations/<thread>.jsonl`, from 1, and
+        `event` the line as written, a harness line or the CLI's stream event
+        verbatim. `since=<n>` serves the lines after it, the cursor
+        `/api/events` keeps with its ids. A final line with no newline yet is
+        being written and is left for the next read; a whole line that does
+        not parse is a row with a null `event` and a warning, so the cursor
+        still moves past it. No log yet is an empty list.
+        """
+        rejected = _reject_unknown_parameters(frozenset({"limit", "since"}))
+        if rejected is not None:
+            return rejected
+        limit, rejected = _int_parameter("limit", DEFAULT_THREAD_EVENT_LIMIT, positive=True)
+        if rejected is not None:
+            return rejected
+        since, rejected = _int_parameter("since", 0)
+        if rejected is not None:
+            return rejected
+        try:
+            path = thread_store.conversation_path(cfg.hive_tasks_dir, thread_id)
+        except thread_store.NoThreadError:
+            # A 400 and not a 404, as `/api/phases` answers a malformed
+            # `task_id`: the id never reaches a path. A well-formed id with no
+            # record is not checked: its log is just absent (ADR 27).
+            return _error(f"no thread id {thread_id!r}: not one the harness makes", 400)
+        warnings: list[str] = []
+        if limit > MAX_THREAD_EVENT_LIMIT:
+            warnings.append(
+                f"limit={limit} is above this service's maximum of "
+                f"{MAX_THREAD_EVENT_LIMIT}: answering {MAX_THREAD_EVENT_LIMIT} "
+                f"rows. Walk the rest with ?since=<last n>."
+            )
+            limit = MAX_THREAD_EVENT_LIMIT
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except FileNotFoundError:
+            return _envelope([], warnings)
+        except OSError as exc:
+            return _envelope([], warnings + [f"{path}: unreadable conversation log: {exc}"])
+        lines = text.split("\n")
+        # The piece after the last newline: empty, or a line still being written.
+        lines.pop()
+        rows: list[dict] = []
+        for n, line in enumerate(lines[max(since, 0):], start=max(since, 0) + 1):
+            if len(rows) == limit:
+                break
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            if not isinstance(event, dict):
+                warnings.append(f"{path}: line {n} is not a JSON object")
+                event = None
+            rows.append({"n": n, "event": event})
+        return _envelope(rows, warnings)
 
     return app
 

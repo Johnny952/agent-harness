@@ -260,8 +260,8 @@ and worker.
 3. The api routes `GET /api/threads` and `GET /api/threads/<id>/events`.
    `GET /api/threads` is built (2026-10-19, ADR 177): every record, the main
    thread first and then by `created`, archived ones with their status.
-   `GET /api/threads/<id>/events` is pending: it waits for the conversation
-   log's format (T-110).
+   `GET /api/threads/<id>/events` is built (2026-10-19, ADR 180): the log's
+   lines as `{"n", "event"}` rows, followed with `?since=<last n>`.
 4. The screen, read-only: threads and conversations with the switch. A front
    task, behind its own ask for a build.
 5. The composer and *stop*, now that *Decisions*, 1 is ruled.

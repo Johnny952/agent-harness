@@ -10109,3 +10109,49 @@ there (T-100-D1).
 - Moving the handlers into `KINDS`: ADR 148 decision 1 and its *Ruled out*
   still hold; `actions.py` would import the core, or `worker.py` would
   mutate another module's frozen registry at import.
+
+## ADR 180 — `GET /api/threads/<id>/events` serves the conversation log by line number
+
+**Status:** accepted (2026-10-19). Builds the second route of
+`docs/plans/main-thread.md` step 3 on the log ADR 173 decision 4 defines.
+
+**Context.** ADR 173 decision 4 writes a thread's conversation to
+`<hive root>/conversations/<thread>.jsonl`, append-only: a `turn_start`
+harness line, the stream's lines verbatim, a `turn_end` line. The screen
+(step 4) needs to read it and then follow it while a turn runs, without
+re-reading what it already has. A reader may meet the last line half
+written.
+
+**Decision.**
+1. *A row is a line.* The answer is `{"n", "event"}` per line: `n` the line's
+   number from 1, `event` the line parsed as written. The route does not
+   group lines into turns or reshape the stream's events; the log's format is
+   ADR 173's, and the screen reads it.
+2. *The cursor is the line number.* `since=<n>` serves the lines after line
+   `n` (0, the default, is from the start; a negative one reads as 0);
+   `limit` bounds the rows, 500 by default and at most 2000, the clamp
+   reported in `warnings`. A follower sends the last `n` it has. The log is
+   append-only, so a line's number never changes.
+3. *A torn last line waits.* The piece after the last newline is being
+   written and is not served; the next read, once it ends, serves it under
+   its number. A whole line that does not parse to a JSON object is a row
+   with a null `event` and a warning, so the numbering stays whole.
+4. *Ids.* An id `conversation_path` refuses (not `main`, not one the
+   harness makes) is a 400, as `/api/phases` answers a malformed id, and no
+   path is built from it. A well-formed id with no log yet is an empty list,
+   not a 404 (ADR 27); the read creates nothing. An unreadable log is an
+   empty list with a warning, not a 500.
+
+**Consequences.**
+- Every request reads the whole file. A thread's log is a conversation, not
+  a phase's stream, so this is cheap for now; a byte-offset index or a
+  seek from a remembered offset is the later optimization if logs grow.
+- The route is read-only and behind the api's auth like the others.
+
+**Ruled out.**
+- A byte-offset cursor: exact and seekable, but meaningless to a reader of
+  the rows and broken by the `errors="replace"` decode of a bad byte.
+- Grouping lines into turns server-side: it would fix a second format beside
+  ADR 173's, and a running turn has no `turn_end` to group by.
+- A 404 for a well-formed id with no log: a new thread has none until its
+  first turn, and ADR 27 answers an id from a list with an empty 200.
