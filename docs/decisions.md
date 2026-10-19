@@ -9213,3 +9213,61 @@ merged first.
   records are orphans, and threads are how ADR 83 runs cycles.
 - Re-running any action that may have spent quota after a crash: C-4.
 - An MCP tool that enqueues: `main-thread.md` step 6, under its own ADR.
+
+## ADR 148 — The worker keeps its handlers, runs cancels first, and ends a start the shutdown held as `interrupted`
+
+**Status:** accepted (T-100, 2026-10-19). Narrows ADR 142 where it left
+room for step 2 of its split (`dispatcher/worker.py`); it supersedes
+nothing.
+
+**Context.** ADR 142 decision 6 says the `KINDS` registry gives each kind's
+handler, but `dispatcher/actions.py` is the module the board service will
+import, and a handler that runs a cycle needs the whole dispatcher core
+behind it. Decision 7 says a `cancel` "is run at once", while the loop
+lists `pending/` in name order, and a cancel is always named after its
+target. And the worker's stop on SIGTERM is "let running handlers reach a
+boundary", which ADR 142 does not name a status for.
+
+**Decision.**
+
+1. *The handlers live in the worker.* `dispatcher/worker.py` holds
+   `HANDLERS`, kind name to handler, for `start` and `cancel`.
+   `Kind.handler` in `KINDS` stays `None`: `actions.py` imports nothing of
+   the dispatcher core, so the board service can import it without the
+   socket's code. A kind with no entry in `HANDLERS` (`command_verdict`
+   and `turn` today) is left in `pending/` untouched, its `waiting` unset.
+2. *Cancels first.* Each pass handles every pending `cancel` before it
+   claims anything else, so a cancel sent for a pending start finds it
+   still pending and nothing of it runs, even when both are new in the
+   same pass. A cancel runs on the loop's own thread: it only moves files
+   and sets a flag.
+3. *A cancel is idempotent on a rerun.* A target already in `done/` as
+   `cancelled` by this cancel's id (`result.cancelled_by`) ends the cancel
+   `done`; any other finished target ends it `failed`.
+4. *Shutdown holds, then interrupts.* On SIGTERM or SIGINT the worker stops
+   claiming and every running start's `may_start_phase` answers no, so the
+   phase in flight finishes and the cycle is held before the next one. A
+   start held that way ends `interrupted`, never `pending`: it has
+   `started_at`, and going on is a new *Start* by a person (C-4, ADR 142
+   decision 7). How long the stop waits is the compose service's
+   `stop_grace_period`, split item 5's to set.
+5. *The account check is paced.* `queue.account_open` can run a `/usage`
+   probe on every parked account. The worker asks it only for a start whose
+   serial key is free, and after a closed answer does not ask again for
+   `queue.WAIT_POLL_SECONDS`; the start waits with `waiting: account`
+   meanwhile.
+
+**Consequences.**
+- A kind's handler is added in two places, `KINDS` for its contract and
+  `HANDLERS` for its run; the empty `Kind.handler` slot is dead until a
+  later task removes it or this ADR is superseded.
+- A start that waits for an account may wait up to five minutes after one
+  frees.
+- Stopping the worker mid-cycle costs the rest of that cycle a new *Start*.
+
+**Ruled out.**
+- Filling `Kind.handler` at import of `worker.py`: it mutates another
+  module's frozen registry, and whether it is set would depend on import
+  order.
+- Sending a held start back to `pending/` on shutdown: it may have spent,
+  and a restart would run it again with no person's act (C-4).

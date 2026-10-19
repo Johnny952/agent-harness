@@ -22,6 +22,7 @@ from dispatcher import (
     tasks,
 )
 from dispatcher import queue as queue_mod
+from dispatcher import worker as worker_mod
 from dispatcher.config import Config, load_config
 from dispatcher.dispatcher import (
     CycleOutcome,
@@ -744,6 +745,12 @@ def main() -> None:
     )
 
     sub.add_parser(
+        "worker",
+        help="Drain the action queue under <state_dir>/actions until signalled; "
+        "one at a time (ADR 142)",
+    )
+
+    sub.add_parser(
         "migrate",
         help="Move the description out of every task file that still carries it "
         "in the frontmatter, into the task's description.md on the board. Run "
@@ -801,6 +808,9 @@ def main() -> None:
             # reads to know what to run next.
             print(_epic_line(cfg, args.task_id))
             raise SystemExit(EXIT_SPLIT)
+    elif args.command == "worker":
+        _require_migrated(cfg, parser)
+        raise SystemExit(worker_mod.run_worker(cfg))
     elif args.command == "run-queue":
         _require_migrated(cfg, parser)
         _run_queue(args, cfg, parser)

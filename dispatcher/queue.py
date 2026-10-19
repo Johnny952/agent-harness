@@ -390,7 +390,9 @@ def _spend(cfg: Config, entry: Entry) -> tuple[int, int]:
     return tokens, unmeasured
 
 
-def _account_open(cfg: Config) -> bool:
+def account_open(cfg: Config) -> bool:
+    """An idle account, or a parked one a fresh /usage probe released. The
+    probe can run on every parked account: do not call it on a short loop."""
     if core.pick_idle_account(cfg, role="arquitecto") is not None:
         return True
     return bool(core._recheck_cooling_accounts(cfg))
@@ -404,7 +406,7 @@ def wait_for_account(cfg: Config, sleep: Callable[[float], None] = time.sleep) -
     booked; the queue looks again every WAIT_POLL_SECONDS.
     """
     announced = False
-    while not _account_open(cfg):
+    while not account_open(cfg):
         if not announced:
             logger.info("queue: no account is open; waiting for one to reset")
             announced = True
