@@ -9054,7 +9054,7 @@ already mounts read-only and the `dispatcher` service read-write.
    "unknown kind", never skipping it in silence.
 
    *How a kind is added.* An entry in one registry in
-   `dispatcher/actions.py`, `KINDS`, giving the kind's `params`
+   a new actions module in the dispatcher package, `KINDS`, giving the kind's `params`
    validation (run by the board service on write and by the worker on
    claim), its handler, its serial key (decision 8), whether it spends
    quota, and what recovery does with it (decision 7); a board-service
@@ -9136,7 +9136,7 @@ already mounts read-only and the `dispatcher` service read-write.
 **The split.** In build order, one surface each. `after` names what must be
 merged first.
 
-1. `dispatcher/actions.py`, the contract. The record, the id, `KINDS` with
+1. The actions module (new), the contract. The record, the id, `KINDS` with
    the four kinds' validation, `create` (tmp then rename, under
    `write.lock`, with the refusals of decision 7), `read_all` (tolerant: a
    file that does not parse is a warning, not an error), and the worker's

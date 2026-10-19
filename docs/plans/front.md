@@ -686,7 +686,7 @@ Bound to the **tier-3 opening task**:
   stays write-free; a Node app lives in its own top-level directory. Neither
   rule says where a Python queue-and-worker goes. An ADR.
   **Decided 2026-10-19** by T-097 (`docs/decisions.md` ADR 142), after ADR
-  124 placed the board service: the queue is `dispatcher/actions.py` over
+  124 placed the board service: the queue is a new actions module over
   files under `<state_dir>/actions/`, written by the board service on a
   console `POST` behind its own bearer, and drained by a `worker` compose
   service built from the dispatcher's image. The api reads it for `/queue`.
