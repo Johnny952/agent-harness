@@ -2,6 +2,7 @@
 console's HTTP endpoints."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,9 @@ def test_accept_refuses_a_bad_to_and_a_task_on_the_board(client, hive):
     assert "on the board" in error(client, "backlog_accept", {"task_id": "T-001"})
 
 
+# Root ignores the mode bits, so as uid 0 (a phase's container) the write
+# succeeds and there is nothing to test.
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only mode")
 def test_a_write_to_a_read_only_hive_is_a_tool_error(client, hive):
     task(hive, "T-001", status="proposed")
     dirs = [hive, hive.parent / "board" / "T-001"]
