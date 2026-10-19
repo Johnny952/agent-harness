@@ -7115,7 +7115,7 @@ def test_record_merge_repairs_an_epic_whose_close_never_happened(tmp_path) -> No
         cfg, "task-0-S2", _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
     )
 
-    assert (recorded, problem) == (["epic task-0: every sub-task is merged, so it is done"], None)
+    assert (recorded, problem) == (["epic task-0: every sub-task is merged or dropped, so it is done"], None)
     assert _task(cfg, "task-0").status == "done"
 
 

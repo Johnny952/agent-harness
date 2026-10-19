@@ -743,7 +743,7 @@ def test_cli_merge_task_closes_the_epic_on_its_last_child_and_not_before(
 
     _merge_task(monkeypatch, config_path, "task-0-S2")
     assert dispatcher_mod.context_transfer.read_task_file(parent).status == "done"
-    assert "epic task-0: every sub-task is merged, so it is done" in capsys.readouterr().out
+    assert "epic task-0: every sub-task is merged or dropped, so it is done" in capsys.readouterr().out
 
 
 def test_cli_merge_task_still_exits_zero_when_the_task_has_no_file(
