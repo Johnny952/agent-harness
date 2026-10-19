@@ -9460,3 +9460,86 @@ queue record carries `project`, but the browser never learns
   lost to a read error, and the 409 already stops a duplicate.
 - Showing *Queued* from the mutation's own result: the poll is the
   record, and a cancel from elsewhere would leave the card lying.
+
+## ADR 163 — The Queue screen reads the real action queue with twenty finished records, and cancels a start behind a dialog
+
+**Status:** accepted (T-107, 2026-10-19). Builds ADR 142 split item 7 on
+ADR 157's forward and ADR 160 part 1's reader; carries out ADR 160's
+consequence that `/queue` retires the draft's mock and its `["actions"]`
+key. Supersedes nothing.
+
+**Context.** `/queue` drew a mock (`listActions`, `QueuedAction`, a verb bar
+and an enqueue dialog) whose shape is not the api's. `GET /api/actions`
+serves `pending` (take order), `claimed`, the newest `limit` of `done`
+(default 50, at most 500), `done_total` and `worker` (`heartbeat`, `stale`,
+`stale_after_seconds`), and the forward copies `limit` (ADR 157, 5). The
+Board reads it with `limit=1` under `["action-queue"]`. The board-service's
+`POST /api/actions/<id>/cancel` answers 201 with a *cancel* action it queued,
+not with the start cancelled: the worker does the cancel. Nothing enqueues
+any other verb from the console.
+
+**Decision.**
+
+1. *One reader, a parameter.* `getActionQueue(limit = 1)` reads
+   `/api/actions?limit=<limit>`; the Board's call and `actionQueueQuery`
+   stay as they are. The screen's query is `actionQueueListQuery`, key
+   `["action-queue", "list"]`, `getActionQueue(QUEUE_DONE_LIMIT)` with
+   `QUEUE_DONE_LIMIT = 20`, polled at `POLL_MS`. The key sits under
+   `["action-queue"]` so ADR 160's invalidation after a start refetches it.
+2. *Three groups, every kind.* *Pending · n* in the order served, *Running ·
+   n* for `claimed`, and *Finished* with `n` or, when `done_total` is larger
+   than the list, `n of done_total`. Each group with no rows says so in one
+   muted line. A row shows `kind`, `task_id`, `project`, `actor`, `note` and
+   an age that ticks: pending since `created_at` (*queued*), running since
+   `claimed_at` (*claimed*), finished since `finished_at` (*finished*). A
+   null task, project, note or timestamp is `Absent` (*no task*, *no
+   project*, *no note*, *not recorded*). A `cancel` row also prints its
+   `params.target` when that is a string. A pending row with `waiting`
+   prints *waiting for an account*, *waiting for the project*, or another
+   value verbatim, as ADR 160 part 3 words it. A finished row has a status
+   pill (`done` success, `failed` destructive, `interrupted` warning,
+   `cancelled` and anything else muted, verbatim) and its `error`, when
+   non-null, on its own destructive line.
+3. *The states.* Loading is one muted line. A failed read is `ErrorState`
+   in place of the groups, naming `GET /api/actions`. All three lists empty
+   with `done_total` 0 is one `EmptyState`: nothing has been queued, and a
+   Ready card's *Start development* on the Board queues one. The api's
+   `warnings` render in `WarningBanner`. `pending`, `claimed` or `done` that
+   is not a list is `Malformed` in that group's place and the others still
+   render (`docs/ui.md` *A value of the wrong shape is named*).
+4. *The worker line.* When the read succeeded and `worker.heartbeat` is
+   null: a `Banner` tone `warning` saying no worker has written a
+   heartbeat, so nothing is being taken from the queue. When `heartbeat` is
+   present and `stale` is true: the same banner saying its heartbeat is
+   older than `stale_after_seconds` seconds, with the age of `beat_at` when
+   that is a string. Staleness is the api's judgement, never recomputed
+   (`docs/ui.md` *Staleness is served, never computed*). It shows beside the
+   empty state too.
+5. *Cancel.* Only on a `kind === "start"` row in Pending or Running.
+   `cancelAction(id)` is `POST /api/actions/<id>/cancel` with body `{}`
+   through `readBare`; `cancelActionMutation(qc)` invalidates
+   `["action-queue"]` and `["tasks"]` on settle, success or refusal. The
+   confirmation is `components/ui/dialog.tsx`, as ADR 160 part 5's: it names
+   the action id and the task, says the worker carries the cancel out, and
+   its confirm is disabled while the write is in flight. Success is
+   `toast.success` (the cancel was queued) and closes the dialog; a refusal
+   is `toast.error` with the served message and also closes it, since
+   there is no input to keep.
+6. *What goes.* The verb bar, the enqueue dialog, `VERBS`, the screen's use
+   of `actionBackendQuery`, and then `listActions`, `enqueueAction`,
+   `commandLine`, `actionsQuery`, `QueuedAction`, `ActionVerb` and
+   `mockActions`, which have no other caller. `actionBackendQuery` and
+   `pingActionBackend` stay for app-shell, approvals and tokens.
+
+**Consequences.**
+- The console has no screen that enqueues an arbitrary verb; a start is the
+  Board's and a cancel is this screen's.
+- A toast's *success* means the cancel was queued; whether the start ended
+  `cancelled` is read off the next poll.
+- The screen polls one more `GET /api/actions` at `POLL_MS` while open.
+
+**Ruled out.**
+- A second reader function: the two would differ by a number.
+- Keying the screen `["actions"]`: a start's invalidation would miss it.
+- `alert-dialog.tsx`: its action closes before the write settles, so the
+  in-flight state could not be shown.

@@ -133,8 +133,8 @@ export const acceptTaskMutation = (qc: QueryClient) =>
   });
 
 /**
- * The action queue the worker reads. Key `["action-queue"]`, not `["actions"]`:
- * that one is the `/queue` draft's mock with another shape. ADR 160.
+ * The action queue the worker reads, as the Board takes it (`limit=1`). Key
+ * `["action-queue"]`, which a start's or a cancel's invalidation refetches. ADR 160.
  */
 export const actionQueueQuery = queryOptions({
   queryKey: ["action-queue"],
@@ -154,11 +154,26 @@ export const startTaskMutation = (qc: QueryClient) =>
       ),
   });
 
-export const actionsQuery = queryOptions({
-  queryKey: ["actions"],
-  queryFn: () => api.listActions(),
+/** How many finished records the Queue screen asks for; `done_total` counts the rest. */
+export const QUEUE_DONE_LIMIT = 20;
+
+/** The Queue screen's read: the same queue with a finished list. Under `["action-queue"]`. ADR 163. */
+export const actionQueueListQuery = queryOptions({
+  queryKey: ["action-queue", "list"],
+  queryFn: () => api.getActionQueue(QUEUE_DONE_LIMIT),
   refetchInterval: POLL_MS,
 });
+
+/** `POST /api/actions/<id>/cancel`. The queue and the board refetch, settled either way. */
+export const cancelActionMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["queue", "cancel"],
+    mutationFn: (actionId: string) => api.cancelAction(actionId),
+    onSettled: () =>
+      Promise.all(
+        [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),
+      ),
+  });
 
 export const threadsQuery = queryOptions({
   queryKey: ["threads"],
