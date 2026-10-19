@@ -231,7 +231,9 @@ def turn_command(
     # Variadic like exec_claude's lists: they sit ahead of `-p`.
     command += ["--allowed-tools", *allowed_tools]
     command += ["--disallowed-tools", *disallowed_tools]
-    command += ["-p", prompt, "--output-format", "stream-json", "--verbose"]
+    # The person's text goes last, after `--`, so a message that starts with
+    # `-` is a prompt and never a flag that could lift the no-code set.
+    command += ["-p", "--output-format", "stream-json", "--verbose", "--", prompt]
     return [
         *TURN_PID_WRAPPER, "timeout", "--kill-after=30", str(timeout_seconds), *command,
     ]

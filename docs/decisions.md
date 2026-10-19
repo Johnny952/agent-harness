@@ -9802,8 +9802,11 @@ quota to name what authorizes it.
    `sh -c 'echo "$$"; exec "$@"' ia-harness-turn timeout --kill-after=30
    1800 claude [--resume <id>] --model <m> --effort <e> --permission-mode
    dontAsk --permission-prompts none --allowed-tools <allow…>
-   --disallowed-tools Write Edit NotebookEdit -p <text> --output-format
-   stream-json --verbose`
+   --disallowed-tools Write Edit NotebookEdit -p --output-format
+   stream-json --verbose -- <text>`
+
+   The text sits last, after `--`, so a message that begins with `-` is
+   read as the prompt and never as a flag that lifts the no-code set.
 
    - The `sh` prints its pid on the first line and `exec`s the rest, so
      that pid is the in-container `timeout`; the script is a literal and

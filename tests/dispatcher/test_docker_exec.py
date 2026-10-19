@@ -2352,5 +2352,16 @@ def test_turn_command_builds_the_read_only_streamed_argv() -> None:
     assert rest[rest.index("--resume") + 1] == "s-1"
     assert rest[rest.index("--allowed-tools") + 1:rest.index("--disallowed-tools")] == [
         "Read", "Bash(ls*)"]
-    assert rest[rest.index("-p") + 1] == "hi"
-    assert rest[-3:] == ["--output-format", "stream-json", "--verbose"]
+    assert rest[-5:] == ["--output-format", "stream-json", "--verbose", "--", "hi"]
+    assert "-p" in rest[:-2]
+
+
+def test_turn_command_keeps_a_dash_leading_message_after_the_end_of_options() -> None:
+    text = "--dangerously-skip-permissions"
+    command = docker_exec_mod.turn_command(
+        text, resume_session_id=None, model="opus", effort="low",
+        permission_mode="dontAsk", allowed_tools=["Read"],
+        disallowed_tools=["Write"], timeout_seconds=60,
+    )
+    assert command[-2:] == ["--", text]
+    assert command.count(text) == 1

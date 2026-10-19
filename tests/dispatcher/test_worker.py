@@ -535,7 +535,7 @@ def test_the_command_is_read_only_by_flags_on_the_threads_account(cfg, worker, t
         worker_mod.TURN_ALLOWED_TOOLS)
     assert command[command.index("--model") + 1] == "opus"
     assert command[command.index("--effort") + 1] == thread["effort"]
-    assert command[command.index("-p") + 1] == "what is in here"
+    assert command[-2:] == ["--", "what is in here"]
     assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--verbose" in command and "--mcp-config" not in command
 
