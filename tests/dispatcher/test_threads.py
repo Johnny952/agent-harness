@@ -210,3 +210,20 @@ def test_read_threads_warns_on_a_bad_file_and_lists_main_first(hive, cfg):
 
 def test_read_threads_without_a_directory(hive):
     assert threads.read_threads(hive) == ([], [])
+
+
+def test_session_id_goes_in_the_last_segment_and_opens_none(hive, cfg):
+    record = new(hive, cfg)
+    got = threads.update(hive, cfg, record["id"], session_id="s-9")
+    assert got["segments"][-1]["session_id"] == "s-9" and len(got["segments"]) == 1
+
+
+def test_the_conversation_log_appends_lines_and_refuses_a_foreign_id(hive, cfg):
+    record = new(hive, cfg)
+    threads.append_conversation(hive, record["id"], {"a": 1})
+    threads.append_conversation(hive, record["id"], '{"b": 2}')
+    path = threads.conversation_path(hive, record["id"])
+    assert path.endswith(f"conversations/{record['id']}.jsonl")
+    assert [json.loads(l) for l in Path(path).read_text().splitlines()] == [{"a": 1}, {"b": 2}]
+    with pytest.raises(threads.NoThreadError):
+        threads.append_conversation(hive, "../x", {})

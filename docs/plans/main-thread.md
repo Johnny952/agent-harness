@@ -9,7 +9,8 @@ supersedes: []
 
 **Status:** design, accepted in outline by the user on 2026-10-11, not built
 as a whole; step 1 is built by T-109 (2026-10-19), narrowed to the thread
-records and the model list, the primary override pending.
+records and the model list, the primary override pending; step 2 is built by
+T-110 (2026-10-19, ADR 173).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -249,7 +250,9 @@ and worker.
    `PATCH /api/threads/<id>`, ADR 170) and the model list (ADR 169); the
    primary override is pending, the primary stays `primary_account`.
 2. The worker's `turn` action and the stream written to
-   `conversations/*.jsonl`. It shares board Phase 5's transport.
+   `conversations/*.jsonl`. It shares board Phase 5's transport. Built by
+   T-110 (2026-10-19): `worker.HANDLERS["turn"]`, read-only by flags, the log
+   between `turn_start` and `turn_end` lines (ADR 173).
 3. The api routes `GET /api/threads` and `GET /api/threads/<id>/events`.
 4. The screen, read-only: threads and conversations with the switch. A front
    task, behind its own ask for a build.

@@ -17,6 +17,7 @@ from dispatcher import tasks as task_store
 from dispatcher.config import EFFORT_LEVELS, Config
 
 THREADS_DIR_NAME = "threads"
+CONVERSATIONS_DIR_NAME = "conversations"
 MAIN_ID = "main"
 MAIN_TITLE = "Main thread"
 STATUSES = ("open", "archived")
@@ -199,10 +200,13 @@ def read_threads(hive_dir: str) -> tuple[list[dict], list[str]]:
 def update(
     hive_dir: str, cfg: Config, thread_id: str, *, title: str | None = None,
     account: str | None = None, model: str | None = None, effort: str | None = None,
-    status: str | None = None, now: dt.datetime | None = None,
+    status: str | None = None, session_id: str | None = None,
+    now: dt.datetime | None = None,
 ) -> dict:
     """Change a thread. A changed account, model or effort opens one segment
-    that carries the last segment's `session_id`; title and status open none."""
+    that carries the last segment's `session_id`; title and status open none.
+    `session_id` is the worker's (ADR 173, 6): it is set on the last segment,
+    after any segment this call opened, and opens none."""
     path = thread_path(hive_dir, thread_id)
     with _lock(hive_dir, thread_id):
         record = _load(path, thread_id)
@@ -226,5 +230,29 @@ def update(
             record["segments"].append(
                 {"session_id": last.get("session_id"), **new, "from": _now(now)}
             )
+        if session_id is not None:
+            record["segments"][-1]["session_id"] = session_id
         _write(hive_dir, record)
     return record
+
+
+def conversation_path(hive_dir: str, thread_id: str) -> str:
+    """`NoThreadError` for an id the module did not make."""
+    if not _known_id(thread_id):
+        raise NoThreadError(f"no thread {thread_id!r}")
+    return os.path.join(
+        context_transfer.hive_root(hive_dir), CONVERSATIONS_DIR_NAME, f"{thread_id}.jsonl"
+    )
+
+
+def append_conversation(hive_dir: str, thread_id: str, line: dict | str) -> None:
+    """Append one line to the thread's log and flush it at once (ADR 173, 4).
+    Append-only: nothing here reads, rewrites or trims the file."""
+    path = conversation_path(hive_dir, thread_id)
+    context_transfer._makedirs_readable(
+        context_transfer.hive_root(hive_dir), os.path.dirname(path)
+    )
+    text = line if isinstance(line, str) else json.dumps(line)
+    with open(path, "a") as f:
+        f.write(text.rstrip("\n") + "\n")
+        f.flush()

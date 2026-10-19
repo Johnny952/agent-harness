@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import threading
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from dispatcher import actions, command_run, tasks, worker as worker_mod
+from dispatcher import actions, command_run, state_machine, tasks, threads, worker as worker_mod
 from dispatcher import dispatcher as core
 from tests.dispatcher.test_dispatcher import _make_config
 from tests.dispatcher.test_queue import _task
@@ -396,14 +397,252 @@ def test_an_unknown_kind_fails(cfg, worker, cycle):
     assert state == "done" and got["status"] == "failed" and got["error"] == "unknown kind"
 
 
-def test_turn_stays_pending_untouched(cfg, worker, cycle):
-    t = actions.create(cfg.state_dir, "turn", params={"thread": "x", "text": "hi"})
-    path = actions.actions_dir(cfg.state_dir) / "pending" / f"{t['id']}.json"
-    before = path.read_bytes()
+# ---- turn (ADR 173) ---------------------------------------------------------
+
+
+class FakeProc:
+    """A fake `docker exec` client: `lines` are what stdout yields, the pid line
+    first. `block` holds the stream open until `kill` (or the test) sets it."""
+
+    def __init__(self, lines, block=None, returncode=0, stderr=""):
+        self.lines = list(lines)
+        self.block = block
+        self.returncode = returncode
+        self.stderr = io.StringIO(stderr)
+        self.entered = threading.Event()
+
+    @property
+    def stdout(self):
+        for line in self.lines:
+            yield line + "\n"
+            self.entered.set()
+        if self.block is not None:
+            self.entered.set()
+            assert self.block.wait(WAIT)
+
+    def wait(self):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
+def ev(**kw):
+    return json.dumps(kw)
+
+
+INIT = ev(type="system", subtype="init", session_id="s-new")
+RESULT = ev(type="result", subtype="success", is_error=False, session_id="s-new",
+            total_cost_usd=0.5, usage={"input_tokens": 3}, num_turns=1, result="hi")
+
+
+@pytest.fixture
+def execs(monkeypatch):
+    class Execs:
+        def __init__(self):
+            self.opened = []  # (container, workdir, command)
+            self.proc = FakeProc(["4242", INIT, ev(type="assistant"), RESULT])
+            self.killed = []
+
+    fake = Execs()
+
+    def open_exec(container, workdir, command):
+        fake.opened.append((container, workdir, command))
+        return fake.proc
+
+    def kill(container, pid):
+        fake.killed.append((container, pid))
+        if fake.proc.block is not None:
+            fake.proc.block.set()
+
+    monkeypatch.setattr(worker_mod.docker_exec, "open_docker_exec", open_exec)
+    monkeypatch.setattr(worker_mod.docker_exec, "kill_in_container", kill)
+    return fake
+
+
+@pytest.fixture
+def thread(cfg):
+    cfg.thread_models = ["opus"]
+    return threads.create(cfg.hive_tasks_dir, cfg, title="t", model="opus")
+
+
+def turn(cfg, thread_id, text="hello"):
+    return actions.create(cfg.state_dir, "turn", params={"thread": thread_id, "text": text})
+
+
+def log_of(cfg, thread_id):
+    with open(threads.conversation_path(cfg.hive_tasks_dir, thread_id)) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def test_a_turn_logs_the_message_the_events_in_order_and_ends_done(cfg, worker, thread, execs):
+    t = turn(cfg, thread["id"])
     worker.tick()
+    worker.join()
+    state, got = where(cfg, t["id"])
+    assert state == "done" and got["status"] == "done"
+    assert got["result"] == {"session_id": "s-new", "total_cost_usd": 0.5,
+                             "usage": {"input_tokens": 3}, "num_turns": 1}
+    lines = log_of(cfg, thread["id"])
+    assert [(l["type"], l.get("event") or l.get("subtype")) for l in lines] == [
+        ("ia_harness", "turn_start"), ("system", "init"), ("assistant", None),
+        ("result", "success"), ("ia_harness", "turn_end"),
+    ]
+    assert lines[0]["text"] == "hello" and lines[0]["session_id"] is None
+    assert lines[-1]["status"] == "done"
+
+
+def test_a_line_that_is_not_json_is_logged_as_unparsed(cfg, worker, thread, execs):
+    execs.proc = FakeProc(["4242", "garbage", INIT, RESULT])
+    turn(cfg, thread["id"])
     worker.tick()
-    assert path.read_bytes() == before
-    assert worker.running == {}
+    worker.join()
+    assert log_of(cfg, thread["id"])[1] == {
+        "type": "ia_harness", "event": "unparsed", "at": log_of(cfg, thread["id"])[1]["at"],
+        "line": "garbage",
+    }
+
+
+def test_a_fresh_thread_gets_its_session_recorded_then_resumed(cfg, worker, thread, execs):
+    turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    record = threads.read_thread(cfg.hive_tasks_dir, thread["id"])
+    assert record["segments"][-1]["session_id"] == "s-new"
+    assert "--resume" not in execs.opened[0][2]
+    turn(cfg, thread["id"], "again")
+    worker.tick()
+    worker.join()
+    command = execs.opened[1][2]
+    assert command[command.index("--resume") + 1] == "s-new"
+
+
+def test_the_command_is_read_only_by_flags_on_the_threads_account(cfg, worker, thread, execs):
+    turn(cfg, thread["id"], "what is in here")
+    worker.tick()
+    worker.join()
+    container, workdir, command = execs.opened[0]
+    assert container == "agent-cuenta1" and workdir == cfg.projects_root
+    flag = command.index("--disallowed-tools")
+    assert command[flag + 1:flag + 4] == ["Write", "Edit", "NotebookEdit"]
+    assert command[command.index("--permission-mode") + 1] == "dontAsk"
+    assert command[command.index("--permission-prompts") + 1] == "none"
+    allowed = command.index("--allowed-tools")
+    assert command[allowed + 1:allowed + 1 + len(worker_mod.TURN_ALLOWED_TOOLS)] == list(
+        worker_mod.TURN_ALLOWED_TOOLS)
+    assert command[command.index("--model") + 1] == "opus"
+    assert command[command.index("--effort") + 1] == thread["effort"]
+    assert command[command.index("-p") + 1] == "what is in here"
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in command and "--mcp-config" not in command
+
+
+@pytest.mark.parametrize("why", ["unknown", "archived", "account", "parked"])
+def test_a_turn_that_cannot_run_fails_with_one_line_and_logs_nothing(
+    cfg, worker, thread, execs, why
+):
+    tid = thread["id"]
+    if why == "unknown":
+        tid = "th-20260101T000000Z-abcdef"
+    elif why == "archived":
+        threads.update(cfg.hive_tasks_dir, cfg, tid, status="archived")
+    elif why == "account":
+        path = threads.thread_path(cfg.hive_tasks_dir, tid)
+        rec = json.loads(open(path).read())
+        rec["account"] = "nope"
+        open(path, "w").write(json.dumps(rec))
+    else:
+        state_machine.park(cfg.state_dir, "cuenta1", state_machine.AccountState.COOLING_DOWN)
+    t = turn(cfg, tid)
+    worker.tick()
+    worker.join()
+    state, got = where(cfg, t["id"])
+    assert state == "done" and got["status"] == "failed"
+    assert got["error"] and "\n" not in got["error"]
+    assert execs.opened == []
+    assert not os.path.exists(threads.conversation_path(cfg.hive_tasks_dir, tid))
+
+
+def test_an_error_result_or_no_result_fails_the_turn(cfg, worker, thread, execs):
+    bad = ev(type="result", subtype="error_during_execution", is_error=True, result="boom")
+    execs.proc = FakeProc(["4242", INIT, bad])
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    got = where(cfg, t["id"])[1]
+    assert got["status"] == "failed" and "boom" in got["error"]
+    execs.proc = FakeProc(["4242", INIT], returncode=1, stderr="no auth")
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    got = where(cfg, t["id"])[1]
+    assert got["status"] == "failed" and "no auth" in got["error"]
+    assert log_of(cfg, thread["id"])[-1]["status"] == "failed"
+
+
+def test_a_cancel_kills_a_running_turn(cfg, worker, thread, execs):
+    execs.proc = FakeProc(["4242", INIT], block=threading.Event())
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    assert execs.proc.entered.wait(WAIT)
+    c = cancel(cfg, t["id"])
+    worker.tick()
+    assert where(cfg, c["id"])[1]["result"]["target_status"] == "running"
+    worker.join()
+    assert execs.killed == [("agent-cuenta1", 4242)]
+    got = where(cfg, t["id"])[1]
+    assert got["status"] == "cancelled"
+    assert log_of(cfg, thread["id"])[-1]["status"] == "cancelled"
+
+
+def test_stop_kills_a_running_turn_and_ends_it_interrupted(cfg, accounts, thread, execs):
+    execs.proc = FakeProc(["4242", INIT], block=threading.Event())
+    w = worker_mod.Worker(cfg, account_poll=0)
+    t = turn(cfg, thread["id"])
+    w.tick()
+    assert execs.proc.entered.wait(WAIT)
+    w.stop()
+    w.recover = lambda: []  # the turn is this process's own, not a dead worker's
+    w.run(interval=0.01)
+    got = where(cfg, t["id"])[1]
+    assert got["status"] == "interrupted" and got["error"] == worker_mod.TURN_STOPPED_ERROR
+    assert execs.killed == [("agent-cuenta1", 4242)]
+    assert log_of(cfg, thread["id"])[-1]["status"] == "interrupted"
+
+
+def test_a_claimed_turn_is_interrupted_on_recovery_and_never_rerun(cfg, worker, thread, execs):
+    t = turn(cfg, thread["id"])
+    claimed = actions.claim(cfg.state_dir, t["id"])
+    claimed["started_at"] = "2026-01-01T00:00:00+00:00"
+    actions.rewrite(cfg.state_dir, claimed)
+    threads.append_conversation(cfg.hive_tasks_dir, thread["id"], {"type": "ia_harness",
+                                                                   "event": "turn_start"})
+    assert worker.recover() == [(t["id"], "interrupted")]
+    worker.tick()
+    worker.join()
+    state, got = where(cfg, t["id"])
+    assert state == "done" and got["status"] == "interrupted"
+    assert execs.opened == []
+    last = log_of(cfg, thread["id"])[-1]
+    assert last["event"] == "turn_end" and last["status"] == "interrupted"
+
+
+def test_two_turns_on_one_thread_never_run_at_once(cfg, worker, thread, execs):
+    execs.proc = FakeProc(["4242", INIT], block=threading.Event())
+    first = turn(cfg, thread["id"])
+    second = turn(cfg, thread["id"], "next")
+    worker.tick()
+    assert execs.proc.entered.wait(WAIT)
+    worker.tick()
+    state, got = where(cfg, second["id"])
+    assert state == "pending" and got["waiting"] == "thread"
+    assert len(execs.opened) == 1
+    execs.proc.block.set()
+    worker.join()
+    assert where(cfg, first["id"])[1]["status"] in ("done", "failed")
 
 
 # ---- command_verdict --------------------------------------------------------
