@@ -1,7 +1,19 @@
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { commentProblem } from "@/lib/comments";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
   Absent,
@@ -14,7 +26,14 @@ import {
   PageHeader,
   WarningBanner,
 } from "@/components/console/primitives";
-import { accountsQuery, debtQuery, readyQuery, tasksQuery } from "@/lib/api/queries";
+import {
+  accountsQuery,
+  actionQueueQuery,
+  debtQuery,
+  readyQuery,
+  startTaskMutation,
+  tasksQuery,
+} from "@/lib/api/queries";
 import { debtTaskId } from "@/lib/api/client";
 import type { Task } from "@/lib/api/types";
 import {
@@ -68,6 +87,8 @@ function BoardPage() {
   // The debt chip is a filter over /api/debt by the task prefix of a debt id, not
   // a field /api/tasks serves. `docs/decisions.md` ADR 17.
   const debt = useQuery(debtQuery);
+  // What the worker holds, to hide *Start development* on a card already started.
+  const actionQueue = useQuery(actionQueueQuery);
 
   const [q, setQ] = useState("");
   const [accountFilter, setAccountFilter] = useState<string>("all");
@@ -95,6 +116,24 @@ function BoardPage() {
     }
     return map;
   }, [debt.data]);
+
+  // A start is known by kind and task id; a claimed one wins over a pending one.
+  // ADR 160 part 2.
+  const startByTask = useMemo(() => {
+    const map = new Map<string, StartState>();
+    const queue = actionQueue.data?.data;
+    for (const [state, records] of [
+      ["pending", queue?.pending],
+      ["claimed", queue?.claimed],
+    ] as const) {
+      for (const r of records ?? []) {
+        if (r.kind !== "start" || typeof r.task_id !== "string") continue;
+        if (state === "pending" && map.get(r.task_id)?.state === "claimed") continue;
+        map.set(r.task_id, { state, waiting: r.waiting });
+      }
+    }
+    return map;
+  }, [actionQueue.data]);
 
   const filtering = q !== "" || accountFilter !== "all" || columnFilter !== "all";
   const board = useMemo(
@@ -137,6 +176,11 @@ function BoardPage() {
       ? "/api/debt did not answer, so no card carries a debt chip. That is the read " +
         "failing, not a board on which nothing has declared debt."
       : null,
+    actionQueue.isError
+      ? "/api/actions did not answer, so a Ready card cannot show whether its start is " +
+        "already queued or running. Start development is still offered; the board-service " +
+        "refuses a second start of the same task."
+      : null,
   ].filter((r): r is string => r !== null);
 
   const warnings = [
@@ -144,6 +188,7 @@ function BoardPage() {
     ...(ready.data?.warnings ?? []),
     ...(accounts.data?.warnings ?? []),
     ...(debt.data?.warnings ?? []),
+    ...(actionQueue.data?.warnings ?? []),
     ...unknown.map(
       (t) =>
         `${t.task_id}: status ${JSON.stringify(t.status)} is not one the dispatcher writes, ` +
@@ -241,6 +286,15 @@ function BoardPage() {
                         now={now}
                         dense={dense}
                         debtCount={debtByTask.get(t.task_id) ?? 0}
+                        footer={
+                          c.key === "ready" ? (
+                            <StartControl
+                              task={t}
+                              queued={startByTask.get(t.task_id)}
+                              loading={actionQueue.isLoading}
+                            />
+                          ) : undefined
+                        }
                       />
                     ))}
                   </Column>
@@ -372,66 +426,156 @@ export function TaskCard({
   now,
   dense,
   debtCount,
+  footer,
 }: {
   task: Task;
   now: number;
   dense: boolean;
   debtCount: number;
+  /** Outside the card's link: a button inside an anchor would also navigate. ADR 160. */
+  footer?: React.ReactNode;
 }) {
   const note = phaseNote(task);
   // Ready or Waiting does not change the chip, so any set will do here.
   const placedAs = columnOf(task, null);
   return (
-    <Link
-      to="/tasks/$taskId"
-      params={{ taskId: task.task_id }}
+    <div
       className={cn(
-        "block rounded-sm border border-border bg-card transition-colors hover:border-border-strong",
+        "rounded-sm border border-border bg-card transition-colors hover:border-border-strong",
         dense ? "px-2 py-1.5" : "px-2 py-2",
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <Mono className="text-[11px] font-semibold">{task.task_id}</Mono>
-        <HeartbeatDot heartbeat={task.heartbeat} lockExpired={task.lock_expired} now={now} />
-      </div>
-      {!dense && (
-        <p className="mt-1 line-clamp-2 text-[11px] text-foreground/90">
-          {task.title ?? task.description ?? <Absent label="no description" />}
-        </p>
-      )}
-      <div className="mt-1.5 flex flex-wrap items-center gap-1">
-        {note && (
-          <span className="mono rounded-sm border border-warning/50 px-1 text-[10px] text-warning">
-            {note}
-          </span>
+      <Link to="/tasks/$taskId" params={{ taskId: task.task_id }} className="block">
+        <div className="flex items-center justify-between gap-2">
+          <Mono className="text-[11px] font-semibold">{task.task_id}</Mono>
+          <HeartbeatDot heartbeat={task.heartbeat} lockExpired={task.lock_expired} now={now} />
+        </div>
+        {!dense && (
+          <p className="mt-1 line-clamp-2 text-[11px] text-foreground/90">
+            {task.title ?? task.description ?? <Absent label="no description" />}
+          </p>
         )}
-        {placedAs === "other" && (
-          <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
-            {task.status}
-          </span>
-        )}
-        {task.owner ? (
-          <Mono className="text-[10px] text-muted-foreground">{task.owner}</Mono>
-        ) : (
-          <span className="text-[10px] italic text-muted-foreground/60">unassigned</span>
-        )}
-        {/* `.length` over a string is a number, so a `depends_on: T-001` written
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {note && (
+            <span className="mono rounded-sm border border-warning/50 px-1 text-[10px] text-warning">
+              {note}
+            </span>
+          )}
+          {placedAs === "other" && (
+            <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
+              {task.status}
+            </span>
+          )}
+          {task.owner ? (
+            <Mono className="text-[10px] text-muted-foreground">{task.owner}</Mono>
+          ) : (
+            <span className="text-[10px] italic text-muted-foreground/60">unassigned</span>
+          )}
+          {/* `.length` over a string is a number, so a `depends_on: T-001` written
             without a dash would put a confident `7` on this card — the one failure
             of this kind that does not throw, and the worse one for it. ADR 29. */}
-        {!Array.isArray(task.depends_on) ? (
-          <Malformed label="depends on" got={task.depends_on} want="a list" />
-        ) : task.depends_on.length > 0 ? (
-          <span className="inline-flex items-center gap-0.5 rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
-            <GitBranch className="size-2.5" />
-            {task.depends_on.length}
-          </span>
-        ) : null}
-        {debtCount > 0 && (
-          <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
-            debt {debtCount}
-          </span>
-        )}
-      </div>
-    </Link>
+          {!Array.isArray(task.depends_on) ? (
+            <Malformed label="depends on" got={task.depends_on} want="a list" />
+          ) : task.depends_on.length > 0 ? (
+            <span className="inline-flex items-center gap-0.5 rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
+              <GitBranch className="size-2.5" />
+              {task.depends_on.length}
+            </span>
+          ) : null}
+          {debtCount > 0 && (
+            <span className="mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground">
+              debt {debtCount}
+            </span>
+          )}
+        </div>
+      </Link>
+      {footer && <div className="mt-1.5">{footer}</div>}
+    </div>
+  );
+}
+
+type StartState = { state: "pending" | "claimed"; waiting: string | null };
+
+function waitingText(waiting: string | null): string {
+  if (waiting === null) return "";
+  if (waiting === "account") return ", waiting for an account";
+  if (waiting === "project") return ", waiting for the project";
+  return `, waiting: ${waiting}`;
+}
+
+/**
+ * The Ready card's footer: the button, or the state of a start already in the
+ * queue. Nothing while the queue read is loading, so a queued start never
+ * flashes a button. ADR 160 part 3.
+ */
+function StartControl({
+  task,
+  queued,
+  loading,
+}: {
+  task: Task;
+  queued: StartState | undefined;
+  loading: boolean;
+}) {
+  const qc = useQueryClient();
+  const start = useMutation(startTaskMutation(qc));
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
+  // A note is optional, so blank is not the comment rule's "needs some text".
+  const problem = note.trim() ? commentProblem(note) : null;
+  const chip = "mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground";
+
+  if (loading) return null;
+  if (queued?.state === "claimed") return <span className={chip}>Running</span>;
+  if (queued) return <span className={chip}>Queued{waitingText(queued.waiting)}</span>;
+
+  const taskId = task.task_id;
+  const confirm = () =>
+    start.mutate(
+      { taskId, note: note.trim() ? note : null },
+      {
+        onSuccess: () => {
+          toast.success(`${taskId} queued to start`);
+          setOpen(false);
+          setNote("");
+        },
+        onError: (e) => toast.error(e instanceof Error ? e.message : `${taskId} was not started`),
+      },
+    );
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+      >
+        Start development
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Start development of {taskId}</DialogTitle>
+            <DialogDescription>
+              {task.title ?? task.description ?? "no title"}. Confirming queues this task's cycle
+              for the worker, which runs it when an account and the project are free.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="space-y-1 text-xs">
+            Note (optional)
+            <Textarea value={note} onChange={(e) => setNote(e.target.value)} />
+          </label>
+          {problem && <p className="text-xs text-destructive">{problem}</p>}
+          <DialogFooter>
+            <Button variant="outline" type="button" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" disabled={problem !== null || start.isPending} onClick={confirm}>
+              Start
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

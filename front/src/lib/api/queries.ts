@@ -132,6 +132,28 @@ export const acceptTaskMutation = (qc: QueryClient) =>
     onSettled: (_data, _error, { taskId }) => invalidateBoard(qc, taskId),
   });
 
+/**
+ * The action queue the worker reads. Key `["action-queue"]`, not `["actions"]`:
+ * that one is the `/queue` draft's mock with another shape. ADR 160.
+ */
+export const actionQueueQuery = queryOptions({
+  queryKey: ["action-queue"],
+  queryFn: () => api.getActionQueue(),
+  refetchInterval: POLL_MS,
+});
+
+/** `POST /api/tasks/<id>/start`. The queue and the board refetch, settled either way. */
+export const startTaskMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "start"],
+    mutationFn: ({ taskId, note }: { taskId: string; note: string | null }) =>
+      api.startTask(taskId, note),
+    onSettled: () =>
+      Promise.all(
+        [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),
+      ),
+  });
+
 export const actionsQuery = queryOptions({
   queryKey: ["actions"],
   queryFn: () => api.listActions(),
