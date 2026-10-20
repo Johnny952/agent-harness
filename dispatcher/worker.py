@@ -743,7 +743,7 @@ def _check(worker: Worker, record: dict, _cancelled=None) -> None:
     Done either way, with `reachable` saying which: a remote that does not
     answer yet is the expected answer before the key is pasted on GitHub, not
     a failure of the check. `writable` is whether the remote took a dry-run
-    push from the key (ADR NNN), `None` when that was not tried because the
+    push from the key (ADR 214), `None` when that was not tried because the
     read did not answer.
     """
     project = _setup_record(worker, record)

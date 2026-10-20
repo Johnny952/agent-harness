@@ -2244,7 +2244,7 @@ def make_project_checkout(
 
 def check_project_remote(cfg: Config, slug: str, remote: str) -> docker_exec.SetupOutcome:
     """Whether `remote` answers the project's deploy key (ADR 212), and whether
-    it would take a push from it (ADR NNN): a dry-run, so nothing lands there.
+    it would take a push from it (ADR 214): a dry-run, so nothing lands there.
 
     No lock: it touches no checkout, only a scratch repository of its own in
     the container's /tmp, which it removes.

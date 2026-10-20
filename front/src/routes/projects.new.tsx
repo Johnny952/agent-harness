@@ -360,7 +360,7 @@ function KeyStep({
 }
 
 /**
- * The check's `{reachable, detail, writable}` (ADR NNN). `writable` is a
+ * The check's `{reachable, detail, writable}` (ADR 214). `writable` is a
  * dry-run push's answer, `null` or absent when it was not tried; a refused one
  * is a warning only when the record may push, judged by the same override the
  * deploy-key step reads.

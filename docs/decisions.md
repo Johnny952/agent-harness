@@ -11900,7 +11900,7 @@ it.
 - Redacting query strings and fragments as well: it would be a second list of
   places a token may hide, and an SSH remote has neither, so nothing is lost by
   quoting none.
-## ADR NNN — `check` tells write access; the bootstrap stays out of the form
+## ADR 214 — `check` tells write access; the bootstrap stays out of the form
 
 **Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
 

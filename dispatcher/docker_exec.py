@@ -1215,7 +1215,7 @@ class SetupOutcome:
 
     `ok` is whether it did what it was asked; `detail` is the one line that
     says what happened, in git's words when git refused. `writable` is the
-    check's alone (ADR NNN): whether the remote took a dry-run push, and
+    check's alone (ADR 214): whether the remote took a dry-run push, and
     `None` when that was not tried, which is every clone and init and a check
     whose read already failed.
     """
@@ -1349,7 +1349,7 @@ def check_remote(
     Run in `projects_root`, so it needs no clone: it is the step between
     pasting the deploy key on GitHub and cloning with it. The read is `git
     ls-remote --heads`; the write is `_probe_push`, tried only once the read
-    answered (ADR NNN), so `writable` is `None` whenever `ok` is false.
+    answered (ADR 214), so `writable` is `None` whenever `ok` is false.
     """
     _require_non_empty(projects_root=projects_root, slug=slug)
     access = _remote_access(
@@ -1399,7 +1399,7 @@ def _probe_push(
 ) -> tuple[bool | None, str]:
     """`git push --dry-run` of an empty commit to a branch the remote does not have.
 
-    What it proves, measured against git over SSH (ADR NNN): a dry-run push
+    What it proves, measured against git over SSH (ADR 214): a dry-run push
     still connects to `git-receive-pack`, and that is where GitHub refuses a
     read-only deploy key ("The key you are authenticating with has been marked
     as read only"), before any ref is looked at. Accepted, the remote said it
