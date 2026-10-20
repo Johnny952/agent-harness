@@ -8277,6 +8277,57 @@ def test_may_start_phase_false_holds_the_cycle_before_the_phase(tmp_path, monkey
     assert _task(cfg).status != "blocked"
 
 
+def _spending(started):
+    """A dispatch_phase that writes a measured usage line of 100 tokens per phase."""
+    def fake(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        started.append(role)
+        dispatcher_mod.context_transfer.append_usage(
+            cfg_arg.hive_tasks_dir, task_id, {"input_tokens": 100, "output_tokens": 0},
+        )
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="ok", account="cuenta1",
+        )
+    return fake
+
+
+def test_a_task_at_its_spending_limit_stops_blocked_before_the_next_phase(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """ADR NNN: the task's limit ends the cycle Blocked, `budget_reached`, between phases."""
+    cfg = _make_config(tmp_path)
+    started = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _spending(started))
+
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, token_limit=100,
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.BLOCKED
+    assert started == ["arquitecto"]
+    task = _task(cfg)
+    assert task.status == "blocked"
+    assert task.blocked_reason == "budget_reached"
+
+
+def test_a_spending_limit_counts_from_the_usage_offset(tmp_path, monkeypatch, fake_git) -> None:
+    """Lines before the start's offset are not this run's spend."""
+    cfg = _make_config(tmp_path)
+    for _ in range(3):
+        dispatcher_mod.context_transfer.append_usage(
+            cfg.hive_tasks_dir, "task-1", {"input_tokens": 100, "output_tokens": 0},
+        )
+    started = []
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _spending(started))
+
+    dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, token_limit=150, usage_offset=3,
+    )
+
+    # 100 after the first phase is under 150; 200 after the second is not.
+    assert len(started) == 2
+    assert _task(cfg).blocked_reason == "budget_reached"
+
+
 def test_a_push_that_raises_is_a_refusal_not_a_crash(tmp_path, monkeypatch, aa_git) -> None:
     cfg = _aa_config(tmp_path)
     aa_git.push_error = RuntimeError("docker went away")

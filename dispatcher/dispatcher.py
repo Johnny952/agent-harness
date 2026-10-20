@@ -2961,6 +2961,15 @@ class CycleContext:
     # nothing started and nothing marked. The queue's token limit (A-5, ADR
     # 79) is the one caller: a limit reached mid-cycle starts no new phase.
     may_start_phase: Callable[[], bool] | None = None
+    # The start's own spending limit (ADR NNN), in measured tokens counted from
+    # `usage_offset`, the task's usage log length when the start began. Read
+    # before each phase, like `may_start_phase`: reached, no new phase starts
+    # and the cycle ends blocked with `budget_reached`. None is no limit.
+    token_limit: int | None = None
+    usage_offset: int = 0
+    # Set when the limit stopped the run; `budget_spent` is what it had spent.
+    budget_reached: bool = False
+    budget_spent: str | None = None
     # Set once the auditor has filed what this task learned: `close_cycle`'s
     # `completed`, kept here since the stages after the mapping are their own
     # functions (ADR 119).
@@ -3152,6 +3161,24 @@ def _adr_block_note(cfg: Config, task_id: str, slug: str) -> str:
     return block.prompt_line()
 
 
+def _budget_reached(ctx: CycleContext) -> bool:
+    """Whether the start's own limit is reached (ADR NNN), and if so, set it on `ctx`.
+
+    The task's measured tokens since `usage_offset` (ADR 79), the same count
+    the epic's limit takes (ADR 218); unmeasured calls are named, not guessed.
+    """
+    if ctx.token_limit is None:
+        return False
+    tokens, unmeasured = epic_runs.task_spend(ctx.cfg.hive_tasks_dir, ctx.task_id, ctx.usage_offset)
+    if tokens < ctx.token_limit:
+        return False
+    ctx.budget_reached = True
+    ctx.budget_spent = f"{tokens} of {ctx.token_limit} measured tokens" + (
+        f", {unmeasured} unmeasured calls" if unmeasured else ""
+    )
+    return True
+
+
 def run_phase(
     ctx: CycleContext,
     role: str,
@@ -3184,6 +3211,12 @@ def run_phase(
             "task %s: %s not started, the caller's limit was reached", ctx.task_id, role
         )
         ctx.held = True
+        return None
+    if _budget_reached(ctx):
+        logger.warning(
+            "task %s: %s not started, the start's spending limit was reached: %s",
+            ctx.task_id, role, ctx.budget_spent,
+        )
         return None
     effort = cfg.effort_for(role, round_num, repeated_finding=repeated_finding)
     if role == "arquitecto":
@@ -3341,7 +3374,8 @@ def _mark_blocked(ctx: CycleContext, reason: str | None = None) -> None:
         if context_transfer.read_task_file(ctx.task_file).owner is not None:
             return
         tasks.mark_blocked(
-            ctx.cfg.hive_tasks_dir, ctx.task_id, reason=reason, failed=ctx.phase_failed
+            ctx.cfg.hive_tasks_dir, ctx.task_id, reason=reason, failed=ctx.phase_failed,
+            spent=ctx.budget_spent if reason == tasks.BUDGET_REACHED else None,
         )
     except FileNotFoundError:
         return
@@ -3799,6 +3833,8 @@ def run_task_cycle(
     scheduler=None,
     project_lock: ProjectLock | None = None,
     via: str = "run-task",
+    token_limit: int | None = None,
+    usage_offset: int = 0,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
 
@@ -3821,6 +3857,9 @@ def run_task_cycle(
     so a caller can read what the outcome does not carry: the queue (A-5)
     stops on `push.refused`. `may_start_phase` is asked before every phase;
     False stops the cycle HELD before that phase starts (CycleContext).
+    `token_limit` is the start's own spending limit (ADR NNN), in measured
+    tokens since `usage_offset`: reached, the cycle starts no new phase and
+    ends BLOCKED with `budget_reached`.
 
     `scheduler` is the parallel queue's (B-3, ADR 83), None everywhere else,
     and None runs the cycle exactly as before. With one, the mapping runs once
@@ -3838,6 +3877,7 @@ def run_task_cycle(
     if ctx is None:
         return CycleOutcome.BLOCKED
     ctx.may_start_phase = may_start_phase
+    ctx.token_limit, ctx.usage_offset = token_limit, usage_offset
     def blocked(reason: str | None = None) -> CycleOutcome:
         return _blocked_outcome(ctx, reason)
 
@@ -3922,8 +3962,11 @@ def run_task_cycle(
 
 
 def _stopped(ctx: CycleContext) -> CycleOutcome:
-    """The stop after a phase that returned None: the phase knows whether it was held."""
-    return CycleOutcome.HELD if ctx.held else _blocked_outcome(ctx)
+    """The stop after a phase that returned None: the phase knows whether it was
+    held, or stopped at the start's spending limit (ADR NNN)."""
+    if ctx.held:
+        return CycleOutcome.HELD
+    return _blocked_outcome(ctx, tasks.BUDGET_REACHED if ctx.budget_reached else None)
 
 
 def _blocked_outcome(ctx: CycleContext, reason: str | None = None) -> CycleOutcome:

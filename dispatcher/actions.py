@@ -132,8 +132,11 @@ def _validate_start(record: dict) -> list[str]:
     problems = _both_required(record)
     params = record["params"]
     problems += _extra_keys(params, ("limit", "thread", "turn", "epic", "floor"))
-    if params.get("limit") is not None:
-        problems.append("params.limit must be null")
+    # A task's own spending limit, in measured tokens (ADR NNN); null is none.
+    if not _limit_ok(params.get("limit")):
+        problems.append(
+            "params.limit must be null or a whole number of measured tokens of at least 1"
+        )
     if not _floor_ok(params.get("floor")):
         problems.append("params.floor must be null or a whole percent from 0 to 100")
     # A start queued by *Start epic* names the epic it was queued for (ADR 207).
@@ -674,9 +677,18 @@ def _start_params(epic_id: str, floor) -> dict:
     return params
 
 
+def _limit_ok(limit) -> bool:
+    return limit is None or (type(limit) is int and limit >= 1)
+
+
+def start_limit(record: dict) -> int | None:
+    """The spending limit `record`, a start, runs under (ADR NNN): its own, or none."""
+    return (record.get("params") or {}).get("limit")
+
+
 def check_limit(limit) -> None:
     """A spending limit is null or a whole number of measured tokens, at least 1."""
-    if limit is not None and (type(limit) is not int or limit < 1):
+    if not _limit_ok(limit):
         raise ActionRefused(
             400, "limit must be null or a whole number of measured tokens of at least 1"
         )

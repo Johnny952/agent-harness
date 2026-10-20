@@ -386,8 +386,14 @@ the default is 5%, which a start or *Start epic* may override with `floor`.
 A start under it waits as `pool` before it is claimed; an unreadable reading
 fails open. The console's start and *Start epic* dialogs take the floor in
 an optional field, blank for the default, and a going run's stored floor
-prefills it (ADR 227). Not built: the per-task limit and `budget_reached`,
-and the notification.
+prefills it (ADR 227). The per-task limit is built the same day (ADR NNN),
+backend only: a start's `params.limit` is a whole number of measured tokens,
+counted from the task's usage-log offset taken when the start began; the
+cycle checks it before each phase, so a running phase finishes, and at the
+limit it ends *Blocked* with `budget_reached` and a *Blocked* notification
+that names the spend. No separate retry count: the dispatcher's retries are
+already bounded. Not built: the field in the console's start dialog, and the
+default numbers from real cycles.
 
 ### 5. The service
 
@@ -684,8 +690,10 @@ Each step is a single surface, built in this order:
    worker, the button on the board and the epic, the spending limit, and the
    queue screen. It needs the queue and worker, and the charter ruling below.
    *Start epic*'s route is built 2026-10-20 (ADR 207); *Stop epic* and the
-   two buttons on the epic's page the same day (ADR 211). The spending limit
-   and the queue screen are not.
+   two buttons on the epic's page the same day (ADR 211). The epic's
+   spending limit the same day (ADR 218), and the per-task limit with
+   `budget_reached` (ADR NNN), backend only. The queue screen and the
+   per-task limit's console field are not.
 
 `review.md`'s diff screen and verdicts come after this, on the same service
 and the same comments file.

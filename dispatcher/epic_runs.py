@@ -21,6 +21,18 @@ def usage_offset(hive_dir: str, task_id: str) -> int:
     return len(context_transfer.read_usage(hive_dir, task_id).lines)
 
 
+def task_spend(hive_dir: str, task_id: str, start: int) -> tuple[int, int]:
+    """One task's measured tokens and unmeasured calls since its usage offset `start`."""
+    tokens = unmeasured = 0
+    for line in context_transfer.read_usage(hive_dir, task_id).lines[start:]:
+        counted = context_transfer.measured_tokens(line)
+        if counted is None:
+            unmeasured += 1
+        else:
+            tokens += counted
+    return tokens, unmeasured
+
+
 def spend(hive_dir: str, run: dict) -> tuple[int, int]:
     """The run's measured tokens and its unmeasured calls since each task's offset."""
     tokens = unmeasured = 0
@@ -28,12 +40,9 @@ def spend(hive_dir: str, run: dict) -> tuple[int, int]:
         start = entry.get("usage_offset") if isinstance(entry, dict) else None
         if type(start) is not int:
             continue
-        for line in context_transfer.read_usage(hive_dir, task_id).lines[start:]:
-            counted = context_transfer.measured_tokens(line)
-            if counted is None:
-                unmeasured += 1
-            else:
-                tokens += counted
+        counted, missing = task_spend(hive_dir, task_id, start)
+        tokens += counted
+        unmeasured += missing
     return tokens, unmeasured
 
 

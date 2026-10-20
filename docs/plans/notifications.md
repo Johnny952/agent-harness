@@ -113,7 +113,9 @@ Each step is a single surface:
    `<hive root>/notifications.jsonl`, written by `tasks` (conflict, blocked,
    command request, phase failed, merged, epic closed), the dispatcher
    (awaiting review at a cycle's end, an account available again) and
-   `epic_runs` (a run paused at its limit, as blocked). Pool dry is written
+   `epic_runs` (a run paused at its limit, as blocked). A task stopped at
+   its start's spending limit is blocked too since 2026-10-20 (ADR NNN), its
+   title naming the spend. Pool dry is written
    since 2026-10-20 (ADR 224), by the park that takes the last configured
    account out of the pool. Turn finished is written since 2026-10-20 (ADR
    228), by the worker when a thread's turn ends done, failed or

@@ -96,6 +96,10 @@ import yaml
 from dispatcher import context_transfer, debt, notifications, surface
 # By name: this module's own `handoff` is a task-file writer.
 from dispatcher.handoff import COMMAND_REQUEST as COMMAND_REQUEST_REASON
+
+# The `blocked_reason` of a cycle that stopped at its start's spending limit
+# (ADR NNN, `docs/plans/board-service.md` "Spending limit").
+BUDGET_REACHED = "budget_reached"
 from dispatcher.handoff import _SPLIT_MAX, _SPLIT_MIN, SubTask, split_problems
 
 # `_makedirs_readable`, `_write_atomic`, `_is_single_path_component`,
@@ -1146,7 +1150,8 @@ def handoff(
 
 @_locked
 def mark_blocked(
-    hive_dir: str, task_id: str, reason: str | None = None, *, failed: bool = False
+    hive_dir: str, task_id: str, reason: str | None = None, *, failed: bool = False,
+    spent: str | None = None,
 ) -> None:
     """Record that this task stopped blocked, and release its lock.
 
@@ -1157,7 +1162,9 @@ def mark_blocked(
 
     And one notification (ADR 221): `phase_failed` when `failed`, the stop of
     a phase that did not finish; `command_request` for a filed request; else
-    `blocked`, a stop that waits on the person's decision.
+    `blocked`, a stop that waits on the person's decision. A stop at the
+    spending limit (`BUDGET_REACHED`, ADR NNN) is a `blocked` that says so,
+    with `spent`, what the cycle spent, when the caller passes it.
     """
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
@@ -1174,6 +1181,11 @@ def mark_blocked(
     elif reason == COMMAND_REQUEST_REASON:
         notifications.notify_task(
             hive_dir, "command_request", task_id, "asks to run a command", task.title
+        )
+    elif reason == BUDGET_REACHED:
+        text = "stopped: its spending limit is reached"
+        notifications.notify_task(
+            hive_dir, "blocked", task_id, f"{text} ({spent})" if spent else text, task.title
         )
     else:
         notifications.notify_task(hive_dir, "blocked", task_id, "is blocked", task.title)

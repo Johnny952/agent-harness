@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Callable
 
 from dispatcher import (
-    actions, board_mcp, command_run, context_transfer, docker_exec, notifications, project_keys,
-    projects, state_machine, tasks, threads,
+    actions, board_mcp, command_run, context_transfer, docker_exec, epic_runs, notifications,
+    project_keys, projects, state_machine, tasks, threads,
 )
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
@@ -358,18 +358,30 @@ def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
         result["noted_at"] = _utc_now().isoformat()
         record["result"] = result
         actions.rewrite(sd, record)
+    # The start's own spending limit (ADR NNN) counts from the usage log as it
+    # is now, taken once so a resumed start keeps counting from its first.
+    limit = actions.start_limit(record)
+    if limit is not None and type(result.get("usage_offset")) is not int:
+        result["usage_offset"] = epic_runs.usage_offset(cfg.hive_tasks_dir, record["task_id"])
+        record["result"] = result
     record["started_at"] = _utc_now().isoformat()
     actions.rewrite(sd, record)
     outcome = core.run_task_cycle(
         cfg, record["task_id"], record["project"], authorized=True,
         may_start_phase=lambda: not (cancelled.is_set() or worker.stopping.is_set()),
         project_lock=_held_project_lock(worker, record),
+        token_limit=limit, usage_offset=result.get("usage_offset", 0),
     )
     task = _read_task(cfg, record["task_id"])
     result["outcome"] = outcome.value
     result["blocked_reason"] = (
         task.blocked_reason if outcome is core.CycleOutcome.BLOCKED and task else None
     )
+    if limit is not None:
+        tokens, unmeasured = epic_runs.task_spend(
+            cfg.hive_tasks_dir, record["task_id"], result["usage_offset"]
+        )
+        result["spent"] = {"limit": limit, "tokens": tokens, "unmeasured": unmeasured}
     held = outcome is core.CycleOutcome.HELD
     if held and cancelled.is_set():
         result["last_phase"] = task.phase if task else None

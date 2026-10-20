@@ -12825,3 +12825,58 @@ notify every end except a cancel.
   for the dock means `routeTree.gen.ts` and a second way to show one thread.
 - Keeping `?thread=` in the url: it would reopen a dock the person closed.
 - Notifying a cancel: the person who cancelled it already knows.
+
+## ADR NNN — A start's own spending limit stops its task Blocked with `budget_reached`
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's
+session; the per-task half of `docs/plans/board-service.md`'s "A spending
+limit on what a start authorizes", backend only.
+
+**Context.** The plan gives each start a limit and says a cycle past it
+ends *Blocked* with `budget_reached`, showing what it spent, and that
+reaching a limit is a *Blocked* notification. The epic's limit is built
+(ADR 218), in measured tokens summed from each task's usage-log offset, and
+pauses the run between phases. A start's `params.limit` existed but had to
+be null. The queue's own limit (ADR 79, `may_start_phase`) holds a cycle
+rather than blocking it.
+
+**Decision.**
+1. `params.limit` on a start is null or a whole number of measured tokens,
+   at least 1 (a bool is not a number). `POST /api/tasks/<id>/start` takes
+   `limit` beside `floor`; `actions.start_limit` reads it. Only the single
+   start sets it: *Start epic*'s starts keep a null limit, since the epic
+   has its own, and thread turns have none.
+2. The measure is the epic limit's: `measured_tokens` of the task's usage
+   log lines, counted from an offset. The worker takes the offset once,
+   before `started_at`, into the start's `result.usage_offset`, so a resumed
+   start counts from the same place. Unmeasured lines are counted apart and
+   never estimated (`epic_runs.task_spend`, which `spend` now uses).
+3. `run_task_cycle` takes `token_limit` and `usage_offset`. `run_phase`
+   checks the spend before each phase, after the queue's check: a running
+   phase always finishes, as the epic's does. At the limit the cycle ends
+   `BLOCKED` with `blocked_reason: budget_reached`, marked by the usual
+   `_mark_blocked` (only when this run took the lock).
+4. `mark_blocked(..., reason=budget_reached, spent=...)` notifies kind
+   `blocked`, titled "stopped: its spending limit is reached (N of M
+   measured tokens[, K unmeasured calls])". The start's result carries
+   `spent: {limit, tokens, unmeasured}`.
+5. Continuing is a new *Start*, which takes a new offset; the limit is not
+   raised in place.
+
+**Consequences.**
+- A task can overshoot its limit by at most the one phase that crossed it.
+- A start with no limit runs exactly as before.
+- A command verdict's resume (`command_run`) runs without the start's limit.
+- The console's start dialog has no field for it yet; a later front task,
+  mirroring the floor field (ADR 227), adds one.
+
+**Ruled out.**
+- A retry counter beside the tokens: the dispatcher's retries are already
+  bounded (`max_revision_rounds`, the one-shot gate, shrink and resume
+  retries), and tokens already count every retry's spend.
+- A default limit: the plan sets defaults from real cycles; null means none
+  until those numbers exist.
+- Holding instead of blocking, as the queue's limit does: the plan says
+  *Blocked*, because the stop waits on the person.
+- Stopping a phase mid-run: it would lose the phase's work for tokens
+  already spent.
