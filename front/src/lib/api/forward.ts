@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Thirteen console paths map one-to-one
- * onto thirteen api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Fifteen console paths map one-to-one
+ * onto fifteen api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose thirteen routes, count and
+ * deliberately not entries of `FORWARDED`, whose fifteen routes, count and
  * rejection message describe the api alone.
  *
  * **Six method and path pairs go to the board-service** (`docs/decisions.md`
@@ -83,6 +83,12 @@ const FORWARDED: Record<string, readonly string[]> = {
   // The action queue (`docs/decisions.md` ADR 142, T-103). Hive-wide like
   // `/api/ready`, so no `?project=` is added and none of the browser's is copied.
   "/api/actions": ["limit"],
+  // The thread list (`docs/decisions.md` ADR 177, ADR 184). Hive-wide like
+  // `/api/actions`, and the api takes no parameter here at all, so nothing is
+  // copied and no `?project=` is added. Only the `GET`: `POST /api/threads` is
+  // the board service's (ADR 170) and the console does not forward it yet, so it
+  // is the read-only 405 like every other write on an api path.
+  "/api/threads": [],
 };
 
 /**
@@ -126,6 +132,17 @@ const TASK_USAGE = /^\/api\/tasks\/([^/]+)\/usage$/;
  * `POST` is the board-service's `task_comment`, matched in `boardTarget`.
  */
 const TASK_COMMENTS = /^\/api\/tasks\/([^/]+)\/comments$/;
+
+/**
+ * One thread's conversation log (`docs/decisions.md` ADR 180, ADR 184): one
+ * segment, `TASK_USAGE`'s shape, with the two parameters the api takes. The id
+ * is re-encoded like a task id and validated again by the api, which answers a
+ * 400 for one the harness does not make.
+ */
+const THREAD_EVENTS = /^\/api\/threads\/([^/]+)\/events$/;
+
+/** The parameters `THREAD_EVENTS` copies: the page size and the cursor. */
+const THREAD_EVENT_PARAMETERS = ["limit", "since"] as const;
 
 /** Accepting a backlog item: a `POST` to the board-service, never a read. */
 const TASK_ACCEPT = /^\/api\/tasks\/([^/]+)\/accept$/;
@@ -640,6 +657,22 @@ function resolveTarget(url: URL): Resolution {
     };
   }
 
+  const events = THREAD_EVENTS.exec(path);
+  if (events) {
+    let id: string;
+    try {
+      id = decodeURIComponent(events[1]!);
+    } catch {
+      return { kind: "reject", status: 404, error: `${path} is not a readable thread id.` };
+    }
+    const target = new URL(`${API_BASE_URL}/api/threads/${encodeURIComponent(id)}/events`);
+    for (const name of THREAD_EVENT_PARAMETERS) {
+      const value = url.searchParams.get(name);
+      if (value) target.searchParams.set(name, value);
+    }
+    return { kind: "forward", target: target.toString() };
+  }
+
   const usage = TASK_USAGE.exec(path);
   if (usage) {
     let id: string;
@@ -661,7 +694,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the thirteen.
+      // `%zz` and friends. A path the console cannot read is not one of the fifteen.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -676,7 +709,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the thirteen routes the console forwards.`,
+      error: `${path} is not one of the fifteen routes the console forwards.`,
     };
   }
 

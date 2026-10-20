@@ -10254,3 +10254,73 @@ length.
   writes a turn takes the same constant or moves it.
 - Checking the account's quota state at the door: it changes before the
   claim, and ADR 173 decision 5 already refuses a parked account then.
+## ADR 184 — The chat dock is the main-thread screen, and how it reads a thread's log
+
+**Status:** accepted (T-111, 2026-10-19). Builds `docs/plans/main-thread.md`
+step 4 on the routes of ADR 177 and ADR 180.
+
+**Context.** Step 4 is the screen: the harness's threads and their
+conversations, read-only, with a switch between the text and the text with
+its commands. The console already had a chat dock (`AppShell`'s `ChatPanel`,
+the `c` key) drawn over `mockThreads`, a draft with a composer that sent
+nowhere. The log is ADR 173's format, served as ADR 180's `{"n", "event"}`
+rows: `turn_start` and `turn_end` lines of the worker's around the CLI's
+stream-json events, verbatim.
+
+**Decision.**
+1. *The screen is the dock.* `components/console/chat-panel.tsx`, not a new
+   route: a route would regenerate `routeTree.gen.ts`, and the dock is beside
+   every screen, which is where step 5's composer goes. The draft's composer
+   and `mockThreads` are gone.
+2. *Two reads, through the forward.* `GET /api/threads` and
+   `GET /api/threads/<id>/events` (`limit`, `since`) go to the api under its
+   bearer, which makes fifteen forwarded routes; any other method on them is
+   a 405, an id that does not decode a 404. The list is a query polled every
+   `POLL_MS`; the log is `use-thread-events.ts`, which reads `since=0` and
+   then `since=<last n>`, appends, follows a full page at once, and keeps
+   what it has when a read fails.
+3. *The selector.* `main` first, then the open threads, then the archived
+   ones marked so, newest first within each; each with its account and
+   model. With no `main` the dock says the board service opens it, at step 5.
+4. *One history.* Every segment of a thread is one scroll (`lib/thread.ts`,
+   `mapThread`). A `turn_start` is the person's message, its `text` and
+   `actor`; an `assistant` event's text blocks are the model's. A
+   `turn_end` closes the turn with its status; a turn with none is
+   *running*, or *ended without a turn_end* when the next `turn_start` comes
+   first. A failed turn shows its error, or an error `result`'s.
+5. *The switch.* *Text*, the default, is the above. *Text and commands* adds
+   each `tool_use` as its name and one short argument (the first of
+   `command`, `file_path`, `path`, `pattern`, `url`, `query`, `description`,
+   else the input's JSON, clipped to 80 characters), its `tool_result`
+   behind a click, marked *error* by `is_error` and *denied* when the turn's
+   `result` names it in `permission_denials`. The choice is remembered in
+   `localStorage` (`ia-harness.thread-view`), every access in a try/catch.
+6. *The separators.* A light one where the account, model or effort of a
+   `turn_start` differs from the one before, naming what changed. A heavy
+   one, *the model does not remember anything above this line*, where a
+   turn resumes no session or another session than the last one known (from
+   the previous turn's `turn_end`, else its `result`, else its `init`).
+   Neither above the first turn.
+7. *The header.* Context is the last `result`'s `usage` (input plus cache
+   read plus cache creation) over the largest `modelUsage` context window;
+   cost is the sum of `total_cost_usd`.
+8. *A row it cannot read is shown, not dropped.* A null `event`, an
+   `unparsed` line, or an `assistant` event whose content is not a list is
+   an item of its own with its line number, and the history goes on.
+9. *Read-only, and it says so.* No composer and no stop button: the dock
+   names step 5 and the board service as where they land (`docs/ui.md`, *A
+   region with no route says which route, and when*).
+
+**Consequences.**
+- `result.usage` sums a turn's calls, so the context figure can overstate
+  what the next call carries; it is an upper bound until the stream gives a
+  per-call figure the dock can read.
+- The mapping is the front's alone; the api still serves the log as written
+  (ADR 180), and a new event type shows nothing until `mapThread` learns it.
+
+**Ruled out.**
+- A `/threads` route: a regenerated route tree, and a screen the composer
+  would have to leave the dock to reach.
+- A React Query for the log: its data is replaced whole on each fetch, and
+  the log grows from a cursor.
+- Dropping unreadable rows: the history would hide a broken log.
