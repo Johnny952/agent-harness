@@ -37,7 +37,9 @@
  * `POST /api/threads/<id>/turns`, and the two project-record writes
  * `POST /api/projects` and `PATCH /api/projects/<slug>`, and the two epic actions
  * `POST /api/epics/<id>/start` and `POST /api/epics/<id>/stop`, onto the same paths
- * there; the last seven carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
+ * there; the last seven carry a bearer. Four more, a new project's setup actions
+ * `POST /api/projects/<slug>/{clone,init,keygen,check}` (ADR 212), go there
+ * too with the same bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
  * `GET /api/threads` is still the api's list, a
@@ -228,6 +230,14 @@ const PROJECTS = "/api/projects";
 const PROJECT_RECORD = /^\/api\/projects\/([^/]+)$/;
 
 /**
+ * A new project's four setup actions (ADR 212): a `POST` to the board-service
+ * with the actions bearer, as a record write is, the slug checked against
+ * `PROJECT_SLUG` and the body unchanged (the route takes only `replace`, on a
+ * keygen). No other method on these paths is forwarded.
+ */
+const PROJECT_SETUP = /^\/api\/projects\/([^/]+)\/(clone|init|keygen|check)$/;
+
+/**
  * The slugs a project may have: `dispatcher/tasks.py`'s `_PROJECT_SLUG`, written
  * again here. A record `PATCH` for any other slug is the console's 404 and
  * never crosses, as a thread id that is not one the harness makes is.
@@ -291,7 +301,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the thirteen exact pairs: a method
+  // Also before the read-only check, and only for the seventeen exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -476,7 +486,7 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the thirteen writes goes, or `null` for any
+ * Where on the board-service one of the seventeen writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
@@ -519,6 +529,16 @@ function boardTarget(method: string, path: string): Resolution | null {
     }
   }
   if (method === "POST") {
+    const setup = PROJECT_SETUP.exec(path);
+    if (setup) {
+      const slug = projectSlug(path, setup[1]!);
+      if (typeof slug !== "string") return slug;
+      return {
+        kind: "forward",
+        target: `${BOARD_SERVICE_URL}${PROJECTS}/${encodeURIComponent(slug)}/${setup[2]!}`,
+        action: "project",
+      };
+    }
     const turns = THREAD_TURNS.exec(path);
     if (turns) {
       const id = threadId(path, turns[1]!);
@@ -622,7 +642,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its thirteen writes (`docs/decisions.md`
+ * The board-service's answer to one of its seventeen writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without

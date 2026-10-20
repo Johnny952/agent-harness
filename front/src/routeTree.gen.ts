@@ -21,6 +21,7 @@ import { Route as RoadmapRouteImport } from './routes/roadmap'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as TailRouteImport } from './routes/tail'
 import { Route as TokensRouteImport } from './routes/tokens'
+import { Route as ProjectsNewRouteImport } from './routes/projects.new'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks.$taskId'
 import { Route as PSlugIndexRouteImport } from './routes/p.$slug.index'
 import { Route as PSlugBacklogRouteImport } from './routes/p.$slug.backlog'
@@ -89,6 +90,11 @@ const TokensRoute = TokensRouteImport.update({
   path: '/tokens',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProjectsNewRoute = ProjectsNewRouteImport.update({
+  id: '/projects/new',
+  path: '/projects/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TasksTaskIdRoute = TasksTaskIdRouteImport.update({
   id: '/tasks/$taskId',
   path: '/tasks/$taskId',
@@ -138,6 +144,7 @@ export interface FileRoutesByFullPath {
   '/sessions': typeof SessionsRoute
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
+  '/projects/new': typeof ProjectsNewRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/p/$slug/backlog': typeof PSlugBacklogRoute
   '/p/$slug/debt': typeof PSlugDebtRoute
@@ -159,6 +166,7 @@ export interface FileRoutesByTo {
   '/sessions': typeof SessionsRoute
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
+  '/projects/new': typeof ProjectsNewRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/p/$slug/backlog': typeof PSlugBacklogRoute
   '/p/$slug/debt': typeof PSlugDebtRoute
@@ -181,6 +189,7 @@ export interface FileRoutesById {
   '/sessions': typeof SessionsRoute
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
+  '/projects/new': typeof ProjectsNewRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/p/$slug/backlog': typeof PSlugBacklogRoute
   '/p/$slug/debt': typeof PSlugDebtRoute
@@ -204,6 +213,7 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/tail'
     | '/tokens'
+    | '/projects/new'
     | '/tasks/$taskId'
     | '/p/$slug/backlog'
     | '/p/$slug/debt'
@@ -225,6 +235,7 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/tail'
     | '/tokens'
+    | '/projects/new'
     | '/tasks/$taskId'
     | '/p/$slug/backlog'
     | '/p/$slug/debt'
@@ -246,6 +257,7 @@ export interface FileRouteTypes {
     | '/sessions'
     | '/tail'
     | '/tokens'
+    | '/projects/new'
     | '/tasks/$taskId'
     | '/p/$slug/backlog'
     | '/p/$slug/debt'
@@ -268,6 +280,7 @@ export interface RootRouteChildren {
   SessionsRoute: typeof SessionsRoute
   TailRoute: typeof TailRoute
   TokensRoute: typeof TokensRoute
+  ProjectsNewRoute: typeof ProjectsNewRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
   PSlugBacklogRoute: typeof PSlugBacklogRoute
   PSlugDebtRoute: typeof PSlugDebtRoute
@@ -363,6 +376,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TokensRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/projects/new': {
+      id: '/projects/new'
+      path: '/projects/new'
+      fullPath: '/projects/new'
+      preLoaderRoute: typeof ProjectsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/tasks/$taskId': {
       id: '/tasks/$taskId'
       path: '/tasks/$taskId'
@@ -428,6 +448,7 @@ const rootRouteChildren: RootRouteChildren = {
   SessionsRoute: SessionsRoute,
   TailRoute: TailRoute,
   TokensRoute: TokensRoute,
+  ProjectsNewRoute: ProjectsNewRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
   PSlugBacklogRoute: PSlugBacklogRoute,
   PSlugDebtRoute: PSlugDebtRoute,

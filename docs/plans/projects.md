@@ -282,9 +282,18 @@ module; steps 2, 4 and 5 need its queue and worker.
    `/p/$slug/debt`, `/p/$slug/learnings` and `/p/$slug/roadmap`, the
    harness's own screens over `?project=<slug>`, which the api already took
    and the console's forward now passes on. The counts of running and
-   waiting, the archived toggle and *New project* are not built.
+   waiting and the archived toggle are not built; *New project* is step 5 (ADR 212).
 5. **New project and the key from the console**: the `clone`, `init`,
-   `keygen` and `check` actions in the worker, and the form.
+   `keygen` and `check` actions in the worker, and the form. Built 2026-10-20
+   (`docs/decisions.md` ADR 212): the four action kinds and
+   `POST /api/projects/<slug>/{clone,init,keygen,check}`, forwarded by the
+   console, and `/projects/new`, linked from the sidebar. The form puts the
+   key before the clone (a record's remote is SSH only). Open: the form does
+   not queue the project's bootstrap (step 3); `check` tells read access, not
+   write; the worker writes the key at `cfg.project_keys_dir`, as the CLI does;
+   the form finds an outcome only among the queue's newest twenty finished and
+   cannot be resumed after a reload; a new project is in the sidebar only once a
+   task names it, until the sidebar reads the records.
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front
    task. Built by T-115 (2026-10-20, ADR 198): one derivation,
    `front/src/lib/slots.ts`, drawn in the dock and in the *Start development*

@@ -2199,6 +2199,58 @@ def update_project_branch(cfg: Config, slug: str) -> docker_exec.UpdateOutcome |
             docker_exec.restore_owner(container, project_dir, owner)
 
 
+#: Who the empty commit of a project made from nothing is by (ADR 212).
+INIT_AUTHOR_NAME = "ia-harness"
+INIT_AUTHOR_EMAIL = "ia-harness@ia-harness.invalid"
+
+
+def _setup_container(cfg: Config) -> str:
+    container = cleanup_container(cfg)
+    if container is None:
+        raise RuntimeError("no account is configured, so there is no container to run git in")
+    return container
+
+
+def make_project_checkout(
+    cfg: Config, slug: str, remote: str | None, base_branch: str | None,
+) -> docker_exec.SetupOutcome:
+    """A new project's checkout (ADR 212): `remote` cloned, or with no remote
+    an empty repository made.
+
+    Runs in cleanup_container's container for cleanup_container's reason, under
+    the project's base lock, and gives what it made to whoever owns
+    `projects_root`: git writes as root in there, and the host is where a
+    person looks at the checkout.
+    """
+    container = _setup_container(cfg)
+    with _base_lock(cfg, slug, "clone" if remote else "init"):
+        owner = docker_exec.read_owner(container, cfg.projects_root)
+        if remote:
+            outcome = docker_exec.clone_project(
+                container, cfg.projects_root, slug, remote, base_branch,
+                credentials_path=cfg.git_credentials_path,
+                keys_dir=cfg.project_keys_dir,
+            )
+        else:
+            outcome = docker_exec.init_project(
+                container, cfg.projects_root, slug, base_branch,
+                author_name=INIT_AUTHOR_NAME, author_email=INIT_AUTHOR_EMAIL,
+            )
+        project_dir = f"{cfg.projects_root}/{slug}"
+        if docker_exec.path_exists(container, project_dir):
+            docker_exec.restore_owner(container, project_dir, owner)
+    return outcome
+
+
+def check_project_remote(cfg: Config, slug: str, remote: str) -> docker_exec.SetupOutcome:
+    """Whether `remote` answers the project's deploy key (ADR 212); reads only."""
+    return docker_exec.check_remote(
+        _setup_container(cfg), cfg.projects_root, slug, remote,
+        credentials_path=cfg.git_credentials_path,
+        keys_dir=cfg.project_keys_dir,
+    )
+
+
 def _drop_review_worktrees(cfg: Config, task_id: str, slug: str) -> None:
     """Remove a finished task's reviewing checkouts, keeping the writers' one.
 

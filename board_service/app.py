@@ -10,6 +10,8 @@ dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 `start`, a `cancel` or a `command_verdict` in the dispatcher's action queue
 (ADR 142, ADR 151), and two behind the same bearer create a project record and
 change its settings (ADR 203), through `dispatcher/projects.py`'s one writer.
+Four more queue a new project's `clone`, `init`, `keygen` and `check` for the
+worker (ADR 212); none carries a remote, the worker reads it from the record.
 
 Everything here reads and writes through `dispatcher/tasks.py` and
 `dispatcher/context_transfer.py`, so there is no second copy of the task file
@@ -982,6 +984,34 @@ def create_app(config_path: str) -> Flask:
         return _project_http(
             actions_token, lambda body: project_store.change(hive_root, slug, body), 200
         )
+
+    # A new project's setup (ADR 212): four actions the worker runs, behind
+    # the action queue's bearer. None takes a remote: the worker reads it from
+    # the record, so the record must exist first.
+
+    def _setup_route(kind: str):
+        def route(slug: str):
+            def make(body: dict):
+                allowed = {"replace"} if kind == "keygen" else set()
+                unknown = sorted(set(body) - allowed)
+                if unknown:
+                    raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+                params = {"replace": body["replace"]} if "replace" in body else {}
+                if project_store.is_slug(slug) and not os.path.exists(
+                    project_store.record_path(hive_root, slug)
+                ):
+                    raise actions.ActionRefused(404, f"project {slug!r} has no record")
+                return actions.create(
+                    state_dir, kind, project=slug, params=params, actor="operator"
+                )
+
+            return _action(actions_token, make)
+
+        route.__name__ = f"http_project_{kind}"
+        return route
+
+    for kind in ("clone", "init", "keygen", "check"):
+        app.post(f"/api/projects/<slug>/{kind}")(_setup_route(kind))
 
     return app
 

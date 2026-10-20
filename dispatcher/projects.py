@@ -689,3 +689,25 @@ def change(hive_root: str, slug: str, fields: dict) -> ProjectRecord:
         record = parse(data)
         write(hive_root, record, replace=True)
     return record
+
+
+def record_key(hive_root: str, slug: str, keys_dir: str) -> ProjectRecord:
+    """`slug`'s record with `key` set from the deploy key on disk (ADR 212).
+
+    Called by the worker after a `keygen`: the only writer of `key`, which a
+    request never sets (`_NOT_SETTABLE`). The fingerprint is `_key_record`'s,
+    so the record holds what `migrate` would have found, and none when the key
+    cannot be read. `NoRecord` and `BrokenRecord` as `change` raises them.
+    """
+    if not is_slug(slug):
+        raise NoRecord(f"no project record {slug!r}")
+    with _record_lock(hive_root, slug):
+        try:
+            current = read(hive_root, slug)
+        except RecordError as exc:
+            raise BrokenRecord(str(exc)) from exc
+        if current is None:
+            raise NoRecord(f"no project record {slug!r}")
+        record = dataclasses.replace(current, key=_key_record(keys_dir, slug))
+        write(hive_root, record, replace=True)
+    return record

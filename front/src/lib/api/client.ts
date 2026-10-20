@@ -64,13 +64,19 @@
  * **Two writes for the project records** (`docs/decisions.md` ADR 203, ADR 206):
  * `createProject` (`POST /api/projects`) and `changeProject` (`PATCH
  * /api/projects/<slug>`), bare like the others. The forward adds the board
- * service's bearer on the server; nothing here carries it. No screen calls them
- * yet.
+ * service's bearer on the server; nothing here carries it. `/projects/new`
+ * calls `createProject`.
  *
  * **Two writes for an epic** (`docs/decisions.md` ADR 207, ADR 211): `startEpic`
  * (`POST /api/epics/<id>/start`, body `{note}` as a task's start) and `stopEpic`
  * (`POST /api/epics/<id>/stop`, body `{}`), bare like the others, for the
  * *Start epic* and *Stop epic* buttons on an epic's page.
+ *
+ * **Four writes for a new project's setup** (ADR 212): `cloneProject`,
+ * `initProject`, `keygenProject` and `checkProject` are `POST
+ * /api/projects/<slug>/{clone,init,keygen,check}`, bare like the others. Each
+ * answers the queued action; the worker's outcome is read back from
+ * `getActionQueue`, as a start's is.
  */
 import type {
   AcceptTaskBody,
@@ -609,6 +615,42 @@ export function listProjects(): Promise<ApiResult<ProjectRecord[]>> {
  */
 export function getProject(slug: string): Promise<ApiResult<ProjectRecord | null>> {
   return readEnvelope<ProjectRecord | null>(`/api/projects/${encodeURIComponent(slug)}`);
+}
+
+/**
+ * Queue one of a new project's setup actions (ADR 212): `POST
+ * /api/projects/<slug>/<kind>`. The answer is the queued action; a refusal (400,
+ * 404 for a slug with no record, 409 for one of the kind already queued, 503) is
+ * an `ApiError` with the service's own message.
+ */
+function queueSetup(slug: string, kind: string, body: object = {}): Promise<ActionRecord> {
+  return readBare<ActionRecord>(`/api/projects/${encodeURIComponent(slug)}/${kind}`, {
+    method: "POST",
+    body,
+  });
+}
+
+/** Clone the record's remote into the project's checkout (ADR 212). */
+export function cloneProject(slug: string): Promise<ActionRecord> {
+  return queueSetup(slug, "clone");
+}
+
+/** Make the project's checkout an empty repository, for a record with no remote (ADR 212). */
+export function initProject(slug: string): Promise<ActionRecord> {
+  return queueSetup(slug, "init");
+}
+
+/**
+ * Make the project's deploy key (ADR 212). The finished action's result holds
+ * the public half and its fingerprint; `replace` makes a new key over one there.
+ */
+export function keygenProject(slug: string, replace = false): Promise<ActionRecord> {
+  return queueSetup(slug, "keygen", replace ? { replace: true } : {});
+}
+
+/** Whether the record's remote answers the deploy key (ADR 212): `{reachable, detail}`. */
+export function checkProject(slug: string): Promise<ActionRecord> {
+  return queueSetup(slug, "check");
 }
 
 /** A write to the board-service. The forward sends the body on and nothing else. */

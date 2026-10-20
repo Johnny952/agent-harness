@@ -11797,3 +11797,82 @@ exactly what *Stop epic* must not do.
   mover (ADR 142).
 - Counting a child's own single start as the epic's: the person queued it on
   its own, so *Stop epic* would drop what it did not start.
+## ADR 212 — New project and its deploy key from the console
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/projects.md` step 5: make a project from the console,
+its record, its deploy key and its checkout. The record writes exist
+(ADR 199, ADR 203) and refuse a remote that carries a credential (ADR 205);
+the console forwards them (ADR 206). `project-keygen` makes a key from the CLI
+(`dispatcher/project_keys.py`); the worker runs queued actions (ADR 148) and
+ADR 207 showed how a kind is added end to end. *Decisions*, 2 says the board
+service writes a `keygen` action and the worker runs `ssh-keygen` into the
+credentials volume; the board service never holds a key.
+
+**Decision.**
+1. Four action kinds, `clone`, `init`, `keygen` and `check`, each with
+   `project` set to the slug, `task_id` null and no remote: the worker reads
+   the remote from the record, so no URL sits in an action file. Only `keygen`
+   takes a param, `replace` (a bool). A second pending or claimed action of the
+   same kind for the same project is refused (409).
+2. `clone` and `init` hold the project (`project:<slug>`) like a start, and are
+   not rerun after a crash: a half-made directory is the person's to look at.
+   `keygen` is not rerun either, since it may have written the pair; `check`
+   only reads, so it is.
+3. `clone` refuses a record with no remote and re-checks the remote for a
+   credential (`projects.has_credential`) before git sees it; `init` refuses a
+   record with a remote. Both refuse when `<projects_root>/<slug>` exists,
+   whatever is in it, and leave it as it is. They run in `cleanup_container`'s
+   container under the project's base lock, and give what they made to the
+   owner of `projects_root`, as `update_project_branch` does. A clone uses the
+   same access as every fetch (`_remote_access`): an SSH remote goes with the
+   project's deploy key or is not tried. `base_branch` is checked out when the
+   record sets one. An init makes one empty commit, authored `ia-harness`, so a
+   task's branch has a HEAD to be cut from.
+4. `keygen` calls `project_keys.generate`, the CLI's own function, at
+   `cfg.project_keys_dir`, then writes the fingerprint into the record's `key`
+   (`projects.record_key`, its only writer). The action's result is
+   `{public, fingerprint, replaced}`: the public half only. An existing key
+   without `replace` fails with that said.
+5. `check` is `git ls-remote --heads` with the project's key, run in
+   `projects_root` so it needs no clone. It is done either way, with
+   `{reachable, detail}`: a remote that does not answer before the key is on
+   GitHub is the expected answer, not a failed check. clone and init end
+   `done` with `{detail}` or `failed` with git's words.
+6. The board service queues them at `POST /api/projects/<slug>/{clone,init,
+   keygen,check}`, behind the actions bearer like the other action routes; a
+   slug with no record file is a 404, an unknown field a 400. The console
+   forwards the four paths (`PROJECT_SETUP` in `forward.ts`), POST only, the
+   slug checked, the body unchanged; `client.ts` has `cloneProject`,
+   `initProject`, `keygenProject` and `checkProject`.
+7. The console's *New project* screen is `/projects/new`, linked from the
+   sidebar's *Projects* section. It asks for a slug, a title and either a remote
+   or *Empty repository*. With a remote the order is record, keygen, the public
+   key and fingerprint with the instruction to add it as the repository's
+   deploy key (write access said from the record's `push_task_branch`, or that
+   the harness default decides when it sets none), *Check*, *Clone*. This puts
+   the key before the clone, not after as *Decisions*, 4 lists it: a record's
+   remote is SSH only and the clone reaches it with that key. With no remote it
+   is record, then init. A failed keygen offers a replacing key. Each outcome is
+   read from `GET /api/actions` by the id its queueing answered.
+
+**Consequences.**
+- The worker writes the key where `cfg.project_keys_dir` says, as the CLI
+  does; that is the credentials volume only where the worker runs with it
+  mounted there.
+- `check` tells whether the key can read the remote, not whether it may push.
+- The screen finds an action among the queue's pending, claimed and newest
+  twenty finished; an outcome older than that shows as not in the answer.
+- The form does not queue the project's bootstrap (step 3's
+  `bootstrap-project`), and a record whose clone or init failed stays; the
+  form cannot be resumed for it after a reload.
+- A new project shows in the sidebar only once a task names it, until the
+  sidebar reads the records.
+
+**Ruled out.**
+- The remote in the action's params: it would be a second copy of the record's,
+  and an action file is not checked for credentials as the record is.
+- Clone before keygen: the clone would fail on every SSH remote.
+- The board service running `ssh-keygen` itself: it would hold the key, which
+  *Decisions*, 2 keeps in the dispatcher's volume.

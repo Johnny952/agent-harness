@@ -1307,6 +1307,36 @@ describe("the board-service project records", () => {
       expect(await answer.text()).not.toContain("actions-token");
     }
   });
+
+  // A new project's setup actions (ADR 212): the same bearer, body unchanged.
+  it.each(["clone", "init", "keygen", "check"])(
+    "forwards a %s with the bearer, body unchanged",
+    async (kind) => {
+      const fetchMock = stubApi('{"id":"a-1","kind":"x"}', 201);
+      const body = kind === "keygen" ? '{"replace":true}' : "{}";
+      const answer = await forwardApiRequest(write(`/api/projects/demo/${kind}`, body));
+      expect(answer?.status).toBe(201);
+      expect(target(fetchMock)).toBe(`${BOARD}/api/projects/demo/${kind}`);
+      expect(sent(fetchMock)).toEqual({ method: "POST", headers: HEADERS, body });
+    },
+  );
+
+  it.each([".hidden", "%zz", "a%2Fb"])("404s a setup action for the slug %s", async (slug) => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(write(`/api/projects/${slug}/clone`, "{}"));
+    expect(answer?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards no other setup path or method", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/projects/demo/keygen")))?.status).toBe(404);
+    expect((await forwardApiRequest(write("/api/projects/demo/push", "{}")))?.status).toBe(405);
+    expect(
+      (await forwardApiRequest(write("/api/projects/demo/clone", "{}", "PATCH")))?.status,
+    ).toBe(405);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 /** ADR 157's two 503s, each under a second mock of `server-env.ts`. */
