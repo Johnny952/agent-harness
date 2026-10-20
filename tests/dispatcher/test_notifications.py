@@ -89,6 +89,11 @@ def test_a_write_that_fails_is_logged_and_never_raises(tmp_path: Path, caplog) -
     assert "not written" in caplog.text
 
 
+def test_thread_url_opens_the_thread_on_the_board_quoted() -> None:
+    assert notifications.thread_url("th-1") == "/?thread=th-1"
+    assert notifications.thread_url("a/b c&d") == "/?thread=a%2Fb%20c%26d"
+
+
 def test_task_url_quotes_the_id_and_task_title_names_it() -> None:
     assert notifications.task_url("a/b c") == "/tasks/a%2Fb%20c"
     assert notifications.task_title("T-1", "is blocked") == "T-1 is blocked"

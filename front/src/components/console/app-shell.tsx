@@ -22,7 +22,7 @@ import {
   Plus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
+import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT, openThread } from "@/hooks/use-console";
 import { actionBackendQuery, notificationsQuery } from "@/lib/api/queries";
 import { unreadCount, useLastSeen } from "@/lib/notifications";
 import {
@@ -79,6 +79,10 @@ function InboxCount() {
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  // `?thread=<id>` on any screen, the url a turn's notification links (ADR NNN).
+  const threadParam = useRouterState({
+    select: (s) => (s.location.search as Record<string, unknown>)["thread"],
+  });
   const [chatOpen, setChatOpen] = useState(false);
   // The thread a screen asked the dock to show (`openThread`, ADR 195). `n`
   // counts the asks, so asking for the same thread twice selects it again.
@@ -96,6 +100,23 @@ export function AppShell({ children }: { children: ReactNode }) {
     window.addEventListener(OPEN_THREAD_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_THREAD_EVENT, onOpen);
   }, []);
+
+  // Opens the dock on `?thread=` through `openThread`, as a screen would, then
+  // drops the param with a replace: the dock's state is not in the url, so a
+  // reload or a step back after closing it must not open it again. Declared
+  // after the listener above, so the listener is on before this first runs.
+  useEffect(() => {
+    if (typeof threadParam !== "string" || !threadParam) return;
+    openThread(threadParam);
+    void navigate({
+      to: ".",
+      search: (prev: Record<string, unknown>) => {
+        const { thread: _thread, ...rest } = prev;
+        return rest;
+      },
+      replace: true,
+    });
+  }, [threadParam, navigate]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {

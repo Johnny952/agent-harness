@@ -14,7 +14,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from dispatcher import actions, command_run, state_machine, tasks, threads, worker as worker_mod
+from dispatcher import (
+    actions, command_run, notifications, state_machine, tasks, threads, worker as worker_mod,
+)
 from dispatcher import dispatcher as core
 from dispatcher.project_lock import ProjectBusy, ProjectLock
 from tests.dispatcher.test_dispatcher import _make_config
@@ -729,6 +731,83 @@ def test_a_claimed_turn_is_interrupted_on_recovery_and_never_rerun(cfg, worker, 
     assert execs.opened == []
     last = log_of(cfg, thread["id"])[-1]
     assert last["event"] == "turn_end" and last["status"] == "interrupted"
+
+
+def turn_notices(cfg):
+    path = notifications.notifications_path(cfg.hive_tasks_dir)
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def test_a_turn_that_ends_done_failed_or_interrupted_notifies_its_thread(
+    cfg, worker, accounts, thread, execs
+):
+    tid = thread["id"]
+    turn(cfg, tid)
+    worker.tick()
+    worker.join()
+    execs.proc = FakeProc(["4242", INIT, ev(type="result", subtype="error_during_execution",
+                                            is_error=True, result="boom")])
+    turn(cfg, tid)
+    worker.tick()
+    worker.join()
+    # Stopped mid-stream, then the one a dead worker left claimed.
+    execs.proc = FakeProc(["4242", INIT], block=threading.Event())
+    w = worker_mod.Worker(cfg, account_poll=0)
+    t = turn(cfg, tid)
+    w.tick()
+    assert execs.proc.entered.wait(WAIT)
+    w.stop()
+    w.recover = lambda: []
+    w.run(interval=0.01)
+    assert where(cfg, t["id"])[1]["status"] == "interrupted"
+    dead = turn(cfg, tid)
+    claimed = actions.claim(cfg.state_dir, dead["id"])
+    claimed["started_at"] = "2026-01-01T00:00:00+00:00"
+    actions.rewrite(cfg.state_dir, claimed)
+    assert worker.recover() == [(dead["id"], "interrupted")]
+    got = turn_notices(cfg)
+    assert [(n["kind"], n["thread"], n["title"]) for n in got] == [
+        ("turn_finished", tid, f"{tid} turn done: t"),
+        ("turn_finished", tid, f"{tid} turn failed: t"),
+        ("turn_finished", tid, f"{tid} turn interrupted: t"),
+        ("turn_finished", tid, f"{tid} turn interrupted: t"),
+    ]
+    assert {n["url"] for n in got} == {notifications.thread_url(tid)}
+    assert all("task" not in n and "account" not in n for n in got)
+
+
+def test_a_cancelled_turn_notifies_nobody(cfg, worker, thread, execs):
+    execs.proc = FakeProc(["4242", INIT], block=threading.Event())
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    assert execs.proc.entered.wait(WAIT)
+    cancel(cfg, t["id"])
+    worker.tick()
+    worker.join()
+    assert where(cfg, t["id"])[1]["status"] == "cancelled"
+    assert turn_notices(cfg) == []
+
+
+def test_a_turn_refused_before_it_starts_notifies_nobody(cfg, worker, thread, execs):
+    threads.update(cfg.hive_tasks_dir, cfg, thread["id"], status="archived")
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    assert where(cfg, t["id"])[1]["status"] == "failed"
+    assert turn_notices(cfg) == []
+
+
+def test_a_notification_that_cannot_be_written_leaves_the_turn_done(cfg, worker, thread, execs):
+    # A directory where the file goes: the append's open fails, and is logged.
+    os.makedirs(notifications.notifications_path(cfg.hive_tasks_dir))
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    assert where(cfg, t["id"])[1]["status"] == "done"
+    assert log_of(cfg, thread["id"])[-1]["status"] == "done"
 
 
 def test_two_turns_on_one_thread_never_run_at_once(cfg, worker, thread, execs):
