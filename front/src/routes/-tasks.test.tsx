@@ -983,6 +983,55 @@ describe("Start epic and Stop epic (ADR 211)", () => {
     expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, limit: 3000 });
   });
 
+  it("prefills the limit from the merged children's cycles, and lets a typed one win", async () => {
+    const { sent } = await epicPage({
+      // T-102 is the one merged child: 1000 measured over its two calls.
+      "/api/tasks/T-102/usage": {
+        data: [group([line({ input_tokens: 600 }), line({ output_tokens: 400, call: "resume" })])],
+      },
+      "POST /api/epics/T-101/start": {
+        bare: { epic: "T-101", queued: [action("T-109")], not_ready: [], limit: 2500 },
+        status: 201,
+      },
+    });
+    const dialog = await open("Start epic");
+    const field = within(dialog).getByLabelText("Spending limit") as HTMLInputElement;
+    // Three children still to land, at the one merged child's 1000 each.
+    await waitFor(() => expect(field.value).toBe("3000"));
+    expect(within(dialog).getByTestId("epic-limit-prefill").textContent).toBe(
+      "Prefilled from 1 merged task of this epic: about 1000 measured tokens each, for 3 tasks still to land.",
+    );
+    fireEvent.change(field, { target: { value: "2500" } });
+    expect(within(dialog).queryByTestId("epic-limit-prefill")).toBeNull();
+    await within(dialog).findByText(/would be queued/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, limit: 2500 });
+  });
+
+  it("prefills a resume's limit on top of the run's spend, and is blank with no measured child", async () => {
+    await epicPage({
+      "/api/tasks/T-102/usage": { data: [group([line({ input_tokens: 1000 })])] },
+      "/api/actions": queueOf({
+        epics: [epicRun({ limit: 1000, paused: "limit_reached", limit_reached: true })],
+      }),
+    });
+    const dialog = await open("Resume epic");
+    const field = within(dialog).getByLabelText("Spending limit") as HTMLInputElement;
+    await waitFor(() => expect(field.value).toBe("4200"));
+    expect(within(dialog).getByTestId("epic-limit-prefill").textContent).toContain(
+      ", on top of the 1200 spent.",
+    );
+    cleanup();
+
+    // T-102's log served nothing measured: the field stays blank.
+    await epicPage({ "/api/tasks/T-102/usage": { data: [group([line()])] } });
+    const blank = await open("Start epic");
+    await within(blank).findByText(/would be queued/);
+    expect((within(blank).getByLabelText("Spending limit") as HTMLInputElement).value).toBe("");
+    expect(within(blank).queryByTestId("epic-limit-prefill")).toBeNull();
+  });
+
   it("toasts a refusal and keeps the dialog", async () => {
     await epicPage({
       "POST /api/epics/T-101/start": {
