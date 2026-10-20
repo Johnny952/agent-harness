@@ -104,6 +104,11 @@ class TaskFile:
     # `T-<n>-D<m>` id: what filing it again is idempotent on. Checked by
     # `tasks.field_problems`; written only when set.
     debt_id: str | None = None
+    # The project the card belongs to (ADR NNN): the slug of its record under
+    # `<hive>/projects/`. None is the one project a harness had before
+    # projects had records, which `dispatch migrate` stamps on every card.
+    # Checked by `tasks.field_problems`; written only when set.
+    project: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -656,6 +661,7 @@ def read_task_file(path: str) -> TaskFile:
         tags=fm.get("tags"),
         rank=fm.get("rank"),
         debt_id=fm.get("debt_id"),
+        project=fm.get("project"),
     )
 
 
@@ -795,6 +801,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["rank"] = task.rank
     if task.debt_id is not None:
         fm["debt_id"] = task.debt_id
+    if task.project is not None:
+        fm["project"] = task.project
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

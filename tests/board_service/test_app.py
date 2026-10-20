@@ -214,14 +214,24 @@ def test_list_rows(client, hive):
     assert out["items"] == [
         {"id": "T-1", "title": "Serve the board over MCP, reads only.", "status": "pending",
          "place": "board", "epic": "T-9", "merged": False, "priority": "normal", "source": None,
-         "tags": [], "rank": None, "debt_id": None},
+         "tags": [], "rank": None, "debt_id": None, "project": None},
         {"id": "T-2", "title": "Serve the board over MCP, reads only.", "status": "done",
          "place": "board", "epic": None, "merged": True, "priority": "normal", "source": None,
-         "tags": [], "rank": None, "debt_id": None},
+         "tags": [], "rank": None, "debt_id": None, "project": None},
         {"id": "T-3", "title": None, "status": "pending", "place": "board", "epic": None,
          "merged": False, "priority": "normal", "source": None,
-         "tags": [], "rank": None, "debt_id": None},
+         "tags": [], "rank": None, "debt_id": None, "project": None},
     ]
+
+
+def test_list_rows_carry_the_project(client, hive):
+    # A card names its project (ADR NNN); one that names none is the
+    # harness's one pre-existing project, and is served as None.
+    task(hive, "T-1", project="shop")
+    task(hive, "T-2")
+    out = ok(client, "board_list")
+    assert {r["id"]: r["project"] for r in out["items"]} == {"T-1": "shop", "T-2": None}
+    assert out["warnings"] == []
 
 
 def test_list_rows_carry_the_backlog_fields(client, hive):

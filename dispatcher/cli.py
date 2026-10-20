@@ -18,6 +18,7 @@ from dispatcher import (
     operator,
     project_docs,
     project_keys,
+    projects,
     role_skills,
     tasks,
 )
@@ -169,7 +170,62 @@ def _require_migrated(cfg: Config, parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _run_migrate(cfg: Config) -> None:
+def _run_migrate(cfg: Config, default: str | None = None) -> None:
+    """Move every description out of its task file, then register the projects.
+
+    Two halves, each idempotent. The first moves descriptions to the board.
+    The second (`docs/plans/projects.md` step 1, ADR NNN) writes a project
+    record for every clone under `projects_root` that has none, and stamps the
+    cards that name no project with `default`: `--project`, or the one record
+    when there is exactly one. A record already there is never written over.
+    """
+    refused = _run_migrate_descriptions(cfg)
+    refused = _run_migrate_projects(cfg, default) or refused
+    if refused:
+        raise SystemExit(EXIT_BLOCKED)
+
+
+def _run_migrate_projects(cfg: Config, default: str | None) -> bool:
+    """The project half of `migrate`; True when something was refused.
+
+    The clones are listed in an agent container, which mounts the projects;
+    the dispatcher's does not. With no container, or a listing that fails, no
+    record is written, the cards are still stamped against the records that
+    exist, and the run exits refused so the operator runs it again.
+    """
+    clones: list[projects.Clone] = []
+    unlisted = None
+    container = cleanup_container(cfg)
+    if container is None:
+        unlisted = "no accounts configured: nothing to list the clones in"
+    else:
+        try:
+            clones = projects.discover(container, cfg.projects_root)
+        except projects.DiscoverError as exc:
+            unlisted = str(exc)
+    if unlisted is not None:
+        print(f"projects: not listed: {unlisted}", file=sys.stderr)
+    report = projects.migrate(
+        cfg.hive_tasks_dir, clones,
+        keys_dir=cfg.project_keys_dir, ttl_seconds=cfg.heartbeat_ttl_seconds, default=default,
+    )
+    for slug in report.written:
+        print(f"{slug}: project record written to {projects.record_path(context_transfer.hive_root(cfg.hive_tasks_dir), slug)}")
+    for name, reason in report.skipped:
+        print(f"{name}: no project record: {reason}", file=sys.stderr)
+    for task_id in report.stamped:
+        print(f"{task_id}: project {report.default}")
+    for task_id, reason in report.refused:
+        print(f"{task_id}: not stamped: {reason}", file=sys.stderr)
+    if report.written or report.stamped or report.refused or report.skipped:
+        print(
+            f"wrote {len(report.written)} project record(s), {len(report.existing)} already there; "
+            f"stamped {len(report.stamped)} card(s), {report.already} already named a project"
+        )
+    return unlisted is not None or bool(report.refused)
+
+
+def _run_migrate_descriptions(cfg: Config) -> bool:
     """Move every description out of its task file, and print what moved."""
     report = tasks.migrate(cfg.hive_tasks_dir, cfg.heartbeat_ttl_seconds)
     for task_id, path in report.moved:
@@ -184,8 +240,7 @@ def _run_migrate(cfg: Config) -> None:
         )
     else:
         print("nothing to migrate")
-    if report.refused:
-        raise SystemExit(EXIT_BLOCKED)
+    return bool(report.refused)
 
 
 def _run_import_debt(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentParser) -> None:
@@ -750,13 +805,21 @@ def main() -> None:
         "one at a time (ADR 142)",
     )
 
-    sub.add_parser(
+    migrate_parser = sub.add_parser(
         "migrate",
         help="Move the description out of every task file that still carries it "
-        "in the frontmatter, into the task's description.md on the board. Run "
-        "it once after upgrading; a second run changes nothing. It prints what "
-        "it moved, and refuses a task whose cycle is still in flight: run it "
+        "in the frontmatter, into the task's description.md on the board; then "
+        "write a project record for every clone under projects_root that has "
+        "none, and stamp the cards that name no project (ADR NNN). Run "
+        "it once after upgrading; a second run changes nothing, and a record "
+        "already there is never written over. It prints what "
+        "it did, and refuses a task whose cycle is still in flight: run it "
         "again when that cycle has ended.",
+    )
+    migrate_parser.add_argument(
+        "--project", metavar="SLUG", default=None,
+        help="The project the cards that name none belong to. Needed only when "
+        "there is more than one project; with one, it is that one.",
     )
 
     import_debt_parser = sub.add_parser(
@@ -782,7 +845,7 @@ def main() -> None:
     cfg = load_config(args.config)
 
     if args.command == "migrate":
-        _run_migrate(cfg)
+        _run_migrate(cfg, args.project)
     elif args.command == "import-debt":
         _run_import_debt(args, cfg, parser)
     elif args.command == "run-task":

@@ -299,6 +299,8 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "tags": [],
         "rank": None,
         "debt_id": None,
+        # No project named: the one pre-existing project (ADR NNN).
+        "project": None,
         # The epic fields of a plain task (ADR 137): no parent, no sub-tasks,
         # not merged, and the Goal's first line for a title.
         "epic": None,
@@ -452,6 +454,7 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
         "tags": [],
         "rank": None,
         "debt_id": None,
+        "project": None,
         "epic": None,
         "split_into": [],
         "merged": False,

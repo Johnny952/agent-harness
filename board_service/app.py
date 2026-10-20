@@ -180,6 +180,9 @@ def board_list(
                 # The debt index entry a `source: debt` item was filed from,
                 # None for any other task (ADR 131).
                 "debt_id": task.debt_id,
+                # The project the card belongs to, None for one that names
+                # none: the harness's one pre-existing project (ADR NNN).
+                "project": task.project,
             }
             problems = task_store.field_problems(task)
         except _UNREADABLE as exc:
@@ -438,7 +441,8 @@ TOOLS: dict[str, dict] = {
         "description": (
             "List the harness's tasks and epics: id, title, status, place, epic, merged, "
             "priority, source, tags, rank, debt_id (the debt index entry a source-debt "
-            "item was filed from). The board's rows come by id, the backlog's by "
+            "item was filed from), project (the project slug, null for the one "
+            "pre-existing project). The board's rows come by id, the backlog's by "
             "priority, then rank. `ready` lists the ids the next cycle may take, in order: "
             "pending with every dependency merged, by priority (a dependency takes the "
             "highest priority of what waits on it), then rank, then id. "

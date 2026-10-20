@@ -1277,6 +1277,9 @@ def _task(
         "tags": task_store.normal_tags(task.tags),
         "rank": task.rank,
         "debt_id": task.debt_id,
+        # The project slug the card belongs to, `null` for one that names none,
+        # which is the harness's one pre-existing project (ADR NNN).
+        "project": task.project,
         # The epic fields, for the console's epic view (board-service plan
         # step 8, ADR 137). `epic` is the parent epic's id on a sub-task,
         # `null` when absent; `split_into` is an epic's sub-task ids in order,
