@@ -35,6 +35,7 @@ function task(id: string, over: Partial<Task> = {}): Task {
     tags: [],
     rank: null,
     debt_id: null,
+    project: null,
     epic: null,
     split_into: [],
     merged: false,
@@ -64,6 +65,18 @@ describe("the backlog's order", () => {
     ]);
     await screen.findByTestId("row-T-5");
     expect(rowIds()).toEqual(["T-5", "T-99", "T-11", "T-12", "T-100b", "T-100"]);
+  });
+});
+
+describe("the project on a backlog row (ADR 204)", () => {
+  it("shows the slug, and the absent mark for a task with no project", async () => {
+    await open([task("T-1", { project: "ia-harness" }), task("T-2")]);
+    const withProject = await screen.findByTestId("row-T-1");
+    expect(within(withProject).getByTestId("project-mark").textContent).toBe("ia-harness");
+    const without = screen.getByTestId("row-T-2");
+    expect(within(without).queryByTestId("project-mark")).toBeNull();
+    expect(without.textContent).toContain("no project");
+    expect(without.textContent).not.toContain("null");
   });
 });
 

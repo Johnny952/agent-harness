@@ -11,6 +11,7 @@ import {
   Malformed,
   Mono,
   PageHeader,
+  ProjectMark,
   RoleBadge,
   StatusPill,
   WarningBanner,
@@ -237,6 +238,9 @@ function TaskDetailPage() {
               ) : (
                 <Absent label="no owner" />
               )}
+            </Field>
+            <Field label="project">
+              <ProjectMark project={t.project} />
             </Field>
             <Field label="lock heartbeat">
               <HeartbeatDot

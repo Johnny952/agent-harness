@@ -19,6 +19,7 @@ function task(id: string, over: Partial<Task> = {}): Task {
     tags: [],
     rank: null,
     debt_id: null,
+    project: null,
     epic: "T-1",
     split_into: [],
     merged: false,

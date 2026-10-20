@@ -11192,3 +11192,48 @@ behind a toggle, which is the record's `status`.
   `created`, which it does not own.
 - Setting `status` on create: a new project is active; archiving one that never
   ran is a change like any other.
+## ADR 204 — *Waiting for the project* in the slots, and the project on every card
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/projects.md` step 6 left *Waiting for the project*
+open (ADR 198): the worker already holds a start back with `waiting:
+"project"` while a start of the same project runs (`dispatcher/worker.py`,
+the serial key `project:<slug>`), but the console drew it as *Queued —
+project*, and it could not name the task holding the project because the task
+rows did not carry `project`. ADR 199 put `project` on the api's task rows,
+null when a card names none. ADR 198, decision 4, said how the reason is added.
+
+**Decision.**
+1. The front's `Task` row type carries `project: string | null`, what the api
+   serves (ADR 199). Nothing else is added to the type.
+2. A card on the board, a row in the backlog and the task page's field panel
+   show the slug, small and secondary, through one primitive, `ProjectMark`
+   in `front/src/components/console/primitives.tsx`. A null project draws the
+   absent mark *no project*; a value that is not a string draws the malformed
+   mark. Neither is replaced by a guessed project.
+3. `deriveSlots` (`front/src/lib/slots.ts`) gains one reason kind,
+   `"project"`, for a pending start whose `waiting` is `"project"`. Its line is
+   *Waiting for the project*, with the detail *behind T-…* naming the first
+   claimed start of the same project when the queue shows one, and no detail
+   otherwise. The dock's slots panel draws it as it draws the other reasons.
+4. `standingLine` takes the task's project. When the queue holds starts of
+   that project, the *Start development* confirmation says *this task would
+   queue behind N task(s) of this project* (`projects.md`, *Decisions*, 6);
+   otherwise it counts every start, as before.
+
+**Consequences.**
+- A start the worker holds for its project reads as such in the dock, and the
+  operator sees which task it waits behind.
+- The reason comes from the worker's word alone; the front only adds the
+  holder's name from the queue it already reads.
+- No time is shown for when the project frees: none is known.
+- The sidebar and the `/p/$slug/` routes (step 4) and the worker's rule
+  itself (step 3) are not part of this.
+
+**Ruled out.**
+- Deriving *Waiting for the project* from two starts sharing a project: the
+  worker decides what holds a start back, and a guess would contradict it.
+- Guessing when the project frees, or a time for the holder's cycle.
+- A backlog column for the project: the slug sits beside the title, so the
+  columns and their widths stay as they are.

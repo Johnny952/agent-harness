@@ -51,6 +51,7 @@ const TASK: TaskDetail = {
   tags: [],
   rank: null,
   debt_id: null,
+  project: null,
   epic: null,
   split_into: [],
   merged: false,
@@ -689,6 +690,21 @@ describe("the running phase", () => {
     await taskPage(TASK);
     await screen.findByText("task body");
     expect(field("phase").textContent).toBe("phasebetween phases");
+  });
+});
+
+describe("the task's project (ADR 204)", () => {
+  it("names the project slug", async () => {
+    await taskPage({ ...TASK, project: "ia-harness" });
+    await screen.findByText("task body");
+    expect(field("project").textContent).toBe("projectia-harness");
+  });
+
+  it("draws the absent mark for a task with no project", async () => {
+    await taskPage(TASK);
+    await screen.findByText("task body");
+    expect(field("project").textContent).toContain("no project");
+    expect(field("project").textContent).not.toContain("null");
   });
 });
 

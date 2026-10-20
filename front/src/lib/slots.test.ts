@@ -160,9 +160,50 @@ describe("deriveSlots", () => {
     const v = deriveSlots(
       [account("a")],
       [],
-      queue([start("T-4", { waiting: "project" }), start("T-5")]),
+      queue([start("T-4", { waiting: "lane" }), start("T-5")]),
     );
-    expect(v.waiting?.map(waitingText)).toEqual(["Queued — project", "Queued"]);
+    expect(v.waiting?.map(waitingText)).toEqual(["Queued — lane", "Queued"]);
+  });
+
+  it("names the task holding the project for a start waiting for the project", () => {
+    const v = deriveSlots(
+      [account("a"), account("b", { state: "BUSY", current_task_id: "T-12" })],
+      [task("T-12", "implementador")],
+      queue(
+        [start("T-13", { waiting: "project" })],
+        [start("T-11", { project: "other" }), start("T-12")],
+      ),
+    );
+    const w = v.waiting?.find((x) => x.taskId === "T-13");
+    expect(w).toEqual({ taskId: "T-13", reason: "project", detail: "behind T-12" });
+    expect(waitingText(w!)).toBe("Waiting for the project — behind T-12");
+  });
+
+  it("says waiting for the project with no detail when the queue shows no holder", () => {
+    const v = deriveSlots(
+      [account("a")],
+      [],
+      queue([start("T-14", { waiting: "project" })], [start("T-15", { project: "other" })]),
+    );
+    const w = v.waiting?.find((x) => x.taskId === "T-14");
+    expect(w).toEqual({ taskId: "T-14", reason: "project", detail: null });
+    expect(waitingText(w!)).toBe("Waiting for the project");
+    // A record with no project names no holder either, even beside a claimed start.
+    const unstamped = deriveSlots(
+      [account("a")],
+      [],
+      queue([start("T-16", { waiting: "project", project: null })], [start("T-17")]),
+    );
+    expect(unstamped.waiting?.find((x) => x.taskId === "T-16")).toMatchObject({
+      reason: "project",
+      detail: null,
+    });
+  });
+
+  it("never reads waiting for the project from a shared project alone", () => {
+    // Same project as a claimed start, but the worker did not say "project".
+    const v = deriveSlots([account("a")], [], queue([start("T-18")], [start("T-19")]));
+    expect(v.waiting?.find((w) => w.taskId === "T-18")?.reason).toBe("queued");
   });
 
   it("lets a claimed start win over a pending one for the same task", () => {
@@ -221,6 +262,23 @@ describe("standingLine", () => {
     );
     expect(standingLine(view([account("a")], queue([start("T-1")])))).toBe(
       "1 account, 1 free; this task would queue behind 1 started task",
+    );
+  });
+
+  it("counts only the starts of the task's own project, named of this project", () => {
+    const q = queue([start("T-2", { project: "other" })], [start("T-1")]);
+    expect(standingLine(view([account("a")], q), "ia-harness")).toBe(
+      "1 account, 1 free; this task would queue behind 1 task of this project",
+    );
+    expect(
+      standingLine(view([account("a")], queue([start("T-3")], [start("T-1")])), "ia-harness"),
+    ).toBe("1 account, 1 free; this task would queue behind 2 tasks of this project");
+    // None of its project in the queue, or no project: the line counts every start.
+    expect(standingLine(view([account("a")], q), "third")).toBe(
+      "1 account, 1 free; this task would queue behind 2 started tasks",
+    );
+    expect(standingLine(view([account("a")], q), null)).toBe(
+      "1 account, 1 free; this task would queue behind 2 started tasks",
     );
   });
 

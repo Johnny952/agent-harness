@@ -345,3 +345,20 @@ function typeName(value: unknown): string {
   const kind = typeof value;
   return kind === "object" ? "an object" : `a ${kind}`;
 }
+
+/**
+ * The project a task belongs to, small and secondary: the slug as served, or
+ * `Absent` on a task not yet stamped by `dispatch migrate` (`null`, ADR 199),
+ * never a guessed default. Anything but a string or `null` is `Malformed`,
+ * since the detail route serves a hand-edited file's value as written.
+ */
+export function ProjectMark({ project }: { project: unknown }) {
+  if (project === null || project === undefined || project === "")
+    return <Absent label="no project" />;
+  if (typeof project !== "string") return <Malformed label="project" got={project} want="a slug" />;
+  return (
+    <span data-testid="project-mark">
+      <Mono className="text-[10px] text-muted-foreground">{project}</Mono>
+    </span>
+  );
+}

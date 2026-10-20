@@ -24,6 +24,7 @@ import {
   Malformed,
   Mono,
   PageHeader,
+  ProjectMark,
   WarningBanner,
 } from "@/components/console/primitives";
 import {
@@ -136,20 +137,20 @@ function BoardPage() {
     return map;
   }, [actionQueue.data]);
 
-  // Where a new start would stand, from the same derivation as the dock's slots.
-  const standing = useMemo(
+  // Where a new start would stand, from the same derivation as the dock's slots,
+  // derived once and worded per card: a card's project names the starts of that
+  // project it would queue behind (ADR 204).
+  const slotsView = useMemo(
     () =>
       accounts.isError
-        ? standingLine("accounts-failed")
+        ? ("accounts-failed" as const)
         : accounts.data
-          ? standingLine(
-              deriveSlots(
-                accounts.data.data,
-                tasks.isError ? null : (tasks.data?.data ?? null),
-                actionQueue.isError ? null : actionQueue.data?.data,
-              ),
+          ? deriveSlots(
+              accounts.data.data,
+              tasks.isError ? null : (tasks.data?.data ?? null),
+              actionQueue.isError ? null : actionQueue.data?.data,
             )
-          : standingLine("loading"),
+          : ("loading" as const),
     [
       accounts.isError,
       accounts.data,
@@ -317,7 +318,10 @@ function BoardPage() {
                               task={t}
                               queued={startByTask.get(t.task_id)}
                               loading={actionQueue.isLoading}
-                              standing={standing}
+                              standing={standingLine(
+                                slotsView,
+                                typeof t.project === "string" ? t.project : null,
+                              )}
                             />
                           ) : undefined
                         }
@@ -497,6 +501,7 @@ export function TaskCard({
           ) : (
             <span className="text-[10px] italic text-muted-foreground/60">unassigned</span>
           )}
+          <ProjectMark project={task.project} />
           {/* `.length` over a string is a number, so a `depends_on: T-001` written
             without a dash would put a confident `7` on this card — the one failure
             of this kind that does not throw, and the worse one for it. ADR 29. */}

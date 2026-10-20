@@ -40,6 +40,7 @@ const TASK: Task = {
   tags: [],
   rank: null,
   debt_id: null,
+  project: null,
   epic: null,
   split_into: [],
   merged: false,

@@ -9,6 +9,7 @@ import {
   ErrorState,
   Mono,
   PageHeader,
+  ProjectMark,
   StatusPill,
   WarningBanner,
 } from "@/components/console/primitives";
@@ -374,6 +375,9 @@ function ItemRow({
           </span>
         ) : null}
         {task.title ?? <Absent label="untitled" />}
+        <span className="ml-2">
+          <ProjectMark project={task.project} />
+        </span>
       </td>
       <td className="mono px-3 py-1.5">{task.priority}</td>
       <td className="px-3 py-1.5">

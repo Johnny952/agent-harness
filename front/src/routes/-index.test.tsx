@@ -70,6 +70,7 @@ const TASK: Task = {
   tags: [],
   rank: null,
   debt_id: null,
+  project: null,
   epic: null,
   split_into: [],
   merged: false,
@@ -190,6 +191,28 @@ describe("a task the api served with no description", () => {
       </RouterContextProvider>,
     );
     expect(container.textContent).toContain("no description");
+    expect(container.textContent).not.toContain("null");
+  });
+});
+
+describe("the project on a card (ADR 204)", () => {
+  function renderProject(project: string | null) {
+    return render(
+      <RouterContextProvider router={cardRouter()}>
+        <TaskCard task={{ ...TASK, project }} now={NOW} dense={false} debtCount={0} />
+      </RouterContextProvider>,
+    );
+  }
+
+  it("shows the project slug", () => {
+    renderProject("ia-harness");
+    expect(screen.getByTestId("project-mark").textContent).toBe("ia-harness");
+  });
+
+  it("draws the absent mark for a task with no project, not a guess", () => {
+    const { container } = renderProject(null);
+    expect(screen.queryByTestId("project-mark")).toBeNull();
+    expect(container.textContent).toContain("no project");
     expect(container.textContent).not.toContain("null");
   });
 });
@@ -592,6 +615,24 @@ describe("Start development on a Ready card", () => {
     expect(
       await within(dialog).findByText(
         "1 account, 1 free; this task would queue behind 1 started task",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says in the confirmation that the task would queue behind a task of its project", async () => {
+    await board(queueOf({ claimed: [action("T-999", { status: "claimed" })] }), {
+      "/api/tasks": {
+        data: [
+          { ...task("T-301"), project: "ia-harness" },
+          { ...task("T-302"), project: "ia-harness" },
+        ],
+      },
+      "/api/accounts": { data: [acct("cuenta1", "IDLE")] },
+    });
+    const dialog = await open();
+    expect(
+      await within(dialog).findByText(
+        "1 account, 1 free; this task would queue behind 1 task of this project",
       ),
     ).toBeTruthy();
   });
