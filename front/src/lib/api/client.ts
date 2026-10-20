@@ -499,6 +499,17 @@ export function getActionQueue(limit = 1): Promise<ApiResult<ActionQueue>> {
 }
 
 /**
+ * One action record by its id, in whichever state it is now: `GET
+ * /api/actions/<id>` (ADR 216). `data` is null with a warning when the record
+ * is there but unreadable; no record is the api's 404, an `ApiError`. This is
+ * how *New project* finds its setup actions' outcomes, however many other
+ * actions have finished since.
+ */
+export function getAction(actionId: string): Promise<ApiResult<ActionRecord | null>> {
+  return readEnvelope<ActionRecord | null>(`/api/actions/${encodeURIComponent(actionId)}`);
+}
+
+/**
  * Cancel a queued or running start: `POST /api/actions/<id>/cancel` with an empty
  * body. The answer is the new *cancel* action the board-service queued, not the
  * start; the worker carries the cancel out (ADR 163 part 5).

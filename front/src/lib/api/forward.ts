@@ -177,6 +177,17 @@ const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
 const ACTION_CANCEL = /^\/api\/actions\/([^/]+)\/cancel$/;
 
 /**
+ * One action record by its id (ADR 216): the api's `GET`, one segment, no query
+ * parameter, hive-wide like `/api/actions` so no `?project=` is added. The id is
+ * checked against `ACTION_ID` here, so one the queue does not make is the
+ * console's 404 and never crosses; `ACTION_CANCEL`'s two segments miss it.
+ */
+const ACTION_DETAIL = /^\/api\/actions\/([^/]+)$/;
+
+/** The ids the queue makes: `dispatcher/actions.py`'s `ID_RE`, written again here. */
+const ACTION_ID = /^a-[0-9]{8}T[0-9]{12}Z-[0-9a-f]{4}$/;
+
+/**
  * *Start epic* and *Stop epic* (ADR 207, ADR 211): `POST`s to the board-service,
  * with the actions bearer. A start's body is rebuilt as a task's is, a stop's is
  * `{}` as a cancel's is.
@@ -914,6 +925,22 @@ function resolveTarget(url: URL): Resolution {
     const slug = projectSlug(path, record[1]!);
     if (typeof slug !== "string") return slug;
     return { kind: "forward", target: `${API_BASE_URL}${PROJECTS}/${encodeURIComponent(slug)}` };
+  }
+
+  // One action record (ADR 216): an id the queue does not make is the console's
+  // 404, as a thread id is, and nothing of the browser's query crosses.
+  const action = ACTION_DETAIL.exec(path);
+  if (action) {
+    let id: string;
+    try {
+      id = decodeURIComponent(action[1]!);
+    } catch {
+      return { kind: "reject", status: 404, error: `${path} is not a readable action id.` };
+    }
+    if (!ACTION_ID.test(id)) {
+      return { kind: "reject", status: 404, error: `${path} names no action id the queue makes.` };
+    }
+    return { kind: "forward", target: `${API_BASE_URL}/api/actions/${id}` };
   }
 
   const detail = TASK_DETAIL.exec(path);

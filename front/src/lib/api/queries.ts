@@ -199,6 +199,24 @@ export const actionQueueListQuery = queryOptions({
   refetchInterval: POLL_MS,
 });
 
+/** The statuses an action does not leave: `dispatcher/actions.py`'s finished ones. */
+const FINISHED = new Set(["done", "failed", "interrupted"]);
+
+/**
+ * One action record by its id (ADR 216), *New project*'s read of each setup
+ * action it queued. Under `["action-queue"]`, so whatever refetches the queue
+ * refetches it; polled until the record is finished, then left alone.
+ */
+export const actionQuery = (actionId: string) =>
+  queryOptions({
+    queryKey: ["action-queue", "one", actionId],
+    queryFn: () => api.getAction(actionId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.data?.status;
+      return status !== undefined && FINISHED.has(status) ? false : POLL_MS;
+    },
+  });
+
 /** `POST /api/actions/<id>/cancel`. The queue and the board refetch, settled either way. */
 export const cancelActionMutation = (qc: QueryClient) =>
   mutationOptions({
@@ -225,6 +243,17 @@ export const projectsQuery = queryOptions({
   queryFn: () => api.listProjects(),
   refetchInterval: POLL_MS * 4,
 });
+
+/**
+ * One project record (ADR 209), read once: *New project* takes it back after a
+ * reload from the slug in its url (ADR 216). Under `["projects"]`, so a record
+ * write's invalidation refetches it.
+ */
+export const projectQuery = (slug: string) =>
+  queryOptions({
+    queryKey: ["projects", "one", slug],
+    queryFn: () => api.getProject(slug),
+  });
 
 export const threadsQuery = queryOptions({
   queryKey: ["threads"],

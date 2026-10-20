@@ -1092,6 +1092,37 @@ def create_app(
         }
         return _envelope(data, warnings)
 
+    @app.get("/api/actions/<action_id>")
+    @requires_auth
+    def action_record(action_id: str):
+        """One action's record, wherever the queue holds it (ADR 216).
+
+        What *New project* reads its setup actions back by: `/api/actions`
+        serves only the newest finished ones, so an action that many others
+        finished after falls out of that answer while this one still finds
+        it. The walk is pending, claimed, done, the order the worker moves a
+        record in, so a record moved between two looks is found in the later
+        one. An id that is not an action id, or names no record, is a 404,
+        and is never made into a path. A file that does not read is `data:
+        null` and the reason, as `/api/projects/<slug>` answers a broken
+        record. Read through `/state:ro`: no directory is made here.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        if not actions.ID_RE.fullmatch(action_id):
+            return _error(f"no action {action_id!r}", 404)
+        root = actions.actions_dir(cfg.state_dir)
+        for state in (actions.PENDING, actions.CLAIMED, actions.DONE):
+            path = root / state / f"{action_id}.json"
+            try:
+                return _envelope(actions._load(path), [])
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as exc:
+                return _envelope(None, [f"{path}: unreadable action: {exc}"])
+        return _error(f"no action {action_id!r} in {root}", 404)
+
     @app.get("/api/threads")
     @requires_auth
     def threads():
