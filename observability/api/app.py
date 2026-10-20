@@ -57,6 +57,7 @@ from dispatcher import (
     docker_exec,
     epic_runs,
     learnings,
+    notifications,
     project_docs,
     state_machine,
 )
@@ -182,6 +183,16 @@ MAX_COMMENTS = 500
 #: thousands of ordinary ones. Over it the newest end is read, starting at a
 #: whole line, and the cut names itself in `warnings`. ADR 135.
 MAX_COMMENTS_BYTES = 1024 * 1024
+
+#: The most notifications one `/api/notifications` answer carries, the newest,
+#: on `MAX_COMMENTS`' model: an inbox is read from its top, and the clamp
+#: names itself in `warnings`. ADR NNN.
+MAX_NOTIFICATIONS = 500
+
+#: The most bytes of `notifications.jsonl` one answer reads, from its end. A
+#: line is a few hundred bytes (`notifications.MAX_TITLE_CHARS` bounds the
+#: only free text), so 1 MiB holds thousands, past `MAX_NOTIFICATIONS`. ADR NNN.
+MAX_NOTIFICATIONS_BYTES = 1024 * 1024
 
 #: The most bytes of a task's unified diff one `/api/tasks/<task_id>/diff`
 #: answer carries. A diff is read on the review screen line by line, so a
@@ -855,6 +866,53 @@ def create_app(
             )
             comments = comments[-MAX_COMMENTS:]
         return _envelope({"task_id": task_id, "comments": comments}, warnings)
+
+    @app.get("/api/notifications")
+    @requires_auth
+    def notifications_inbox():
+        """The notification record, newest first (ADR NNN).
+
+        The lines `dispatcher/notifications.py:append` writes to
+        `<hive root>/notifications.jsonl`, each judged by
+        `notifications.parse_line`. A line that is not a notification is a
+        warning naming the file and its line, and the rest is still served. No
+        file is no notification yet: `[]`. Read state is not here: the inbox
+        keeps it (`docs/plans/notifications.md` step 2).
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        path = notifications.notifications_path(cfg.hive_tasks_dir)
+        try:
+            first_line, raw, cut_bytes = _comments_tail(path, MAX_NOTIFICATIONS_BYTES)
+        except (FileNotFoundError, NotADirectoryError):
+            return _envelope([], [])
+        except OSError as exc:
+            return _envelope(None, [f"{path}: unreadable notifications file: {exc}"])
+        warnings: list[str] = []
+        if cut_bytes:
+            warnings.append(
+                f"{path}: the notifications file is over {MAX_NOTIFICATIONS_BYTES} bytes: "
+                f"its first {cut_bytes} bytes are not read, and the oldest notifications "
+                "in them are not served"
+            )
+        found = []
+        for number, line in enumerate(raw.split(b"\n"), start=first_line):
+            if not line.strip():
+                continue
+            record, problem = notifications.parse_line(line)
+            if problem is not None:
+                warnings.append(f"{path}: line {number}: {problem}")
+            if record is not None:
+                found.append(record)
+        if len(found) > MAX_NOTIFICATIONS:
+            warnings.append(
+                f"{len(found)} notifications and this service answers at most "
+                f"{MAX_NOTIFICATIONS}: the newest {MAX_NOTIFICATIONS} are served"
+            )
+            found = found[-MAX_NOTIFICATIONS:]
+        found.reverse()
+        return _envelope(found, warnings)
 
     @app.get("/api/tasks/<task_id>/diff")
     @requires_auth
@@ -1702,8 +1760,11 @@ def _bounded_body(path: str, body: str) -> tuple[str, list[str]]:
     ]
 
 
-def _comments_tail(path: str) -> tuple[int, bytes, int]:
-    """The newest `MAX_COMMENTS_BYTES` of a comments file, as whole lines.
+def _comments_tail(path: str, cap: int | None = None) -> tuple[int, bytes, int]:
+    """The newest `cap` bytes of a comments file, as whole lines.
+
+    `cap` is `MAX_COMMENTS_BYTES` when not given, read at the call; the
+    notifications file is read the same way under its own (ADR NNN).
 
     Returns the file's line number of the first line kept, the bytes kept and
     how many bytes were left unread (0 for a file under the cap). The prefix is
@@ -1711,11 +1772,13 @@ def _comments_tail(path: str) -> tuple[int, bytes, int]:
     names the line an editor shows, and so a cut never lands mid-line: what
     follows the last newline of the prefix, a partial line, is dropped.
     """
+    if cap is None:
+        cap = MAX_COMMENTS_BYTES
     with open(path, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
-        if size <= MAX_COMMENTS_BYTES:
-            return 1, fh.read(MAX_COMMENTS_BYTES), 0
-        skip = size - MAX_COMMENTS_BYTES
+        if size <= cap:
+            return 1, fh.read(cap), 0
+        skip = size - cap
         newlines = 0
         last = b"\n"
         left = skip
@@ -1726,7 +1789,7 @@ def _comments_tail(path: str) -> tuple[int, bytes, int]:
             newlines += chunk.count(b"\n")
             last = chunk[-1:]
             left -= len(chunk)
-        kept = fh.read(MAX_COMMENTS_BYTES)
+        kept = fh.read(cap)
     if last != b"\n":
         # The prefix ended mid-line: the rest of that line is not a comment.
         partial, newline, rest = kept.partition(b"\n")

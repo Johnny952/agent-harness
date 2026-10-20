@@ -1,5 +1,5 @@
 ---
-status: design
+status: building
 approved: 2026-10-11
 built: null
 supersedes: []
@@ -7,7 +7,9 @@ supersedes: []
 
 # Notifications — the console tells the person when it needs them
 
-**Status:** design, accepted in outline by the user on 2026-10-11, not built.
+**Status:** building, accepted in outline by the user on 2026-10-11. The
+record and its writers are built (ADR NNN), and so is the read route; the
+inbox, the push and the settings are not.
 It records a gap the user named that day: push notifications for an awaited
 approval, a finished development and the like. It fills a weakness the main
 thread's analysis of the same day found: in a near-automatic workflow, the
@@ -106,8 +108,16 @@ or the exact command and target. The notification takes the person there.
 Each step is a single surface:
 
 1. The record, and its writers in the board module and the dispatcher.
+   **Built 2026-10-20** (ADR NNN): `dispatcher/notifications.py` appends to
+   `<hive root>/notifications.jsonl`, written by `tasks` (conflict, blocked,
+   command request, phase failed, merged, epic closed), the dispatcher
+   (awaiting review at a cycle's end, an account available again) and
+   `epic_runs` (a run paused at its limit, as blocked). Pool dry and turn
+   finished have no writer yet: see the ADR.
 2. `GET /api/notifications`, and the inbox in the console, polled. It is
-   useful on its own, before any push.
+   useful on its own, before any push. **Partly built 2026-10-20** (ADR
+   NNN): the route serves the newest 500 records, newest first; the inbox,
+   and read state with it, are not built.
 3. The notifier, and the endpoint that stores a subscription (a write, so in
    the board service). The server's Web Push library is its own ask, and the
    VAPID key's location gets an ADR, like the git credential.

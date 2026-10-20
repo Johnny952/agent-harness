@@ -207,3 +207,21 @@ def test_resume_at_the_limit_before_any_merge_looked(client, hive, state):
     res = start_epic(client, body={"project": "demo", "limit": 100})
     assert res.status_code == 201, res.get_json()
     assert res.get_json()["queued"] == [] and run_file(state)["limit"] == 100
+
+
+def test_a_run_paused_by_its_limit_is_told_once(client, hive, state):
+    """The pause is a stop waiting on the person: a `blocked` notification (ADR NNN)."""
+    from dispatcher import notifications
+
+    chain(hive)
+    start_epic(client, body={"project": "demo", "limit": 1000})
+    spend(hive, "T-1-S1", 1200)
+    merge(hive, "T-1-S1")
+    epic_runs.follow_on(str(hive), str(state))
+    epic_runs.follow_on(str(hive), str(state))
+
+    lines = Path(notifications.notifications_path(str(hive))).read_bytes().splitlines()
+    records = [notifications.parse_line(line)[0] for line in lines]
+    assert [(r["kind"], r["task"]) for r in records] == [("merged", "T-1-S1"), ("blocked", "T-1")]
+    assert records[-1]["title"].startswith("T-1 paused: its spending limit is reached")
+    assert records[-1]["url"] == "/tasks/T-1"
