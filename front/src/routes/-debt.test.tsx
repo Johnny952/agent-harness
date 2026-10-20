@@ -202,4 +202,49 @@ describe("the Debt screen's backlog items", () => {
     await waitFor(() => expect(cell("T-001-D1").textContent).toContain("T-200"));
     expect(r.sent.filter((s) => s.method !== "GET")).toEqual([]);
   });
+
+  it("filters an open entry by its item's id and state words", async () => {
+    await open([entry("T-001-D1"), entry("T-002-D1"), entry("T-003-D1", true)], {
+      data: [task("T-097", { debt_id: "T-001-D1" })],
+    });
+    await waitFor(() => expect(cell("T-001-D1").textContent).toContain("T-097"));
+    const box = screen.getByPlaceholderText(/^Filter debt/);
+
+    fireEvent.change(box, { target: { value: "t-097" } });
+    await waitFor(() => expect(screen.queryByText("T-002-D1")).toBeNull());
+    expect(screen.getByText("T-001-D1")).toBeTruthy();
+
+    fireEvent.change(box, { target: { value: "not imported" } });
+    await waitFor(() => expect(screen.queryByText("T-001-D1")).toBeNull());
+    expect(screen.getByText("T-002-D1")).toBeTruthy();
+    // A resolved row draws no item, so its words are not the box's to find.
+    expect(screen.queryByText("T-003-D1")).toBeNull();
+  });
+
+  const desc = (surface: string) =>
+    `## Goal\n\ng\n\n## Done when\n\nd\n\n## Surface\n\n${surface}\n`;
+
+  it("points an open entry at a task in play whose Surface its where falls on", async () => {
+    await open([{ ...entry("T-001-D1"), where: "`front/src/lib/debt.ts:matchesQuery`" }], {
+      data: [
+        task("T-300", { status: "in_progress", description: desc("- `front/src/lib/`") }),
+        task("T-301", { status: "done", merged: true, description: desc("- `front/`") }),
+      ],
+    });
+    const note = await screen.findByTestId("in-play-T-001-D1");
+    expect(note.textContent).toContain("where falls on the surface of");
+    expect(note.textContent).toContain("accepted — in_progress");
+    const links = within(note).getAllByRole("link");
+    expect(links.map((l) => l.getAttribute("href"))).toEqual(["/tasks/T-300"]);
+    // The item cell's own words are unchanged.
+    expect(cell("T-001-D1").textContent).toBe("not imported");
+  });
+
+  it("points at nothing when the only overlapping task is merged", async () => {
+    await open([{ ...entry("T-001-D1"), where: "`front/src/lib/debt.ts`" }], {
+      data: [task("T-301", { status: "done", merged: true, description: desc("- `front/`") })],
+    });
+    await waitFor(() => expect(cell("T-001-D1").textContent).toBe("not imported"));
+    expect(screen.queryByTestId("in-play-T-001-D1")).toBeNull();
+  });
 });

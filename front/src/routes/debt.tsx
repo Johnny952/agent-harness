@@ -13,7 +13,17 @@ import {
 } from "@/components/console/primitives";
 import { debtQuery, tasksQuery } from "@/lib/api/queries";
 import type { DebtEntry, Task } from "@/lib/api/types";
-import { duplicateWarning, itemsByDebtId, pairEntry, stateLabel } from "@/lib/debt";
+import {
+  duplicateWarning,
+  itemState,
+  itemsByDebtId,
+  matchesQuery,
+  pairEntry,
+  stateLabel,
+  surfaceOverlaps,
+  tasksInPlay,
+  type InPlay,
+} from "@/lib/debt";
 import { useSearchHotkey } from "@/hooks/use-console";
 
 export const Route = createFileRoute("/debt")({
@@ -42,7 +52,9 @@ const NO_TASK = "unattributed";
  * be a claim about every entry the read could not see. ADR 141.
  */
 type PairingRead =
-  { state: "loading" } | { state: "broken" } | { state: "ready"; byId: Map<string, Task[]> };
+  | { state: "loading" }
+  | { state: "broken" }
+  | { state: "ready"; byId: Map<string, Task[]>; inPlay: InPlay[] };
 
 function DebtPage() {
   const debt = useQuery(debtQuery);
@@ -51,12 +63,32 @@ function DebtPage() {
   const searchRef = useSearchHotkey();
   const [q, setQ] = useState("");
 
+  const pairing: PairingRead = useMemo(
+    () =>
+      tasks.isError
+        ? { state: "broken" }
+        : tasks.data
+          ? {
+              state: "ready",
+              byId: itemsByDebtId(tasks.data.data),
+              inPlay: tasksInPlay(tasks.data.data),
+            }
+          : { state: "loading" },
+    [tasks.isError, tasks.data],
+  );
+
+  // An open entry's item id and state words are matched only once the pairing is
+  // in, since only then does the row draw them (`lib/debt.ts:matchesQuery`).
   const rows = useMemo(
     () =>
       (debt.data?.data ?? []).filter((d) =>
-        q ? `${d.id} ${d.what} ${d.where} ${d.card}`.toLowerCase().includes(q.toLowerCase()) : true,
+        matchesQuery(
+          d,
+          q,
+          pairing.state === "ready" && !d.resolved ? pairEntry(d.id, pairing.byId) : null,
+        ),
       ),
-    [debt.data, q],
+    [debt.data, q, pairing],
   );
 
   // The collection as the read served it, which is what decides between the two
@@ -73,15 +105,6 @@ function DebtPage() {
   const open = useMemo(() => rows.filter((d) => !d.resolved), [rows]);
   const resolved = useMemo(() => rows.filter((d) => d.resolved), [rows]);
 
-  const pairing: PairingRead = useMemo(
-    () =>
-      tasks.isError
-        ? { state: "broken" }
-        : tasks.data
-          ? { state: "ready", byId: itemsByDebtId(tasks.data.data) }
-          : { state: "loading" },
-    [tasks.isError, tasks.data],
-  );
   const brokenReads =
     pairing.state === "broken"
       ? [
@@ -152,7 +175,7 @@ export function DebtEmpty({ served, query }: { served: number; query: string }) 
   return (
     <EmptyState
       title={`No debt row matches “${query}”`}
-      body={`Clear the filter box to see ${served === 1 ? "the one row" : `all ${served} rows`} again, open and resolved. The filter reads the id, the what, the where and the card.`}
+      body={`Clear the filter box to see ${served === 1 ? "the one row" : `all ${served} rows`} again, open and resolved. The filter reads the id, the what, the where and the card, and an open row's item and its state.`}
     />
   );
 }
@@ -246,8 +269,11 @@ function DebtTable({ rows, pairing }: { rows: DebtEntry[]; pairing?: PairingRead
               {d.card && d.card !== "none" ? d.card : <Absent label="no card" />}
             </td>
             {pairing && (
-              <td className="px-3 py-1.5" data-testid={`item-${d.id}`}>
-                <ItemCell debtId={d.id} pairing={pairing} />
+              <td className="px-3 py-1.5">
+                <div data-testid={`item-${d.id}`}>
+                  <ItemCell debtId={d.id} pairing={pairing} />
+                </div>
+                {pairing.state === "ready" && <InPlayNote entry={d} inPlay={pairing.inPlay} />}
               </td>
             )}
           </tr>
@@ -284,6 +310,31 @@ function ItemCell({ debtId, pairing }: { debtId: string; pairing: PairingRead })
           <span className={state.kind === "accepted" ? "text-foreground" : "text-muted-foreground"}>
             {stateLabel(state)}
           </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The tasks on the board, not merged, whose *Surface* this open entry's *where*
+ * falls on (`lib/debt.ts:surfaceOverlaps`; `docs/plans/board-service.md`
+ * section 5, *Debt on a surface already in play*). A pointer only: folding the
+ * debt into that task is the person's call, made on the task, and nothing here
+ * writes. Drawn under the item cell, and nothing at all when no task matches.
+ */
+function InPlayNote({ entry, inPlay }: { entry: DebtEntry; inPlay: InPlay[] }) {
+  const tasks = surfaceOverlaps(entry, inPlay);
+  if (tasks.length === 0) return null;
+  return (
+    <div className="mt-1 space-y-0.5 text-[10px]" data-testid={`in-play-${entry.id}`}>
+      <p className="text-muted-foreground">where falls on the surface of</p>
+      {tasks.map((task) => (
+        <div key={task.task_id} className="flex items-center gap-2">
+          <Link to="/tasks/$taskId" params={{ taskId: task.task_id }}>
+            <Mono className="font-semibold hover:underline">{task.task_id}</Mono>
+          </Link>
+          <span className="text-muted-foreground">{stateLabel(itemState(task))}</span>
         </div>
       ))}
     </div>
