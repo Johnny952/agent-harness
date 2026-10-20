@@ -93,8 +93,9 @@ from pathlib import Path
 
 import yaml
 
-from dispatcher import context_transfer, debt, surface
+from dispatcher import context_transfer, debt, notifications, surface
 # By name: this module's own `handoff` is a task-file writer.
+from dispatcher.handoff import COMMAND_REQUEST as COMMAND_REQUEST_REASON
 from dispatcher.handoff import _SPLIT_MAX, _SPLIT_MIN, SubTask, split_problems
 
 # `_makedirs_readable`, `_write_atomic`, `_is_single_path_component`,
@@ -127,6 +128,10 @@ DRAFT_REQUIRED = ("Surface", "Out of scope")
 BACKLOG_STATUSES = ("proposed", "deferred", "dropped")
 #: The status a task has to be accepted into before it may run.
 ACCEPTED_STATUS = "pending"
+#: The status the pre-merge check gives a task whose merge it stopped
+#: (`dispatcher.CONFLICT_STATUS`, which is this one): here because `handoff`
+#: notifies the move into it (ADR 221).
+CONFLICT_STATUS = "conflict"
 #: The priority buckets, highest first; `rank` is the order inside one (ADR 130).
 PRIORITIES = ("high", "normal", "low")
 #: The bucket of a task that names none: every task filed before the field,
@@ -1114,6 +1119,7 @@ def handoff(
     depends_on: list[str] | None = None,
 ) -> None:
     path, task = context_transfer._read_or_new(hive_dir, task_id)
+    was = task.status
     task.status = new_status
     task.owner = None
     task.heartbeat = None
@@ -1124,16 +1130,26 @@ def handoff(
     if depends_on is not None:
         task.depends_on = depends_on
     _write_task_file(path, task)
+    # Into a conflict, not a rewrite of one: the automatic approve hands a
+    # conflicted task off again, and the person was told the first time.
+    if new_status == CONFLICT_STATUS and was != CONFLICT_STATUS:
+        notifications.notify_task(hive_dir, "conflict", task_id, "has a conflict", task.title)
 
 
 @_locked
-def mark_blocked(hive_dir: str, task_id: str, reason: str | None = None) -> None:
+def mark_blocked(
+    hive_dir: str, task_id: str, reason: str | None = None, *, failed: bool = False
+) -> None:
     """Record that this task stopped blocked, and release its lock.
 
     The body and every other field stay. A task with no file raises, as
     `refresh_heartbeat` does: there is nothing to mark, and creating one here
     would invent a task. `acquire_lock` takes a blocked task again, and clears
     `reason`. A block without one clears a stale reason too (ADR 117).
+
+    And one notification (ADR 221): `phase_failed` when `failed`, the stop of
+    a phase that did not finish; `command_request` for a filed request; else
+    `blocked`, a stop that waits on the person's decision.
     """
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
@@ -1143,6 +1159,16 @@ def mark_blocked(hive_dir: str, task_id: str, reason: str | None = None) -> None
     task.phase = None
     task.blocked_reason = reason
     _write_task_file(path, task)
+    if failed:
+        notifications.notify_task(
+            hive_dir, "phase_failed", task_id, "stopped: a phase did not finish", task.title
+        )
+    elif reason == COMMAND_REQUEST_REASON:
+        notifications.notify_task(
+            hive_dir, "command_request", task_id, "asks to run a command", task.title
+        )
+    else:
+        notifications.notify_task(hive_dir, "blocked", task_id, "is blocked", task.title)
 
 
 @_locked
@@ -1156,8 +1182,13 @@ def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     """
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
+    first = not task.merged
     task.merged = {"into": target, "at": dt.datetime.now(dt.timezone.utc).isoformat()}
     _write_task_file(path, task)
+    # The first record only: `merge-task` run again repairs or replaces the
+    # block, and the merge it describes was told already (ADR 221).
+    if first:
+        notifications.notify_task(hive_dir, "merged", task_id, f"merged into {target}", task.title)
 
 
 @_locked
@@ -1347,6 +1378,13 @@ def close_epic(hive_dir: str, task_id: str) -> str | None:
             return None
         parent.status = "done" if merged else EPIC_ALL_DROPPED_STATUS
         _write_task_file(parent_path, parent)
+        # The *Merged, and epic closed* kind's second half (ADR 221).
+        notifications.notify_task(
+            hive_dir, "merged", task.epic,
+            "closed: every sub-task is merged or dropped" if merged
+            else "closed: every sub-task was dropped",
+            parent.title,
+        )
     return task.epic
 
 

@@ -12336,3 +12336,77 @@ is needed.
 - A new api field for the waiting reason: the record already carries it.
 - Storing the toggle on the server: it is a viewer's view preference, as
   the thread view is.
+## ADR 221 — Notifications are one record, appended by whoever writes the state change, and served by the api
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/notifications.md` (accepted in outline 2026-10-11)
+designs a console that tells the person when it needs them: a fixed list of
+kinds, one record written where the state changes (*Decisions* 1 and 2), a
+push that carries little (4), and an inbox read before any push (step 2).
+None of it existed: the states the kinds report are written by the board
+module (`dispatcher/tasks.py`), the dispatcher and the epic follow-on, and
+nothing recorded that a person was wanted.
+
+**Decision.**
+1. `dispatcher/notifications.py` is the record. A line of
+   `<hive root>/notifications.jsonl`, beside the board and the locks, is
+   `{"id", "kind", "at", "task" | "thread" | "account", "title", "url"}`:
+   exactly one subject, a title of at most 200 characters, and the console
+   url that opens the item. Ids are `n-<UTC time>Z-<4 hex>`, the queue's
+   action ids' shape, so they sort as written.
+2. The kinds are the plan's table, one per row: `awaiting_review`,
+   `conflict`, `command_request`, `blocked` (needs the person); `merged`,
+   which also covers an epic closed, `pool`, which covers pool dry and an
+   account available again, `phase_failed` and `turn_finished` (informs; the
+   last two off by default, for step 5's settings). A kind not in the list
+   is a `ValueError` at the writer and a skipped line at the reader.
+3. An append is one `os.write` on an `O_APPEND` file, with no lock of its
+   own, so a writer that holds a task's lock appends under it. It never
+   raises into the state change it rides on: an `OSError` is a warning in
+   the log and the change stands.
+4. The writers, each where its state is written:
+   - `tasks.handoff` into `conflict`, from any other status: `conflict`.
+   - `tasks.mark_blocked`: `command_request` when the reason is the
+     handoff's command request, `phase_failed` when the cycle stopped because
+     a phase did not finish (`failed=True`, set by the dispatcher from the
+     fatal path; a phase held for lack of an account is not one), else
+     `blocked`.
+   - `tasks.mark_merged`, the first time only: `merged`. `tasks.close_epic`:
+     `merged` about the epic.
+   - The dispatcher, at a cycle's end that merged nothing, for a task left
+     `done` and not merged: `awaiting_review` (the board has no such status,
+     ADR 219's stand-in). A recovered account in `_recheck_cooling_accounts`:
+     `pool`, linking `/pool`.
+   - `epic_runs.follow_on`, on the move into paused at the spending limit
+     (ADR 218): `blocked` about the epic, once.
+5. A title is the id, what happened and the task's own title: never a diff,
+   a command's text or a handoff's content (*Decisions* 4). Every task kind
+   links `/tasks/<id>`.
+6. The api serves `GET /api/notifications`, no parameters, behind the
+   bearer: the file's last MiB read from its end at a whole line, the newest
+   500 records newest first, with a warning for the cut, the clamp and each
+   bad line (`<path>: line <n>: <problem>`), as the comments route warns. A
+   missing file is `[]`.
+
+**Consequences.**
+- Pool dry has no record: the dispatcher's "no accounts available" is a
+  log line, not a state change anyone writes, so it gets its kind's writer
+  when it gets one.
+- `turn_finished` has no record: the trigger exists (`turn_end` in
+  `dispatcher/worker.py`), but no console url opens a thread yet, and a
+  record must carry the url that opens its item.
+- Read state is not in the record: it is step 2's inbox, and per person
+  with the users store (*Open questions*).
+- `_comments_tail` takes its cap at call time, so the comments route's and
+  this route's caps are both patchable in tests.
+- The console does not yet forward or show the route: the inbox, the
+  notifier, the service worker and the settings are steps 2 to 5.
+
+**Ruled out.**
+- Deriving notifications from the events log afterwards: the plan's
+  *Decisions* 2, and a reader would guess at what the writer knew.
+- A lock on the file: one `O_APPEND` write keeps lines whole, and a second
+  lock taken under a task's lock is a deadlock waiting for a writer order.
+- An `awaiting_review` status on the board: `review.md` step 1, its own
+  task.

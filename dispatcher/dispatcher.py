@@ -26,6 +26,7 @@ from dispatcher import (
     gates,
     handoff,
     learnings,
+    notifications,
     project_docs,
     projects,
     quota,
@@ -908,6 +909,13 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             # the holders the park left running.
             if state_machine.unpark(cfg.state_dir, acc.name, forget_rate_limit=True):
                 recovered.append(acc.name)
+                # The *Pool* kind's second half: work waiting on the pool can
+                # run again (ADR 221). Pool dry has no writer yet.
+                notifications.append(
+                    cfg.hive_tasks_dir, "pool", account=acc.name,
+                    title=f"account {acc.name} is available again",
+                    url=notifications.POOL_URL,
+                )
     return recovered
 
 
@@ -2378,7 +2386,7 @@ def left_behind_report(cfg: Config, task_id: str, role: str | None = None) -> li
 #: The status a task gets when the pre-merge check stops its merge
 #: (`docs/plans/autonomy.md` *Decisions*, 2). The integrador resolves it once
 #: that role exists; until then, the operator.
-CONFLICT_STATUS = "conflict"
+CONFLICT_STATUS = tasks.CONFLICT_STATUS
 
 #: The heading of the note the pre-merge check appends to the task file.
 PRE_MERGE_HEADING = "## pre-merge check"
@@ -2876,6 +2884,10 @@ class CycleContext:
     # of it before `run_phase` returns, so at the end of a blocked cycle the
     # file cannot say whether this run ever held it; this can.
     took_lock: bool = False
+    # Set when a phase the run depends on did not finish (timed out, crashed,
+    # errored), not held: the blocked mark it leaves is told as
+    # `phase_failed`, not as a stop waiting on the person (ADR 221).
+    phase_failed: bool = False
     # Asked before each phase starts; False stops the run there, held, with
     # nothing started and nothing marked. The queue's token limit (A-5, ADR
     # 79) is the one caller: a limit reached mid-cycle starts no new phase.
@@ -3159,6 +3171,7 @@ def run_phase(
                 result.result_text or "no diagnosis: the phase produced no output",
             )
             ctx.held = result.no_account
+            ctx.phase_failed = not result.no_account
             return None
         # A phase the task does not depend on. It still hands off what it
         # managed — a partial map is worth having, and the next phase
@@ -3258,7 +3271,9 @@ def _mark_blocked(ctx: CycleContext, reason: str | None = None) -> None:
     try:
         if context_transfer.read_task_file(ctx.task_file).owner is not None:
             return
-        tasks.mark_blocked(ctx.cfg.hive_tasks_dir, ctx.task_id, reason=reason)
+        tasks.mark_blocked(
+            ctx.cfg.hive_tasks_dir, ctx.task_id, reason=reason, failed=ctx.phase_failed
+        )
     except FileNotFoundError:
         return
     except Exception as exc:
@@ -4080,4 +4095,28 @@ def _cycle_rounds(
         # phase for a row the repo already has. A branch that did not
         # merge keeps them here, where the next task still sees them.
         learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
+    else:
+        _notify_awaiting_review(cfg, task_id)
     return CycleOutcome.FINISHED
+
+
+def _notify_awaiting_review(cfg: Config, task_id: str) -> None:
+    """Tell the person a finished cycle left the task for their review (ADR 221).
+
+    The board has no "awaiting review" status (ADR 219): a task waits on the
+    person when its cycle ended `done` and nothing merged it. A task the
+    automatic approve moved to `conflict` was told as one, so it is not told
+    twice. It never raises: the cycle has finished, and its outcome stands.
+    """
+    try:
+        task = context_transfer.read_task_file(
+            context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+        )
+        if task.status != "done" or task.merged:
+            return
+        notifications.notify_task(
+            cfg.hive_tasks_dir, "awaiting_review", task_id, "is waiting for your review",
+            task.title,
+        )
+    except Exception as exc:
+        logger.warning("task %s: awaiting-review notification not written: %s", task_id, exc)

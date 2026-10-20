@@ -13,7 +13,7 @@ merge, `follow_on`) call it; neither imports the other.
 
 from __future__ import annotations
 
-from dispatcher import actions, context_transfer, tasks
+from dispatcher import actions, context_transfer, notifications, tasks
 
 
 def usage_offset(hive_dir: str, task_id: str) -> int:
@@ -89,7 +89,24 @@ def follow_on(hive_dir: str, state_dir: str) -> list[str]:
             continue
         if made["paused"]:
             lines.append(f"epic {epic_id}: paused, its limit is reached")
+            # Paused waits on the person raising the limit or stopping the
+            # run: the *Blocked* kind (ADR 221). `paused` is true on the
+            # move into it only, so a paused run is told once.
+            notifications.notify_task(
+                hive_dir, "blocked", epic_id, "paused: its spending limit is reached",
+                _epic_title(hive_dir, epic_id),
+            )
         elif made["queued"]:
             ids = ", ".join(r["task_id"] for r in made["queued"])
             lines.append(f"epic {epic_id}: queued {ids}")
     return lines
+
+
+def _epic_title(hive_dir: str, epic_id: str) -> str | None:
+    """The epic's frontmatter title for a notification, or None when unreadable."""
+    try:
+        return context_transfer.read_task_file(
+            context_transfer.task_file_path(hive_dir, epic_id)
+        ).title
+    except Exception:  # a bad file is the board's problem, not this title's
+        return None
