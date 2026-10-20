@@ -22,6 +22,7 @@ from dispatcher import (
     context_transfer,
     debt,
     docker_exec,
+    epic_runs,
     gates,
     handoff,
     learnings,
@@ -2794,6 +2795,8 @@ def record_merge(
     so running `merge-task` again keeps the first record and repairs one that
     was never written. The epic check runs either way.
 
+    Then each started epic queues its tasks now Ready (ADR 218).
+
     Returns what it recorded, one line each, and what it could not, or None.
     It never raises: the branch landed whatever happens here, and the
     dependency gate is where a merge with no record is met again.
@@ -2812,6 +2815,12 @@ def record_merge(
         return recorded, f"task {task_id}: it has no task file, so the merge is not recorded"
     except Exception as exc:
         return recorded, f"task {task_id}: the merge could not be recorded: {exc}"
+    # A started epic queues its tasks this merge made Ready, or pauses at its
+    # limit (ADR 218). After the record, since the dependency gate reads it.
+    try:
+        recorded += epic_runs.follow_on(hive, cfg.state_dir)
+    except Exception as exc:
+        return recorded, f"task {task_id}: merged, but the epics' follow-on failed: {exc}"
     return recorded, None
 
 

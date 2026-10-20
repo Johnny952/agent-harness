@@ -153,7 +153,11 @@ def test_an_epic_with_no_task_in_ready_is_refused(client, hive, state):
 
 
 @pytest.mark.parametrize("body, needle", [
-    ({"project": "demo", "limit": 1000}, "spending limit"),
+    ({"project": "demo", "limit": 0}, "limit must be"),
+    ({"project": "demo", "limit": -5}, "limit must be"),
+    ({"project": "demo", "limit": "1000"}, "limit must be"),
+    ({"project": "demo", "limit": 1.5}, "limit must be"),
+    ({"project": "demo", "limit": True}, "limit must be"),
     ({"project": "demo", "tasks": ["T-1-S1"]}, "unknown field 'tasks'"),
     ({"project": "demo", "note": 7}, "note"),
 ])

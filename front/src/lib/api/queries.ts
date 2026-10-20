@@ -170,8 +170,15 @@ export const startTaskMutation = (qc: QueryClient) =>
 export const startEpicMutation = (qc: QueryClient) =>
   mutationOptions({
     mutationKey: ["board", "start-epic"],
-    mutationFn: ({ epicId, note }: { epicId: string; note: string | null }) =>
-      api.startEpic(epicId, note),
+    mutationFn: ({
+      epicId,
+      note,
+      limit = null,
+    }: {
+      epicId: string;
+      note: string | null;
+      limit?: number | null;
+    }) => api.startEpic(epicId, note, limit),
     onSettled: () =>
       Promise.all(
         [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),

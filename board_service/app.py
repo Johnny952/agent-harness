@@ -40,7 +40,7 @@ import sys
 import yaml
 from flask import Flask, jsonify, request
 
-from dispatcher import actions, context_transfer
+from dispatcher import actions, context_transfer, epic_runs
 from dispatcher import projects as project_store
 from dispatcher import tasks as task_store
 from dispatcher import threads as thread_store
@@ -362,7 +362,7 @@ def _ready_check(hive_dir: str):
 
 
 def epic_start(
-    hive_dir: str, state_dir: str, epic_id: str, project=None, note=None,
+    hive_dir: str, state_dir: str, epic_id: str, project=None, note=None, limit=None,
 ) -> dict:
     """*Start epic*'s queue write (ADR 207): a `start` per Ready task of the epic.
 
@@ -371,7 +371,14 @@ def epic_start(
     naming the epic and the same note; the rest are answered in `not_ready`,
     not queued. All or none: a covered task that already has a start queued,
     or one that left Ready, refuses the call and nothing is written.
+
+    The same write keeps the epic's run (ADR 218): its `limit`, in measured
+    tokens or null, and the tasks it queued, so each merge queues the epic's
+    next tasks as their dependencies land. On a run paused at its limit this
+    is *Resume*: the new limit is taken, a task already queued is skipped,
+    and no task in Ready is not a refusal.
     """
+    actions.check_limit(limit)
     tasks = task_store.read_all_tasks(hive_dir)
     epic = tasks.get(epic_id)
     if epic is None:
@@ -382,7 +389,12 @@ def epic_start(
     order = task_store.ready_order(tasks)
     ready_now = set(order)
     queue = [tid for tid in order if tid in covered]
-    if not queue:
+    run = actions.read_epic_run(state_dir, epic_id)
+    resume = (
+        run is not None and run.get("stopped_at") is None
+        and (bool(run.get("paused")) or epic_runs.view(hive_dir, run)["limit_reached"])
+    )
+    if not queue and not resume:
         raise actions.ActionRefused(409, f"epic {epic_id} has no task in Ready")
     # The Ready check is made again under the queue's lock, from one read of
     # the board for the whole batch.
@@ -393,14 +405,17 @@ def epic_start(
             read_once.append(set(task_store.ready_order(task_store.read_all_tasks(hive_dir))))
         return tid in read_once[0]
 
-    records = actions.create_starts(
-        state_dir, project, queue, params={"limit": None, "epic": epic_id},
-        actor="operator", note=note, ready=ready,
+    records, run = actions.start_epic_run(
+        state_dir, epic_id, project, queue, limit=limit, note=note,
+        actor="operator", ready=ready,
+        offset=lambda tid: epic_runs.usage_offset(hive_dir, tid),
+        spent=lambda r: epic_runs.spend(hive_dir, r)[0],
     )
     return {
         "epic": epic_id,
         "queued": records,
         "not_ready": [tid for tid in covered if tid not in ready_now],
+        "limit": run["limit"],
     }
 
 
@@ -885,11 +900,10 @@ def create_app(config_path: str) -> Flask:
             unknown = sorted(set(body) - {"project", "note", "limit"})
             if unknown:
                 raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
-            if body.get("limit") is not None:
-                raise actions.ActionRefused(400, "the spending limit is not built yet")
+            # The epic's spending limit, in measured tokens, or null (ADR 218).
             return epic_start(
                 hive_dir, state_dir, epic_id, project=body.get("project"),
-                note=body.get("note"),
+                note=body.get("note"), limit=body.get("limit"),
             )
 
         return _action(actions_token, make)

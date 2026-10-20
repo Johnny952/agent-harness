@@ -52,6 +52,7 @@ from dispatcher import (
     context_transfer,
     debt,
     docker_exec,
+    epic_runs,
     learnings,
     project_docs,
     state_machine,
@@ -1061,7 +1062,8 @@ def create_app(
         them (name order), each with the `waiting` the worker set; `claimed`,
         the running ones, in name order; `done`, the newest `limit` by name,
         newest first; and `worker`, the heartbeat `dispatcher/worker.py`
-        writes with a `stale` flag. The directory a record sits in is its
+        writes with a `stale` flag; and `epics`, each started epic's run
+        with its spend and `limit_reached` (ADR 218). The directory a record sits in is its
         state (ADR 142, 3), so a record is served whole under the directory
         it was found in. Read through `/state:ro`: no directory is made here,
         and a queue that was never created is an empty one with no worker.
@@ -1089,6 +1091,7 @@ def create_app(
             "done": done,
             "done_total": done_total,
             "worker": _worker_heartbeat(root / action_worker.HEARTBEAT, warnings),
+            "epics": _epic_runs(warnings),
         }
         return _envelope(data, warnings)
 
@@ -1122,6 +1125,18 @@ def create_app(
             except (OSError, ValueError) as exc:
                 return _envelope(None, [f"{path}: unreadable action: {exc}"])
         return _error(f"no action {action_id!r} in {root}", 404)
+
+    def _epic_runs(warnings: list[str]) -> list[dict]:
+        """Each started epic's run, with its measured spend and limit (ADR 218)."""
+        runs, skipped = actions.read_epic_runs(cfg.state_dir)
+        warnings.extend(skipped)
+        out = []
+        for run in runs:
+            try:
+                out.append(epic_runs.view(cfg.hive_tasks_dir, run))
+            except _UNREADABLE as exc:
+                warnings.append(f"epic {run.get('epic')}: unreadable run: {exc}")
+        return out
 
     @app.get("/api/threads")
     @requires_auth

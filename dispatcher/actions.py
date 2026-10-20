@@ -9,6 +9,7 @@ moving it is an `os.rename`, which is atomic and succeeds once.
     pending/   created, not yet taken
     claimed/   taken by the worker (running)
     done/      finished, whatever the status
+    epics/     one run per started epic (ADR 218); not an action
     write.lock the creator's lock
 
 One creator (`create`, under `write.lock`) and one mover (the worker): the
@@ -34,6 +35,7 @@ from dispatcher.tasks import MAX_COMMENT_CHARS
 
 ACTIONS_DIR = "actions"
 TMP, PENDING, CLAIMED, DONE = "tmp", "pending", "claimed", "done"
+EPICS = "epics"
 WRITE_LOCK = "write.lock"
 VERSION = 1
 STATUSES = ("pending", "running", "done", "failed", "cancelled", "interrupted")
@@ -445,6 +447,11 @@ def create_epic_cancels(
     are no cancels and nothing is written. Refused with 409 when the epic has
     no start pending or claimed, or when each pending one already has its
     cancel queued (a second press before the worker ran the first).
+
+    The epic's run, when it has one still going, is marked stopped in the
+    same hold, so no merge queues another of its tasks (ADR 218). A run
+    still going with nothing queued (between one task's merge and the next
+    one's start) is stopped and answered with empty lists, not refused.
     """
     root = ensure_dirs(state_dir)
     with _write_locked(root):
@@ -464,9 +471,11 @@ def create_epic_cancels(
             if e.state == PENDING and e.record.get("id") not in named
         ]
         left = [e.record for e in mine if e.state == CLAIMED]
-        if not mine:
+        run = _read_run(root, epic_id)
+        going = run is not None and run.get("stopped_at") is None
+        if not mine and not going:
             raise ActionRefused(409, f"epic {epic_id} has no start queued")
-        if not dropped and not left:
+        if not dropped and not left and not going:
             raise ActionRefused(
                 409, f"every start queued for epic {epic_id} already has a cancel queued"
             )
@@ -478,6 +487,9 @@ def create_epic_cancels(
             for start in dropped
         ]
         _place(root, records)
+        if going:
+            run["stopped_at"] = _now()
+            _store_run(root, run)
     return {"cancels": records, "dropped": dropped, "left": left}
 
 
@@ -554,6 +566,219 @@ def _place(root: Path, records: list[dict]) -> None:
         for tmp in tmps:
             tmp.unlink(missing_ok=True)
         raise
+
+
+# ---- epic runs --------------------------------------------------------------
+#
+# A started epic's run (ADR 218): `epics/<epic id>.json`, written under
+# `write.lock` by *Start epic*, *Stop epic* and each merge's follow-on, and
+# read by the console. It is not an action and the worker never reads it.
+#
+# `limit` is the epic's spending limit in measured tokens (ADR 79's count) or
+# null; `paused` is null or "limit_reached"; `queued` maps each task the run
+# queued a start for to `{"action", "usage_offset", "at"}`, the offset being
+# the length of the task's usage log when it was first queued, so the run's
+# spend is what each task's log wrote after it.
+
+PAUSED_LIMIT = "limit_reached"
+RUN_FIELDS = (
+    "version", "epic", "project", "note", "actor", "limit", "started_at",
+    "stopped_at", "paused", "paused_at", "queued",
+)
+
+
+def _run_path(root: Path, epic_id: str) -> Path:
+    if _slug_problem("epic", epic_id):
+        raise ActionRefused(400, f"epic {epic_id!r} is not a task id")
+    return root / EPICS / f"{epic_id}.json"
+
+
+def _load_run(path: Path) -> dict:
+    """The run at `path`; raises OSError or ValueError when it is not one."""
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or data.get("version") != VERSION:
+        raise ValueError(f"not a version {VERSION} epic run")
+    if data.get("epic") != path.stem or not isinstance(data.get("queued"), dict):
+        raise ValueError("not the epic run of this file's name")
+    return data
+
+
+def _read_run(root: Path, epic_id: str) -> dict | None:
+    """The epic's run, or None when it has none (or one that will not load)."""
+    try:
+        return _load_run(_run_path(root, epic_id))
+    except (OSError, ValueError, ActionRefused):
+        return None
+
+
+def _store_run(root: Path, run: dict) -> None:
+    (root / EPICS).mkdir(exist_ok=True)
+    _store(root, _run_path(root, run["epic"]), {k: run.get(k) for k in RUN_FIELDS})
+
+
+def read_epic_runs(state_dir) -> tuple[list[dict], list[str]]:
+    """Every epic run, by epic id, and a warning per file skipped.
+
+    It makes no directory: the console's API reads the state dir read-only.
+    """
+    root = actions_dir(state_dir) / EPICS
+    try:
+        names = sorted(n for n in os.listdir(root) if n.endswith(".json"))
+    except FileNotFoundError:
+        return [], []
+    except OSError as exc:
+        return [], [f"{EPICS}: cannot list: {exc}"]
+    runs, warnings = [], []
+    for name in names:
+        try:
+            runs.append(_load_run(root / name))
+        except (OSError, ValueError) as exc:
+            warnings.append(f"{EPICS}/{name}: {exc}")
+    return runs, warnings
+
+
+def read_epic_run(state_dir, epic_id: str) -> dict | None:
+    return _read_run(actions_dir(state_dir), epic_id)
+
+
+def check_limit(limit) -> None:
+    """A spending limit is null or a whole number of measured tokens, at least 1."""
+    if limit is not None and (type(limit) is not int or limit < 1):
+        raise ActionRefused(
+            400, "limit must be null or a whole number of measured tokens of at least 1"
+        )
+
+
+def start_epic_run(
+    state_dir,
+    epic_id: str,
+    project,
+    task_ids: list[str],
+    *,
+    offset: Callable[[str], int],
+    spent: Callable[[dict], int],
+    limit=None,
+    note=None,
+    actor: str = "operator",
+    ready: Callable[[str, str], bool] | None = None,
+) -> tuple[list[dict], dict]:
+    """*Start epic* with its run (ADR 218): the starts and the run, in one hold.
+
+    A first press, or one after *Stop epic* (which begins a new run, its
+    spend from zero), is `create_starts`' all or none over `task_ids`. A
+    press on a run paused at its limit is *Resume*: a task that already has
+    a start queued is skipped rather than refused, and none
+    left is not a refusal, since the new limit is what was asked. Either way
+    the run takes the new `limit` and is going again; a limit the run has
+    already spent (`spent(run)`, its measured tokens so far) is refused with
+    409. A task the run queued before keeps its usage offset, so a resumed
+    run's spend counts from its first start. `offset(task_id)` is the length of
+    the task's usage log now.
+    """
+    check_limit(limit)
+    root = ensure_dirs(state_dir)
+    with _write_locked(root):
+        run = _read_run(root, epic_id)
+        going = run is not None and run.get("stopped_at") is None
+        # Paused, or at its limit before a merge looked (the pause is lazy).
+        resume = going and (
+            run.get("paused") is not None
+            or (run.get("limit") is not None and spent(run) >= run["limit"])
+        )
+        if run is None or run.get("stopped_at") is not None:
+            # A stopped run is over: a press after *Stop epic* starts a new one.
+            run = {"version": VERSION, "epic": epic_id, "started_at": _now(), "queued": {}}
+        if limit is not None and run["queued"]:
+            so_far = spent(run)
+            if so_far >= limit:
+                raise ActionRefused(
+                    409, f"the limit is already spent: {so_far} measured tokens of {limit}"
+                )
+        if resume:
+            held, _ = _scan(root, (PENDING, CLAIMED))
+            busy = {
+                e.record.get("task_id") for e in held if e.record.get("kind") == "start"
+            }
+            task_ids = [tid for tid in task_ids if tid not in busy]
+        elif not task_ids:
+            raise ActionRefused(409, "no task to start")
+        if len(set(task_ids)) != len(task_ids):
+            raise ActionRefused(400, "a task is named more than once")
+        records = [
+            _new_record("start", project, tid, {"limit": None, "epic": epic_id}, actor, note)
+            for tid in task_ids
+        ]
+        for record in records:
+            _refuse_locked(root, record, ready)
+        _place(root, records)
+        run.update(
+            project=project, note=note, actor=actor, limit=limit,
+            stopped_at=None, paused=None, paused_at=None,
+        )
+        _note_queued(run, records, offset)
+        _store_run(root, run)
+    return records, run
+
+
+def _note_queued(run: dict, records: list[dict], offset: Callable[[str], int]) -> None:
+    """Each start's task into the run; a task queued before keeps its offset."""
+    for record in records:
+        before = run["queued"].get(record["task_id"]) or {}
+        offset_now = before.get("usage_offset")
+        run["queued"][record["task_id"]] = {
+            "action": record["id"],
+            "usage_offset": offset(record["task_id"]) if offset_now is None else offset_now,
+            "at": _now(),
+        }
+
+
+def follow_epic_run(
+    state_dir,
+    epic_id: str,
+    candidates: Callable[[], list[str]],
+    *,
+    offset: Callable[[str], int],
+    spent: Callable[[dict], int],
+) -> dict:
+    """A merge's follow-on for one epic (ADR 218): queue its tasks now Ready.
+
+    Under one hold of `write.lock`: nothing when the epic has no run, or its
+    run is stopped or paused. A run whose spend (`spent(run)`) has reached
+    its limit is paused instead, and nothing is queued. Otherwise a `start`
+    is queued, as *Start epic* queues one, for each of `candidates()` (the
+    epic's tasks in Ready, in the board's order, read inside the hold) that
+    the run never queued and that no start pending or claimed names. So a
+    task is queued once by its run, however many merges see it Ready; one
+    whose phase failed back to Ready is the person's to start again.
+    Returns `{"queued", "paused"}`: the starts written, and whether the run
+    paused here.
+    """
+    root = ensure_dirs(state_dir)
+    with _write_locked(root):
+        run = _read_run(root, epic_id)
+        if run is None or run.get("stopped_at") is not None or run.get("paused"):
+            return {"queued": [], "paused": False}
+        limit = run.get("limit")
+        if limit is not None and spent(run) >= limit:
+            run.update(paused=PAUSED_LIMIT, paused_at=_now())
+            _store_run(root, run)
+            return {"queued": [], "paused": True}
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        busy = {e.record.get("task_id") for e in held if e.record.get("kind") == "start"}
+        records = [
+            _new_record(
+                "start", run.get("project"), tid, {"limit": None, "epic": epic_id},
+                run.get("actor") or "operator", run.get("note"),
+            )
+            for tid in candidates()
+            if tid not in run["queued"] and tid not in busy
+        ]
+        if records:
+            _place(root, records)
+            _note_queued(run, records, offset)
+            _store_run(root, run)
+    return {"queued": records, "paused": False}
 
 
 # ---- the worker -------------------------------------------------------------

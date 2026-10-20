@@ -23,6 +23,7 @@ import { renderRoute, type Answer, type Served } from "@/test/render-route";
 import type {
   ActionQueue,
   ActionRecord,
+  EpicRun,
   Task,
   TaskComment,
   TaskDetail,
@@ -801,6 +802,24 @@ function action(taskId: string, over: Partial<ActionRecord> = {}): ActionRecord 
   } as ActionRecord;
 }
 
+/** An epic's run as `/api/actions` serves it (`dispatcher/epic_runs.py:view`). */
+function epicRun(over: Partial<EpicRun> = {}): EpicRun {
+  return {
+    epic: "T-101",
+    project: "ia-harness",
+    note: null,
+    limit: null,
+    started_at: "2026-10-20T12:00:00Z",
+    stopped_at: null,
+    paused: null,
+    paused_at: null,
+    queued: { "T-109": { action: "act-T-109", usage_offset: 0 } },
+    spent: { tokens: 1200, unmeasured: 0 },
+    limit_reached: false,
+    ...over,
+  };
+}
+
 function queueOf(over: Partial<ActionQueue> = {}): { data: ActionQueue } {
   return {
     data: {
@@ -846,7 +865,7 @@ describe("Start epic and Stop epic (ADR 211)", () => {
     return await screen.findByRole("dialog");
   }
 
-  it("says what Start epic would queue and what it leaves out, with the slots and no limit", async () => {
+  it("says what Start epic would queue and what it leaves out, with the slots and a limit field", async () => {
     await epicPage();
     const dialog = await open("Start epic");
     const summary = within(dialog).getByTestId("epic-start-summary");
@@ -857,13 +876,21 @@ describe("Start epic and Stop epic (ADR 211)", () => {
     expect(within(dialog).getByTestId("standing-line").textContent).toMatch(
       /^For the first of them: /,
     );
-    expect(within(dialog).getByTestId("epic-limit").textContent).toContain("(400)");
+    expect(within(dialog).getByTestId("epic-limit").textContent).toContain(
+      "Spending limit (measured tokens, optional)",
+    );
+    expect(screen.queryByTestId("epic-run")).toBeNull();
   });
 
   it("sends the note, toasts what was queued and what was left out", async () => {
     const { sent } = await epicPage({
       "POST /api/epics/T-101/start": {
-        bare: { epic: "T-101", queued: [action("T-109"), action("T-104")], not_ready: ["T-102"] },
+        bare: {
+          epic: "T-101",
+          queued: [action("T-109"), action("T-104")],
+          not_ready: ["T-102"],
+          limit: null,
+        },
         status: 201,
       },
     });
@@ -878,7 +905,82 @@ describe("Start epic and Stop epic (ADR 211)", () => {
     );
     const post = sent.find((r) => r.method === "POST");
     expect(post?.path).toBe("/api/epics/T-101/start");
-    expect(post?.body).toEqual({ note: "go" });
+    expect(post?.body).toEqual({ note: "go", limit: null });
+  });
+
+  it("sends the spending limit, and refuses one that is not a whole number", async () => {
+    const { sent } = await epicPage({
+      "POST /api/epics/T-101/start": {
+        bare: { epic: "T-101", queued: [action("T-109")], not_ready: [], limit: 5000 },
+        status: 201,
+      },
+    });
+    const dialog = await open("Start epic");
+    await within(dialog).findByText(/would be queued/);
+    const field = within(dialog).getByLabelText("Spending limit");
+    const button = within(dialog).getByRole("button", { name: "Start" }) as HTMLButtonElement;
+    fireEvent.change(field, { target: { value: "0" } });
+    expect(within(dialog).getByText("0 is not a whole number of at least 1.")).toBeTruthy();
+    expect(button.disabled).toBe(true);
+    fireEvent.change(field, { target: { value: "5000" } });
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "1 start of T-101 queued; limit 5000 measured tokens",
+      ),
+    );
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, limit: 5000 });
+  });
+
+  it("shows a run's spend against its limit", async () => {
+    await epicPage({ "/api/actions": queueOf({ epics: [epicRun({ limit: 9000 })] }) });
+    expect((await screen.findByTestId("epic-run")).textContent).toBe(
+      "1200 of 9000 measured tokens spent",
+    );
+    expect(screen.getByRole("button", { name: "Start epic" })).toBeTruthy();
+    // A going run is stoppable with nothing queued: it is between two tasks.
+    expect(screen.getByRole("button", { name: "Stop epic" })).toBeTruthy();
+  });
+
+  it("shows Paused: limit reached and resumes with a new limit above the spend", async () => {
+    const { sent } = await epicPage({
+      "/api/ready": { data: ["T-200"] },
+      "/api/actions": queueOf({
+        epics: [
+          epicRun({ limit: 1000, paused: "limit_reached", limit_reached: true }),
+          epicRun({ epic: "T-300", limit: 1 }),
+        ],
+      }),
+      "POST /api/epics/T-101/start": {
+        bare: { epic: "T-101", queued: [], not_ready: [], limit: 3000 },
+        status: 201,
+      },
+    });
+    expect((await screen.findByTestId("epic-run")).textContent).toBe(
+      "Paused: limit reached · 1200 of 1000 measured tokens spent",
+    );
+    const dialog = await open("Resume epic");
+    expect(within(dialog).getByTestId("epic-limit").textContent).toContain(
+      "New spending limit (measured tokens; 1200 spent of 1000)",
+    );
+    const field = within(dialog).getByLabelText("Spending limit");
+    const button = within(dialog).getByRole("button", { name: "Resume" }) as HTMLButtonElement;
+    fireEvent.change(field, { target: { value: "1200" } });
+    expect(
+      within(dialog).getByText("The run has already spent 1200 measured tokens."),
+    ).toBeTruthy();
+    expect(button.disabled).toBe(true);
+    // Nothing in Ready does not hold a resume back: the merges queue the rest.
+    fireEvent.change(field, { target: { value: "3000" } });
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "0 starts of T-101 queued; limit 3000 measured tokens",
+      ),
+    );
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, limit: 3000 });
   });
 
   it("toasts a refusal and keeps the dialog", async () => {

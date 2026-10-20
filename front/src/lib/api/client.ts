@@ -68,7 +68,7 @@
  * calls `createProject`.
  *
  * **Two writes for an epic** (`docs/decisions.md` ADR 207, ADR 211): `startEpic`
- * (`POST /api/epics/<id>/start`, body `{note}` as a task's start) and `stopEpic`
+ * (`POST /api/epics/<id>/start`, body `{note, limit}`, ADR 218) and `stopEpic`
  * (`POST /api/epics/<id>/stop`, body `{}`), bare like the others, for the
  * *Start epic* and *Stop epic* buttons on an epic's page.
  *
@@ -108,6 +108,7 @@ import type {
   ReadyOrder,
   Roadmap,
   Settings,
+  StartEpicBody,
   StartTaskBody,
   Task,
   TaskComments,
@@ -535,12 +536,19 @@ export function startTask(taskId: string, note: string | null): Promise<ActionRe
 }
 
 /**
- * *Start epic* (ADR 207): `POST /api/epics/<id>/start` with `{note}`, as a task's
- * start. The answer names the starts queued and the tasks not in Ready; a refusal
- * (404, 409 for a task already started or nothing in Ready) is an `ApiError`.
+ * *Start epic* (ADR 207): `POST /api/epics/<id>/start` with `{note, limit}`, as a
+ * task's start. `limit` is the run's spending limit in measured tokens, or null
+ * (ADR 218); on a run paused at its limit the press is *Resume*. The answer names
+ * the starts queued and the tasks not in Ready; a refusal (404, 400 for a bad
+ * limit, 409 for a task already started, nothing in Ready, or a limit already
+ * spent) is an `ApiError`.
  */
-export function startEpic(epicId: string, note: string | null): Promise<EpicStartResult> {
-  const body: StartTaskBody = { note };
+export function startEpic(
+  epicId: string,
+  note: string | null,
+  limit: number | null = null,
+): Promise<EpicStartResult> {
+  const body: StartEpicBody = { note, limit };
   return readBare<EpicStartResult>(`/api/epics/${encodeURIComponent(epicId)}/start`, {
     method: "POST",
     body,

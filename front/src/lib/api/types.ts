@@ -593,6 +593,35 @@ export interface EpicStartResult {
   queued: ActionRecord[];
   /** The epic's tasks not in Ready when it was pressed: named, not queued. */
   not_ready: string[];
+  /** The run's spending limit, in measured tokens, or null for none (ADR 218). */
+  limit: number | null;
+}
+
+/** `POST /api/epics/<id>/start`'s body: `limit` in measured tokens, or null (ADR 218). */
+export interface StartEpicBody {
+  note: string | null;
+  limit: number | null;
+}
+
+/**
+ * A started epic's run (`dispatcher/epic_runs.py:view`, ADR 218): what *Start
+ * epic* wrote, its spend in measured tokens (ADR 79) since each task was queued,
+ * and whether the limit is reached. `paused` is `limit_reached` once a merge or
+ * a press wrote it; `limit_reached` is true before that too.
+ */
+export interface EpicRun {
+  epic: string;
+  project: string | null;
+  note: string | null;
+  limit: number | null;
+  started_at: string | null;
+  stopped_at: string | null;
+  paused: string | null;
+  paused_at: string | null;
+  queued: Record<string, { action: string; usage_offset: number }>;
+  /** `unmeasured`: the usage lines that measured nothing, counted apart. */
+  spent: { tokens: number; unmeasured: number };
+  limit_reached: boolean;
 }
 
 /** One start *Stop epic* names: its action id and its task. */
@@ -623,6 +652,8 @@ export interface ActionQueue {
     stale: boolean;
     stale_after_seconds: number;
   };
+  /** Each started epic's run (ADR 218); absent from an api older than it. */
+  epics?: EpicRun[];
 }
 
 /** `POST /api/threads/<id>/turns`: exactly `{text}`; the route refuses any other key (ADR 181, ADR 190). */

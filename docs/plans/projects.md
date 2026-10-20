@@ -266,8 +266,12 @@ module; steps 2, 4 and 5 need its queue and worker.
    as `project` until the one before reaches *Awaiting review*, so it needs
    no lock of its own. *Stop epic* and the console's *Start epic* and *Stop
    epic* buttons, on the epic's task page, are built 2026-10-20
-   (`docs/decisions.md` ADR 211). Still open: queuing a later task as its
-   dependencies merge, and the epic's spending limit.
+   (`docs/decisions.md` ADR 211). Queuing a later task as its dependencies
+   merge, and the epic's spending limit in measured tokens, are built
+   2026-10-20 (`docs/decisions.md` ADR 218): each merge record queues the
+   started epics' tasks now in *Ready*, and an epic at its limit shows
+   *Paused: limit reached* with *Resume*. Still open: the limit prefilled
+   from past cycles, the pool's floor, and the limit's notification.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR 208): the
