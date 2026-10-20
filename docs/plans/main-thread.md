@@ -292,7 +292,11 @@ and worker.
 7. The execution threads and the selector's slots (*Decisions*, 8). They read
    what the phases already write, so they need board Phase 5's transport and
    `projects.md`'s slots, not the composer. *Talk about this task* is built
-   with step 5 (ADR 195).
+   with step 5 (ADR 195). The selector's slots, the second half, are built by
+   T-115 (2026-10-20, ADR 198): a region under the selector row, and a line in
+   the *Start development* confirmation. The execution threads, the first
+   half, are not. *Waiting for the project* is open, as `projects.md` step 6
+   says.
 
 ## Open questions
 

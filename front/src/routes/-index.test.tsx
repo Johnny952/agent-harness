@@ -561,6 +561,51 @@ describe("Start development on a Ready card", () => {
     expect(within(dialog).getByText(/20,001 characters, over the 20,000/)).toBeTruthy();
   });
 
+  const acct = (name: string, state: string) => ({
+    name,
+    container: name,
+    is_primary: false,
+    quota_threshold_pct: 80,
+    reserve_pct: 20,
+    quota_cooldown_seconds: 3600,
+    state,
+    current_task: null,
+    rate_limited_at: null,
+    last_probe: null,
+  });
+
+  it("says in the confirmation how many slots are free and that the task would start now", async () => {
+    await board(undefined, {
+      "/api/accounts": { data: [acct("cuenta1", "IDLE"), acct("cuenta2", "BUSY")] },
+    });
+    const dialog = await open();
+    expect(
+      await within(dialog).findByText("2 accounts, 1 free; this task would start now"),
+    ).toBeTruthy();
+  });
+
+  it("says in the confirmation that the task would queue behind started tasks", async () => {
+    await board(queueOf({ pending: [action("T-999")] }), {
+      "/api/accounts": { data: [acct("cuenta1", "IDLE")] },
+    });
+    const dialog = await open();
+    expect(
+      await within(dialog).findByText(
+        "1 account, 1 free; this task would queue behind 1 started task",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says in the confirmation when /api/accounts does not answer", async () => {
+    await board(undefined, { "/api/accounts": { status: 500, error: "boom" } });
+    const dialog = await open();
+    expect(
+      await within(dialog).findByText(
+        "/api/accounts did not answer, so the free slots are not known",
+      ),
+    ).toBeTruthy();
+  });
+
   it("does not follow the card's link when the button is clicked", async () => {
     const { router } = await board();
     await open();

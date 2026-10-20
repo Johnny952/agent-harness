@@ -54,6 +54,7 @@ import {
   type ThreadView,
 } from "@/lib/thread";
 import { Absent, Banner, Gauge, Malformed, Mono, WarningBanner } from "./primitives";
+import { SlotsPanel } from "./slots";
 import { useThreadEvents } from "./use-thread-events";
 
 function optionLabel(t: Thread): string {
@@ -200,6 +201,8 @@ export function ChatPanel({
           <X className="size-3.5" />
         </button>
       </div>
+
+      <SlotsPanel />
 
       {form === "new" && (
         <NewThreadForm
