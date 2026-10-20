@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Sixteen console paths map one-to-one
- * onto sixteen api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Eighteen console paths map one-to-one
+ * onto eighteen api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose sixteen routes, count and
+ * deliberately not entries of `FORWARDED`, whose eighteen routes, count and
  * rejection message describe the api alone.
  *
  * **Eleven method and path pairs go to the board-service** (`docs/decisions.md`
@@ -95,6 +95,11 @@ const FORWARDED: Record<string, readonly string[]> = {
   // the board service's (ADR 170), matched in `boardTarget` before this table
   // is read (ADR 195).
   "/api/threads": [],
+  // The project records (ADR 209). Hive-wide: the records are the hive's, not a
+  // checkout's, and the api takes no parameter here, so nothing is copied and no
+  // `?project=` is added. Only the `GET`: `POST /api/projects` is the board
+  // service's (ADR 203, ADR 206), matched in `boardTarget` first.
+  "/api/projects": [],
 };
 
 /**
@@ -197,15 +202,17 @@ const THREAD_RECORD = /^\/api\/threads\/([^/]+)$/;
 
 /**
  * Making a project record (ADR 203, ADR 206): a `POST` to the board-service
- * with the actions bearer, which the route asks for. Nothing in the api answers
- * a `GET` here, so every other method keeps the answer it had.
+ * with the actions bearer, which the route asks for. A `GET` is the api's list
+ * of the records (ADR 209), forwarded from `FORWARDED`; every other method keeps
+ * the answer it had.
  */
 const PROJECTS = "/api/projects";
 
 /**
  * Changing one project record (ADR 203, ADR 206): a `PATCH` to the
  * board-service with the actions bearer, the slug checked against
- * `PROJECT_SLUG`. No other method on the path is forwarded.
+ * `PROJECT_SLUG`. A `GET` is the api's read of the one record (ADR 209), the
+ * slug checked the same way in `resolveTarget`. No other method is forwarded.
  */
 const PROJECT_RECORD = /^\/api\/projects\/([^/]+)$/;
 
@@ -857,6 +864,15 @@ function resolveTarget(url: URL): Resolution {
     };
   }
 
+  // One project record (ADR 209): the slug checked as a `PATCH`'s is, so one the
+  // harness does not take is the console's 404 and never crosses.
+  const record = PROJECT_RECORD.exec(path);
+  if (record) {
+    const slug = projectSlug(path, record[1]!);
+    if (typeof slug !== "string") return slug;
+    return { kind: "forward", target: `${API_BASE_URL}${PROJECTS}/${encodeURIComponent(slug)}` };
+  }
+
   const detail = TASK_DETAIL.exec(path);
   if (detail) {
     const raw = detail[1]!;
@@ -864,7 +880,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the sixteen.
+      // `%zz` and friends. A path the console cannot read is not one of the eighteen.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -879,7 +895,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the sixteen routes the console forwards.`,
+      error: `${path} is not one of the eighteen routes the console forwards.`,
     };
   }
 

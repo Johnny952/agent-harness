@@ -19,8 +19,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
-import { actionBackendQuery, tasksQuery } from "@/lib/api/queries";
-import { deriveProjects } from "@/lib/projects";
+import { actionBackendQuery } from "@/lib/api/queries";
+import { listedProjects, useProjectList } from "@/lib/projects";
 import { ChatPanel } from "./chat-panel";
 import { Kbd } from "./primitives";
 
@@ -179,31 +179,37 @@ const PROJECT_PAGES = [
 ] as const;
 
 /**
- * The sidebar's "Projects" section: one entry per project the board's tasks
- * name, by slug (there is no read route for the project records, so no title
- * either), each linking to its `/p/$slug/` screens. The open project lists its
- * screens beneath it. Read-only: no project is made or edited here. ADR 208.
+ * The sidebar's "Projects" section: one entry per active project record
+ * (`GET /api/projects`, ADR 209), by title with the slug as its fallback, each
+ * linking to its `/p/$slug/` screens; a project with no task yet is listed, an
+ * archived one is not. When the records read fails the list is the slugs the
+ * board's tasks name (ADR 208), and says so. The open project lists its screens
+ * beneath it. Read-only: no project is made or edited here. ADR 208, ADR 209.
  */
 export function ProjectNav({ pathname }: { pathname: string }) {
-  const q = useQuery(tasksQuery);
-  const projects = deriveProjects(q.data?.data ?? []);
+  const list = useProjectList();
+  const projects = list.entries ? listedProjects(list.entries) : [];
   let body: ReactNode;
-  if (q.isError) {
+  if (list.failed) {
     body = (
       <p className="px-2 py-1 text-[11px] text-destructive">
-        Projects unread: the task list did not answer.
+        Projects unread: neither the project records nor the task list answered.
       </p>
     );
-  } else if (!q.data) {
+  } else if (!list.entries) {
     body = <p className="px-2 py-1 text-[11px] text-muted-foreground">Reading projects…</p>;
   } else if (projects.length === 0) {
     body = (
-      <p className="px-2 py-1 text-[11px] text-muted-foreground">No project on the board yet.</p>
+      <p className="px-2 py-1 text-[11px] text-muted-foreground">
+        {list.source === "records"
+          ? "No active project recorded yet."
+          : "No project on the board yet."}
+      </p>
     );
   } else {
     body = (
       <ul className="space-y-0.5" aria-label="Projects">
-        {projects.map((slug) => {
+        {projects.map(({ slug, title }) => {
           const base = `/p/${slug}`;
           const open = pathname === base || pathname.startsWith(`${base}/`);
           return (
@@ -220,7 +226,12 @@ export function ProjectNav({ pathname }: { pathname: string }) {
                 )}
               >
                 <Folder className="size-3.5" />
-                <span className="mono flex-1 truncate">{slug}</span>
+                <span
+                  className={cn("flex-1 truncate", title === slug && "mono")}
+                  title={title === slug ? undefined : slug}
+                >
+                  {title}
+                </span>
               </Link>
               {open && (
                 <ul className="mt-0.5 space-y-0.5 pl-5">
@@ -258,6 +269,11 @@ export function ProjectNav({ pathname }: { pathname: string }) {
     <div className="mb-2">
       <SectionLabel>Projects</SectionLabel>
       {body}
+      {list.source === "tasks" && list.entries && (
+        <p data-testid="projects-fallback" className="px-2 py-1 text-[10px] text-muted-foreground">
+          Project records unread: listed from the tasks, by slug.
+        </p>
+      )}
     </div>
   );
 }

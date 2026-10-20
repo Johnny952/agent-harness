@@ -192,8 +192,11 @@ describe("the command-request card", () => {
         "/api/command-requests?state=awaiting_resume",
       ),
     );
-    // `/api/tasks` is the sidebar's project list (ADR 208), not this screen's.
-    const urls = fetchMock.mock.calls.map((c) => String(c[0])).filter((u) => u !== "/api/tasks");
+    // `/api/projects` and `/api/tasks` are the sidebar's project list and its
+    // fallback (ADR 208, ADR 209), not this screen's.
+    const urls = fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u !== "/api/tasks" && u !== "/api/projects");
     expect(urls.every((u) => u.startsWith("/api/command-requests"))).toBe(true);
     for (const call of fetchMock.mock.calls) {
       expect((call[1]?.method ?? "GET").toUpperCase()).toBe("GET");

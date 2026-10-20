@@ -270,10 +270,13 @@ module; steps 2, 4 and 5 need its queue and worker.
    sidebar's *Projects* section above a *Harness* section that holds the
    screens as they were, and `/p/$slug/`, `/p/$slug/backlog` and
    `/p/$slug/tasks/$taskId`, the harness's own Board, Backlog and task page
-   narrowed to the slug. No api route lists the records, so the list is the
-   `project` the tasks name, by slug. The project's debt and learnings, the
-   counts of running and waiting, the archived toggle and *New project* are
-   not built.
+   narrowed to the slug. Then (ADR 209) the api's read-only
+   `GET /api/projects` and `GET /api/projects/<slug>`, the reads ADR 203 left
+   to the api, remotes redacted: the sidebar lists the active records by
+   title, a project with no task among them, and the gate knows a recorded
+   slug; the tasks' `project` is the list only when that read fails. The
+   project's debt and learnings, the counts of running and waiting, the
+   archived toggle and *New project* are not built.
 5. **New project and the key from the console**: the `clone`, `init`,
    `keygen` and `check` actions in the worker, and the form.
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front

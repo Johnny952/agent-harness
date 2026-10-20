@@ -10,7 +10,8 @@ the hive's trap entries; `context_transfer.read_usage` reads a task's per-call
 usage log (ADR 54), and `observability/api/plans.py` reads a plan's frontmatter
 (T-072; it lives here and not in `dispatcher/` because no dispatcher code reads
 a plan, and its test imports it), and `dispatcher/command_run.py` answers which
-block of command requests a task is held on and what verdict it has (T-078). This is an HTTP surface over those, and nothing more:
+block of command requests a task is held on and what verdict it has (T-078),
+and `dispatcher/projects.py` reads the project records (ADR 209). This is an HTTP surface over those, and nothing more:
 every route is a `GET`, every mount is `:ro`, and there is no second copy of any
 file format here — a parser this service needs and does not have is one to make
 reachable in `dispatcher/`, not one to rewrite.
@@ -55,6 +56,8 @@ from dispatcher import (
     project_docs,
     state_machine,
 )
+# Aliased like `tasks`: `create_app` names its `/api/projects` view `projects`.
+from dispatcher import projects as project_store
 # Aliased like `tasks`: `create_app` names its `/api/threads` view `threads`.
 from dispatcher import threads as thread_store
 # Aliased: `create_app` names its `/api/tasks` view `tasks`.
@@ -1176,7 +1179,92 @@ def create_app(
             rows.append({"n": n, "event": event})
         return _envelope(rows, warnings)
 
+    @app.get("/api/projects")
+    @requires_auth
+    def projects():
+        """Every project record under `<hive root>/projects/`, by slug (ADR 199, ADR 209).
+
+        `docs/plans/projects.md` step 4. A row is the record's own fields,
+        `ProjectRecord.to_dict()`, and nothing derived. Archived records are
+        served with their `status` and filtered by the console, as `/api/threads`
+        serves archived threads, so this route takes no query parameters. A
+        record that does not read is a warning naming its file and the rest are
+        still served. The remote crosses through `redact_remote` (ADR 205):
+        `parse` already refuses a record whose remote carries a credential, so
+        this is the second lock, and the warning's text has been through the
+        same redaction in `project_store.read`. Read through `/data/.hive:ro`: no
+        directory is made, and a hive with no `projects/` is an empty list.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        hive = context_transfer.hive_root(cfg.hive_tasks_dir)
+        try:
+            names = project_store.slugs(hive)
+        except OSError as exc:
+            # `slugs` turns an absent directory into an empty list; one it
+            # cannot list (permissions, a file in its place) is this warning.
+            root = project_store.projects_dir(hive)
+            return _envelope([], [f"{root}: unreadable projects directory: {exc}"])
+        rows: list[dict] = []
+        warnings: list[str] = []
+        for slug in names:
+            row, problem = _project_record(hive, slug)
+            if problem is not None:
+                warnings.append(problem)
+            elif row is not None:
+                # None without a problem: the file went between the listing and
+                # the read, which is a record that is no longer there.
+                rows.append(row)
+        return _envelope(rows, warnings)
+
+    @app.get("/api/projects/<slug>")
+    @requires_auth
+    def project_record(slug: str):
+        """One project record, as a row of `/api/projects` is (ADR 209).
+
+        A slug that is not one, or has no record, is a 404. A record that does
+        not read is `data: null` and the reason, as `/api/tasks/<id>` answers a
+        task file that does not parse: a 404 would say the record does not
+        exist, which is a lie about a file that does.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        if not project_store.is_slug(slug):
+            return _error(f"no project {slug!r}", 404)
+        hive = context_transfer.hive_root(cfg.hive_tasks_dir)
+        row, problem = _project_record(hive, slug)
+        if problem is not None:
+            return _envelope(None, [problem])
+        if row is None:
+            return _error(f"no project {slug!r} in {project_store.projects_dir(hive)}", 404)
+        return _envelope(row, [])
+
     return app
+
+
+# --- the project records ----------------------------------------------------
+
+
+def _project_record(hive: str, slug: str) -> tuple[dict | None, str | None]:
+    """`slug`'s record as a row, and the warning when it does not read (ADR 209).
+
+    `(row, None)` for a record, `(None, None)` for no record file, `(None,
+    warning)` for one that is broken. `project_store.read` prefixes its message
+    with the file's path and has already redacted a remote in it; the row's own
+    remote goes through `redact_remote` here as well, so no credential leaves
+    this route whichever check a future record format loosens.
+    """
+    try:
+        record = project_store.read(hive, slug)
+    except project_store.RecordError as exc:
+        return None, str(exc)
+    if record is None:
+        return None, None
+    row = record.to_dict()
+    row["remote"] = project_store.redact_remote(row["remote"])
+    return row, None
 
 
 # --- the envelope ---------------------------------------------------------

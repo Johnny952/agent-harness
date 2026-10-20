@@ -554,6 +554,24 @@ export function changeProject(slug: string, body: ChangeProjectBody): Promise<Pr
   });
 }
 
+/**
+ * Every project record the hive holds, by slug, archived ones among them:
+ * `GET /api/projects` (ADR 209). A record that does not read is a warning, not
+ * a row; a remote never crosses with a credential in it.
+ */
+export function listProjects(): Promise<ApiResult<ProjectRecord[]>> {
+  return readEnvelope<ProjectRecord[]>("/api/projects");
+}
+
+/**
+ * One project record: `GET /api/projects/<slug>` (ADR 209). `data` is `null` for
+ * a record that exists and does not read, with the reason in `warnings`; a slug
+ * with no record is a 404 `ApiError`, as `getTask`'s is.
+ */
+export function getProject(slug: string): Promise<ApiResult<ProjectRecord | null>> {
+  return readEnvelope<ProjectRecord | null>(`/api/projects/${encodeURIComponent(slug)}`);
+}
+
 /** A write to the board-service. The forward sends the body on and nothing else. */
 interface BoardWrite {
   method: "POST" | "PATCH";
