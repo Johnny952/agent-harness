@@ -115,6 +115,8 @@ interface Extras {
    * the body.
    */
   write?: (method: string, path: string, body: Record<string, unknown>) => Response;
+  /** The board `/api/tasks` answers (ADR NNN); the default is none. */
+  tasks?: unknown;
 }
 
 function created(body: unknown, status = 201) {
@@ -147,6 +149,14 @@ function serve(threads: Thread[], log: { n: number; event: unknown }[] = LOG, ex
     }
     if (url.pathname === "/api/threads") return json(threads);
     if (url.pathname === "/api/accounts") return json(extras.accounts ?? []);
+    // An execution's reads (ADR NNN), before the thread log's `/events`.
+    if (url.pathname === "/api/tasks") return json(extras.tasks ?? []);
+    const taskPath = /^\/api\/tasks\/([^/]+)(\/[a-z]+)?$/.exec(url.pathname);
+    if (taskPath) {
+      if (taskPath[2] === "/events" || taskPath[2] === "/usage") return json([]);
+      const id = decodeURIComponent(taskPath[1]!);
+      return json({ task_id: id, status: "in_progress", body: "" });
+    }
     if (url.pathname.endsWith("/events")) {
       const since = Number(url.searchParams.get("since") ?? "0");
       return json(log.filter((r) => r.n > since));
@@ -199,6 +209,26 @@ function mount(pollMs = 60_000, select: { threadId: string; n: number } | null =
   return render(
     <QueryClientProvider client={client}>
       <ChatPanel onClose={() => {}} pollMs={pollMs} select={select} />
+    </QueryClientProvider>,
+  );
+}
+
+/** The dock under a router, for the views that link to a screen. */
+function mountRouted() {
+  const root = createRootRoute();
+  const router = createRouter({
+    routeTree: root.addChildren([
+      createRoute({ getParentRoute: () => root, path: "/tasks/$taskId" }),
+      createRoute({ getParentRoute: () => root, path: "/queue" }),
+    ]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <RouterContextProvider router={router}>
+        <ChatPanel onClose={() => {}} pollMs={60_000} />
+      </RouterContextProvider>
     </QueryClientProvider>,
   );
 }
@@ -724,5 +754,89 @@ describe("select (ADR 195)", () => {
     await waitFor(async () => expect(await selected()).toBe("t-1"));
     rerender(view({ threadId: "t-2", n: 2 }));
     await waitFor(async () => expect(await selected()).toBe("t-2"));
+  });
+});
+
+function boardTask(id: string, over: Record<string, unknown> = {}) {
+  return {
+    task_id: id,
+    status: "pending",
+    owner: null,
+    depends_on: [],
+    phase: null,
+    merged: false,
+    title: `Task ${id}`,
+    ...over,
+  };
+}
+
+describe("executions (ADR NNN)", () => {
+  const TASKS = [
+    boardTask("T-1", { status: "in_progress", phase: "implementador", owner: "cuenta2" }),
+    boardTask("T-2", { status: "done" }),
+    boardTask("T-3", { status: "done", merged: true }),
+    boardTask("T-4", { status: "dropped" }),
+    boardTask("T-5"),
+    boardTask("T-6", { status: "epic" }),
+    boardTask("T-7"),
+  ];
+  const QUEUE = { ...EMPTY_QUEUE, pending: [{ id: "a-1", kind: "start", task_id: "T-7" }] };
+
+  it("lists the tasks in play under the threads, and not the closed or unstarted ones", async () => {
+    serve([thread("main")], LOG, { tasks: TASKS, queue: QUEUE });
+    mount();
+    const select = await screen.findByRole("combobox", { name: "Thread" });
+    const group = await waitFor(() => within(select).getByRole("group", { name: "Executions" }));
+    expect(
+      within(group)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual([
+      "T-1 · Task T-1 — running implementador",
+      "T-2 · Task T-2 — done",
+      "T-7 · Task T-7 — pending",
+    ]);
+    // main stays first, outside the group.
+    expect(within(select).getAllByRole("option")[0]!.textContent).toBe("main — cuenta1 · opus");
+  });
+
+  it("lists no group when no task is in play", async () => {
+    serve([thread("main")], LOG, { tasks: [TASKS[2], TASKS[3], TASKS[4]] });
+    mount();
+    const select = await screen.findByRole("combobox", { name: "Thread" });
+    await waitFor(() => expect(within(select).getAllByRole("option")).toHaveLength(1));
+    expect(within(select).queryByRole("group")).toBeNull();
+  });
+
+  it("shows the execution with no composer when one is chosen, and the thread again after", async () => {
+    serve([thread("main")], LOG, { tasks: TASKS });
+    mountRouted();
+    const select = await screen.findByRole("combobox", { name: "Thread" });
+    await waitFor(() => within(select).getByRole("option", { name: /^T-1 / }));
+    expect(screen.getByRole("textbox")).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: "task:T-1" } });
+    expect(await screen.findByTestId("execution")).toBeTruthy();
+    expect(await selected()).toBe("task:T-1");
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByRole("link", { name: "T-1" }).getAttribute("href")).toBe("/tasks/T-1");
+
+    fireEvent.change(select, { target: { value: "main" } });
+    expect(await screen.findByRole("textbox")).toBeTruthy();
+    expect(screen.queryByTestId("execution")).toBeNull();
+  });
+
+  it("says when the board did not answer", async () => {
+    const fetch = serve([thread("main")]);
+    const real = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (input, init) =>
+      String(input) === "/api/tasks"
+        ? new Response("down", { status: 502, headers: { "content-type": "text/html" } })
+        : real(input, init),
+    );
+    mount();
+    expect(
+      await screen.findByText("/api/tasks did not answer, so no execution is listed."),
+    ).toBeTruthy();
   });
 });

@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Fifteen console paths map one-to-one
- * onto fifteen api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Sixteen console paths map one-to-one
+ * onto sixteen api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose fifteen routes, count and
+ * deliberately not entries of `FORWARDED`, whose sixteen routes, count and
  * rejection message describe the api alone.
  *
  * **Nine method and path pairs go to the board-service** (`docs/decisions.md`
@@ -147,6 +147,13 @@ const THREAD_EVENTS = /^\/api\/threads\/([^/]+)\/events$/;
 
 /** The parameters `THREAD_EVENTS` copies: the page size and the cursor. */
 const THREAD_EVENT_PARAMETERS = ["limit", "since"] as const;
+
+/**
+ * The hook events of one task's phases (`docs/decisions.md` ADR NNN), the
+ * dock's execution view: `TASK_USAGE`'s shape, tested before `TASK_DETAIL`,
+ * with `THREAD_EVENT_PARAMETERS`, the two the api takes.
+ */
+const TASK_EVENTS = /^\/api\/tasks\/([^/]+)\/events$/;
 
 /** Accepting a backlog item: a `POST` to the board-service, never a read. */
 const TASK_ACCEPT = /^\/api\/tasks\/([^/]+)\/accept$/;
@@ -757,6 +764,22 @@ function resolveTarget(url: URL): Resolution {
     return { kind: "forward", target: target.toString() };
   }
 
+  const taskEvents = TASK_EVENTS.exec(path);
+  if (taskEvents) {
+    let id: string;
+    try {
+      id = decodeURIComponent(taskEvents[1]!);
+    } catch {
+      return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
+    }
+    const target = new URL(`${API_BASE_URL}/api/tasks/${encodeURIComponent(id)}/events`);
+    for (const name of THREAD_EVENT_PARAMETERS) {
+      const value = url.searchParams.get(name);
+      if (value) target.searchParams.set(name, value);
+    }
+    return { kind: "forward", target: target.toString() };
+  }
+
   const usage = TASK_USAGE.exec(path);
   if (usage) {
     let id: string;
@@ -778,7 +801,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the fifteen.
+      // `%zz` and friends. A path the console cannot read is not one of the sixteen.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -793,7 +816,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the fifteen routes the console forwards.`,
+      error: `${path} is not one of the sixteen routes the console forwards.`,
     };
   }
 

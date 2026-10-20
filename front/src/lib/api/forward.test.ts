@@ -97,7 +97,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/sessions"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/sessions is not one of the fifteen routes the console forwards.",
+      error: "/api/sessions is not one of the sixteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -247,6 +247,21 @@ describe("the thread reads", () => {
     const sent = new URL(target(fetchMock));
     expect(sent.origin + sent.pathname).toBe(`${BASE}/api/threads/main/events`);
     expect(Object.fromEntries(sent.searchParams)).toEqual({ since: "41", limit: "200" });
+  });
+
+  it("forwards a task's events with limit and since, and nothing else", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/T-1/events?since=7&limit=50&project=x&n=1"));
+    const sent = new URL(target(fetchMock));
+    expect(sent.origin + sent.pathname).toBe(`${BASE}/api/tasks/T-1/events`);
+    expect(Object.fromEntries(sent.searchParams)).toEqual({ since: "7", limit: "50" });
+  });
+
+  it("404s a task's events whose id does not decode, without asking the api", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/tasks/%zz/events"));
+    expect(answer?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("drops an empty cursor rather than sending since=", async () => {
@@ -496,7 +511,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the fifteen routes the console forwards.",
+      error: "/api/settingsx is not one of the sixteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });

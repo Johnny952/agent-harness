@@ -57,7 +57,9 @@
  * (ADR 190), bare like the others; the dock stops a turn with `cancelAction`.
  * `createThread` (`POST /api/threads`) and `updateThread` (`PATCH
  * /api/threads/<id>`) open, rename, re-pick and archive a thread (ADR 195), bare
- * too.
+ * too. `listTaskEvents` reads a task's hook events, `GET /api/tasks/<id>/events`
+ * (ADR NNN), for the dock's execution view: the api's envelope, read from a
+ * cursor like the thread log.
  */
 import type {
   AcceptTaskBody,
@@ -586,6 +588,15 @@ export function listThreadEvents(id: string, since = 0): Promise<ApiResult<Threa
   return readEnvelope<ThreadEventRow[]>(
     `/api/threads/${encodeURIComponent(id)}/events?since=${since}`,
   );
+}
+
+/**
+ * The hook events of a task's phases after event `since` (ADR NNN): the rows
+ * whose `cwd` sits under the task's worktrees, oldest first, at most the route's
+ * default page of 500. No events database yet is `[]` and a warning.
+ */
+export function listTaskEvents(id: string, since = 0): Promise<ApiResult<HookEvent[]>> {
+  return readEnvelope<HookEvent[]>(`/api/tasks/${encodeURIComponent(id)}/events?since=${since}`);
 }
 
 /* ── Still fixtures: tier 3, and the ones that never land ───────────────── */
