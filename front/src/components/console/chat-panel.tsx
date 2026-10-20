@@ -22,6 +22,13 @@
  * a change of model is typed, checked by the service. A refused write is shown in
  * its form and the form keeps what was typed. A screen opens the dock on a thread
  * with `openThread` (`hooks/use-console.ts`), which arrives here as `select`.
+ *
+ * Under the threads the selector lists the executions (ADR 197): one entry per
+ * started task in play, from `/api/tasks` and the action queue
+ * (`lib/execution.ts:inPlay`), gone once the task is merged or dropped. Choosing
+ * one shows `ExecutionView` in place of the thread's header, history and
+ * composer: read only, with the same view switch. A failed task list only means
+ * no executions are listed, said in one line.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -33,6 +40,7 @@ import {
   cancelActionMutation,
   createThreadMutation,
   sendTurnMutation,
+  tasksQuery,
   threadsQuery,
   updateThreadMutation,
 } from "@/lib/api/queries";
@@ -40,6 +48,7 @@ import { EFFORT_LEVELS } from "@/lib/api/types";
 import type { CreateThreadBody, Thread, UpdateThreadBody } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 import { formatClock } from "@/lib/format";
+import { executionLabel, inPlay } from "@/lib/execution";
 import {
   mapThread,
   orderThreads,
@@ -55,6 +64,10 @@ import {
 } from "@/lib/thread";
 import { Absent, Banner, Gauge, Malformed, Mono, WarningBanner } from "./primitives";
 import { useThreadEvents } from "./use-thread-events";
+import { ExecutionView } from "./execution-view";
+
+/** An execution's value in the selector: no thread id holds a colon. */
+const EXECUTION = "task:";
 
 function optionLabel(t: Thread): string {
   const name = t.id === "main" ? "main" : `${t.title || t.id}${t.project ? ` · ${t.project}` : ""}`;
@@ -89,15 +102,25 @@ export function ChatPanel({
     }
   }, [select]);
 
-  const thread = threads.find((t) => t.id === chosen) ?? threads[0] ?? null;
+  const qc = useQueryClient();
+  const queue = useQuery(actionQueueQuery);
+  const queueData: unknown = queue.data?.data;
+  const tasks = useQuery(tasksQuery);
+  const executions = useMemo(
+    () => inPlay(Array.isArray(tasks.data?.data) ? tasks.data.data : [], queueData),
+    [tasks.data, queueData],
+  );
+  const execution =
+    chosen?.startsWith(EXECUTION) === true
+      ? (executions.find((t) => `${EXECUTION}${t.task_id}` === chosen) ?? null)
+      : null;
+
+  const thread = execution ? null : (threads.find((t) => t.id === chosen) ?? threads[0] ?? null);
   const events = useThreadEvents(thread?.id ?? null, pollMs);
   const items = useMemo(() => mapThread(events.rows, view), [events.rows, view]);
   const meter = useMemo(() => threadMeter(events.rows), [events.rows]);
   const hasMain = threads.some((t) => t.id === "main");
 
-  const qc = useQueryClient();
-  const queue = useQuery(actionQueueQuery);
-  const queueData: unknown = queue.data?.data;
   const queued = useMemo(
     () => (thread ? queuedTurns(queueData, thread.id, events.rows) : []),
     [queueData, thread, events.rows],
@@ -169,11 +192,12 @@ export function ChatPanel({
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
         <select
           aria-label="Thread"
-          value={thread?.id ?? ""}
-          disabled={threads.length === 0}
+          value={execution ? `${EXECUTION}${execution.task_id}` : (thread?.id ?? "")}
+          disabled={threads.length === 0 && executions.length === 0}
           onChange={(e) => {
             setChosen(e.target.value);
             setProblem(null);
+            setForm(null);
           }}
           className="mono min-w-0 flex-1 rounded-sm border border-border bg-surface-2 px-2 py-1 text-[11px]"
         >
@@ -182,6 +206,15 @@ export function ChatPanel({
               {optionLabel(t)}
             </option>
           ))}
+          {executions.length > 0 && (
+            <optgroup label="Executions">
+              {executions.map((t) => (
+                <option key={t.task_id} value={`${EXECUTION}${t.task_id}`}>
+                  {executionLabel(t)}
+                </option>
+              ))}
+            </optgroup>
+          )}
         </select>
         <button
           onClick={() => setForm((f) => (f === "new" ? null : "new"))}
@@ -201,7 +234,23 @@ export function ChatPanel({
         </button>
       </div>
 
-      {form === "new" && (
+      {execution && (
+        <ExecutionView
+          key={execution.task_id}
+          task={execution}
+          view={view}
+          onView={choose}
+          onOpenThread={(id) => setChosen(id)}
+          pollMs={pollMs}
+        />
+      )}
+      {tasks.isError && (
+        <p className="border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+          /api/tasks did not answer, so no execution is listed.
+        </p>
+      )}
+
+      {!execution && form === "new" && (
         <NewThreadForm
           hasMain={hasMain}
           onCancel={() => setForm(null)}
@@ -230,89 +279,94 @@ export function ChatPanel({
         />
       )}
 
-      {data && !hasMain && (
+      {!execution && data && !hasMain && (
         <Banner tone="info">
           No <Mono>main</Mono> thread yet. <em>New thread</em> opens it with{" "}
           <Mono>POST /api/threads</Mono> and <Mono>main: true</Mono>.
         </Banner>
       )}
-      <WarningBanner warnings={[...(data?.warnings ?? []), ...events.warnings]} />
+      {!execution && (
+        <>
+          <WarningBanner warnings={[...(data?.warnings ?? []), ...events.warnings]} />
 
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
-        {isError && (
-          <p className="text-xs text-destructive">
-            /api/threads did not answer: {error instanceof Error ? error.message : String(error)}
-          </p>
-        )}
-        {events.error && (
-          <p className="text-xs text-destructive">
-            The thread's log did not answer: {events.error}
-          </p>
-        )}
-        {data && threads.length === 0 && (
-          <p className="text-xs text-muted-foreground">The harness holds no thread yet.</p>
-        )}
-        {thread && events.loaded && items.length === 0 && !events.error && (
-          <p className="text-xs text-muted-foreground">No turn in this thread yet.</p>
-        )}
-        {items.map((item) => (
-          <Item key={item.key} item={item} stopping={stopping} onStop={stop} />
-        ))}
-        {queued.map((turn) => (
-          <QueuedItem key={turn.id} turn={turn} onCancel={stop} />
-        ))}
-      </div>
-
-      <div className="space-y-1.5 border-t border-border px-3 py-2">
-        {queue.isError && (
-          <p className="text-[11px] text-destructive">
-            The action queue did not answer, so queued messages are not shown.
-          </p>
-        )}
-        {workerStale && (
-          <p className="text-[11px] text-warning">
-            The worker is not running: a message you send waits in the queue until it is.
-          </p>
-        )}
-        {shownProblem && (
-          <p role="alert" className="whitespace-pre-wrap text-[11px] text-destructive">
-            {shownProblem}
-          </p>
-        )}
-        {thread && archived && (
-          <p className="text-[11px] text-muted-foreground">
-            This thread is archived and takes no new turn.
-          </p>
-        )}
-        {thread && !archived && (
-          <div className="flex items-end gap-2">
-            <textarea
-              aria-label="Message"
-              value={draft}
-              rows={3}
-              placeholder="Message this thread — Ctrl+Enter sends"
-              onChange={(e) => {
-                const next = e.target.value;
-                setDrafts((d) => ({ ...d, [thread.id]: next }));
-              }}
-              onKeyDown={(e) => {
-                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-                  e.preventDefault();
-                  submit();
-                }
-              }}
-              className="min-w-0 flex-1 resize-none rounded-sm border border-border bg-surface-2 px-2 py-1 text-xs"
-            />
-            <button
-              onClick={submit}
-              disabled={!draft.trim() || send.isPending}
-              className="rounded-sm border border-border px-3 py-1 text-xs hover:bg-surface-2 disabled:opacity-50"
-            >
-              {send.isPending ? "Sending…" : "Send"}
-            </button>
+          <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-3 py-3">
+            {isError && (
+              <p className="text-xs text-destructive">
+                /api/threads did not answer:{" "}
+                {error instanceof Error ? error.message : String(error)}
+              </p>
+            )}
+            {events.error && (
+              <p className="text-xs text-destructive">
+                The thread's log did not answer: {events.error}
+              </p>
+            )}
+            {data && threads.length === 0 && (
+              <p className="text-xs text-muted-foreground">The harness holds no thread yet.</p>
+            )}
+            {thread && events.loaded && items.length === 0 && !events.error && (
+              <p className="text-xs text-muted-foreground">No turn in this thread yet.</p>
+            )}
+            {items.map((item) => (
+              <Item key={item.key} item={item} stopping={stopping} onStop={stop} />
+            ))}
+            {queued.map((turn) => (
+              <QueuedItem key={turn.id} turn={turn} onCancel={stop} />
+            ))}
           </div>
-        )}
-      </div>
+
+          <div className="space-y-1.5 border-t border-border px-3 py-2">
+            {queue.isError && (
+              <p className="text-[11px] text-destructive">
+                The action queue did not answer, so queued messages are not shown.
+              </p>
+            )}
+            {workerStale && (
+              <p className="text-[11px] text-warning">
+                The worker is not running: a message you send waits in the queue until it is.
+              </p>
+            )}
+            {shownProblem && (
+              <p role="alert" className="whitespace-pre-wrap text-[11px] text-destructive">
+                {shownProblem}
+              </p>
+            )}
+            {thread && archived && (
+              <p className="text-[11px] text-muted-foreground">
+                This thread is archived and takes no new turn.
+              </p>
+            )}
+            {thread && !archived && (
+              <div className="flex items-end gap-2">
+                <textarea
+                  aria-label="Message"
+                  value={draft}
+                  rows={3}
+                  placeholder="Message this thread — Ctrl+Enter sends"
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setDrafts((d) => ({ ...d, [thread.id]: next }));
+                  }}
+                  onKeyDown={(e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                      e.preventDefault();
+                      submit();
+                    }
+                  }}
+                  className="min-w-0 flex-1 resize-none rounded-sm border border-border bg-surface-2 px-2 py-1 text-xs"
+                />
+                <button
+                  onClick={submit}
+                  disabled={!draft.trim() || send.isPending}
+                  className="rounded-sm border border-border px-3 py-1 text-xs hover:bg-surface-2 disabled:opacity-50"
+                >
+                  {send.isPending ? "Sending…" : "Send"}
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </aside>
   );
 }

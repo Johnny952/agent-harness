@@ -10824,3 +10824,80 @@ reads, `GET /api/threads` (`threadsQuery`), already carries each thread's `task`
 - Waiting on a failed list: the button would stay dead until the api answered.
 - A board-service lookup of a task's thread: the list the dock polls already
   holds what the choice needs.
+## ADR 197 — The dock's execution thread: a started task's cycle, read only
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/main-thread.md` step 7 (*Decisions* 8) asks the dock
+for an execution thread: under the conversation threads, one entry per started
+task in play, showing the task's cycle in one scroll. A phase runs
+`claude -p --output-format json`, so it leaves no stream log as a thread turn
+does; the hook events the collector stores are the only record of what a phase
+did between its start and its handoff. `/api/events` cannot serve them: it
+answers the newest rows first and filters by nothing a task owns. The rest is
+already served: the task and its body (the phases' `## role` sections and their
+`**Dispatcher gates**` lines), `/api/tasks/<id>/usage` (each phase's role,
+round, account, model and session ids), `/api/actions` (the `start` records
+and their notes) and `/api/threads`. The slots (projects.md *Decisions* 6) are
+not built here.
+
+**Decision.**
+1. One read-only route, `GET /api/tasks/<id>/events?since=&limit=`, in
+   `observability/api/app.py`: the hook events whose payload's `cwd` sits under
+   `/worktrees/<id>/`, oldest first, after event `since`, at most 500 by
+   default and 1000 at most (a larger `limit` is clamped with a warning). An id
+   that is not a bare filename, or names no task file, is a 404; no events
+   database is `[]` and a warning. The forward carries it like the other task
+   reads. `useTaskEvents` walks it from a cursor on `useThreadEvents`'s model.
+2. A task is in play while it is not merged, not dropped and not an epic, and
+   it runs a phase, is `in_progress`, `blocked`, `conflict` or `done` (done and
+   not yet merged), or has a `start` pending or claimed in the queue. A plain
+   `pending`, a backlog status and a `start` already finished do not count.
+3. The selector lists them in an `Executions` group under the threads, the
+   running ones first and then in board order, each as
+   `<id> · <title> — running <phase>` or `— <status>`. An entry leaves when the
+   board says the task is merged or dropped; a chosen one that leaves gives the
+   dock back to the first thread.
+4. Choosing one shows, oldest first: the start note; then each phase as a
+   segment with its role, round, account and model; its events under the
+   thread's *Text* / *Text and commands* switch (prompts, notifications and a
+   `Stop`'s last message under *Text*; the paired tool calls and the session
+   markers added under the other); its handoff, rendered as markdown; and its
+   gates as chips. The segments are the body's sections in order, a usage group
+   no section took placed by its time, and the running phase last. An event goes
+   to the phase whose session it carries, else to the phase whose time window
+   holds it, else to the running phase, else to a closing *unattributed*
+   segment.
+5. The start note is read from the queue's records only, the latest `start` of
+   the task with a note among the pending, claimed and the last 20 done. When
+   none is there the view says so and points at the task's comments.
+6. The view is read only: no composer. Its header links to the task page and,
+   when a thread is about the task (`task` is its id, not archived), offers
+   *Open its thread*, which shows it in the dock as `openThread` does. Talking
+   about a task stays *Talk about this task* (ADR 195).
+7. Nothing here spends quota: every read is a GET on what the collector and the
+   board already hold.
+
+**Consequences.**
+- A phase's activity can be followed from the dock while it runs, with no new
+  writer and no change to how phases are run.
+- The attribution is a heuristic: a phase whose usage was not recorded keeps
+  its events only by time, and a hook payload with no `cwd` is not found at all.
+- A phase's own words appear only where a hook carried them (the prompt, a
+  `Stop`'s `last_assistant_message`); its intermediate assistant text is not in
+  the hook events.
+- A start note older than the queue's last 20 done records is not shown here.
+- The dock polls the task's events while an execution is shown, one cursor read
+  per poll.
+
+**Ruled out.**
+- A stream log for phases (`--output-format stream-json`): it changes how
+  every phase runs and is the dispatcher's, not a view's.
+- Filtering `/api/events` in the front: it answers newest first and would have
+  to read the whole table to find a task's rows.
+- One combined route answering the task, its usage, its notes and its events:
+  each part is already served, and the new route stays one read.
+- Reading the start note from the task's comments: the `start` record is where
+  it is given, and the comments are on the task page.
+- A composer on the execution: the phases are not talked to; a thread about the
+  task is.

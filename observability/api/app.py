@@ -230,6 +230,29 @@ DEFAULT_THREAD_EVENT_LIMIT = 500
 #: reports itself in `warnings` on `MAX_EVENT_LIMIT`'s model.
 MAX_THREAD_EVENT_LIMIT = 2000
 
+#: How many hook events one `/api/tasks/<id>/events` answer carries when the
+#: caller sends no `limit`. A phase makes a pair of events per tool call, so a
+#: phase is tens to hundreds and this is a cycle's first page (ADR 197).
+DEFAULT_TASK_EVENT_LIMIT = 500
+
+#: The most hook events one `/api/tasks/<id>/events` answer carries, on
+#: `MAX_EVENT_LIMIT`'s model: the clamp reports itself in `warnings`.
+MAX_TASK_EVENT_LIMIT = 1000
+
+#: Which events belong to a task: those whose hook payload's `cwd` sits under
+#: the task's worktrees, `{projects_root}/{slug}/worktrees/{task_id}/<name>`
+#: (`docker_exec.task_worktrees_dir`). The writer's `work` and each reviewer's
+#: own directory alike, at any depth below them. The id is bounded by slashes
+#: on both sides so `T-1` never matches `T-10`, and `json_valid` keeps a row
+#: whose payload is not JSON from failing the whole query.
+_TASK_EVENTS_SQL = (
+    "SELECT id, source_app, event_type, payload, created_at FROM events "
+    "WHERE id > ? AND instr("
+    "COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload, '$.cwd') END, '')"
+    " || '/', '/worktrees/' || ? || '/') > 0 "
+    "ORDER BY id ASC LIMIT ?"
+)
+
 #: How old the worker's last beat may be before `/api/actions` calls it stale.
 #: The worker beats once a pass, every `worker.POLL_SECONDS` (2s) plus the
 #: pass's own work, so fifteen missed beats is a worker that is gone or wedged,
@@ -694,6 +717,65 @@ def create_app(
             warnings.append(f"{path}: unreadable usage log: {exc}")
             return _envelope(None, warnings)
         return _envelope(groups, warnings)
+
+    @app.get("/api/tasks/<task_id>/events")
+    @requires_auth
+    def task_events(task_id: str):
+        """The hook events of a task's phases, oldest first (ADR 197).
+
+        `docs/plans/main-thread.md` step 7: the dock's execution view. A phase
+        runs `claude -p --output-format json` and leaves no stream log, so the
+        hook events the collector stores are the only record of what it did
+        between its start and its handoff. `/api/events` cannot serve them: it
+        answers the newest rows and filters by nothing a task owns. This one
+        matches each payload's `cwd` against the task's worktrees and walks up
+        from `since=<last id>`, the cursor `/api/events` already keeps. A row
+        is that route's row. No database yet is an empty list and a warning.
+        """
+        rejected = _reject_unknown_parameters(frozenset({"limit", "since"}))
+        if rejected is not None:
+            return rejected
+        limit, rejected = _int_parameter("limit", DEFAULT_TASK_EVENT_LIMIT, positive=True)
+        if rejected is not None:
+            return rejected
+        since, rejected = _int_parameter("since", 0)
+        if rejected is not None:
+            return rejected
+        # A 404 in the usage route's words: this read belongs to a task the
+        # caller already holds, and an id that is not a bare filename never
+        # reaches the query.
+        if not _is_bare_task_id(task_id):
+            return _error(f"no task {task_id!r}", 404)
+        if not os.path.exists(context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)):
+            return _error(f"no task {task_id!r} in {cfg.hive_tasks_dir}", 404)
+        warnings: list[str] = []
+        if limit > MAX_TASK_EVENT_LIMIT:
+            warnings.append(
+                f"limit={limit} is above this service's maximum of "
+                f"{MAX_TASK_EVENT_LIMIT}: answering {MAX_TASK_EVENT_LIMIT} "
+                f"rows. Walk the rest with ?since=<last id>."
+            )
+            limit = MAX_TASK_EVENT_LIMIT
+        try:
+            conn = db.connect_read_only(db_path)
+            try:
+                found = conn.execute(_TASK_EVENTS_SQL, (since, task_id, limit)).fetchall()
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return _envelope([], warnings + [_no_events_warning(db_path, exc)])
+        # Only a payload that parsed can have matched, so `json.loads` holds.
+        rows = [
+            {
+                "id": event_id,
+                "source_app": source_app,
+                "event_type": event_type,
+                "payload": json.loads(payload),
+                "created_at": created_at,
+            }
+            for event_id, source_app, event_type, payload, created_at in found
+        ]
+        return _envelope(rows, warnings)
 
     @app.get("/api/tasks/<task_id>/comments")
     @requires_auth
