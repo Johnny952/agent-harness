@@ -25,6 +25,7 @@ from dispatcher import (
 from dispatcher import queue as queue_mod
 from dispatcher import worker as worker_mod
 from dispatcher.config import Config, load_config
+from dispatcher.project_lock import ProjectBusy
 from dispatcher.dispatcher import (
     CycleOutcome,
     _base_lock,
@@ -120,6 +121,12 @@ def _exit_on_resumed_outcome(cfg: Config, args: argparse.Namespace, outcome: Cyc
     if outcome is CycleOutcome.SPLIT:
         print(_epic_line(cfg, args.task_id))
         raise SystemExit(EXIT_SPLIT)
+
+
+def _exit_project_busy(exc: ProjectBusy, task_id: str):
+    """A start on a project another cycle holds: one line, exit 75 (ADR 200, 5)."""
+    print(f"{exc}; {task_id} was not started", file=sys.stderr)
+    raise SystemExit(EXIT_HELD)
 
 
 def _print_proposed_split(args: argparse.Namespace, payload: dict | None) -> None:
@@ -851,7 +858,10 @@ def main() -> None:
     elif args.command == "run-task":
         _require_migrated(cfg, parser)
         description = _resolve_description(args, cfg, parser)
-        outcome = run_task_cycle(cfg, args.task_id, args.project, description=description)
+        try:
+            outcome = run_task_cycle(cfg, args.task_id, args.project, description=description)
+        except ProjectBusy as exc:
+            _exit_project_busy(exc, args.task_id)
         for line in left_behind_report(cfg, args.task_id):
             print(line, file=sys.stderr)
         # Before ADR 52 every one of these exited 0, so a cycle that never got
@@ -900,15 +910,18 @@ def main() -> None:
                 f"task {args.task_id} has no description: run-phase resumes a task that "
                 "is already under way. Start it with run-task."
             )
-        result = run_single_phase(
-            cfg,
-            args.task_id,
-            args.project,
-            args.role,
-            round_num=args.round_num,
-            final=args.final,
-            note=args.note,
-        )
+        try:
+            result = run_single_phase(
+                cfg,
+                args.task_id,
+                args.project,
+                args.role,
+                round_num=args.round_num,
+                final=args.final,
+                note=args.note,
+            )
+        except ProjectBusy as exc:
+            _exit_project_busy(exc, args.task_id)
         for line in left_behind_report(cfg, args.task_id, role=args.role):
             print(line, file=sys.stderr)
         if result is None:
@@ -945,6 +958,8 @@ def main() -> None:
         except command_run.VerdictRefused as exc:
             print(f"task {args.task_id}: verdict refused: {exc}", file=sys.stderr)
             raise SystemExit(EXIT_BLOCKED) from None
+        except ProjectBusy as exc:
+            _exit_project_busy(exc, args.task_id)
         _exit_on_resumed_outcome(cfg, args, outcome)
         print(f"task {args.task_id}: request {args.n} {args.verdict}; the cycle finished")
     elif args.command == "command-resume":
@@ -954,6 +969,8 @@ def main() -> None:
         except command_run.VerdictRefused as exc:
             print(f"task {args.task_id}: resume refused: {exc}", file=sys.stderr)
             raise SystemExit(EXIT_BLOCKED) from None
+        except ProjectBusy as exc:
+            _exit_project_busy(exc, args.task_id)
         _exit_on_resumed_outcome(cfg, args, outcome)
         print(f"task {args.task_id}: the verdict was resumed; the cycle finished")
     elif args.command == "allowlist":

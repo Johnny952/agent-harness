@@ -81,7 +81,7 @@ class ScheduledCycle:
             self.events.append((task_id, what))
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
-                 on_approve=None, may_start_phase=None, scheduler=None):
+                 on_approve=None, may_start_phase=None, scheduler=None, project_lock=None):
         assert scheduler is not None, "a parallel queue passes its scheduler"
         self.scheduler = scheduler
         if may_start_phase is not None and not may_start_phase():
@@ -309,7 +309,7 @@ def cycle(cfg, monkeypatch):
     """`run_task_cycle` with everything around its phases stubbed."""
     state = {"move": None, "needs_mapping": False}
 
-    def open_cycle(cfg, task_id, slug, description=None):
+    def open_cycle(cfg, task_id, slug, description=None, project_lock=None, via="cycle"):
         return types.SimpleNamespace(
             cfg=cfg, task_id=task_id, slug=slug, held=False, foreign_lock=False,
             may_start_phase=None, completed=False, write_window=False,

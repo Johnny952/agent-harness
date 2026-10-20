@@ -35,6 +35,7 @@ from dispatcher import (
     tasks,
 )
 from dispatcher.config import DRAFT_ROLE, Config, refresh_primary
+from dispatcher.project_lock import ProjectLock
 from dispatcher.state_machine import AccountState
 
 logger = logging.getLogger(__name__)
@@ -2818,6 +2819,11 @@ class CycleContext:
     completed: bool = False
     # Set once the scheduler granted this cycle its write window.
     write_window: bool = False
+    # The project's lock (ADR 200), held from `open_cycle` to `close_cycle`.
+    # `owns_project_lock` says this cycle took it and so lets go of it; a lock
+    # a caller passed in (the worker, a queue) is the caller's to release.
+    project_lock: ProjectLock | None = None
+    owns_project_lock: bool = False
 
 
 def project_config(cfg: Config, task_id: str, slug: str) -> Config | None:
@@ -2840,8 +2846,14 @@ def open_cycle(
     task_id: str,
     slug: str,
     description: str | None = None,
+    project_lock: ProjectLock | None = None,
+    via: str = "cycle",
 ) -> CycleContext | None:
     """Get a run to the point where a phase can be dispatched.
+
+    The project's lock is taken last, after every refusal below (ADR 200): a
+    busy project raises `ProjectBusy` with nothing written. `project_lock` is
+    one the caller already holds; the cycle then neither takes nor releases it.
 
     Returns None when it cannot get there, having already said why. That is a task nobody described, a description missing a
     required section, a hive `dispatch migrate` has not been run on, an epic,
@@ -2947,8 +2959,16 @@ def open_cycle(
         if reasons:
             logger.error("task %s cannot start: %s", task_id, "; ".join(reasons))
             return None
-    if supplied:
-        tasks.write_description(cfg.hive_tasks_dir, task_id, description)
+    owns = project_lock is None
+    if owns:
+        project_lock = ProjectLock.take(cfg.state_dir, slug, task_id, via)
+    try:
+        if supplied:
+            tasks.write_description(cfg.hive_tasks_dir, task_id, description)
+    except BaseException:
+        if owns:
+            project_lock.release()
+        raise
 
     return CycleContext(
         cfg=cfg,
@@ -2958,6 +2978,8 @@ def open_cycle(
         task_file=task_file,
         scratch_dir=scratch_dir,
         harness=harness,
+        project_lock=project_lock,
+        owns_project_lock=owns,
     )
 
 
@@ -3122,8 +3144,17 @@ def close_cycle(ctx: CycleContext, completed: bool) -> None:
 
     `completed` means the auditor filed what this task learned. Every other
     way out — done-but-not-audited, blocked, bounced, crashed — leaves entries
-    nobody filed, and those have to go back to being unowned.
+    nobody filed, and those have to go back to being unowned. The project's
+    lock goes back last, if this cycle took it (ADR 200).
     """
+    try:
+        _close_cycle(ctx, completed)
+    finally:
+        if ctx.owns_project_lock and ctx.project_lock is not None:
+            ctx.project_lock.release()
+
+
+def _close_cycle(ctx: CycleContext, completed: bool) -> None:
     # Every way into here is terminal for this run — done, blocked, or a
     # crash — and the reviewing checkouts are rebuilt on demand, so they can
     # go now rather than pile up per task. The exception is a task this run
@@ -3341,6 +3372,8 @@ def run_single_phase(
     final: bool = False,
     description: str | None = None,
     note: str = "",
+    project_lock: ProjectLock | None = None,
+    via: str = "run-phase",
 ) -> DispatchResult | None:
     """Dispatch exactly the phase named, on a task that is already under way.
 
@@ -3371,7 +3404,9 @@ def run_single_phase(
     cfg = project_config(cfg, task_id, slug)
     if cfg is None:
         return None
-    ctx = open_cycle(cfg, task_id, slug, description=description)
+    ctx = open_cycle(
+        cfg, task_id, slug, description=description, project_lock=project_lock, via=via,
+    )
     if ctx is None:
         return None
     result: DispatchResult | None = None
@@ -3611,8 +3646,14 @@ def run_task_cycle(
     on_approve: Callable[[ApproveResult], None] | None = None,
     may_start_phase: Callable[[], bool] | None = None,
     scheduler=None,
+    project_lock: ProjectLock | None = None,
+    via: str = "run-task",
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
+
+    The project is held for the whole cycle (ADR 200): a busy one raises
+    `project_lock.ProjectBusy` before anything is written. `project_lock` is a
+    lock the caller already holds (the worker's, a queue's), passed through.
 
     HELD when a phase the task depends on stopped because no account could
     take it, SPLIT when the arquitecto's split was filed and the task is now
@@ -3640,7 +3681,9 @@ def run_task_cycle(
     cfg = project_config(cfg, task_id, slug)
     if cfg is None:
         return CycleOutcome.BLOCKED
-    ctx = open_cycle(cfg, task_id, slug, description=description)
+    ctx = open_cycle(
+        cfg, task_id, slug, description=description, project_lock=project_lock, via=via,
+    )
     if ctx is None:
         return CycleOutcome.BLOCKED
     ctx.may_start_phase = may_start_phase

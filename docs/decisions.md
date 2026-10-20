@@ -11237,3 +11237,103 @@ null when a card names none. ADR 198, decision 4, said how the reason is added.
 - Guessing when the project frees, or a time for the holder's cycle.
 - A backlog column for the project: the slug sits beside the title, so the
   columns and their widths stay as they are.
+## ADR 200 — One cycle per project: a `flock` per project, taken in `open_cycle`
+
+**Status:** accepted (2026-10-20), T-116.
+
+**Context.** `docs/plans/projects.md` step 3 and *Decisions*, 5. The worker
+serialised its own starts on the serial key `project:<slug>`
+(`dispatcher/actions.py` `KINDS`, ADR 148) and wrote `waiting: "project"` on
+one it held back, but the key lived in the worker's memory. A `run-task`,
+`run-phase`, `command-verdict`, `command-resume` or `run-queue` on the same
+project saw none of it, so two of them ran two cycles on one clone.
+
+**Decision.**
+1. **The lock.** `dispatcher/project_lock.py`: an exclusive, non-blocking
+   `flock` on `<state_dir>/project-locks/<slug>.lock`, held by an open file
+   descriptor for as long as a cycle runs. A process that dies closes the
+   descriptor and the kernel gives the lock back; nothing reaps it, and the
+   file's presence means nothing. The holder writes one JSON line into the
+   file once it holds the lock (`task_id`, `via`, `pid`, `host`, `since`) and
+   empties it before letting go; it is read only to name the holder to a
+   start that was refused, never to decide whether the project is busy. A
+   refused take raises `ProjectBusy`, carrying that record (or none, if the
+   holder has not written it yet).
+2. **Where it is taken.** In `open_cycle`, after every refusal it already
+   makes and before it writes the description: the one function the four
+   cycle entry points (`run_task_cycle`, `run_single_phase`,
+   `run_command_request`, `resume_command_verdict`) pass through. It is
+   released in `close_cycle`, whichever way the cycle ended, including the
+   early return for a foreign task lock. A caller that already holds the
+   project's lock passes it to `open_cycle` (`project_lock=`), and then the
+   cycle neither takes nor releases it.
+3. **What "running" means.** The project is busy from the cycle's opening to
+   its end: through every phase and every revision round inside the cycle,
+   and the auditor's merge when there is one. The task is then *Awaiting
+   review* (or blocked, held, split) and the project is free. A later cycle of
+   the same task — the request-changes round of `review.md` once it is built,
+   a `run-phase --round`, a verdict's resume — comes through `open_cycle`
+   again and takes the lock again.
+4. **The worker** takes the lock itself, in `Worker._consider`, for a kind
+   whose serial key is `project:<slug>` (`start`, `command_verdict`): after
+   its in-memory key check and before its account check. Busy, the action is
+   left pending as `waiting: "project"`, as today, and taken on a later pass
+   once the project frees; an account then closed releases the lock and waits
+   as `account`; a claim that loses its race releases it. The held lock goes
+   with the action to its handler thread, which passes it to the cycle and
+   releases it when the handler returns. The start on a project another
+   process holds therefore waits exactly like one behind the worker's own.
+5. **A CLI start on a busy project exits.** `run-task`, `run-phase`,
+   `command-verdict` and `command-resume` print one line on stderr,
+   `project <slug> is busy: task <id> holds it (<via>, pid <pid>, since
+   <since>); <task> was not started`, and exit `EXIT_HELD` (75, "try again
+   later"). Nothing was written for the refused task. Exiting rather than
+   waiting, because a verb typed for one task now that sits silent behind an
+   unknown cycle for an hour looks like a hang, the console cannot see or
+   cancel it, and the worker already is the place where a start waits.
+   `command-verdict` refuses before it records the verdict, so the verdict
+   can be given again.
+6. **`run-queue` waits, and holds the project for its whole run.** A queue is
+   already a thing that waits (for accounts, for merges). `queue.run` takes
+   its project's lock once before its first cycle, polling every
+   `WAIT_POLL_SECONDS` with one log line naming the holder while it is busy,
+   passes the held lock to every cycle it starts, and releases it when it
+   returns. That is one rule for `--parallel 1` and above.
+7. **How it meets ADR 83.** Under `--parallel N` above 1 the queue's N
+   cycles share the one lock the queue took, so the lock neither serialises
+   them nor deadlocks them: none of them takes it. Within the queue, ADR 83's
+   write windows per surface still decide which cycles write at once. Toward
+   everything outside the queue, the project is busy while the queue runs:
+   the parallel queue is the one sanctioned case of more than one cycle on a
+   project, and only with its own scheduler.
+8. **Two projects** take two different files and run side by side, in one
+   process (two worker threads) or in two.
+9. **The epic, one task at a time.** *Start epic* (`board-service.md`,
+   *Per epic*) is not built. When it is, this rule is what makes it run one
+   task of the epic at a time: every start it queues names the epic's
+   project, so each one after the first waits as `project` until the cycle
+   before it ends with its task awaiting review. *Start epic* needs no lock
+   of its own.
+
+**Consequences.**
+- The worker's in-memory `project:<slug>` key stays: it is what keeps a
+  second start of one project out of the worker's own `running` without a
+  `flock` on every pass, and the `flock` is what covers every other process.
+- A cycle opened by a library caller with no lock passed takes its own, so no
+  entry point can skip the rule by calling the cycle functions directly.
+- `flock` holds across the containers that mount the state directory from one
+  host's file system. A state directory on NFS would not hold it.
+- A queue holds its project between its cycles too, so a worker start on that
+  project waits for the whole queue, not only its running cycle.
+- The project lock comes before every other lock: it is taken before any
+  phase and never inside one, and never waited on in the kernel, so no path
+  waits on it while holding the task, base or surface lock.
+
+**Ruled out.**
+- A file whose presence means busy, or a heartbeat lock like the base lock
+  (ADR 80): a crash leaves it behind and something has to reap it.
+- A CLI start that waits: see decision 5.
+- A blocking `flock`: every taker either reports busy or polls on its own
+  cadence, so no thread sleeps inside the kernel holding something else.
+- The lock per cycle under a parallel queue: two of the queue's own cycles
+  would then exclude each other and the queue would run one at a time.
