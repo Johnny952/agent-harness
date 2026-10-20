@@ -778,6 +778,27 @@ class _UsageRecorder:
             )
 
 
+def _park(cfg: Config, account: str, state: AccountState) -> None:
+    """Park `account`, and tell the operator when that left the pool dry.
+
+    Dry is every configured account parked on a quota or login state; busy
+    accounts and the dispatch gates are not dry, since nothing is parked. The
+    pool's own state files are the memory: the record goes out only on the
+    park that takes the last account out, so a poll that finds the pool still
+    dry, or a second park of an already parked account, writes nothing
+    (`docs/decisions.md` ADR 224). `notifications.append` never raises.
+    """
+    dried = state_machine.park(
+        cfg.state_dir, account, state, pool=[a.name for a in cfg.accounts],
+    )
+    if dried:
+        notifications.append(
+            cfg.hive_tasks_dir, "pool", account=account,
+            title=f"the pool is dry: account {account} went {state.value} and no account is left",
+            url=notifications.POOL_URL,
+        )
+
+
 def check_quota_ok(cfg: Config, account: str) -> bool:
     container = container_for(cfg, account)
     # The /usage probe parses free-text CLI output (design spec sec. 4a
@@ -805,7 +826,7 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             account,
         )
         state_machine.record_rate_limit(cfg.state_dir, account)
-        state_machine.park(cfg.state_dir, account, AccountState.COOLING_DOWN)
+        _park(cfg, account, AccountState.COOLING_DOWN)
         return False
     # Same reasoning, and it has to come before the parse for the same
     # reason: a rejected login is something a probe can actually report, and
@@ -829,7 +850,7 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             "parking it PRE_COOLDOWN and looking for another",
             account, usage.session_pct, usage.week_pct, decision.limit_phrase,
         )
-        state_machine.park(cfg.state_dir, account, AccountState.PRE_COOLDOWN)
+        _park(cfg, account, AccountState.PRE_COOLDOWN)
         return False
     return True
 
@@ -910,7 +931,8 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
             if state_machine.unpark(cfg.state_dir, acc.name, forget_rate_limit=True):
                 recovered.append(acc.name)
                 # The *Pool* kind's second half: work waiting on the pool can
-                # run again (ADR 221). Pool dry has no writer yet.
+                # run again (ADR 221). It is told on every recovery, the one
+                # that ends a dry pool included; `_park` writes the dry (ADR 224).
                 notifications.append(
                     cfg.hive_tasks_dir, "pool", account=acc.name,
                     title=f"account {acc.name} is available again",
@@ -970,7 +992,7 @@ def _park_auth_expired(cfg: Config, account: str, where: str) -> None:
         "(docker exec -it %s claude, then /login) and runs `release %s`",
         account, where, container_for(cfg, account), account,
     )
-    state_machine.park(cfg.state_dir, account, AccountState.AUTH_EXPIRED)
+    _park(cfg, account, AccountState.AUTH_EXPIRED)
 
 
 def _exec_succeeded(result: docker_exec.ClaudeResult) -> bool:
@@ -1992,7 +2014,7 @@ def dispatch_phase(
             # recheck cannot reproduce it. Write it down before parking the
             # account, or the next recheck recovers it on stale local numbers.
             state_machine.record_rate_limit(cfg.state_dir, account)
-            state_machine.park(cfg.state_dir, account, AccountState.COOLING_DOWN)
+            _park(cfg, account, AccountState.COOLING_DOWN)
             state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id

@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import dispatcher.dispatcher as dispatcher_mod
 from dispatcher import handoff, notifications, tasks
+from dispatcher.config import AccountConfig
 from dispatcher.context_transfer import read_task_file, task_file_path, write_task_file
+from dispatcher.docker_exec import ClaudeResult
 from dispatcher.state_machine import AccountState, get_state, set_state
 from tests.dispatcher.test_dispatcher import _make_config, _split_ctx
 from tests.dispatcher.test_tasks import _epic, _hive, _legacy
@@ -246,3 +249,94 @@ def test_an_account_recovered_from_cooling_is_told(tmp_path: Path, monkeypatch) 
     [record] = _records(cfg.hive_tasks_dir)
     assert (record["kind"], record["account"], record["url"]) == ("pool", "cuenta1", "/pool")
     assert record["title"] == "account cuenta1 is available again"
+
+
+# -- pool dry (ADR 224) -------------------------------------------------------
+
+
+def _two_accounts(tmp_path: Path):
+    return _make_config(tmp_path, accounts=[
+        AccountConfig(name="cuenta1", container="agent-cuenta1"),
+        AccountConfig(name="cuenta2", container="agent-cuenta2"),
+    ])
+
+
+def _probe(monkeypatch, result: ClaudeResult) -> None:
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", lambda *a, **k: result)
+
+
+_REFUSED = ClaudeResult(session_id=None, result_text="usage limit reached", raw={"is_error": True})
+_DRY = "the pool is dry: account cuenta1 went {} and no account is left"
+
+
+def test_the_park_that_leaves_no_account_tells_the_pool_is_dry(tmp_path: Path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    _probe(monkeypatch, _REFUSED)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    [record] = _records(cfg.hive_tasks_dir)
+    assert (record["kind"], record["account"], record["url"]) == ("pool", "cuenta1", "/pool")
+    assert record["title"] == _DRY.format("COOLING_DOWN")
+
+
+def test_the_quota_ceiling_park_is_a_dry_too(tmp_path: Path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    _probe(monkeypatch, ClaudeResult(session_id=None, result_text="usage", raw={"is_error": False}))
+    monkeypatch.setattr(
+        dispatcher_mod.quota, "parse_usage_output",
+        lambda text: SimpleNamespace(session_pct=99, week_pct=50),
+    )
+    monkeypatch.setattr(
+        dispatcher_mod, "_quota_decision",
+        lambda cfg, account, usage: SimpleNamespace(exceeds=True, limit_phrase="the ceiling"),
+    )
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    assert [r["title"] for r in _records(cfg.hive_tasks_dir)] == [_DRY.format("PRE_COOLDOWN")]
+
+
+def test_a_park_that_leaves_an_account_is_not_dry(tmp_path: Path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    _probe(monkeypatch, _REFUSED)
+
+    dispatcher_mod.check_quota_ok(cfg, "cuenta1")
+    assert _records(cfg.hive_tasks_dir) == []
+
+    # A login refused is parked like a quota, and empties the pool the same way.
+    dispatcher_mod._park_auth_expired(cfg, "cuenta2", "a phase")
+    assert _kinds(cfg.hive_tasks_dir) == [("pool", "cuenta2")]
+
+
+def test_a_dry_pool_is_told_once_and_again_after_it_came_back(tmp_path: Path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    dispatcher_mod._park(cfg, "cuenta1", AccountState.PRE_COOLDOWN)
+    dispatcher_mod._park(cfg, "cuenta1", AccountState.COOLING_DOWN)  # still dry: no second line
+
+    def fake_exec_claude(*args, **kwargs):
+        raise ValueError("bad /usage format")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == ["cuenta1"]
+    dispatcher_mod._park(cfg, "cuenta1", AccountState.PRE_COOLDOWN)
+
+    assert [r["title"] for r in _records(cfg.hive_tasks_dir)] == [
+        _DRY.format("PRE_COOLDOWN"),
+        "account cuenta1 is available again",
+        _DRY.format("PRE_COOLDOWN"),
+    ]
+
+
+def test_a_dry_record_lost_to_the_disk_leaves_the_park_standing(
+    tmp_path: Path, monkeypatch, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    os.makedirs(notifications.notifications_path(cfg.hive_tasks_dir))  # a directory where the file goes
+    _probe(monkeypatch, _REFUSED)
+
+    with caplog.at_level("WARNING", logger=notifications.logger.name):
+        assert dispatcher_mod.check_quota_ok(cfg, "cuenta1") is False
+
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.COOLING_DOWN
+    assert "not written" in caplog.text

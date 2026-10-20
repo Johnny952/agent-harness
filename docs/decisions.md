@@ -12545,3 +12545,65 @@ anything, so what a build or a run would show is still unknown.
 - Making the mount writable for the agents so a missing browser downloads
   itself: a phase would then install browsers, and a version mismatch would
   go silent.
+
+## ADR 224 — The pool is dry when the last account is parked, and the park that does it writes the record
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 221 gave the `pool` kind one half: an account available
+again, written in `_recheck_cooling_accounts` on every unpark. Pool dry had
+no record, because the dispatcher's "no accounts available" is a log line
+and a `DispatchResult(no_account=True)` that every poll repeats, and it also
+comes from busy accounts, the `fallback_roles` gate and holding for a
+waitable worker, none of which is the pool running out. A writer there would
+fire on every poll and on states that are not dry.
+
+**Decision.**
+1. The pool is dry when every account in `cfg.accounts` is parked: one of
+   `PARKED_STATES`, a quota state or `AUTH_EXPIRED`. A busy account is not
+   parked, so a pool of busy accounts is not dry, and nothing the gates hold
+   back is either.
+2. The memory of whether the pool was dry is the accounts' own state files,
+   which the dispatcher already writes. No new state is kept.
+3. `state_machine.park` takes `pool`, the configured names, and returns
+   True when this park dried it: the account was not parked before, and
+   after the write every other name in `pool` is parked. It reads them under
+   the state lock it writes under, so of two parks at once only the second
+   sees the pool empty. A neighbour file that cannot be read gives False,
+   and the park stands. With no `pool` it is never True.
+4. `dispatcher._park` parks through it with `cfg.accounts`' names and, on
+   True, appends one `pool` record about the account that went last:
+   "the pool is dry: account <name> went <STATE> and no account is left",
+   linking `/pool`. The four parks go through it: the probe's refusal
+   (`COOLING_DOWN`), the probe over the ceiling (`PRE_COOLDOWN`), a refused
+   login (`AUTH_EXPIRED`, `_park_auth_expired`) and a phase refused as
+   rate-limited (`COOLING_DOWN`).
+5. Available again is unchanged: told on every recovery, the one that ends a
+   dry pool included.
+
+**Consequences.**
+- One record per dry spell: a poll that finds the pool still dry writes
+  nothing, nor does a second park of an account already parked (a
+  `PRE_COOLDOWN` account going `COOLING_DOWN`). A pool that comes back and
+  runs out again is told again.
+- Available again is not narrowed to the end of a dry spell: in the usual
+  setup the primary stays `IDLE` while a worker cools, so the pool is never
+  dry and the worker's recovery would stop being told. The two halves are
+  consistent in that a dry is always followed, when it ends by a recheck, by
+  an available-again record.
+- An account released by the operator from `AUTH_EXPIRED` (`release`) is
+  not told as available again: `release` goes through `set_state`, not the
+  recheck. The operator made that change and does not need it told.
+- A park lost to the disk loses its record and logs it, as every append
+  does (ADR 221 point 3); the park and the dispatch go on.
+- An account removed from the config while parked does not count: the pool
+  is `cfg.accounts`, read at each park.
+
+**Ruled out.**
+- Writing on "no accounts available": it repeats every poll and is also
+  busy accounts and the dispatch gates.
+- A `pool_dry` flag in a file of its own: it duplicates what the account
+  files say and can disagree with them after a hand edit or a crash between
+  the two writes.
+- Checking the pool after the park, outside its lock: two accounts parked
+  at the same moment could both see the other parked and write two records.

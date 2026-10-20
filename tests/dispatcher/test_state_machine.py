@@ -439,3 +439,46 @@ def test_stamp_holder_starts_the_clock_on_an_unstamped_holder(tmp_path: Path) ->
 
     assert get_busy_since(state_dir, "cuenta1") is not None
     assert stamp_holder(state_dir, "cuenta1", None) is False
+
+
+# -- the park that dries the pool (ADR 224) ------------------------------------
+
+
+def test_a_park_that_leaves_an_account_unparked_is_not_dry(tmp_path: Path) -> None:
+    assert park(str(tmp_path), "a", AccountState.COOLING_DOWN, pool=["a", "b"]) is False
+
+
+def test_the_park_of_the_last_unparked_account_dries_the_pool(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    park(d, "a", AccountState.COOLING_DOWN, pool=["a", "b"])
+    claim(d, "b", "T-1")  # busy is not parked: the pool is not dry yet
+
+    assert park(d, "b", AccountState.PRE_COOLDOWN, pool=["a", "b"]) is True
+    assert get_state(d, "b") == AccountState.PRE_COOLDOWN
+
+
+@pytest.mark.parametrize("again", PARKED)
+def test_parking_an_account_already_parked_is_not_a_second_dry(tmp_path: Path, again) -> None:
+    d = str(tmp_path)
+    assert park(d, "a", AccountState.COOLING_DOWN, pool=["a"]) is True
+    assert park(d, "a", again, pool=["a"]) is False
+    assert get_state(d, "a") == again
+
+
+def test_a_pool_that_came_back_and_is_parked_again_is_dry_again(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    assert park(d, "a", AccountState.COOLING_DOWN, pool=["a"]) is True
+    assert unpark(d, "a")
+    assert park(d, "a", AccountState.COOLING_DOWN, pool=["a"]) is True
+
+
+def test_a_park_with_no_pool_names_no_dry(tmp_path: Path) -> None:
+    assert park(str(tmp_path), "a", AccountState.COOLING_DOWN) is False
+
+
+def test_an_unreadable_neighbour_is_no_dry_and_the_park_stands(tmp_path: Path) -> None:
+    d = str(tmp_path)
+    (tmp_path / "b.json").write_text("{not json")
+
+    assert park(d, "a", AccountState.COOLING_DOWN, pool=["a", "b"]) is False
+    assert get_state(d, "a") == AccountState.COOLING_DOWN
