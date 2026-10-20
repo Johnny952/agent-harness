@@ -10254,3 +10254,133 @@ length.
   writes a turn takes the same constant or moves it.
 - Checking the account's quota state at the door: it changes before the
   claim, and ADR 173 decision 5 already refuses a parked account then.
+
+## ADR 187 — The thread's one write is `task_start`: a `start` queued inside a running turn whose message names the task
+
+**Status:** accepted (T-113, 2026-10-20). `docs/plans/main-thread.md`
+step 6, and `docs/plans/balancer.md` *How a front reaches all this* and
+*The conversational thread does not write code*. Builds on ADR 128,
+ADR 142, ADR 151, ADR 173 and ADR 181; supersedes nothing.
+
+**Context.** A turn (ADR 173) runs a read-only `claude -p` and passes no
+`--mcp-config`, so the thread can neither read the board nor start work
+except by asking the person to press *Start development*. The balancer
+plan gives it one way to have work done: an MCP tool that writes to the
+same action queue the console writes to, so the queue keeps one shape
+and the worker stays the only holder of the socket. `docs/charter.md`
+C-4 (and its 2026-10-15 amendment) lets the owner's word in the
+conversation authorize a run; C-12 *Amended* 2026-10-11 keeps a verdict,
+not a message, as what authorizes a run *from the board*. Neither lets
+the model start one on its own. The MCP endpoint's `?role=` is not a
+credential (ADR 125).
+
+**Decision.**
+
+1. *A role and a tool.* `dispatcher/board_mcp.py` gains
+   `THREAD = "thread"` and the row
+   `ROLE_TOOLS[THREAD] = ("board_list", "board_get", "task_start")`. No
+   other row changes: the operator and the arquitecto do not get
+   `task_start`, and the thread gets no other write. The board service
+   adds `THREAD` to `KNOWN_ROLES` (it is not a phase role, so
+   `dispatcher.dispatcher`'s phase flags never give it to a phase).
+2. *The turn is in the URL, not in the arguments.* `board_mcp.mcp_config`
+   takes a keyword `turn=None`; given, the query is
+   `?role=thread&turn=<action id>`. The worker writes it, so the model
+   cannot choose it. The service's `POST /mcp` answers the JSON-RPC
+   error it answers a bad query today (400, `INVALID_REQUEST`) when the
+   role is `thread` and `turn` is missing or does not match
+   `actions.ID_RE`, and when any other role carries `turn`. Every
+   request of the thread role carries it, `initialize` and `tools/list`
+   included.
+3. *`task_start`'s arguments.* `task_id` (string, required) and
+   `project` (string, optional), `additionalProperties: false`, checked
+   by the existing `_check`. A missing `project` is the thread record's
+   `project`; when that is empty too, `actions.create` refuses it
+   (`project must be a non-empty string`).
+4. *How it respects C-4: what it refuses.* Before it queues anything,
+   in this order, each a `ToolError` (an `isError` result the model
+   reads, never a JSON-RPC error):
+   - no `BOARD_ACTIONS_TOKEN` set in the service: `the action routes are
+     off: no BOARD_ACTIONS_TOKEN is set`. The token's absence turns the
+     queue's writers off, the tool with them;
+   - the `turn` names no action in `claimed/` whose `kind` is `turn`,
+     `status` `running` and `actor` `operator`: `no running turn <id>`.
+     A dispatch only happens while a turn a person sent is running, and
+     a queued, finished or forged turn id starts nothing;
+   - the running turn's `params.text` does not name `task_id` as a
+     whole token (case-insensitive; the characters on either side are
+     not letters, digits, `_` or `-`, so `T-1` does not match `T-10` or
+     `T-1-S1`): `task <id> is not named in the owner's message for this
+     turn`. The owner's word must name the task; "start the next one"
+     is answered by the model naming it and the owner saying so in the
+     next message. This is the mechanical half of "never by the model
+     on its own": the model cannot start a task the person did not
+     name in the message that is running. The other half — that the
+     message asked for a start and not, say, a status — is the model's
+     reading, as it was the host session's when it ran `dispatch
+     run-task` on the user's word, and the tool's description says to
+     call it only when the owner's message asks for that task to be
+     started.
+   - the thread record (from the turn's `params.thread`) is unreadable,
+     missing or archived: its message, as `http_turn` words it.
+5. *Same queue, same refusals.* Then it calls `actions.create(state_dir,
+   "start", project=…, task_id=…, params={"limit": None, "thread":
+   <thread id>, "turn": <turn action id>}, actor="thread", note=None,
+   ready=<the same Ready check http_start passes>)`. The Ready lambda
+   moves into one helper both callers use. `_validate_start`, the
+   `_ONE_PER_TASK` 409 and the readiness 409 answer as they answer the
+   console; an `ActionRefused` becomes a `ToolError` with its reason, an
+   `OSError` one with `the action queue could not be written: <exc>`.
+   The tool's result is the created record, as the start route's 201
+   body is.
+6. *What the queued record carries.* `actor: "thread"` (never
+   `operator`), `note: null`, `params.thread` and `params.turn`.
+   `actions._validate_start` takes `params` keys `limit`, `thread` and
+   `turn`, and ties them to the actor: with `actor == "thread"`,
+   `params.thread` must be a non-empty string and `params.turn` an
+   action id; with any other actor neither key may be present. The
+   worker validates on claim (`actions.claim`), so a record that breaks
+   this fails there too. The worker's `_start` is unchanged: it claims
+   and runs this record like the console's.
+7. *How the console finds the message.* `params.turn` is the id the
+   conversation log's `turn_start` line carries as `action` (ADR 173),
+   so a queued start links to the message that authorized it; the
+   `tool_use`/`tool_result` pair in the same log holds the created
+   record's `id` and `task_id`, so the dispatch line links to the
+   action and its task (`main-thread.md` *Decisions*, 5). Drawing that
+   link is a front task.
+8. *The turn gets the server.* `docker_exec.turn_command` takes
+   `mcp_config: str | None = None` and puts `--mcp-config <json>` after
+   `--permission-prompts none`, ahead of the variadic lists and `-p`.
+   `worker._turn`, when `cfg.board_mcp_url` is set, passes
+   `board_mcp.mcp_config(cfg.board_mcp_url, THREAD, turn=<the turn's
+   action id>)` and `allowed_tools = [*TURN_ALLOWED_TOOLS,
+   *board_mcp.allowed_tools(THREAD)]`. With `board_mcp_url: null` it
+   passes neither and the argv is today's. `TURN_DISALLOWED_TOOLS` and
+   the read-only `Bash` patterns do not change.
+9. *No cancel tool.* The thread cannot queue a `cancel`. A start it
+   queued is cancelled from the console's queue (ADR 163) or by the
+   owner asking and then pressing it there; a cancel tool would be a
+   second write to guard for no case the console does not cover.
+
+**Consequences.**
+- A turn's model sees `mcp__board__board_list`, `mcp__board__board_get`
+  and `mcp__board__task_start`, and can read the board in every turn.
+- One message may start several tasks if it names each; each is its own
+  start, its own Ready check and its own 409. There is no per-turn cap.
+- A start the thread queued spends quota exactly as a console start
+  does, with `params.limit` null as the console's is.
+- The `turn` query is a binding, not a credential, as `role` is not
+  (ADR 125): something on `ia_harness_net` that learns a running turn's
+  id can call the tool while that turn runs, still only for a task the
+  owner's message names and only with the token set.
+
+**Ruled out.**
+- Thread id and turn id as tool arguments: the model would choose them.
+- A start that waits for a console confirmation: the owner's word in the
+  conversation is a C-4 authorization, and the plan's dispatch is the
+  thread's own.
+- A new kind (`thread_start`): the worker, the queue screen and the
+  cancel path would each need it, and the record is a `start`.
+- A parallel creator in the board service: it would skip
+  `_validate_start`, `_ONE_PER_TASK` and the lock.
