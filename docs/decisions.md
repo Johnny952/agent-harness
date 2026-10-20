@@ -11900,3 +11900,73 @@ it.
 - Redacting query strings and fragments as well: it would be a second list of
   places a token may hide, and an SSH remote has neither, so nothing is lost by
   quoting none.
+## ADR NNN — `check` tells write access; the bootstrap stays out of the form
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 212 left two things of `docs/plans/projects.md` step 5 open:
+the form does not queue the project's bootstrap (*Decisions*, 4, step 3), and
+`check` tells whether the deploy key can read the remote, not whether it may
+push. A project whose `push_task_branch` is on needs the key's *Allow write
+access*; the person learns it is off only when the first task's push fails.
+
+**Decision.**
+1. After a remote has answered `ls-remote`, `check` tries a push that writes
+   nothing: in a scratch repository (`mktemp -d /tmp/ia-write-check.XXXXXX` in
+   the container, removed after), `git init`, one empty commit authored
+   `ia-harness`, then `git push --dry-run --porcelain -- <remote>
+   HEAD:refs/heads/ia-harness/write-check-<12 hex>` with the project's access
+   (`_remote_access`, as every fetch). A dry-run push opens `git-receive-pack`
+   on the remote, which is where GitHub refuses a read-only deploy key
+   ("The key you are authenticating with has been marked as read only", exit
+   128); it then stops before sending the pack, so no ref and no object reach
+   the remote. Measured on 2026-10-20 with git 2.43 against a local bare
+   repository behind a stand-in `ssh`: exit 0, the bare's refs and objects
+   unchanged; with a refusing `git-receive-pack`, exit 128. The test suite does
+   the same against a local bare.
+2. The result is `{reachable, detail, writable}`. `writable` is true when the
+   dry-run push exits 0, false when it does not (git's last words in
+   `detail`), null when the write was not tested: the remote did not answer,
+   the check could not be run, or the scratch repository could not be made.
+   `reachable` and `detail` keep their meaning, so a reader of ADR 212's shape
+   is unchanged; `detail` gains the push's sentence after a `;`. The check
+   takes no lock, as before: it writes only its own scratch directory.
+3. The form reads it against the record's `push_task_branch`: a refused push
+   is a warning to tick *Allow write access* and check again when the project
+   pushes (or when the record leaves it to the harness default), and an
+   expected answer when it does not. A null `writable`, and a check result
+   from a worker older than this ADR, read "write access was not tested".
+4. The bootstrap is not queued by the form, and no `bootstrap` action is
+   added. `bootstrap-project` (`dispatcher/cli.py`) spends no quota and runs
+   no phase: it only runs `mkdir -p <projects_root>/<slug>` in the container.
+   After a clone or an init that directory exists, so it would do nothing;
+   queued before them it would make a root-owned empty directory, and both
+   refuse a directory that exists (ADR 212, decision 3). Step 3 of
+   *Decisions*, 4 is subsumed by step 1.
+
+**Consequences.**
+- `writable: true` says the remote accepts this key at `git-receive-pack`. It
+  does not see branch protection or rulesets, which GitHub applies when a real
+  update of a protected ref arrives; the probe names a new branch no rule is
+  likely to match.
+- A push refused for another reason (the network dropping between the
+  `ls-remote` and the push) reads as `writable: false` with git's words in
+  `detail`; checking again tells which.
+- The probe was measured with the host's git 2.43; the agent image carries
+  2.39, where it was not run (no docker in this work). The flags it uses are
+  older than both.
+
+**Ruled out.**
+- `git ls-remote --upload-pack=git-receive-pack`: over SSH it asks the same
+  service, but over HTTPS git ignores the option and it reads, so a read-only
+  token would look writable.
+- `git push --dry-run --all` from the empty scratch repository: with no
+  branch it exits 1 before reaching the remote.
+- Deleting a branch that does not exist (`:refs/heads/<name>`): in the
+  measurement it exited 0 in a case the probe could not explain, so its exit
+  status was not trusted to tell a refusal.
+- A real push of a throwaway branch and its deletion: it writes the remote,
+  fires its webhooks and, on a failure between the two, leaves a branch.
+- A `bootstrap` action running `bootstrap-project`: it would only make the
+  directory clone and init make, and building something more under that name
+  would be a substitute for a bootstrap the harness does not have.

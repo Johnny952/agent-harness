@@ -6,7 +6,8 @@ a record holds, and the one command that reaches it is handed a
 `url.<bare>.insteadOf` rewrite (through GIT_CONFIG_COUNT), so it lands in a
 bare repository in the same tmp dir and could reach nothing on the network.
 The deploy key is a placeholder file in a tmp keys dir: `_remote_access` only
-asks that it is there, and the rewrite means ssh never runs.
+asks that it is there, and the rewrite means ssh never runs. The write check's
+scratch repository goes under tmp_path too, not the host's /tmp.
 """
 
 from __future__ import annotations
@@ -81,11 +82,16 @@ def git_host(tmp_path, monkeypatch):
         assert container == _CONTAINER
         commands.append(list(command))
         extra = dict(env or {})
-        if command[:1] == ["git"] and ("clone" in command or "ls-remote" in command):
+        if command[:1] == ["git"] and (
+            "clone" in command or "ls-remote" in command or "push" in command
+        ):
             extra.update(rewrite)
         return _run(command, workdir, env=extra, timeout=timeout)
 
     monkeypatch.setattr(docker_exec, "run_docker_exec", local_exec)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(docker_exec, "WRITE_CHECK_SCRATCH", str(scratch))
     # Not tmp_path/projects: that is where the hive root's records are.
     root = tmp_path / "checkouts"
     root.mkdir()
@@ -205,8 +211,69 @@ def test_check_lists_the_remotes_heads_without_a_clone(git_host):
 
     out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _URL, keys_dir=str(keys))
 
-    assert out.ok and out.detail == f"{_URL} answered with 1 branch(es)"
+    assert out.ok and out.detail.startswith(f"{_URL} answered with 1 branch(es); ")
     assert list(root.iterdir()) == []
+
+
+def test_check_tells_write_access_by_a_dry_run_push_that_leaves_no_trace(git_host, tmp_path):
+    root, keys, commands = git_host
+    _place_key(keys)
+    bare = tmp_path / "remote.git"
+    refs_before = _git(bare, "for-each-ref")
+    objects_before = sorted(p.name for p in (bare / "objects").rglob("*") if p.is_file())
+
+    out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _URL, keys_dir=str(keys))
+
+    assert out.ok and out.writable is True
+    assert out.detail == (
+        f"{_URL} answered with 1 branch(es); it accepted a dry-run push of a new branch"
+    )
+    push = next(c for c in commands if "push" in c)
+    assert push[push.index("push"):push.index("--")] == ["push", "--dry-run", "--porcelain"]
+    assert push[-2] == _URL
+    assert push[-1].startswith(f"HEAD:refs/heads/{docker_exec.WRITE_CHECK_BRANCH}-")
+    # Nothing reached the remote: no branch, no object.
+    assert _git(bare, "for-each-ref") == refs_before
+    assert sorted(p.name for p in (bare / "objects").rglob("*") if p.is_file()) == objects_before
+    # And the scratch repository is gone.
+    assert list((tmp_path / "scratch").iterdir()) == []
+
+
+def test_check_of_a_key_the_remote_will_not_take_a_push_from(git_host, tmp_path, monkeypatch):
+    root, keys, _ = git_host
+    _place_key(keys)
+    local_exec = docker_exec.run_docker_exec
+
+    def read_only(container, workdir, command, env=None, timeout=None):
+        # What GitHub answers a read-only deploy key at git-receive-pack.
+        if command[:1] == ["git"] and "push" in command:
+            return subprocess.CompletedProcess(
+                command, 128, "",
+                "ERROR: The key you are authenticating with has been marked as read only.\n"
+                "fatal: Could not read from remote repository.\n",
+            )
+        return local_exec(container, workdir, command, env=env, timeout=timeout)
+
+    monkeypatch.setattr(docker_exec, "run_docker_exec", read_only)
+
+    out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _URL, keys_dir=str(keys))
+
+    assert out.ok and out.writable is False
+    assert "it refused a dry-run push: ERROR: The key you are authenticating with" in out.detail
+    assert list((tmp_path / "scratch").iterdir()) == []
+
+
+def test_check_that_cannot_make_its_scratch_repository_leaves_write_untested(
+    git_host, monkeypatch,
+):
+    root, keys, _ = git_host
+    _place_key(keys)
+    monkeypatch.setattr(docker_exec, "WRITE_CHECK_SCRATCH", "/nonexistent-ia-scratch")
+
+    out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _URL, keys_dir=str(keys))
+
+    assert out.ok and out.writable is None
+    assert "write not checked: no scratch directory" in out.detail
 
 
 def test_check_without_a_key_says_so(git_host):
@@ -215,15 +282,18 @@ def test_check_without_a_key_says_so(git_host):
     out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _URL, keys_dir=str(keys))
 
     assert not out.ok and out.detail.startswith("not checked: ")
+    assert out.writable is None
 
 
 def test_check_of_a_remote_that_does_not_answer(git_host):
-    root, keys, _ = git_host
+    root, keys, commands = git_host
     _place_key(keys)
 
     out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _GONE, keys_dir=str(keys))
 
     assert not out.ok and out.detail.startswith(f"{_GONE} did not answer: ")
+    assert out.writable is None
+    assert not any("push" in c for c in commands)
 
 
 # ---- the dispatcher's wrappers ----------------------------------------------
@@ -358,8 +428,11 @@ def test_a_check_is_done_either_way_and_says_whether_it_answered(cfg, worker):
     after = _run_action(cfg, worker, "check", "myproj")
 
     assert before["status"] == "done" and before["result"]["reachable"] is False
+    assert before["result"]["writable"] is None
     assert after["status"] == "done" and after["result"] == {
-        "reachable": True, "detail": f"{_URL} answered with 1 branch(es)",
+        "reachable": True,
+        "detail": f"{_URL} answered with 1 branch(es); it accepted a dry-run push of a new branch",
+        "writable": True,
     }
 
 

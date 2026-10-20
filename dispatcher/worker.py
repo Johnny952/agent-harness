@@ -742,7 +742,9 @@ def _check(worker: Worker, record: dict, _cancelled=None) -> None:
 
     Done either way, with `reachable` saying which: a remote that does not
     answer yet is the expected answer before the key is pasted on GitHub, not
-    a failure of the check.
+    a failure of the check. `writable` is whether the remote took a dry-run
+    push from the key (ADR NNN), `None` when that was not tried because the
+    read did not answer.
     """
     project = _setup_record(worker, record)
     if project is None:
@@ -753,7 +755,7 @@ def _check(worker: Worker, record: dict, _cancelled=None) -> None:
         return
     outcome = core.check_project_remote(worker.cfg, project.slug, project.remote)
     actions.finish(worker.state_dir, record["id"], "done", result={
-        "reachable": outcome.ok, "detail": outcome.detail,
+        "reachable": outcome.ok, "detail": outcome.detail, "writable": outcome.writable,
     })
 
 

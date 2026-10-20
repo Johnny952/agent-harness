@@ -159,6 +159,54 @@ describe("New project", () => {
     ]);
   });
 
+  async function checked(settings: ProjectRecord["settings"], result: Record<string, unknown>) {
+    await renderRoute(Route, "/projects/new", {
+      "POST /api/projects": { bare: project({ settings }), status: 201 },
+      "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
+      "POST /api/projects/shop/check": { bare: action("a-chk", "check"), status: 201 },
+      "/api/actions": [
+        queue(),
+        queue({ done: [KEY_DONE] }),
+        queue({ done: [KEY_DONE, action("a-chk", "check", { status: "done", result })] }),
+      ],
+    });
+    await fill("shop", REMOTE);
+    fireEvent.click(await screen.findByRole("button", { name: "Check" }));
+  }
+
+  it("Check says the remote would take a push when the dry-run push was accepted", async () => {
+    await checked(
+      { push_task_branch: true },
+      { reachable: true, writable: true, detail: "answered with 1 branch(es)" },
+    );
+    expect(
+      await screen.findByText(/answers this key and would take a push from it\. answered with 1/),
+    ).toBeTruthy();
+  });
+
+  it("Check warns a pushing project whose key the remote will not take a push from", async () => {
+    await checked(
+      { push_task_branch: true },
+      { reachable: true, writable: false, detail: "it refused a dry-run push: read only" },
+    );
+    expect(await screen.findByText(/refuses a push from it/)).toBeTruthy();
+    expect(screen.getByText(/tick “Allow write access” on the deploy key/)).toBeTruthy();
+  });
+
+  it("Check reads a refused push as expected for a project that does not push", async () => {
+    await checked(
+      { push_task_branch: false },
+      { reachable: true, writable: false, detail: "it refused a dry-run push: read only" },
+    );
+    expect(await screen.findByText(/read only: this project does not push/)).toBeTruthy();
+    expect(screen.queryByText(/refuses a push from it/)).toBeNull();
+  });
+
+  it("Check with no write answer says write access was not tested", async () => {
+    await checked({}, { reachable: true, writable: null, detail: "answered" });
+    expect(await screen.findByText(/write access was not tested/)).toBeTruthy();
+  });
+
   it("an empty repository has no remote and queues an init, no key", async () => {
     const { sent } = await renderRoute(Route, "/projects/new", {
       "POST /api/projects": { bare: project({ remote: null }), status: 201 },

@@ -162,7 +162,8 @@ had before this, which `dispatch migrate` writes once
 - **New project** is a short form that queues one action at a time:
   1. *Clone* a remote, or *create* an empty repository;
   2. make its key and show the public half (*Decisions*, 2), and check it;
-  3. run the existing `bootstrap`.
+  3. run the existing `bootstrap`. (Subsumed by step 1, ADR 214: the
+     bootstrap only makes the project's directory, which clone and init make.)
 
   Each step shows its own result, so a key GitHub refuses stops the flow at
   step 2 rather than failing the bootstrap.
@@ -288,12 +289,19 @@ module; steps 2, 4 and 5 need its queue and worker.
    (`docs/decisions.md` ADR 212): the four action kinds and
    `POST /api/projects/<slug>/{clone,init,keygen,check}`, forwarded by the
    console, and `/projects/new`, linked from the sidebar. The form puts the
-   key before the clone (a record's remote is SSH only). Open: the form does
-   not queue the project's bootstrap (step 3); `check` tells read access, not
-   write; the worker writes the key at `cfg.project_keys_dir`, as the CLI does;
+   key before the clone (a record's remote is SSH only). The rest of the flow
+   is built the same day (ADR 214): `check` tells write access too, by a
+   dry-run push of a throwaway branch from an empty scratch repository, with
+   `writable` beside `{reachable, detail}`, and the form says what that means
+   for the record's `push_task_branch`. The bootstrap (*Decisions*, 4, step 3)
+   is not queued and needs no action: `bootstrap-project` only makes
+   `<projects_root>/<slug>`, which clone and init already do, and run before
+   them it would make them refuse. Open: the write check does not see branch
+   protection, which GitHub applies to a real update of a protected branch
+   only; the worker writes the key at `cfg.project_keys_dir`, as the CLI does;
    the form finds an outcome only among the queue's newest twenty finished and
-   cannot be resumed after a reload; a new project is in the sidebar only once a
-   task names it, until the sidebar reads the records.
+   cannot be resumed after a reload. (A new project is in the sidebar as soon
+   as its record is, since the sidebar reads the records, ADR 209.)
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front
    task. Built by T-115 (2026-10-20, ADR 198): one derivation,
    `front/src/lib/slots.ts`, drawn in the dock and in the *Start development*

@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
@@ -1213,11 +1214,15 @@ class SetupOutcome:
     """What became of a new project's clone, init or remote check (ADR 212).
 
     `ok` is whether it did what it was asked; `detail` is the one line that
-    says what happened, in git's words when git refused.
+    says what happened, in git's words when git refused. `writable` is the
+    check's alone (ADR NNN): whether the remote took a dry-run push, and
+    `None` when that was not tried, which is every clone and init and a check
+    whose read already failed.
     """
 
     ok: bool
     detail: str
+    writable: bool | None = None
 
 
 def _new_project_dir(container: str, projects_root: str, slug: str) -> str | SetupOutcome:
@@ -1334,14 +1339,17 @@ def check_remote(
     *,
     credentials_path: str = GIT_CREDENTIALS_PATH,
     keys_dir: str = PROJECT_KEYS_DIR,
+    scratch_root: str | None = None,
+    author_name: str = "ia-harness",
+    author_email: str = "ia-harness@ia-harness.invalid",
     timeout: float | None = None,
 ) -> SetupOutcome:
-    """Whether `remote_url` answers the project's key: `git ls-remote --heads`.
+    """Whether `remote_url` answers the project's key, and whether it may push.
 
     Run in `projects_root`, so it needs no clone: it is the step between
-    pasting the deploy key on GitHub and cloning with it. It lists heads and
-    reads nothing else; whether the key may also push is not something a read
-    can tell, and is not claimed.
+    pasting the deploy key on GitHub and cloning with it. The read is `git
+    ls-remote --heads`; the write is `_probe_push`, tried only once the read
+    answered (ADR NNN), so `writable` is `None` whenever `ok` is false.
     """
     _require_non_empty(projects_root=projects_root, slug=slug)
     access = _remote_access(
@@ -1360,7 +1368,85 @@ def check_remote(
             False, f"{remote_url} did not answer: {_output_tail(listed)}{access.missing}"
         )
     heads = len([line for line in listed.stdout.splitlines() if line.strip()])
-    return SetupOutcome(True, f"{remote_url} answered with {heads} branch(es)")
+    read = f"{remote_url} answered with {heads} branch(es)"
+    writable, said = _probe_push(
+        container, remote_url, access, scratch_root or WRITE_CHECK_SCRATCH,
+        author_name=author_name, author_email=author_email, timeout=timeout,
+    )
+    return SetupOutcome(True, f"{read}; {said}", writable)
+
+
+#: The branch a write check names in its dry-run push. Never created: a
+#: dry-run sends no pack and updates no ref, so the name only has to be one
+#: nobody has, which is why each check adds a random suffix.
+WRITE_CHECK_BRANCH = "ia-harness/write-check"
+
+#: Where, in the container, the write check makes its throwaway repository
+#: when the caller names no `scratch_root`: outside `projects_root`, so a probe
+#: left behind by a killed check is never mistaken for a project.
+WRITE_CHECK_SCRATCH = "/tmp"
+
+
+def _probe_push(
+    container: str,
+    remote_url: str,
+    access: _RemoteAccess,
+    scratch_root: str,
+    *,
+    author_name: str,
+    author_email: str,
+    timeout: float | None,
+) -> tuple[bool | None, str]:
+    """`git push --dry-run` of an empty commit to a branch the remote does not have.
+
+    What it proves, measured against git over SSH (ADR NNN): a dry-run push
+    still connects to `git-receive-pack`, and that is where GitHub refuses a
+    read-only deploy key ("The key you are authenticating with has been marked
+    as read only"), before any ref is looked at. Accepted, the remote said it
+    would take the new branch; nothing was sent, since a dry-run uploads no
+    pack and updates no ref. Over https:// the same command asks for the
+    receive-pack service, which GitHub grants only to a token that may write.
+    It does not see branch protection: GitHub checks that per ref, on a real
+    update, and this one names a new branch.
+
+    The commit lives in a throwaway repository under `scratch_root`, never the
+    project's directory, which a check runs before there is one; it is removed
+    either way. `None` with the reason when the probe could not be set up.
+    """
+    made = run_docker_exec(
+        container, "/", ["mktemp", "-d", f"{scratch_root}/ia-write-check.XXXXXX"],
+        env=_GIT_ENV,
+    )
+    scratch = made.stdout.strip()
+    if made.returncode != 0 or not scratch:
+        return None, f"write not checked: no scratch directory: {_output_tail(made)}"
+    try:
+        # The author in the environment, as init_project does, so no config in
+        # the container decides whether the commit can be made.
+        author = {
+            "GIT_AUTHOR_NAME": author_name, "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": author_name, "GIT_COMMITTER_EMAIL": author_email,
+        }
+        for step in (
+            ["git", "init", "--quiet"],
+            ["git", "commit", "--quiet", "--allow-empty", "-m", "ia-harness write check"],
+        ):
+            proc = run_docker_exec(container, scratch, step, env={**_GIT_ENV, **author})
+            if proc.returncode != 0:
+                return None, f"write not checked: git {step[1]} failed: {_output_tail(proc)}"
+        branch = f"{WRITE_CHECK_BRANCH}-{uuid.uuid4().hex[:12]}"
+        pushed = run_docker_exec(
+            container, scratch,
+            ["git", *access.git_args, "push", "--dry-run", "--porcelain", "--",
+             remote_url, f"HEAD:refs/heads/{branch}"],
+            env=access.env,
+            timeout=timeout,
+        )
+        if pushed.returncode != 0:
+            return False, f"it refused a dry-run push: {_output_tail(pushed)}"
+        return True, "it accepted a dry-run push of a new branch"
+    finally:
+        run_docker_exec(container, "/", ["rm", "-rf", "--", scratch], env=_GIT_ENV)
 
 
 PUSHED = "pushed"
