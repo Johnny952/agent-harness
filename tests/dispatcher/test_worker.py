@@ -521,6 +521,7 @@ def test_a_fresh_thread_gets_its_session_recorded_then_resumed(cfg, worker, thre
 
 
 def test_the_command_is_read_only_by_flags_on_the_threads_account(cfg, worker, thread, execs):
+    cfg.board_mcp_url = None
     turn(cfg, thread["id"], "what is in here")
     worker.tick()
     worker.join()
@@ -643,6 +644,36 @@ def test_two_turns_on_one_thread_never_run_at_once(cfg, worker, thread, execs):
     execs.proc.block.set()
     worker.join()
     assert where(cfg, first["id"])[1]["status"] in ("done", "failed")
+
+
+def test_a_turn_gets_the_board_server_for_the_thread_role_and_its_tool_names(
+    cfg, worker, thread, execs
+):
+    cfg.board_mcp_url = "http://board-service:8792/mcp"
+    t = turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    command = execs.opened[0][2]
+    server = json.loads(command[command.index("--mcp-config") + 1])["mcpServers"]["board"]
+    assert server["url"] == f"http://board-service:8792/mcp?role=thread&turn={t['id']}"
+    allowed = command.index("--allowed-tools")
+    names = list(worker_mod.TURN_ALLOWED_TOOLS) + [
+        "mcp__board__board_list", "mcp__board__board_get", "mcp__board__task_start",
+    ]
+    assert command[allowed + 1:allowed + 1 + len(names)] == names
+    flag = command.index("--disallowed-tools")
+    assert command[flag + 1:flag + 4] == ["Write", "Edit", "NotebookEdit"]
+    assert command.index("--mcp-config") < command.index("-p")
+
+
+def test_a_turn_with_no_board_url_gets_no_server_and_no_tool_names(cfg, worker, thread, execs):
+    cfg.board_mcp_url = None
+    turn(cfg, thread["id"])
+    worker.tick()
+    worker.join()
+    command = execs.opened[0][2]
+    assert "--mcp-config" not in command
+    assert not any(part.startswith("mcp__") for part in command)
 
 
 # ---- command_verdict --------------------------------------------------------

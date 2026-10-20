@@ -342,3 +342,42 @@ def test_finish_moves_to_done_with_result(tmp_path):
     rec = read(tmp_path, "done", aid)
     assert rec["status"] == "done" and rec["result"] == {"ok": 1}
     assert rec["finished_at"] and names(tmp_path, "claimed") == []
+
+
+A_TURN = "a-20260101T000000000000Z-abcd"
+
+
+def test_a_start_queued_by_the_thread_carries_its_thread_and_turn(tmp_path):
+    params = {"limit": None, "thread": "th-1", "turn": A_TURN}
+    rec = create(tmp_path, "start", **START, params=params, actor="thread")
+    assert rec["params"] == params and rec["actor"] == "thread"
+    assert actions.claim(tmp_path, rec["id"])["status"] == "running"
+
+
+@pytest.mark.parametrize(
+    "actor, params",
+    [
+        ("thread", {"limit": None}),
+        ("thread", {"limit": None, "thread": "th-1"}),
+        ("thread", {"limit": None, "thread": "", "turn": A_TURN}),
+        ("thread", {"limit": None, "thread": "th-1", "turn": "nope"}),
+        ("operator", {"limit": None, "thread": "th-1", "turn": A_TURN}),
+        ("operator", {"limit": None, "turn": A_TURN}),
+    ],
+)
+def test_the_threads_keys_are_tied_to_the_actor(tmp_path, actor, params):
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, "start", **START, params=params, actor=actor)
+    assert err.value.status == 400
+
+
+def test_find_looks_in_every_state_and_only_for_an_action_id(tmp_path):
+    aid = create(tmp_path, "start", **START)["id"]
+    assert actions.find(tmp_path, aid).state == "pending"
+    actions.claim(tmp_path, aid)
+    assert actions.find(tmp_path, aid).state == "claimed"
+    actions.finish(tmp_path, aid, "done")
+    found = actions.find(tmp_path, aid)
+    assert found.state == "done" and found.record["id"] == aid
+    assert actions.find(tmp_path, A_TURN) is None
+    assert actions.find(tmp_path, "../x") is None

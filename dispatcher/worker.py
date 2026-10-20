@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from dispatcher import (
-    actions, command_run, context_transfer, docker_exec, state_machine, tasks, threads,
+    actions, board_mcp, command_run, context_transfer, docker_exec, state_machine, tasks, threads,
 )
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
@@ -422,10 +422,17 @@ def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     resumed = segment.get("session_id")
     project = thread.get("project")
     workdir = os.path.join(cfg.projects_root, project) if project else cfg.projects_root
+    # The board server, bound to this turn, when the config has one (ADR 187, 8).
+    mcp_config = None
+    allowed_tools = TURN_ALLOWED_TOOLS
+    if cfg.board_mcp_url:
+        mcp_config = board_mcp.mcp_config(cfg.board_mcp_url, board_mcp.THREAD, turn=aid)
+        allowed_tools = (*TURN_ALLOWED_TOOLS, *board_mcp.allowed_tools(board_mcp.THREAD))
     command = docker_exec.turn_command(
         text, resume_session_id=resumed, model=thread["model"], effort=thread["effort"],
-        permission_mode=TURN_PERMISSION_MODE, allowed_tools=TURN_ALLOWED_TOOLS,
+        permission_mode=TURN_PERMISSION_MODE, allowed_tools=allowed_tools,
         disallowed_tools=TURN_DISALLOWED_TOOLS, timeout_seconds=TURN_TIMEOUT_SECONDS,
+        mcp_config=mcp_config,
     )
 
     def log(line) -> None:

@@ -40,7 +40,7 @@ from flask import Flask, jsonify, request
 from dispatcher import actions, context_transfer
 from dispatcher import tasks as task_store
 from dispatcher import threads as thread_store
-from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS
+from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS, THREAD
 from dispatcher.config import PHASE_ROLES, load_config
 
 CONFIG_PATH = "/app/config.yaml"
@@ -50,7 +50,7 @@ ACTIONS_TOKEN_ENV = "BOARD_ACTIONS_TOKEN"
 #: Every role the service knows. A role outside it is a misspelt URL, answered
 #: 400, rather than a role that silently gets no tools. `OPERATOR` is the
 #: operator's session; every other caller is a phase, named by its role.
-KNOWN_ROLES = frozenset(PHASE_ROLES) | {OPERATOR}
+KNOWN_ROLES = frozenset(PHASE_ROLES) | {OPERATOR, THREAD}
 
 # `ROLE_TOOLS`, section 6's table of read rows, is imported from
 # `dispatcher/board_mcp.py`: the dispatcher reads the same table to decide
@@ -347,6 +347,65 @@ def backlog_accept(hive_dir: str, role: str, task_id: str, **arguments) -> dict:
     return _writing(task_store.accept, hive_dir, task_id, **arguments)
 
 
+def _ready_check(hive_dir: str):
+    """The `ready(project, task_id)` a `start` is created with, for the console and the thread."""
+    return lambda _project, tid: tid in task_store.ready_order(
+        task_store.read_all_tasks(hive_dir)
+    )
+
+
+def _names_task(text: str, task_id: str) -> bool:
+    """Whether `text` has `task_id` as a whole token, in any case (ADR 187, 4).
+
+    The characters on either side are not letters, digits, `_` or `-`, so `T-1`
+    is not in `T-10` or `T-1-S1`.
+    """
+    pattern = rf"(?<![A-Za-z0-9_-]){re.escape(task_id)}(?![A-Za-z0-9_-])"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+def task_start(
+    hive_dir: str, state_dir: str, token: str, turn: str | None, task_id: str,
+    project: str | None = None,
+) -> dict:
+    """The thread's one write (ADR 187): queue a `start` for `task_id`.
+
+    Only inside a running turn a person sent, and only for a task that turn's
+    message names; the rest is `actions.create`, the console's own path.
+    """
+    if not token:
+        raise ToolError("the action routes are off: no BOARD_ACTIONS_TOKEN is set")
+    entry = actions.find(state_dir, turn) if turn else None
+    running = entry.record if entry is not None and entry.state == actions.CLAIMED else None
+    if (
+        running is None or running.get("kind") != "turn"
+        or running.get("status") != "running" or running.get("actor") != OPERATOR
+    ):
+        raise ToolError(f"no running turn {turn}")
+    params = running.get("params") or {}
+    text, thread_id = params.get("text"), params.get("thread")
+    if not isinstance(text, str) or not _names_task(text, task_id):
+        raise ToolError(
+            f"task {task_id} is not named in the owner's message for this turn"
+        )
+    try:
+        thread = thread_store.read_thread(hive_dir, thread_id)
+    except (thread_store.NoThreadError, thread_store.UnreadableThreadError) as exc:
+        raise ToolError(str(exc)) from None
+    if thread.get("status") == "archived":
+        raise ToolError(f"thread {thread_id} is archived")
+    try:
+        return actions.create(
+            state_dir, "start", project=project or thread.get("project"), task_id=task_id,
+            params={"limit": None, "thread": thread_id, "turn": turn},
+            actor=THREAD, note=None, ready=_ready_check(hive_dir),
+        )
+    except actions.ActionRefused as exc:
+        raise ToolError(exc.reason) from None
+    except OSError as exc:
+        raise ToolError(f"the action queue could not be written: {exc}") from None
+
+
 # --- what MCP is told about the tools ---------------------------------------
 
 _STRING = {"type": "string"}
@@ -521,6 +580,29 @@ TOOLS: dict[str, dict] = {
         },
         "annotations": {**_WRITES, "idempotentHint": True},
     },
+    "task_start": {
+        "name": "task_start",
+        "description": (
+            "Queue a start of development for one task, for the dispatcher to run. Call it "
+            "only when the owner's message in this turn asks for this task to be started, "
+            "and name the task by the id the owner wrote: the call is refused for a task "
+            "that message does not name, a task not in Ready, or one already queued. "
+            "Never start work on your own judgment."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": _STRING,
+                "project": {
+                    **_STRING,
+                    "description": "the project's name; the thread's own when left out",
+                },
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+        "annotations": {**_WRITES, "idempotentHint": False},
+    },
 }
 
 _WRITERS = {
@@ -580,10 +662,13 @@ def _check(schema: dict, value, where: str, top: bool = False) -> None:
                 _check(properties[key], item, key if top else f"{where}.{key}")
 
 
-def _call(hive_dir: str, role: str, name: str, arguments: dict) -> dict:
+def _call(
+    hive_dir: str, role: str, name: str, arguments: dict, queue: tuple | None = None
+) -> dict:
     """Run one tool on checked arguments. `ToolError` for arguments the tool does not take.
 
-    An argument given as null is one left out.
+    An argument given as null is one left out. `queue` is `(state_dir, token,
+    turn)`, what `task_start` writes the action queue with.
     """
     _check(TOOLS[name]["inputSchema"], arguments, name, top=True)
     arguments = {key: value for key, value in arguments.items() if value is not None}
@@ -591,6 +676,8 @@ def _call(hive_dir: str, role: str, name: str, arguments: dict) -> dict:
         return board_list(hive_dir, **arguments)
     if name == "board_get":
         return board_get(hive_dir, arguments["task_id"])
+    if name == "task_start":
+        return task_start(hive_dir, *queue, **arguments)
     return _WRITERS[name](hive_dir, role, **arguments)
 
 
@@ -629,9 +716,18 @@ def create_app(config_path: str) -> Flask:
             return _rpc_error(
                 None, INVALID_REQUEST, f"?role= must be one of {known}, not {role!r}", 400
             )
-        unknown = sorted(set(request.args) - {"role"})
+        unknown = sorted(set(request.args) - {"role", "turn"})
         if unknown:
             return _rpc_error(None, INVALID_REQUEST, f"unknown query parameter {unknown[0]!r}", 400)
+        # The thread's turn is bound in the URL by the worker (ADR 187, 2): the
+        # thread always carries one, and no other role may.
+        turn = request.args.get("turn")
+        if role == THREAD and not (turn and actions.ID_RE.fullmatch(turn)):
+            return _rpc_error(
+                None, INVALID_REQUEST, "?turn= must be the running turn's action id for role thread", 400
+            )
+        if role != THREAD and turn is not None:
+            return _rpc_error(None, INVALID_REQUEST, "unknown query parameter 'turn'", 400)
         message = request.get_json(silent=True)
         if message is None:
             return _rpc_error(None, PARSE_ERROR, "the body is not JSON", 400)
@@ -644,7 +740,7 @@ def create_app(config_path: str) -> Flask:
             # A notification (`notifications/initialized` and the rest):
             # accepted, nothing to answer.
             return "", 202
-        return _dispatch(hive_dir, role, message)
+        return _dispatch(hive_dir, role, message, (state_dir, actions_token, turn))
 
     # The console's writes (section 6: "the console calls the same functions
     # over HTTP"), as the operator, whose role table they follow. The same
@@ -695,10 +791,7 @@ def create_app(config_path: str) -> Flask:
                 raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
             return actions.create(
                 state_dir, "start", project=body.get("project"), task_id=task_id,
-                note=body.get("note"), actor="operator",
-                ready=lambda _project, tid: tid in task_store.ready_order(
-                    task_store.read_all_tasks(hive_dir)
-                ),
+                note=body.get("note"), actor="operator", ready=_ready_check(hive_dir),
             )
 
         return _action(actions_token, make)
@@ -875,7 +968,7 @@ def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 2
     return jsonify(result), created_status if made else 200
 
 
-def _dispatch(hive_dir: str, role: str, message: dict):
+def _dispatch(hive_dir: str, role: str, message: dict, queue: tuple | None = None):
     msg_id = message["id"]
     method = message["method"]
     params = message.get("params") or {}
@@ -906,7 +999,7 @@ def _dispatch(hive_dir: str, role: str, message: dict):
         if not isinstance(arguments, dict):
             return _rpc_error(msg_id, INVALID_PARAMS, "arguments must be an object")
         try:
-            result = _call(hive_dir, role, name, arguments)
+            result = _call(hive_dir, role, name, arguments, queue)
         except ToolError as exc:
             return _rpc_result(
                 msg_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True}

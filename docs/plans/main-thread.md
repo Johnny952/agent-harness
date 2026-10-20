@@ -12,7 +12,8 @@ as a whole; step 1 is built: the thread records and the model list by T-109
 (2026-10-19), the primary override the same day (ADR 176); step 2 is built by
 T-110 (2026-10-19, ADR 173); step 4, the screen read-only, is built by T-111
 (2026-10-19, ADR 184); step 5's board-service route is built by T-112
-(2026-10-19, ADR 181), and the composer and stop button are pending.
+(2026-10-19, ADR 181), and the composer and stop button are pending; step 6
+is built by T-113 (2026-10-20, ADR 187).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -274,7 +275,11 @@ and worker.
    `POST /api/threads/<id>/turns` is built (ADR 181): a message mid-turn
    queues and stop is the cancel route; the composer and the stop button wait
    for a front task.
-6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`).
+6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`). Built
+   by T-113 (2026-10-20, ADR 187): the thread role's `task_start` queues a
+   `start` inside a running turn whose message names the task, and the turn
+   gets the board server; there is no cancel tool. The link from a dispatch
+   line to its action is a front task.
 7. The execution threads and the selector's slots (*Decisions*, 8). They read
    what the phases already write, so they need board Phase 5's transport and
    `projects.md`'s slots, not the composer. *Talk about this task* comes with

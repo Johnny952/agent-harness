@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from dispatcher.board_mcp import THREAD
 from dispatcher.tasks import MAX_COMMENT_CHARS
 
 ACTIONS_DIR = "actions"
@@ -124,9 +125,21 @@ def _both_required(record: dict) -> list[str]:
 def _validate_start(record: dict) -> list[str]:
     problems = _both_required(record)
     params = record["params"]
-    problems += _extra_keys(params, ("limit",))
+    problems += _extra_keys(params, ("limit", "thread", "turn"))
     if params.get("limit") is not None:
         problems.append("params.limit must be null")
+    # A start queued by the thread's tool carries the thread and the turn that
+    # authorized it; any other actor carries neither (ADR 187, 6).
+    if record.get("actor") == THREAD:
+        if not _is_text(params.get("thread")):
+            problems.append("params.thread must be a non-empty string")
+        turn = params.get("turn")
+        if not isinstance(turn, str) or not ID_RE.fullmatch(turn):
+            problems.append("params.turn must be an action id")
+    else:
+        for key in ("thread", "turn"):
+            if key in params:
+                problems.append(f"params.{key} is only for a start queued by the thread")
     return problems
 
 
@@ -381,6 +394,26 @@ def _find(root: Path, action_id: str, states) -> Path | None:
         path = root / state / f"{action_id}.json"
         if path.exists():
             return path
+    return None
+
+
+def find(state_dir, action_id: str) -> Entry | None:
+    """The record of `action_id` in pending, claimed or done, or None.
+
+    None also when the file is unreadable; the queue's own warnings are
+    `read_all`'s. An id that is not an action id is never looked up, so a
+    caller's text cannot name a path.
+    """
+    if not isinstance(action_id, str) or not ID_RE.fullmatch(action_id):
+        return None
+    root = actions_dir(state_dir)
+    for state in (PENDING, CLAIMED, DONE):
+        try:
+            return Entry(state, _load(root / state / f"{action_id}.json"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return None
     return None
 
 

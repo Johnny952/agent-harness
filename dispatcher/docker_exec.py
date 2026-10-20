@@ -217,10 +217,12 @@ def turn_command(
     allowed_tools: Sequence[str],
     disallowed_tools: Sequence[str],
     timeout_seconds: int,
+    mcp_config: str | None = None,
 ) -> list[str]:
     """The argv of one conversation turn (docs/decisions.md ADR 173, 3): a
     streamed `claude -p`, no-code by flags. Every flag is restated on a
-    `--resume`; nothing is inherited from the session."""
+    `--resume`; nothing is inherited from the session. `mcp_config` is the
+    board server for the thread role (ADR 187, 8)."""
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     command = ["claude"]
@@ -229,6 +231,8 @@ def turn_command(
     command += ["--model", model, "--effort", effort]
     command += ["--permission-mode", permission_mode, "--permission-prompts", "none"]
     # Variadic like exec_claude's lists: they sit ahead of `-p`.
+    if mcp_config:
+        command += ["--mcp-config", mcp_config]
     command += ["--allowed-tools", *allowed_tools]
     command += ["--disallowed-tools", *disallowed_tools]
     # The person's text goes last, after `--`, so a message that starts with
