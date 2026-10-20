@@ -270,8 +270,12 @@ module; steps 2, 4 and 5 need its queue and worker.
    merge, and the epic's spending limit in measured tokens, are built
    2026-10-20 (`docs/decisions.md` ADR 218): each merge record queues the
    started epics' tasks now in *Ready*, and an epic at its limit shows
-   *Paused: limit reached* with *Resume*. Still open: the limit prefilled
-   from past cycles, the pool's floor, and the limit's notification.
+   *Paused: limit reached* with *Resume*. The limit prefilled from past
+   cycles is built the same day (`docs/decisions.md` ADR NNN): the epic's
+   merged tasks' mean measured tokens times the tasks still to land, plus a
+   paused run's spend, and blank when none was measured. Still open: the
+   pool's floor, a design decision on what the pool's free share counts, and
+   the limit's notification, which is `notifications.md`'s.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR 208): the
@@ -291,11 +295,13 @@ module; steps 2, 4 and 5 need its queue and worker.
    reads the api already served: running is a board card `in_progress` and
    not merged, waiting a task with a `start` pending or claimed that is not
    running, both drawn only above zero and not at all when their read
-   failed; *Show archived* lists the archived records, marked. Still open:
-   the counts are only as fresh as the board's polling, a waiting start's
-   reason (`waiting`: account or project) is not shown per project, the
-   toggle is not kept across a reload, and the tasks-fallback list has no
-   archived entries to show. *New project* is step 5 (ADR 212).
+   failed; *Show archived* lists the archived records, marked. A waiting
+   start's reason per project and the toggle kept across a reload are built
+   the same day (`docs/decisions.md` ADR NNN): the waiting mark's title names
+   how many wait for an account and for the project, from the worker's
+   `waiting` on the pending record, and the toggle is kept in this browser.
+   Still open: the counts are only as fresh as the board's polling, and the
+   tasks-fallback list has no archived entries to show. *New project* is step 5 (ADR 212).
 5. **New project and the key from the console**: the `clone`, `init`,
    `keygen` and `check` actions in the worker, and the form. Built 2026-10-20
    (`docs/decisions.md` ADR 212): the four action kinds and

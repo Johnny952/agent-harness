@@ -12285,3 +12285,54 @@ approve, request-changes or resolve verdict.
   write.
 - A new comment route: the board-service already takes the anchor, all
   three fields or none.
+
+## ADR NNN — The epic's limit is prefilled from its past cycles, and the sidebar keeps its toggle and names a waiting start's reason
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 218 left *Start epic*'s spending limit blank, though
+`docs/plans/board-service.md` (*Per epic*) has it prefilled from past
+cycles. ADR 217 left two open points on the sidebar
+(`docs/plans/projects.md`, step 4): *Show archived* resets on a reload, and
+a waiting start's reason is not shown per project. The reason is already
+served: the worker writes `waiting` (`account` or `project`, ADR 204) on a
+pending start record, and `GET /api/actions` returns it, so no api change
+is needed.
+
+**Decision.**
+1. The limit field is prefilled with the mean measured tokens (ADR 79, the
+   four fields summed) of the epic's merged tasks that have a usage log,
+   times the tasks still to land; for a paused run, plus what the run has
+   spent, since the limit counts the run's whole spend. With no merged task
+   measured the field stays blank. A hint under the field says where the
+   number came from, and the prefill stops once the user types.
+2. The source is the epic's own merged tasks, read through the usage route
+   the task page reads. The project's median over all its cycles waits on
+   `token-economy.md` P4.
+3. *Show archived* is kept per viewer in `localStorage`
+   (`ia-harness.show-archived`), read and written in try/catch as the
+   thread view is: blocked storage reads as hidden, and the toggle still
+   works, unremembered.
+4. The waiting mark's title and accessible name count the reasons:
+   "2 waiting: 1 for an account, 1 for the project", with the rest as
+   "other" only when some starts have a reason and some do not. The reason
+   is read on pending records only, as the dock's `deriveSlots` reads it; a
+   claimed start counts as waiting with no reason.
+
+**Consequences.**
+- The prefill costs one usage read per merged task of the epic, made when
+  the form opens, cached as the task page's reads are.
+- A first epic run with nothing merged starts with a blank field, as before.
+- The toggle is remembered per browser, not per user: another browser
+  starts hidden.
+
+**Ruled out.**
+- The pool's floor (stop queuing when the pool's free share drops under
+  N%): it needs the dispatcher to read `/usage` while it queues, and
+  whether the free share counts the worker accounts only or the primary's
+  reserve too is a design decision, left to the user.
+- The limit's notification: it belongs to `docs/plans/notifications.md`,
+  built in parallel.
+- A new api field for the waiting reason: the record already carries it.
+- Storing the toggle on the server: it is a viewer's view preference, as
+  the thread view is.
