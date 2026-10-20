@@ -11,12 +11,9 @@
  * riding beside it. `docs/decisions.md` ADR 16, with ADR 25 for the type.
  *
  * Everything else still resolves from `./mock/fixtures` and `./mock/ops-fixtures`,
- * because the routes behind them are tier 3 of `docs/plans/front.md`:
- * `listThreads` is never coming here at
- * all — ADR 19 puts the write surface
- * in another service with its own credential, and C-1 has not ruled on the chat
- * dock. A screen reading one of those says so on itself rather than looking
- * finished; `docs/ui.md` *A region with no route says which route, and when*.
+ * because the routes behind them are tier 3 of `docs/plans/front.md`. A screen
+ * reading one of those says so on itself rather than looking finished;
+ * `docs/ui.md` *A region with no route says which route, and when*.
  *
  * Relative URLs mean these ten may only be called from the browser: a relative
  * `fetch` on the server has no base. Every one is behind a `useQuery` or a
@@ -51,6 +48,12 @@
  * is `POST /api/tasks/<id>/start`, bare like the six. `getActionQueue` takes the
  * finished-list `limit` and `cancelAction` is `POST /api/actions/<id>/cancel`,
  * both for the Queue screen (ADR 163).
+ *
+ * **Two reads for the chat dock** (`docs/decisions.md` ADR 184, step 4 of
+ * `docs/plans/main-thread.md`): `listThreads` reads `GET /api/threads` (ADR 177)
+ * and `listThreadEvents` one thread's log, `GET /api/threads/<id>/events` (ADR
+ * 180), both the api's envelope. They replaced the mock thread the dock drew
+ * before; the writes that open a thread and send a turn are step 5's.
  */
 import type {
   AcceptTaskBody,
@@ -59,7 +62,6 @@ import type {
   ActionQueue,
   ActionRecord,
   ApiResult,
-  ChatThread,
   CommandRequestState,
   CommandRequests,
   CommentTaskBody,
@@ -79,9 +81,10 @@ import type {
   Task,
   TaskComments,
   TaskDetail,
+  Thread,
+  ThreadEventRow,
   UsageGroup,
 } from "./types";
-import { mockThreads } from "./mock/fixtures";
 
 export class ApiError extends Error {
   constructor(
@@ -530,12 +533,25 @@ async function readBare<T>(path: string, write?: BoardWrite): Promise<T> {
   return body as T;
 }
 
-/* ── Still fixtures: tier 3, and the ones that never land ───────────────── */
+/* ── Threads: the chat dock's reads ──────────────────────────────────────── */
 
-export async function listThreads(): Promise<ChatThread[]> {
-  await latency();
-  return mockThreads();
+/** Every thread the harness holds, `main` among them once it exists (ADR 177). */
+export function listThreads(): Promise<ApiResult<Thread[]>> {
+  return readEnvelope<Thread[]>("/api/threads");
 }
+
+/**
+ * One thread's conversation log after line `since` (ADR 180): the rows with
+ * `n > since`, at most the api's default page of 500. A missing log is `[]`; a
+ * line that is not a JSON object is a row with `event: null` and a warning.
+ */
+export function listThreadEvents(id: string, since = 0): Promise<ApiResult<ThreadEventRow[]>> {
+  return readEnvelope<ThreadEventRow[]>(
+    `/api/threads/${encodeURIComponent(id)}/events?since=${since}`,
+  );
+}
+
+/* ── Still fixtures: tier 3, and the ones that never land ───────────────── */
 
 export async function pingActionBackend(): Promise<boolean> {
   await latency();

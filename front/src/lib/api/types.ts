@@ -685,28 +685,52 @@ export interface HookEvent {
   created_at: string;
 }
 
-export interface ChatToolCall {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-  result_summary: string;
+/**
+ * One stretch of a thread on one account, model and effort (`docs/decisions.md`
+ * ADR 170). A change of any of the three appends a segment carrying the last
+ * one's `session_id`, so a conversation outlives an account change; the worker
+ * sets `session_id` on the last segment when the CLI answers with a session
+ * other than the one it resumed. `null` until a first turn has run.
+ */
+export interface ThreadSegment {
+  session_id: string | null;
+  account: string;
+  model: string;
+  effort: string;
+  /** ISO time the segment began. */
+  from: string;
 }
 
-export interface ChatMessage {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  created_at: string;
-  tool_calls: ChatToolCall[];
-}
-
-export interface ChatThread {
+/**
+ * A thread as `GET /api/threads` serves it (ADR 170, ADR 177): the record the
+ * board service writes, read as it is. `main` is the operator's thread, with no
+ * project; every other one belongs to a project and may carry the task it was
+ * opened from.
+ */
+export interface Thread {
   id: string;
   title: string;
-  updated_at: string;
-  context_used: number;
-  context_limit: number;
-  messages: ChatMessage[];
+  project: string | null;
+  account: string;
+  model: string;
+  effort: string;
+  segments: ThreadSegment[];
+  created: string;
+  status: "open" | "archived";
+  task: string | null;
+}
+
+/**
+ * One line of a thread's conversation log, as `GET /api/threads/<id>/events`
+ * serves it (ADR 180): `n` counts lines from 1 and is the cursor `since` takes;
+ * `event` is the parsed line, or `null` for a line that is not a JSON object
+ * (which the api also names in a warning). The events are the worker's own
+ * `turn_start` / `turn_end` / `unparsed` lines and the CLI's stream-json events
+ * between them, so they stay a loose record here and `lib/thread.ts` reads them.
+ */
+export interface ThreadEventRow {
+  n: number;
+  event: Record<string, unknown> | null;
 }
 
 // `USAGE_THRESHOLD`, `PRIMARY_RESERVE` and `COOLDOWN_S` were this harness's

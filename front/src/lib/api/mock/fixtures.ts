@@ -1,6 +1,5 @@
 import type {
   Account,
-  ChatThread,
   DebtEntry,
   HookEvent,
   LastProbe,
@@ -20,10 +19,8 @@ import type {
  * catches a type that drifts from the route, and so a later task has a fixture it
  * can trust the shape of.
  *
- * `mockThreads` still backs `listThreads`, whose route is tier 3 of
- * `docs/plans/front.md`, and it carries no `warnings`: ADR 25 says a fixture for a
- * route with no producer cannot rehearse an envelope. `mockActions` went with the
- * Queue draft's mock (ADR 163).
+ * `mockActions` went with the Queue draft's mock (ADR 163), and `mockThreads`
+ * with the chat dock's (ADR 184), which reads `/api/threads` now.
  */
 
 /** Fixtures are anchored to "now" so heartbeat freshness is realistic. */
@@ -680,98 +677,4 @@ export function mockLearnings(): LearningEntry[] {
     },
   );
   return base;
-}
-
-export function mockThreads(): ChatThread[] {
-  return [
-    {
-      id: "th-main",
-      title: "operator ↔ harness",
-      updated_at: iso(60),
-      context_used: 48200,
-      context_limit: 120000,
-      messages: [
-        {
-          id: "m1",
-          role: "user",
-          content: "why is T-008 blocked?",
-          created_at: iso(300),
-          tool_calls: [],
-        },
-        {
-          id: "m2",
-          role: "assistant",
-          content:
-            "T-008 is blocked on T-011. Its arquitecto phase wrote a contract that references the `phases.budgets` schema, and the contract-docs gate returned blocking because that schema has not landed yet. T-011 is currently in revisor round 2.",
-          created_at: iso(290),
-          tool_calls: [
-            {
-              id: "tc1",
-              name: "get_task",
-              arguments: { task_id: "T-008" },
-              result_summary: "status=blocked, depends_on=[T-004, T-011]",
-            },
-            {
-              id: "tc2",
-              name: "list_gate_findings",
-              arguments: { task_id: "T-008", level: "blocking" },
-              result_summary: "1 blocking finding on contract-docs",
-            },
-          ],
-        },
-        {
-          id: "m3",
-          role: "user",
-          content: "can I release cuenta2?",
-          created_at: iso(70),
-          tool_calls: [],
-        },
-        {
-          id: "m4",
-          role: "assistant",
-          content:
-            "Not yet. cuenta2 was refused by the provider 10m ago and the cooldown is 1800s, so roughly 20 minutes remain. Releasing it now would fail the same way action A-503 did.",
-          created_at: iso(60),
-          tool_calls: [
-            {
-              id: "tc3",
-              name: "get_account",
-              arguments: { name: "cuenta2" },
-              result_summary: "state=COOLING_DOWN, rate_limited_at set",
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: "th-pool",
-      title: "pool triage",
-      updated_at: iso(3600),
-      context_used: 9100,
-      context_limit: 120000,
-      messages: [
-        {
-          id: "p1",
-          role: "user",
-          content: "list accounts over the local threshold",
-          created_at: iso(3620),
-          tool_calls: [],
-        },
-        {
-          id: "p2",
-          role: "assistant",
-          content: "Only cuenta5 at 93%. It self-heals; a re-probe runs every 60s.",
-          created_at: iso(3600),
-          tool_calls: [
-            {
-              id: "tp1",
-              name: "list_accounts",
-              arguments: { min_usage: 90 },
-              result_summary: "1 account",
-            },
-          ],
-        },
-      ],
-    },
-  ];
 }

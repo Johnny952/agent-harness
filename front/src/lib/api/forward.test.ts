@@ -89,15 +89,15 @@ describe("the whitelist", () => {
     });
   });
 
-  // `/api/threads` and not `/api/learnings`, which was the example until T-016
-  // forwarded it: ADR 19 puts the chat dock's route in no tier at all, so this
-  // is a path the console refuses and will go on refusing.
+  // `/api/sessions` and not `/api/threads`, which was the example until T-111
+  // forwarded it (ADR 184): the sessions draft reads no api route, so this is a
+  // path the console refuses until a task gives it one.
   it("404s a path it does not serve, without asking the api", async () => {
     const fetchMock = stubApi();
-    const answer = await forwardApiRequest(get("/api/threads"));
+    const answer = await forwardApiRequest(get("/api/sessions"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/threads is not one of the thirteen routes the console forwards.",
+      error: "/api/sessions is not one of the fifteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -228,6 +228,75 @@ describe("the action queue read", () => {
     expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({
       Authorization: "Bearer test-token",
     });
+  });
+});
+
+describe("the thread reads", () => {
+  it("forwards /api/threads bare, with the api's bearer and no project", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/threads?project=x&limit=3"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/threads`);
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({
+      Authorization: "Bearer test-token",
+    });
+  });
+
+  it("forwards a thread's events with limit and since, and nothing else", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/threads/main/events?since=41&limit=200&project=x&n=1"));
+    const sent = new URL(target(fetchMock));
+    expect(sent.origin + sent.pathname).toBe(`${BASE}/api/threads/main/events`);
+    expect(Object.fromEntries(sent.searchParams)).toEqual({ since: "41", limit: "200" });
+  });
+
+  it("drops an empty cursor rather than sending since=", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/threads/main/events?since="));
+    expect(target(fetchMock)).toBe(`${BASE}/api/threads/main/events`);
+  });
+
+  it("re-encodes the id so it stays one segment", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/threads/a%3Fb%23c/events"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/threads/a%3Fb%23c/events`);
+  });
+
+  it("404s an id that does not decode, without asking the api", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/threads/%zz/events"));
+    expect(answer?.status).toBe(404);
+    expect(await answer?.json()).toEqual({
+      error: "/api/threads/%zz/events is not a readable thread id.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("404s the paths around the two it serves", async () => {
+    const fetchMock = stubApi();
+    for (const path of [
+      "/api/threads/main",
+      "/api/threads/main/events/x",
+      "/api/threads//events",
+      "/api/threadsx",
+    ]) {
+      const answer = await forwardApiRequest(get(path));
+      expect(answer?.status, path).toBe(404);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers a write on a thread path itself: GET is all it forwards", async () => {
+    const fetchMock = stubApi();
+    for (const [method, path] of [
+      ["POST", "/api/threads"],
+      ["PATCH", "/api/threads"],
+      ["PATCH", "/api/threads/main"],
+      ["POST", "/api/threads/main/events"],
+    ] as const) {
+      const answer = await forwardApiRequest(get(path, { method, body: "{}" }));
+      expect(answer?.status, `${method} ${path}`).toBe(405);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -424,7 +493,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the thirteen routes the console forwards.",
+      error: "/api/settingsx is not one of the fifteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });

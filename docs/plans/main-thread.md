@@ -10,7 +10,8 @@ supersedes: []
 **Status:** design, accepted in outline by the user on 2026-10-11, not built
 as a whole; step 1 is built: the thread records and the model list by T-109
 (2026-10-19), the primary override the same day (ADR 176); step 2 is built by
-T-110 (2026-10-19, ADR 173).
+T-110 (2026-10-19, ADR 173); step 4, the screen read-only, is built by T-111
+(2026-10-19, ADR 184).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -263,7 +264,11 @@ and worker.
    `GET /api/threads/<id>/events` is built (2026-10-19, ADR 180): the log's
    lines as `{"n", "event"}` rows, followed with `?since=<last n>`.
 4. The screen, read-only: threads and conversations with the switch. A front
-   task, behind its own ask for a build.
+   task, behind its own ask for a build. Built by T-111 (2026-10-19, ADR 184):
+   the console's chat dock, a selector with `main` first, one history across
+   the segments with a separator where the account, model or effort changed
+   and a heavier one where the session did, the *Text* / *Text and commands*
+   switch, and no composer until step 5.
 5. The composer and *stop*, now that *Decisions*, 1 is ruled.
 6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`).
 7. The execution threads and the selector's slots (*Decisions*, 8). They read

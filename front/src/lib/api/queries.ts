@@ -175,9 +175,16 @@ export const cancelActionMutation = (qc: QueryClient) =>
       ),
   });
 
+/**
+ * The thread list for the chat dock's selector (ADR 184). Polled like the other
+ * lists, so a thread the board service opens, or a segment a model change
+ * appends, shows without a reload. The log itself is not a query: it is read
+ * page by page from a cursor, in `components/console/use-thread-events.ts`.
+ */
 export const threadsQuery = queryOptions({
   queryKey: ["threads"],
   queryFn: () => api.listThreads(),
+  refetchInterval: POLL_MS,
 });
 
 export const actionBackendQuery = queryOptions({
