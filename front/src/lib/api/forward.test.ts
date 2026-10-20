@@ -97,7 +97,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/sessions"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/sessions is not one of the sixteen routes the console forwards.",
+      error: "/api/sessions is not one of the eighteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -511,7 +511,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the sixteen routes the console forwards.",
+      error: "/api/settingsx is not one of the eighteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -1210,10 +1210,29 @@ describe("the board-service project records", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("forwards the reads to the api, hive-wide (ADR NNN)", async () => {
+    let fetchMock = stubApi();
+    // No `?project=` added, and none of the browser's parameters copied.
+    expect((await forwardApiRequest(get("/api/projects?project=x&status=active")))?.status).toBe(
+      200,
+    );
+    expect(target(fetchMock)).toBe(`${BASE}/api/projects`);
+    fetchMock.mockRestore();
+    fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/projects/demo.site")))?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BASE}/api/projects/demo.site`);
+    fetchMock.mockRestore();
+    // A slug the harness does not take never crosses.
+    fetchMock = stubApi();
+    for (const path of ["/api/projects/.x", "/api/projects/a%20b", "/api/projects/%zz"]) {
+      expect((await forwardApiRequest(get(path)))?.status, path).toBe(404);
+    }
+    expect((await forwardApiRequest(get("/api/projects/demo/x")))?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("leaves every other method on the paths as it was", async () => {
     const fetchMock = stubApi();
-    expect((await forwardApiRequest(get("/api/projects")))?.status).toBe(404);
-    expect((await forwardApiRequest(get("/api/projects/demo")))?.status).toBe(404);
     for (const [method, path] of [
       ["PUT", "/api/projects/demo"],
       ["DELETE", "/api/projects/demo"],

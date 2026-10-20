@@ -117,13 +117,15 @@ describe("the sidebar's projects", () => {
     expect(await within(sidebar()).findByText("No project on the board yet.")).toBeTruthy();
   });
 
-  it("says the projects are unread when the tasks read fails", async () => {
+  it("says the projects are unread when the tasks read fails, the records unserved", async () => {
     await renderRoute(BoardRoute, "/", {
       ...boardServed(),
       "/api/tasks": { status: 503, error: "down" },
     });
     expect(
-      await within(sidebar()).findByText("Projects unread: the task list did not answer."),
+      await within(sidebar()).findByText(
+        "Projects unread: neither the project records nor the task list answered.",
+      ),
     ).toBeTruthy();
   });
 

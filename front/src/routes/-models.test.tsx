@@ -163,9 +163,13 @@ function writes(sent: Sent[]): Sent[] {
   return sent.filter((s) => s.method !== "GET");
 }
 
-/** The screen's reads: the sidebar's `/api/tasks` (its project list, ADR 208) is not one. */
+/**
+ * The screen's reads: the sidebar's `/api/projects` and `/api/tasks` (its project
+ * list and the list's fallback, ADR 208, ADR NNN) are not among them.
+ */
+const SIDEBAR_READS = new Set(["/api/projects", "/api/tasks"]);
 function reads(sent: Sent[]): number {
-  return sent.filter((s) => s.method === "GET" && s.path !== "/api/tasks").length;
+  return sent.filter((s) => s.method === "GET" && !SIDEBAR_READS.has(s.path)).length;
 }
 
 function brokenBanner(): HTMLElement {

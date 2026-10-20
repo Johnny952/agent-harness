@@ -640,7 +640,10 @@ export interface ProjectSettings {
   push_task_branch?: boolean;
 }
 
-/** A project record as the board service answers it (ADR 203): `ProjectRecord.to_dict()`. */
+/**
+ * A project record as the board service answers it (ADR 203) and the api reads it
+ * (`GET /api/projects`, ADR NNN): `ProjectRecord.to_dict()`, the remote redacted.
+ */
 export interface ProjectRecord {
   slug: string;
   title: string;

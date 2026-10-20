@@ -49,6 +49,7 @@ ROUTES = [
     "/api/actions",
     "/api/threads",
     "/api/threads/main/events",
+    "/api/projects",
 ]
 
 

@@ -185,6 +185,16 @@ export const cancelActionMutation = (qc: QueryClient) =>
  * appends, shows without a reload. The log itself is not a query: it is read
  * page by page from a cursor, in `components/console/use-thread-events.ts`.
  */
+/**
+ * The project records (ADR NNN): the sidebar's list and `ProjectGate`'s check.
+ * They change only when someone writes one, so this polls slower than the board.
+ */
+export const projectsQuery = queryOptions({
+  queryKey: ["projects"],
+  queryFn: () => api.listProjects(),
+  refetchInterval: POLL_MS * 4,
+});
+
 export const threadsQuery = queryOptions({
   queryKey: ["threads"],
   queryFn: () => api.listThreads(),

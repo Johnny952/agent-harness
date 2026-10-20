@@ -11588,3 +11588,74 @@ row carries `project` (ADR 199, ADR 204), null for a card that names none.
   harness's screens.
 - Treating a null project as the harness's own project slug: the slug is not
   known to the console, and guessing it would put cards under the wrong name.
+
+## ADR NNN — The project records read route, and the sidebar from it
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 208 built the sidebar and the `/p/$slug/` routes from the
+`project` field of `/api/tasks`, because no route served the project records
+(`.hive/projects/<slug>.json`, ADR 199): the sidebar showed slugs only, and a
+project with no task yet was neither listed nor reachable. ADR 203 decision 1
+left the reads to the api's side; the board service holds the writes.
+
+**Decision.**
+1. The observability api serves `GET /api/projects` and
+   `GET /api/projects/<slug>` (`observability/api/app.py`), read-only. A row is
+   the record as `ProjectRecord.to_dict()` writes it (`slug`, `title`,
+   `remote`, `base_branch`, `key`, `settings`, `created`, `status`), no other
+   field. The list is hive-wide, in slug order, archived records included with
+   their `status`; the console filters them.
+2. Every served `remote` passes `redact_remote` (ADR 205). The loader already
+   refuses a record whose remote carries a credential; the redaction is the
+   second lock, so a record written before ADR 205 or by hand cannot leak one
+   through this route.
+3. A record that does not load (bad JSON, a field out of shape, a credential in
+   the remote) is left out of the list and named in `warnings`, the way the api
+   reports other broken hive files. The detail route answers it with
+   `data: null` and the warning; a slug that is not a valid slug, or has no
+   file, is a 404. Neither route takes a parameter; an unknown one is a 400.
+4. The console forwards both reads (`forward.ts`: eighteen routes now), hive-wide,
+   with no `?project=`: the records are the hive's, not one project's. The
+   client has `listProjects()` and `getProject(slug)`; `projectsQuery` polls at
+   four times the board's interval, since records change rarely.
+5. The sidebar lists the active records (`useProjectList`, `listedProjects`,
+   `front/src/lib/projects.ts`), in slug order, by title, the slug when the
+   title is empty, with the slug kept as the link's `title` attribute. A
+   project with no task is listed; an archived one is not.
+6. Only when the records read fails does the list fall back to ADR 208's: the
+   slugs the tasks name. The sidebar says so under the list (*Project records
+   unread: listed from the tasks, by slug.*). With both reads failed it says
+   neither answered.
+7. `ProjectGate` knows a slug from a record (archived ones too, still reachable
+   by URL) or from a task naming it (`useProjectKnown`). It draws the not-found
+   only when both reads have settled, one answered, and neither knows the slug;
+   while a read is pending, or with both failed, the screen is drawn.
+8. A read counts as failed while it has no data and has errored at least once
+   (`errorUpdateCount`), not only while `isError`: in TanStack Query v5 a query
+   with no data goes back to `pending` on each refetch, and each newly mounted
+   observer refetches it, so testing `isError` alone swapped the gate's screen
+   in and out on every remount, a render loop.
+9. The new front tests are in `front/src/routes/-p.records.test.tsx`, apart from
+   `-p.test.tsx`, whose tests now run on the tasks fallback (`/api/projects`
+   unserved there). `-models` and `-approvals` leave the sidebar's
+   `/api/projects` read out of their counts, as ADR 208 did for `/api/tasks`.
+
+**Consequences.**
+- Every screen makes one more read, `/api/projects`, shared by the sidebar and
+  the gate under one cache key.
+- A project recorded but archived is not in the sidebar; there is no toggle to
+  show the archived ones.
+- The sidebar shows no counts of running or waiting tasks, and no debt or
+  learnings per project.
+- ADR 205's refusal for a remote "not in SSH form" quotes the remote in its
+  message. A remote with a token in a query string but no userinfo is refused
+  by that check, and its warning then carries the remote as written.
+- *New project* is not part of this step.
+
+**Ruled out.**
+- Serving the records from the board service: it holds the writes (ADR 203)
+  and the api already reads the hive for the console.
+- Scoping the list by `CONSOLE_PROJECT`: the list is what picks a project.
+- Dropping the tasks-derived list: an api older than this route would leave
+  the sidebar empty.

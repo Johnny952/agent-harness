@@ -1,14 +1,15 @@
 /**
  * What the `/p/$slug/` routes wrap a screen in: the project's scope, a plain
- * not-found for a slug no task names, and the link to a task that stays inside
+ * not-found for a slug no record or task names, and the link to a task that stays inside
  * the project. The screens themselves are the harness's own, reused — they read
- * the scope from `ProjectScopeContext` and narrow their rows by it. ADR 208.
+ * the scope from `ProjectScopeContext` and narrow their rows by it. ADR 208,
+ * ADR NNN.
  */
-import { useMemo, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { taskQuery, tasksQuery } from "@/lib/api/queries";
-import { ProjectScopeContext, deriveProjects, useProjectScope } from "@/lib/projects";
+import { taskQuery } from "@/lib/api/queries";
+import { ProjectScopeContext, useProjectKnown, useProjectScope } from "@/lib/projects";
 import { AppShell } from "./app-shell";
 
 /** The plain not-found a project route draws for what it does not know. */
@@ -27,19 +28,19 @@ export function ProjectNotFound({ title, body }: { title: string; body: string }
 }
 
 /**
- * Draw `children` in `slug`'s scope, or the not-found when the tasks have been
- * read and none names `slug`. While the read is in flight, or when it failed,
- * the screen is drawn: it has its own loading and error states, and a failed
- * read is not evidence that the project does not exist.
+ * Draw `children` in `slug`'s scope, or the not-found when the project records
+ * and the tasks have been read and neither knows `slug`. A record makes it
+ * known, an archived one too (hidden from the sidebar, still reachable by its
+ * URL), and so does a task naming it. While a read is in flight, or when both
+ * failed, the screen is drawn: it has its own loading and error states, and a
+ * failed read is not evidence that the project does not exist (ADR NNN).
  */
 export function ProjectGate({ slug, children }: { slug: string; children: ReactNode }) {
-  const q = useQuery(tasksQuery);
-  const known = useMemo(() => deriveProjects(q.data?.data ?? []), [q.data]);
-  if (q.data && !q.isError && !known.includes(slug)) {
+  if (useProjectKnown(slug) === "absent") {
     return (
       <ProjectNotFound
         title={`No project named ${slug}`}
-        body="No task on the board names this project. A project shows in the sidebar once one of its tasks is on the board or in the backlog."
+        body="No project record has this slug and no task on the board names it. A project shows in the sidebar once it is recorded."
       />
     );
   }
