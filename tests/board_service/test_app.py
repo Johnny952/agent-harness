@@ -43,7 +43,10 @@ def hive(tmp_path: Path) -> Path:
 @pytest.fixture
 def cfg(tmp_path: Path, hive: Path) -> Path:
     path = tmp_path / "config.yaml"
-    path.write_text(CONFIG_YAML.format(hive=hive))
+    # The state dir is under tmp_path: in a container `/data/dispatcher_state`
+    # is the dispatcher's real one.
+    text = CONFIG_YAML.format(hive=hive).replace("/data/dispatcher_state", str(tmp_path / "state"))
+    path.write_text(text)
     (tmp_path / "config.d").mkdir()
     return path
 
