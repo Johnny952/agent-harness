@@ -32,7 +32,9 @@ It writes nothing, anywhere: `db.init_db` is never called (it runs
 `CREATE TABLE` and the events volume is read-only), the learnings read calls neither `ensure_dirs` nor `reconcile`,
 the actions read calls neither `actions.ensure_dirs` nor `actions.read_all` (which makes the queue's directories),
 and there is no docker socket on this service — `dispatcher/docker_exec.py`
-arrives as an import, for one frozenset, and is never called.
+arrives as an import, for one frozenset and the name of a task's branch, and
+none of its commands is called. The one process it starts is `git`, read-only,
+for `/api/tasks/<task_id>/diff` over the `:ro` checkouts (ADR NNN).
 """
 from __future__ import annotations
 
@@ -41,6 +43,7 @@ import json
 import os
 import shlex
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -178,6 +181,18 @@ MAX_COMMENTS = 500
 #: thousands of ordinary ones. Over it the newest end is read, starting at a
 #: whole line, and the cut names itself in `warnings`. ADR 135.
 MAX_COMMENTS_BYTES = 1024 * 1024
+
+#: The most bytes of a task's unified diff one `/api/tasks/<task_id>/diff`
+#: answer carries. A diff is read on the review screen line by line, so a
+#: branch past 1 MiB is not reviewed there whole anyway; the cut is taken at a
+#: whole line, says so in `truncated` and in `warnings`, and the rest stays on
+#: the branch for `git diff` on the host. ADR NNN.
+MAX_DIFF_BYTES = 1024 * 1024
+
+#: How long one `git` call of the diff route may run, in seconds. Every call
+#: it makes is a read over one repository's refs and objects; one that takes
+#: longer is a wedged mount, and the route answers why instead of hanging.
+GIT_TIMEOUT_SECONDS = 20
 
 #: The keys a comment line may carry across this api: `tasks.add_comment`'s
 #: three, and the diff anchor's three. Anything else on a line is dropped.
@@ -839,6 +854,51 @@ def create_app(
             )
             comments = comments[-MAX_COMMENTS:]
         return _envelope({"task_id": task_id, "comments": comments}, warnings)
+
+    @app.get("/api/tasks/<task_id>/diff")
+    @requires_auth
+    def task_diff(task_id: str):
+        """A task branch's changes, as the raw unified diff `git diff` prints.
+
+        Step 2 of `docs/plans/review.md` (ADR NNN): the diff of
+        `agent/task/<task_id>` against its merge base with the branch the
+        project's checkout is on — the base `dispatch merge-task` merges into,
+        and the three-dot diff `docker_exec.branch_changed_paths` reads, so
+        the person reviews what a merge would bring. Served with the tip
+        `commit` it was taken at, which a line comment's anchor names.
+        `?project=` picks the checkout; without it the task file's `project`
+        does, and a task naming none takes the one checkout `_project` allows.
+        Nothing is parsed here: the browser splits the text.
+
+        No branch, a detached checkout, or a `git` this image cannot run is
+        `data: null` and the reason, never a 500. An empty `diff` is a branch
+        with no change of its own, which is a different claim.
+        """
+        rejected = _reject_unknown_parameters(frozenset({"project"}))
+        if rejected is not None:
+            return rejected
+        # A 404 in the same two cases and words as the detail route, as on
+        # `/api/tasks/<task_id>/comments`.
+        if not _is_bare_task_id(task_id):
+            return _error(f"no task {task_id!r}", 404)
+        path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+        if not os.path.exists(path):
+            return _error(f"no task {task_id!r} in {cfg.hive_tasks_dir}", 404)
+        slug = request.args.get("project") or None
+        if slug is None:
+            try:
+                slug = context_transfer.read_task_file(path).project
+            except _UNREADABLE as exc:
+                return _envelope(None, [f"{path}: unreadable task file: {exc}"])
+            if slug is not None and not isinstance(slug, str):
+                return _envelope(
+                    None, [f"{path}: project is {slug!r}, not a slug: no checkout to read"]
+                )
+        slug, error = _project(cfg, slug)
+        if error is not None:
+            return error
+        data, warnings = _task_diff(os.path.join(cfg.projects_root, slug), slug, task_id)
+        return _envelope(data, warnings)
 
     @app.get("/api/learnings")
     @requires_auth
@@ -1659,6 +1719,101 @@ def _comment(line: bytes) -> tuple[dict | None, str | None]:
         )
     comment.update({key: value[key] for key in _ANCHOR_KEYS})
     return comment, None
+
+
+class _GitFailed(Exception):
+    """A `git` call of the diff route that gave no usable answer."""
+
+
+def _git(project_dir: str, *args: str) -> bytes:
+    """One read-only `git` call in `project_dir`: its stdout, or `_GitFailed`.
+
+    `safe.directory` is set for this one call because this service runs as
+    root over a checkout the host user owns, and git refuses such a repository
+    without it. `--no-optional-locks` keeps the call from refreshing the index,
+    a write the `:ro` mount would refuse. `GIT_CEILING_DIRECTORIES` stops git
+    at the checkout, so a directory that is not a repository is not answered
+    with whatever repository holds it. `LC_ALL=C` as `docker_exec._GIT_ENV`
+    sets it, so the error a warning quotes is git's English.
+    """
+    command = [
+        "git", "--no-optional-locks", "-c", f"safe.directory={project_dir}",
+        "-C", project_dir, *args,
+    ]
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(project_dir)),
+    }
+    try:
+        proc = subprocess.run(
+            command, capture_output=True, timeout=GIT_TIMEOUT_SECONDS, env=env, check=False
+        )
+    except FileNotFoundError as exc:
+        raise _GitFailed(f"git is not installed in this service's image: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _GitFailed(
+            f"git {args[0]} took over {GIT_TIMEOUT_SECONDS}s in {project_dir}"
+        ) from exc
+    except OSError as exc:
+        raise _GitFailed(f"git could not run in {project_dir}: {exc}") from exc
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise _GitFailed(
+            f"git {args[0]} failed in {project_dir} (exit {proc.returncode})"
+            + (f": {stderr}" if stderr else "")
+        )
+    return proc.stdout
+
+
+def _task_diff(project_dir: str, slug: str, task_id: str) -> tuple[dict | None, list[str]]:
+    """`/api/tasks/<task_id>/diff`'s `data` and warnings, read with `git`.
+
+    Four reads, each its own question: the base (the branch the checkout is
+    on), the task branch's tip, their merge base, and the diff from one to
+    the other. The first that cannot be answered is the warning beside
+    `data: null`.
+    """
+    branch = docker_exec.task_branch(task_id)
+    try:
+        base_ref = _git(project_dir, "symbolic-ref", "--quiet", "--short", "HEAD")
+    except _GitFailed as exc:
+        return None, [f"{project_dir}: no branch checked out to diff {branch} against: {exc}"]
+    base = base_ref.decode("utf-8", errors="replace").strip()
+    try:
+        tip = _git(
+            project_dir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}"
+        )
+    except _GitFailed:
+        return None, [f"{project_dir}: no branch {branch}: the task has not committed there"]
+    commit = tip.decode("ascii", errors="replace").strip()
+    try:
+        merge_base = _git(project_dir, "merge-base", base, commit).decode("ascii").strip()
+        raw = _git(
+            project_dir, "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+            f"{merge_base}..{commit}",
+        )
+    except _GitFailed as exc:
+        return None, [str(exc)]
+    warnings: list[str] = []
+    truncated = len(raw) > MAX_DIFF_BYTES
+    if truncated:
+        cut = raw.rfind(b"\n", 0, MAX_DIFF_BYTES)
+        raw = raw[: cut + 1]
+        warnings.append(
+            f"the diff of {branch} is over {MAX_DIFF_BYTES} bytes: its first "
+            f"{len(raw)} bytes are served, and the rest is on the branch"
+        )
+    return {
+        "task_id": task_id,
+        "project": slug,
+        "branch": branch,
+        "base": base,
+        "commit": commit,
+        "merge_base": merge_base,
+        "diff": raw.decode("utf-8", errors="replace"),
+        "truncated": truncated,
+    }, warnings
 
 
 def _no_events_warning(db_path: str, exc: Exception) -> str:

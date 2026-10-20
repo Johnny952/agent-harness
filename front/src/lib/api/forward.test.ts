@@ -97,7 +97,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/sessions"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/sessions is not one of the eighteen routes the console forwards.",
+      error: "/api/sessions is not one of the nineteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -192,6 +192,40 @@ describe("the task usage route", () => {
     const fetchMock = stubApi();
     await forwardApiRequest(get("/api/tasks/..%2f..%2fadmin/usage"));
     expect(target(fetchMock)).toBe(`${BASE}/api/tasks/..%2F..%2Fadmin/usage`);
+  });
+});
+
+describe("the task diff route", () => {
+  it("forwards a bare id with the console's own ?project= when the browser names none", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/T-014/diff"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/T-014/diff?project=ia-harness`);
+  });
+
+  it("carries the browser's project slug, and no other parameter", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/T-014/diff?project=scratch&x=1"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/T-014/diff?project=scratch`);
+  });
+
+  it("400s a project that is not a slug, without asking the api", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/tasks/T-014/diff?project=..%2Fx"));
+    expect(answer?.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("404s an id it cannot read and a path below it, without asking the api", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/tasks/%zz/diff")))?.status).toBe(404);
+    expect((await forwardApiRequest(get("/api/tasks/T-014/diff/x")))?.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("re-encodes an id rather than passing it through", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get("/api/tasks/..%2f..%2fadmin/diff"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/tasks/..%2F..%2Fadmin/diff?project=ia-harness`);
   });
 });
 
@@ -515,7 +549,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the eighteen routes the console forwards.",
+      error: "/api/settingsx is not one of the nineteen routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });

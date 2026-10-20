@@ -2,8 +2,9 @@
  * The Approvals screen's command-request card, mounted whole through
  * `renderRoute` with what `/api/command-requests` served (ADR 122, ADR 123).
  *
- * The mock approvals below it read no route, so the one thing served is the
- * card's read. What these hold: the argv comes first in a card and is text,
+ * The review below it reads `/api/tasks`, which these leave unserved: its 404
+ * is the review's own error state, and `-approvals.review.test.tsx` holds the
+ * review. What these hold: the argv comes first in a card and is text,
  * not markup; the agent's reason is last and marked as the agent's; a CLI line
  * is drawn only when the api offered it; the refused requests are listed apart;
  * and an empty read and a failed read each say so. Nothing here writes, and
@@ -193,7 +194,7 @@ describe("the command-request card", () => {
       ),
     );
     // `/api/projects` and `/api/tasks` are the sidebar's project list and its
-    // fallback (ADR 208, ADR 209), not this screen's.
+    // fallback (ADR 208, ADR 209), and `/api/tasks` the review's list (ADR NNN).
     const urls = fetchMock.mock.calls
       .map((c) => String(c[0]))
       .filter((u) => u !== "/api/tasks" && u !== "/api/projects");

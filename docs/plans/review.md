@@ -8,8 +8,10 @@ supersedes: []
 # Review — a person approves a task's diff in the console before it merges
 
 **Status:** design, approved in outline by the user on 2026-10-11. The console
-review is not built: no *awaiting review* state, no diff route, no screen, no
-line comments and no verdicts. Two pieces landed on the CLI side through
+review is built but for its verdicts (ADR NNN): the api serves a task
+branch's diff, and `/approvals` draws it with the comments pinned to it and
+pins new ones to a line, but there is no *awaiting review* state and no
+verdict from the console. Two pieces landed on the CLI side through
 `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -51,10 +53,13 @@ becomes a person's decision, taken over a diff, in the console.
   (Since 2026-10-17 the dispatcher pushes the base after an automatic
   approve or `merge-task --push`, per ADRs 77 and 78, and every merge runs
   the pre-merge check first. The task branch is still never pushed.)
-- **A draft screen.** `front/src/routes/approvals.tsx` approves or rejects
-  "pushes with diffs, merges, tool permissions and budget overrides" over mock
-  data. It splits a raw unified diff in the browser and has no line comments.
-  It is a Lovable draft, not a spec.
+- **A screen without verdicts.** `front/src/routes/approvals.tsx` was a Lovable
+  draft over mock data until ADR NNN. It now lists the tasks that are `done`
+  and not merged, as the stand-in for *Awaiting review*, and the `conflict`
+  ones, and draws each one's diff from the api's diff route, by hand, with
+  the line comments `comments.jsonl` already holds; a line number pins a
+  new one at the tip. The verdict is the `merge-task` CLI line it prints,
+  not a button.
 - **The api writes nothing.** Every route in `observability/api/app.py` is a
   `GET` and every mount is `:ro`. Writes go through the board service of
   `docs/plans/board-service.md`, never the api.
@@ -262,8 +267,14 @@ and run `merge-task` again.
 After `board-service.md`'s steps, each a single surface:
 
 1. The *awaiting review* state, replacing `merge_on_done`.
-2. The diff route in the api.
-3. The *comment* verdict and line comments in `comments.jsonl`.
+2. The diff route in the api. **Built 2026-10-20** (ADR NNN):
+   `GET /api/tasks/<id>/diff?project=<slug>` runs `git` read-only on the
+   project's clone, against the merge base with the base branch, capped in
+   size; the api image installs git for it. The console forwards it.
+3. The *comment* verdict and line comments in `comments.jsonl`. **Partly
+   built 2026-10-20** (ADR NNN): the line comments were already in the
+   board-service's anchored `task_comment`, and the review now writes them
+   at the tip. The *comment* verdict is open.
 4. The *approve* verdict: merge, push and the `merged` block, with the
    credential's ADR, and the dispatcher picking up verdicts.
 5. The task-branch push after each phase, per project, off by default.
@@ -271,7 +282,12 @@ After `board-service.md`'s steps, each a single surface:
    credential, and the ADR goes with whichever of 4 and 5 lands first.
 6. The *request changes* verdict: the cycle reopened at the arquitecto.
 7. The screen, with the diff library. A front task, behind its own ask for a
-   build and for the package.
+   build and for the package. **Partly built 2026-10-20** (ADR NNN): the
+   screen reads and draws, with a hand-written diff view instead of a
+   library, comments shown at their line on the tip and as outdated past
+   it, a line number pinning a new one at the tip, and the *Conflict* list
+   shown read-only. Still open: the library, the handoffs' summary beside
+   the diff, and every verdict button (they wait for steps 1, 3, 4 and 6).
 8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
 9. The integrador role: its prompt, handoff schema, profile and write limit,

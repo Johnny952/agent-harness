@@ -655,6 +655,11 @@ Each step is a single surface, built in this order:
    T-096's two pending items are built 2026-10-20 (ADR 193): the filter
    finds an open entry by its item and its state, and an open entry whose
    *where* falls on the *Surface* of a task in play points at that task.
+   The Approvals screen is real since ADR NNN: it lists `done` tasks not yet
+   merged, as the stand-in for *Awaiting review*, and `conflict` ones, with
+   the task branch's diff and its pinned comments, and it pins new ones
+   through `task_comment`'s anchor; the verdicts
+   wait for `review.md`.
 
 9. **Starting development.** The `start` action and its cancel in the
    worker, the button on the board and the epic, the spending limit, and the

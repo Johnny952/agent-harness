@@ -12019,3 +12019,78 @@ host's git 2.43 only, and the agent image, where the worker runs it, carries
 **Ruled out.**
 - Parsing the porcelain's `*`/`!` lines: it would add a second reading that
   agrees with the exit status in every measured case.
+
+## ADR NNN — The Approvals screen reviews a task branch's diff and pins line comments to it
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `/approvals` drew the console's command requests from the real
+queue (ADR 123), and under them a list of "approvals" with a diff and
+approve/reject buttons that read and wrote only the mock
+(`ops-fixtures.ts`). `docs/plans/review.md` designs that screen as a
+person's review of a task branch before it merges, but none of what it
+reads existed: the api had no diff route, the board has no *awaiting review*
+status, and neither the board-service nor `dispatcher/actions.py` has an
+approve, request-changes or resolve verdict.
+
+**Decision.**
+1. The api serves `GET /api/tasks/<task_id>/diff` (`review.md` step 2),
+   with `?project=` its only parameter. It answers the raw unified diff of
+   `agent/task/<task_id>` against its merge base with the branch the
+   project's checkout is on (the base `merge-task` merges into, three-dot as
+   `branch_changed_paths` reads it), with `branch`, `base`, the tip `commit`
+   and `merge_base`. Four read-only `git` calls, each with a 20 s timeout;
+   no branch, a detached checkout or no `git` is `data: null` and the
+   reason, never a 500. Over `MAX_DIFF_BYTES` (1 MiB) the diff is cut at a
+   whole line, with `truncated` and a warning. The api image installs `git`
+   for it.
+2. The console's forward whitelist gains the route, now nineteen: the id is
+   checked as the task-detail route checks it, and `?project=` is the
+   browser's slug when it passes `PROJECT_SLUG` (a bad one is a 400), else
+   the console's project, through one helper the project-scoped reads share.
+3. The screen lists, in two tabs, the tasks that are `done` and not
+   `merged`, as the stand-in for *Awaiting review* until `review.md` step 1
+   gives it a status, and the `conflict` ones. A selected task shows its
+   branch, base and tip, then the diff by file with its counts and the new
+   side's line numbers, drawn by hand (`src/lib/review.ts` splits the text):
+   no diff library, which `review.md` step 7 keeps behind its own ask.
+4. Line comments are the ones `comments.jsonl` already holds with an anchor:
+   one whose `commit` is the tip sits under its line; one taken at another
+   commit is listed apart as outdated, with its `file:line@commit`. A
+   new-side line number opens a form that pins a comment to that file and
+   line at the tip: `POST /api/tasks/<id>/comments` with `file`, `line` and
+   `commit`, the board-service's existing anchored `task_comment` through
+   the forward ADR 139's form already uses, so a comment pinned here is the
+   one the next phase reads. A
+   removed line has no new-side number and takes none. This is the
+   screen's one write; `review.md`'s *comment* verdict is not it.
+5. The verdict is a read-only panel: the `dispatch merge-task <id> --project
+   <slug>` line to run, and for a conflict the way out (the base merged into
+   the task branch, then the merge again). No verdict button.
+6. The mock approvals (types, fixtures, `listApprovals`, `decideApproval`,
+   `approvalsQuery`) are removed: nothing else read them.
+
+**Consequences.**
+- *Awaiting review* here includes every `done` task not merged, whether or
+  not anyone means to review it; when step 1 lands the filter becomes that
+  status, and the screen's reads stay as they are.
+- The diff is polled every 10 s (`POLL_MS * 4`), four `git` calls each, for
+  the selected task only.
+- The Dockerfile change is not build-verified here; until the api image is
+  rebuilt the route answers `data: null` with the "cannot run git" reason.
+- The handoffs' summary beside the diff and every verdict, the *comment*
+  one included, remain `review.md` steps 3, 4, 6 and 7.
+- A line comment can be pinned only to a line the tip has, and only at the
+  tip: a comment on a removed line goes on the whole task, from its page.
+
+**Ruled out.**
+- Installing a diff library: `review.md` step 7 keeps it behind the user's
+  ask for the package.
+- An approve or merge button over an action the worker does not have: it
+  would invent a write. The CLI line is the true verdict today.
+- Reusing the task page's comment form for line comments: it posts
+  without an anchor, so a comment written from the review would lose the
+  line it was about. The review's own form posts the anchor to the same
+  write.
+- A new comment route: the board-service already takes the anchor, all
+  three fields or none.
