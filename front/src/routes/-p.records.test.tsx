@@ -13,12 +13,24 @@ import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { Route as ProjectBoardRoute } from "./p.$slug.index";
 import { Route as BoardRoute } from "./index";
 import { renderRoute, type Served } from "@/test/render-route";
-import { listedProjects, projectCounts, projectEntries } from "@/lib/projects";
+import {
+  SHOW_ARCHIVED_KEY,
+  listedProjects,
+  projectCounts,
+  projectEntries,
+  readShowArchived,
+  storeShowArchived,
+  waitingTitle,
+} from "@/lib/projects";
 import type { ActionQueue, ActionRecord, ProjectRecord, Task } from "@/lib/api/types";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+  vi.restoreAllMocks();
+});
 
 function task(id: string, over: Partial<Task> = {}): Task {
   return {
@@ -264,9 +276,31 @@ const BUSY_QUEUE: ActionQueue = {
 describe("projectCounts", () => {
   it("counts in_progress cards as running, and started tasks not in progress as waiting", () => {
     expect(Object.fromEntries(projectCounts(BUSY_TASKS, BUSY_QUEUE))).toEqual({
-      alpha: { running: 2, waiting: 1 },
-      beta: { running: 0, waiting: 1 },
+      alpha: { running: 2, waiting: 1, waitingFor: { account: 0, project: 1 } },
+      beta: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } },
     });
+  });
+
+  it("counts the worker's reason on a pending start only, and words the title from it", () => {
+    const queue: ActionQueue = {
+      ...EMPTY_QUEUE,
+      // A claimed record's `waiting` is stale: it is no longer waiting on anything.
+      claimed: [start("T-6", { status: "claimed", project: "gamma", waiting: "account" })],
+      pending: [
+        start("T-7", { project: "gamma", waiting: "account" }),
+        start("T-8", { project: "gamma", waiting: "project" }),
+        start("T-9", { project: "gamma", waiting: "something new" }),
+      ],
+    };
+    const gamma = projectCounts([], queue).get("gamma")!;
+    expect(gamma).toEqual({ running: 0, waiting: 4, waitingFor: { account: 1, project: 1 } });
+    expect(waitingTitle(gamma)).toBe("4 waiting: 1 for an account, 1 for the project, 2 other");
+    expect(waitingTitle({ running: 0, waiting: 2, waitingFor: { account: 0, project: 2 } })).toBe(
+      "2 waiting: 2 for the project",
+    );
+    expect(waitingTitle({ running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } })).toBe(
+      "1 waiting",
+    );
   });
 
   it("takes a start's project from its record, else its task row, and counts a task once", () => {
@@ -277,8 +311,8 @@ describe("projectCounts", () => {
     };
     // T-7 has neither a record project nor a row: it names no project.
     expect(Object.fromEntries(projectCounts([task("T-9", { project: "beta" })], queue))).toEqual({
-      beta: { running: 0, waiting: 1 },
-      gamma: { running: 0, waiting: 1 },
+      beta: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } },
+      gamma: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } },
     });
   });
 
@@ -287,8 +321,17 @@ describe("projectCounts", () => {
       ...EMPTY_QUEUE,
       pending: [start("T-203", { kind: "cancel" }), start("T-204")],
     };
-    expect(projectCounts(BUSY_TASKS, queue).get("alpha")).toEqual({ running: 2, waiting: 0 });
-    expect(projectCounts(BUSY_TASKS, null).get("alpha")).toEqual({ running: 2, waiting: null });
+    const none = { account: 0, project: 0 };
+    expect(projectCounts(BUSY_TASKS, queue).get("alpha")).toEqual({
+      running: 2,
+      waiting: 0,
+      waitingFor: none,
+    });
+    expect(projectCounts(BUSY_TASKS, null).get("alpha")).toEqual({
+      running: 2,
+      waiting: null,
+      waitingFor: none,
+    });
     expect(projectCounts(BUSY_TASKS, null).has("beta")).toBe(false);
   });
 });
@@ -302,9 +345,10 @@ describe("the sidebar's counts", () => {
     );
     const nav = within(sidebar());
     expect((await nav.findByTestId("project-running-alpha")).textContent).toBe("2");
-    expect((await nav.findByTestId("project-waiting-alpha")).getAttribute("title")).toBe(
-      "1 waiting",
-    );
+    const alphaWaiting = await nav.findByTestId("project-waiting-alpha");
+    expect(alphaWaiting.getAttribute("title")).toBe("1 waiting: 1 for the project");
+    expect(alphaWaiting.getAttribute("aria-label")).toBe("1 waiting: 1 for the project");
+    expect(nav.getByTestId("project-waiting-beta").getAttribute("title")).toBe("1 waiting");
     expect(nav.getByTestId("project-waiting-beta").textContent).toBe("1");
     expect(nav.queryByTestId("project-running-beta")).toBeNull();
     expect(nav.queryByTestId("project-counts-unread")).toBeNull();
@@ -361,6 +405,38 @@ describe("the sidebar's archived toggle", () => {
     expect(hide.getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(hide);
     expect(within(sidebar()).queryByTestId("project-link-old")).toBeNull();
+  });
+
+  it("keeps the choice across a reload, in this browser", async () => {
+    await renderRoute(BoardRoute, "/", served());
+    await projectLinks();
+    fireEvent.click(within(sidebar()).getByRole("button", { name: "Show archived (1)" }));
+    expect(window.localStorage.getItem(SHOW_ARCHIVED_KEY)).toBe("true");
+
+    cleanup();
+    await renderRoute(BoardRoute, "/", served());
+    expect(await within(sidebar()).findByTestId("project-link-old")).toBeTruthy();
+    const hide = within(sidebar()).getByRole("button", { name: "Hide archived (1)" });
+    expect(hide.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(hide);
+    expect(window.localStorage.getItem(SHOW_ARCHIVED_KEY)).toBe("false");
+
+    cleanup();
+    await renderRoute(BoardRoute, "/", served());
+    await projectLinks();
+    expect(within(sidebar()).getByRole("button", { name: "Show archived (1)" })).toBeTruthy();
+    expect(within(sidebar()).queryByTestId("project-link-old")).toBeNull();
+  });
+
+  it("hides the archived, and keeps toggling, when storage throws", () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    expect(readShowArchived()).toBe(false);
+    expect(() => storeShowArchived(true)).not.toThrow();
   });
 
   it("lists an archived project when it is the only record and the toggle is on", async () => {

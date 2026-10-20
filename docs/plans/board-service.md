@@ -376,9 +376,11 @@ The default numbers are set when this is built, from real cycles.
 **Per epic built 2026-10-20** (`docs/decisions.md` ADR 218): the limit is
 in measured tokens, the usage log's `result` lines summed from the press;
 at the limit nothing new is queued and the epic shows *Paused: limit
-reached* with *Resume epic*, which asks a new limit. Not built: the
-prefill from past cycles (the field is blank), the per-task limit and
-`budget_reached`, the pool's floor, and the notification.
+reached* with *Resume epic*, which asks a new limit. The prefill from
+past cycles is built the same day (ADR 220), from the epic's own merged
+tasks' usage logs; the project's median waits on `token-economy.md` P4.
+Not built: the per-task limit and `budget_reached`, the pool's floor, and
+the notification.
 
 ### 5. The service
 

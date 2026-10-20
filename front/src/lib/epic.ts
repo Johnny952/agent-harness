@@ -12,7 +12,7 @@
  * merged count is measured against: "n of m merged" is over the children still
  * meant to land. A missing child stays in m — the page cannot say it was dropped.
  */
-import type { Task } from "@/lib/api/types";
+import type { Task, UsageGroup, UsageLine } from "@/lib/api/types";
 
 export interface EpicChild {
   id: string;
@@ -58,4 +58,72 @@ export function epicProgress(children: EpicChild[]): EpicProgress {
 export function childDependsOn(task: Task | null): string[] {
   const v: unknown = task?.depends_on;
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * One usage line's tokens as ADR 79 counts them, or `null` if it measured none:
+ * the four token fields summed unweighted, the measure an epic run's spend is
+ * counted in (`dispatcher/context_transfer.py:measured_tokens`, ADR 218).
+ */
+export function lineTokens(line: UsageLine): number | null {
+  const fields = [
+    line.input_tokens,
+    line.output_tokens,
+    line.cache_creation_input_tokens,
+    line.cache_read_input_tokens,
+  ];
+  if (line.measured === false || fields.every((f) => f === null || f === undefined)) return null;
+  return fields.reduce<number>((sum, f) => sum + (Number.isInteger(f) ? (f as number) : 0), 0);
+}
+
+/** A task's measured tokens over every call its log holds, or `null` when none was measured. */
+export function taskTokens(groups: UsageGroup[]): number | null {
+  let sum: number | null = null;
+  for (const g of groups) {
+    for (const c of g.calls) {
+      const n = lineTokens(c);
+      if (n !== null) sum = (sum ?? 0) + n;
+    }
+  }
+  return sum;
+}
+
+export interface LimitSuggestion {
+  /** What the limit field is prefilled with. */
+  value: number;
+  /** The merged children's mean, rounded: what one more child is taken to cost. */
+  perTask: number;
+  /** How many merged children the mean is over. */
+  measured: number;
+  /** The children neither merged nor dropped: what the limit is meant to cover. */
+  left: number;
+}
+
+/**
+ * The spending limit prefilled from the epic's own past cycles
+ * (`docs/plans/board-service.md` *Per epic*): the mean measured tokens of its
+ * merged children, every call of every attempt, times the children still to
+ * land, on top of what a paused run has already `spent`. `usage` holds each
+ * merged child's log as served; a child whose log was not read, or that measured
+ * nothing, is left out of the mean. `null` when no merged child was measured or
+ * nothing is left to land: the field then stays blank, never a guess.
+ */
+export function suggestLimit(
+  children: EpicChild[],
+  usage: Map<string, UsageGroup[] | null>,
+  spent: number | null,
+): LimitSuggestion | null {
+  const costs: number[] = [];
+  for (const c of children) {
+    if (c.task?.merged !== true) continue;
+    const groups = usage.get(c.id);
+    const n = groups ? taskTokens(groups) : null;
+    if (n !== null) costs.push(n);
+  }
+  const progress = epicProgress(children);
+  const left = progress.total - progress.merged;
+  if (costs.length === 0 || left <= 0) return null;
+  const perTask = Math.round(costs.reduce((a, b) => a + b, 0) / costs.length);
+  if (perTask < 1) return null;
+  return { value: (spent ?? 0) + perTask * left, perTask, measured: costs.length, left };
 }

@@ -14,13 +14,17 @@
  * next tasks as their dependencies land, until the spending limit, in measured
  * tokens, is reached. The run is `/api/actions`' `epics`; at its limit the epic
  * shows *Paused: limit reached* and the button is *Resume epic*, which asks a
- * new limit. A limit prefilled from past cycles is not built: the field is blank.
+ * new limit. While the dialog is open the field is prefilled from the epic's
+ * past cycles (`lib/epic.ts:suggestLimit`): the usage logs of its merged
+ * children are read, their mean times the children still to land, plus a paused
+ * run's spend, and a line says what it came from. With no merged child measured
+ * the field is blank; once typed in, the field is the operator's.
  *
  * *Stop epic* drops the epic's starts still waiting and leaves a running one
  * alone; its answer names both, and the toast counts them.
  */
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,9 +45,11 @@ import {
   startEpicMutation,
   stopEpicMutation,
   tasksQuery,
+  usageQuery,
 } from "@/lib/api/queries";
-import type { ActionRecord, EpicRun, Task } from "@/lib/api/types";
+import type { ActionRecord, EpicRun, Task, UsageGroup } from "@/lib/api/types";
 import { commentProblem } from "@/lib/comments";
+import { epicChildren, suggestLimit } from "@/lib/epic";
 import { deriveSlots, standingLine } from "@/lib/slots";
 
 function plural(n: number, word: string): string {
@@ -116,6 +122,8 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
   const [stopping, setStopping] = useState(false);
   const [note, setNote] = useState("");
   const [limitText, setLimitText] = useState("");
+  // Until typed in, the field shows the prefill rather than `limitText`.
+  const [limitTouched, setLimitTouched] = useState(false);
   // A note is optional, so blank is not the comment rule's "needs some text".
   const problem = note.trim() ? commentProblem(note) : null;
   const epicId = epic.task_id;
@@ -130,7 +138,23 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
   const running = queue === null ? null : epicStarts(queue.claimed, epicId);
   const run = queue === null ? null : goingRun(queue.epics, epicId);
   const paused = run?.limit_reached === true;
-  const limit = readLimit(limitText, paused && run ? run.spent.tokens : null);
+  const spent = paused && run ? run.spent.tokens : null;
+
+  // The prefill: the merged children's usage logs, read only while the dialog is open.
+  const children = tasks.data && !tasks.isError ? epicChildren(ids, tasks.data.data) : null;
+  const mergedIds = (children ?? []).filter((c) => c.task?.merged === true).map((c) => c.id);
+  const usageReads = useQueries({
+    queries: mergedIds.map((id) => ({ ...usageQuery(id), enabled: starting })),
+  });
+  const usage = new Map<string, UsageGroup[] | null>(
+    mergedIds.map((id, i) => {
+      const read = usageReads[i];
+      return [id, read && !read.isError ? (read.data?.data ?? null) : null];
+    }),
+  );
+  const suggestion = children === null ? null : suggestLimit(children, usage, spent);
+  const shownLimit = limitTouched ? limitText : suggestion ? String(suggestion.value) : "";
+  const limit = readLimit(shownLimit, spent);
 
   const slotsView = useMemo(
     () =>
@@ -168,6 +192,7 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
           setStarting(false);
           setNote("");
           setLimitText("");
+          setLimitTouched(false);
         },
         onError: (e) => toast.error(e instanceof Error ? e.message : `${epicId} was not started`),
       },
@@ -272,10 +297,20 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
               step={1}
               min={1}
               className="h-7 w-40 text-xs"
-              value={limitText}
-              onChange={(e) => setLimitText(e.target.value)}
+              value={shownLimit}
+              onChange={(e) => {
+                setLimitText(e.target.value);
+                setLimitTouched(true);
+              }}
             />
           </label>
+          {!limitTouched && suggestion && (
+            <p className="text-xs text-muted-foreground" data-testid="epic-limit-prefill">
+              Prefilled from {plural(suggestion.measured, "merged task")} of this epic: about{" "}
+              {suggestion.perTask} measured tokens each, for {plural(suggestion.left, "task")} still
+              to land{spent !== null ? `, on top of the ${spent} spent` : ""}.
+            </p>
+          )}
           {!limit.ok && <p className="text-xs text-destructive">{limit.why}</p>}
           {paused && limit.ok && limit.value === null && (
             <p className="text-xs text-muted-foreground">

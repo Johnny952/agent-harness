@@ -25,8 +25,11 @@ import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
 import { actionBackendQuery } from "@/lib/api/queries";
 import {
   listedProjects,
+  readShowArchived,
+  storeShowArchived,
   useProjectCounts,
   useProjectList,
+  waitingTitle,
   type ProjectCounts,
 } from "@/lib/projects";
 import { ChatPanel } from "./chat-panel";
@@ -200,13 +203,14 @@ const PROJECT_PAGES = [
  *
  * Each entry draws what it has running and waiting (`projectCounts`, ADR 217),
  * a count only above zero, and none at all when the read it comes from failed:
- * a note under the list says which. *Show archived* lists the archived records
- * too, marked; the choice is this viewer's, held in the component.
+ * a note under the list says which; the waiting mark's title names the reasons
+ * the worker served. *Show archived* lists the archived records too, marked; the
+ * choice is this viewer's, kept in this browser across a reload.
  */
 export function ProjectNav({ pathname }: { pathname: string }) {
   const list = useProjectList();
   const { counts, tasksFailed, queueFailed } = useProjectCounts();
-  const [showArchived, setShowArchived] = useState(false);
+  const [showArchived, setShowArchived] = useState(readShowArchived);
   const archived = list.entries?.filter((e) => e.status === "archived").length ?? 0;
   const projects = !list.entries ? [] : showArchived ? list.entries : listedProjects(list.entries);
   let body: ReactNode;
@@ -308,7 +312,10 @@ export function ProjectNav({ pathname }: { pathname: string }) {
       {archived > 0 && (
         <button
           type="button"
-          onClick={() => setShowArchived((v) => !v)}
+          onClick={() => {
+            storeShowArchived(!showArchived);
+            setShowArchived(!showArchived);
+          }}
           aria-pressed={showArchived}
           className="flex w-full items-center rounded-sm px-2 py-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-surface-2/60 hover:text-foreground"
         >
@@ -339,7 +346,8 @@ export function ProjectNav({ pathname }: { pathname: string }) {
 
 /**
  * A project's running and waiting counts, each drawn only above zero. No entry
- * means neither; a `null` waiting was not read, and draws nothing.
+ * means neither; a `null` waiting was not read, and draws nothing. The waiting
+ * mark's title and label carry its reasons (`waitingTitle`).
  */
 function CountMarks({ slug, counts }: { slug: string; counts: ProjectCounts | undefined }) {
   const running = counts?.running ?? 0;
@@ -358,11 +366,11 @@ function CountMarks({ slug, counts }: { slug: string; counts: ProjectCounts | un
           {running}
         </span>
       )}
-      {waiting > 0 && (
+      {counts && waiting > 0 && (
         <span
           data-testid={`project-waiting-${slug}`}
-          title={`${waiting} waiting`}
-          aria-label={`${waiting} waiting`}
+          title={waitingTitle(counts)}
+          aria-label={waitingTitle(counts)}
           className="flex items-center gap-0.5 text-muted-foreground"
         >
           <Hourglass className="size-2.5" />
