@@ -109,14 +109,18 @@ interface Extras {
   turn?: () => Response;
   /** The account list the *New thread* form reads. */
   accounts?: unknown;
+  /** `/api/accounts` answers a 500. */
+  accountsDown?: boolean;
   /**
    * The answer to a `POST /api/threads` or a `PATCH /api/threads/<id>`, given the
    * method, the path and the parsed body; the default echoes a record built from
    * the body.
    */
   write?: (method: string, path: string, body: Record<string, unknown>) => Response;
-  /** The board `/api/tasks` answers (ADR 197); the default is none. */
+  /** The board `/api/tasks` answers (ADR 197), read by the executions and the slots; the default is none. */
   tasks?: unknown;
+  /** `/api/tasks` answers a 502. */
+  tasksDown?: boolean;
 }
 
 function created(body: unknown, status = 201) {
@@ -148,9 +152,15 @@ function serve(threads: Thread[], log: { n: number; event: unknown }[] = LOG, ex
       return created(record, 200);
     }
     if (url.pathname === "/api/threads") return json(threads);
-    if (url.pathname === "/api/accounts") return json(extras.accounts ?? []);
+    if (url.pathname === "/api/accounts") {
+      if (extras.accountsDown) return refusal(500, "boom")();
+      return json(extras.accounts ?? []);
+    }
     // An execution's reads (ADR 197), before the thread log's `/events`.
-    if (url.pathname === "/api/tasks") return json(extras.tasks ?? []);
+    if (url.pathname === "/api/tasks") {
+      if (extras.tasksDown) return refusal(502, "down")();
+      return json(extras.tasks ?? []);
+    }
     const taskPath = /^\/api\/tasks\/([^/]+)(\/[a-z]+)?$/.exec(url.pathname);
     if (taskPath) {
       if (taskPath[2] === "/events" || taskPath[2] === "/usage") return json([]);
@@ -838,5 +848,100 @@ describe("executions (ADR 197)", () => {
     expect(
       await screen.findByText("/api/tasks did not answer, so no execution is listed."),
     ).toBeTruthy();
+  });
+});
+
+describe("the slots region (ADR 198)", () => {
+  const acct = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    container: name,
+    is_primary: false,
+    quota_threshold_pct: 80,
+    reserve_pct: 20,
+    quota_cooldown_seconds: 3600,
+    state: "IDLE",
+    current_task: null,
+    rate_limited_at: null,
+    last_probe: null,
+    ...over,
+  });
+  const startRecord = (taskId: string, over: Record<string, unknown> = {}) => ({
+    id: `act-${taskId}`,
+    kind: "start",
+    task_id: taskId,
+    project: "ia-harness",
+    waiting: null,
+    created_at: "2026-10-20T10:00:00Z",
+    status: "pending",
+    ...over,
+  });
+  const slots = () => screen.getByRole("region", { name: "Slots" });
+
+  it("draws a busy slot, an empty primary with its reserve, and what waits", async () => {
+    serve([thread("main")], LOG, {
+      accounts: [
+        acct("cuenta1", { state: "BUSY", current_task: "T-9" }),
+        acct("cuenta2", { is_primary: true, reserve_pct: 30 }),
+      ],
+      tasks: [
+        { task_id: "T-9", phase: "implementador" },
+        { task_id: "T-8", phase: null },
+      ],
+      queue: {
+        ...EMPTY_QUEUE,
+        claimed: [
+          startRecord("T-9", { status: "claimed" }),
+          startRecord("T-8", { status: "claimed" }),
+        ],
+        pending: [startRecord("T-7", { waiting: "account" })],
+      },
+    });
+    mount();
+    await within(await screen.findByRole("region", { name: "Slots" })).findByText("implementador");
+    const text = slots().textContent ?? "";
+    expect(text).toContain("1 free of 2");
+    expect(text).toContain("T-9");
+    expect(text).toContain("ia-harness");
+    expect(text).toContain("primary · 30% reserve");
+    expect(text).toContain("empty");
+    expect(text).toContain("Between phases");
+    expect(text).toContain("Waiting for an account — every slot is full");
+  });
+
+  it("draws a closed slot with its reset time", async () => {
+    serve([thread("main")], LOG, {
+      accounts: [
+        acct("cuenta1", {
+          state: "COOLING_DOWN",
+          rate_limited_at: 1000,
+          quota_cooldown_seconds: 500,
+        }),
+      ],
+      tasks: [],
+    });
+    mount();
+    expect(
+      await within(await screen.findByRole("region", { name: "Slots" })).findByText(
+        /closed — refused by the provider/,
+      ),
+    ).toBeTruthy();
+    expect(slots().textContent).toContain("00:25:00 UTC");
+  });
+
+  it("says the slots are not known when /api/accounts does not answer", async () => {
+    serve([thread("main")], LOG, { accountsDown: true });
+    mount();
+    expect(
+      await screen.findByText(/\/api\/accounts did not answer, so the slots are not known/),
+    ).toBeTruthy();
+  });
+
+  it("says phase not known when /api/tasks does not answer", async () => {
+    serve([thread("main")], LOG, {
+      accounts: [acct("cuenta1", { state: "BUSY", current_task: "T-9" })],
+      tasksDown: true,
+    });
+    mount();
+    expect(await screen.findByText("phase not known")).toBeTruthy();
   });
 });

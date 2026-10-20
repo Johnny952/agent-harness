@@ -242,7 +242,11 @@ module; steps 2, 4 and 5 need its queue and worker.
 5. **New project and the key from the console**: the `clone`, `init`,
    `keygen` and `check` actions in the worker, and the form.
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front
-   task.
+   task. Built by T-115 (2026-10-20, ADR 198): one derivation,
+   `front/src/lib/slots.ts`, drawn in the dock and in the *Start development*
+   confirmation. *Waiting for the project* is open: it needs step 3 (and the
+   `project` on the task row of step 1), and ADR 198, decision 4, says how it
+   is added. Until then such a start reads *Queued — project*.
 
 ## Open questions
 

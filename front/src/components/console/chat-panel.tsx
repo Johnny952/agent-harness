@@ -63,6 +63,7 @@ import {
   type ThreadView,
 } from "@/lib/thread";
 import { Absent, Banner, Gauge, Malformed, Mono, WarningBanner } from "./primitives";
+import { SlotsPanel } from "./slots";
 import { useThreadEvents } from "./use-thread-events";
 import { ExecutionView } from "./execution-view";
 
@@ -233,6 +234,8 @@ export function ChatPanel({
           <X className="size-3.5" />
         </button>
       </div>
+
+      <SlotsPanel />
 
       {execution && (
         <ExecutionView

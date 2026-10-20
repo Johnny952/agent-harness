@@ -45,6 +45,7 @@ import {
   type Lane,
 } from "@/lib/board";
 import { splitInto } from "@/lib/backlog";
+import { deriveSlots, standingLine } from "@/lib/slots";
 import { epicChildren, epicProgress } from "@/lib/epic";
 import { useNow, useSearchHotkey } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
@@ -134,6 +135,30 @@ function BoardPage() {
     }
     return map;
   }, [actionQueue.data]);
+
+  // Where a new start would stand, from the same derivation as the dock's slots.
+  const standing = useMemo(
+    () =>
+      accounts.isError
+        ? standingLine("accounts-failed")
+        : accounts.data
+          ? standingLine(
+              deriveSlots(
+                accounts.data.data,
+                tasks.isError ? null : (tasks.data?.data ?? null),
+                actionQueue.isError ? null : actionQueue.data?.data,
+              ),
+            )
+          : standingLine("loading"),
+    [
+      accounts.isError,
+      accounts.data,
+      tasks.isError,
+      tasks.data,
+      actionQueue.isError,
+      actionQueue.data,
+    ],
+  );
 
   const filtering = q !== "" || accountFilter !== "all" || columnFilter !== "all";
   const board = useMemo(
@@ -292,6 +317,7 @@ function BoardPage() {
                               task={t}
                               queued={startByTask.get(t.task_id)}
                               loading={actionQueue.isLoading}
+                              standing={standing}
                             />
                           ) : undefined
                         }
@@ -512,10 +538,12 @@ function StartControl({
   task,
   queued,
   loading,
+  standing,
 }: {
   task: Task;
   queued: StartState | undefined;
   loading: boolean;
+  standing: string;
 }) {
   const qc = useQueryClient();
   const start = useMutation(startTaskMutation(qc));
@@ -561,6 +589,9 @@ function StartControl({
               for the worker, which runs it when an account and the project are free.
             </DialogDescription>
           </DialogHeader>
+          <p className="text-xs text-muted-foreground" data-testid="standing-line">
+            {standing}
+          </p>
           <label className="space-y-1 text-xs">
             Note (optional)
             <Textarea value={note} onChange={(e) => setNote(e.target.value)} />

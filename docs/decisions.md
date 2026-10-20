@@ -10901,3 +10901,145 @@ not built here.
   it is given, and the comments are on the task page.
 - A composer on the execution: the phases are not talked to; a thread about the
   task is.
+
+## ADR 198 — The slots: one derivation in `front/src/lib/slots.ts`, drawn in the dock and in the *Start development* confirmation
+
+**Status:** accepted (2026-10-20). Designed by T-115's arquitecto.
+
+**Context.** `docs/plans/projects.md` *Decisions*, 6 (build step 6) and
+`docs/plans/main-thread.md` *Decisions*, 8 (the second half of step 7) ask the
+console to show how many phases can run at once and why: one slot per account,
+what is on each, and which started tasks wait and on what. They name two places:
+the dock's selector, and the *Start development* confirmation. Every fact is
+already served. `GET /api/accounts` gives each account's `state`,
+`current_task` (`current_task_id` in the console, ADR 17), `rate_limited_at`,
+`quota_cooldown_seconds`, `last_probe`, `is_primary` and `reserve_pct`.
+`GET /api/tasks` gives each task's `phase` (ADR 126). `GET /api/actions` gives
+the `start` records, pending or claimed, with their `project` and the worker's
+`waiting` word (ADR 142, 160). Execution threads (*Decisions*, 8, first half)
+are not in this base: the dock's selector lists thread records only. ADR 197 is
+left unused.
+
+**Decision.**
+1. **One pure module, `front/src/lib/slots.ts`.**
+   `deriveSlots(accounts, tasks, queue)` takes the three reads' `data`:
+   `accounts` is `Account[]`, `tasks` is `Task[] | null` (`null` when that
+   read failed or has not answered), and `queue` is `unknown`, guarded as
+   `front/src/lib/thread.ts` guards it. It answers a `SlotsView`,
+   `{ slots, free, waiting, started }`, where `waiting` (the list of 3) and
+   `started` (the count of 6) are `null` when `queue` is not a queue object.
+   `standingLine(view: SlotsView | "loading" | "accounts-failed")` builds the
+   confirmation's sentence; the caller decides the two string arms from the
+   accounts read. Both places import these two functions, and no component
+   re-derives a slot. Tests are in `front/src/lib/slots.test.ts`.
+2. **A slot per account, never more.** The order is the pool's: workers first,
+   then the primary, then by name. An account with `max_concurrent_phases`
+   above 1 is still one slot, because the api serves one `current_task` per
+   account.
+   - **Open** when `state` is `IDLE` or `BUSY`. The state is the
+     dispatcher's judgement of "under its threshold", so it is read and never
+     re-decided from `last_probe`. `IDLE` is *empty*. `BUSY` carries its task:
+     `current_task_id`, the task row's `phase` (the role) and the project of
+     the claimed `start` record for that task. Each one missing is its own
+     `Absent` mark: "task not recorded", "phase not served", "project not
+     recorded".
+   - **Closed** otherwise, with what closed it and its reset:
+     - `COOLING_DOWN` is *refused by the provider*. Its reset is
+       `rate_limited_at + quota_cooldown_seconds`, epoch seconds, drawn with
+       `formatClock`. It is `null` when `rate_limited_at` is.
+     - `PRE_COOLDOWN` is *parked over its ceiling*. Its reset is the raw
+       `last_probe` clause (`session_reset` and/or `week_reset`) of each
+       window at or over its ceiling, by the pool screen's `>=` test, shown
+       verbatim and never parsed. With none, it is absent: "no reset
+       recorded".
+     - `AUTH_EXPIRED` is *login expired*. It has no reset, because it needs the
+       operator (ADR 76).
+     - `state: null` is *state unreadable*, with no reset.
+   - **The primary** is marked on its slot as
+     `primary · <reserve_pct>% reserve`. The slot says a phase there spends
+     the conversation's quota. It is open or closed by the same rules.
+   - `free` counts the open, empty slots.
+3. **What waits.** These are the `start` records, with a claimed one winning
+   over a pending one for the same task, as on the Board (ADR 160), in served
+   order with claimed records first. A task that an open slot carries is in a
+   phase and is not listed. Every other task is listed with one reason:
+   - **Waiting for an account**: a pending record whose `waiting` is
+     `"account"`. The worker's word is the fact, so this is not re-derived from
+     the slots. It carries the *soonest reset*, the earliest epoch reset among
+     the closed slots. With no closed slot it reads "every slot is full", and
+     with closed slots but no epoch reset it reads "no reset time to compare".
+   - **Between phases**: a claimed record whose task row has `phase: null`.
+   - **Queued**: any other pending record. The worker's `waiting` word is shown
+     verbatim when it is set (`project` today, ADR 142's serial key).
+   - **In `<phase>`, on no account**: a claimed record whose task has a
+     `phase` that no slot carries, such as a stale lock or an unreadable
+     account row.
+   - **Unknown**: a claimed record whose task row is missing, or `/api/tasks`
+     failed.
+4. ***Waiting for the project* is left out** as a named reason, because
+   `docs/plans/projects.md` step 3 is not built. It is added in `deriveSlots` as one more
+   reason kind. A pending record with `waiting: "project"` maps to it, and so
+   does a pending start whose project equals a claimed start's project, once
+   step 1 puts `project` on the task row. Then `standingLine` counts only the
+   starts of the same project and names them "of this project". Until then that
+   record shows as *Queued*, with the worker's word.
+5. **The dock.** A *Slots* region, `SlotsPanel` in
+   `front/src/components/console/slots.tsx`, sits directly under the dock's
+   selector row, above the forms and the thread header. It has one line per
+   slot, then the waiting list, which is omitted when empty. It reads
+   `accountsQuery`, `tasksQuery` and `actionQueueQuery` (already polled, shared
+   keys). Its states are:
+   - "Reading the slots…" until accounts answers.
+   - "/api/accounts did not answer, so the slots are not known" when that read
+     fails. Nothing else is drawn.
+   - "No account is configured" with no accounts.
+   - With the queue failed, the slots are drawn and "/api/actions did not
+     answer, so what waits is not known" replaces the list.
+   - With tasks failed, the phase marks read "phase not known".
+   The region is small (two accounts, two lines) and is not collapsible. When
+   execution threads land in the selector, the region stays above them.
+6. **The confirmation.** The *Start development* dialog (`StartControl` in
+   `front/src/routes/index.tsx`) draws `standingLine` as one paragraph between
+   the description and the note. The sentence is `<n> account(s), <f> free`,
+   adding `, the primary among them` when a free slot is the primary, then `; `
+   and one of:
+   - `this task would queue behind <k> started task(s)` when `k`, the pending
+     and claimed `start` records, is above 0. The worker serializes starts per
+     project and this console sends one project (ADR 157).
+   - `this task would start now` when `f` is above 0.
+   - `this task would wait for an account`.
+   With no account the sentence is "No account is configured; no slot can take
+   this task". With accounts failed it is "/api/accounts did not answer, so the
+   free slots are not known". With the queue failed it is
+   `<n> accounts, <f> free; /api/actions did not answer, so where this task
+   would stand is not known`. While loading it is "Reading the slots…". It never
+   names a time. The Board already reads all three queries.
+7. **Tests.** `front/src/lib/slots.test.ts` covers an open empty slot, an
+   open busy slot with phase and project, a closed cooling slot with its epoch
+   reset, a parked slot with its clause, the primary with its reserve,
+   *Waiting for an account* with the soonest reset and with none, *Between
+   phases*, *Queued* with `project`, and every `standingLine` arm. A component test of the dock checks
+   `SlotsPanel` drawn from stubbed reads: slots, the waiting list and the
+   accounts-failed state. One in `front/src/routes/-index.test.tsx` checks the
+   confirmation's line.
+8. **Plans.** `docs/plans/projects.md` step 6 and `docs/plans/main-thread.md`
+   step 7 are marked built by T-115 and ADR 198, step 7's second half by name. Both say
+   *Waiting for the project* is open, as 4 says. This is done when the code
+   lands, not before.
+
+**Consequences.**
+- A start the worker holds behind another start of its project reads
+  *Queued — project*, not a named reason, until step 3.
+- `standingLine`'s count is conservative: it counts every started task,
+  whatever its project, since the browser does not know the console's project.
+- A parked slot's reset is the CLI's clause and is not compared, so *Waiting for
+  an account*'s soonest reset only weighs provider cooldowns.
+- A `BUSY` account holding two phases shows one.
+
+**Ruled out.**
+- A backend route for slots: every fact is served (task constraint).
+- Re-deciding "under its threshold" from `last_probe`: the state already says
+  it, and two judgements could disagree.
+- Parsing the probe's reset clauses: a guessed time.
+- Deriving *Waiting for an account* from the slots: the worker's `waiting` is
+  what holds the start.

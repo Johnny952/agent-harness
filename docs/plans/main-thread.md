@@ -15,7 +15,8 @@ T-110 (2026-10-19, ADR 173); step 4, the screen read-only, is built by T-111
 (2026-10-19, ADR 181) and its composer and stop button by T-114
 (2026-10-20, ADR 190), the session seeding on 2026-10-20 (ADR 194), and the
 thread writes with *Talk about this task* on 2026-10-20 (ADR 195); step 6 is built by T-113 (2026-10-20, ADR 187); step 7's execution threads are built on
-2026-10-20 (ADR 197), its slots are not.
+2026-10-20 (ADR 197) and its slots by T-115 (2026-10-20, ADR 198); *Waiting
+for the project* is open.
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -297,8 +298,11 @@ and worker.
    started task in play under the threads and shows its cycle read only —
    start note, one segment per phase with role, account and model, its hook
    events under the Text / Text and commands switch, its handoff and its
-   gates — from one new read-only route, `GET /api/tasks/<id>/events`; the
-   slots (projects.md *Decisions* 6) remain.
+   gates — from one new read-only route, `GET /api/tasks/<id>/events`. The
+   second half, the selector's slots, built by T-115 (2026-10-20, ADR 198): a
+   region under the selector row, above the execution, and a line in the
+   *Start development* confirmation. *Waiting for the project* is open, as
+   `projects.md` step 6 says.
 
 ## Open questions
 
