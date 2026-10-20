@@ -243,6 +243,10 @@ module; steps 2, 4 and 5 need its queue and worker.
    `BOARD_ACTIONS_TOKEN` bearer, through `dispatcher/projects.py`'s one check
    and writer. The console's proxy does not carry them yet, and the clone of
    step 5 is not theirs: a record is written whether or not its clone exists.
+   A record's remote never holds a credential (ADR 205): a password or a
+   token-shaped user in its userinfo is refused on create and change and
+   reported as a broken record on read, with the userinfo redacted to `***`
+   in every message.
 2. **SSH in the dispatcher.** Built 2026-10-11. The image's `openssh-client`
    and pinned host key, `GIT_SSH_COMMAND`, and a CLI command, `project-keygen
    --project <slug>`, that makes the pair and prints the public half. This is

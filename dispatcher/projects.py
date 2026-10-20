@@ -41,6 +41,17 @@ from dispatcher import context_transfer, docker_exec, project_keys, tasks
 _SCP_REMOTE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$")
 _SSH_URL = re.compile(r"^ssh://[^\s/]+/[^\s]+$")
 _HTTPS_REMOTE = re.compile(r"^https?://(?:[^@/\s]+@)?([A-Za-z0-9.-]+)(?::\d+)?/([^\s]+?)/?$")
+#: A URL's userinfo: everything before the last `@` of its authority, as git
+#: and RFC 3986 read it, so a password holding a raw `@` is all inside it.
+_URL_USERINFO = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<userinfo>[^/\s]*)@")
+#: The scp-like form's user: everything before its first `@`.
+_SCP_USERINFO = re.compile(r"^(?P<scheme>)(?P<userinfo>[^@/\s]*)@")
+#: A bare login name, the only userinfo a record keeps (`git@`, `deploy@`).
+_BARE_USER = re.compile(r"^[A-Za-z0-9._-]+$")
+#: Userinfo that is a token on its own (`https://ghp_...@github.com/...`):
+#: GitHub's classic, OAuth, user, server and refresh prefixes, its
+#: fine-grained one, and GitLab's. A login name does not start like this.
+_TOKEN_USER = re.compile(r"^(?:gh[pousr]_|github_pat_|glpat-)", re.IGNORECASE)
 
 STATUSES = ("active", "archived")
 
@@ -112,8 +123,49 @@ def is_slug(value: object) -> bool:
     return tasks.is_project_slug(value)
 
 
+def _userinfo(value: str) -> re.Match | None:
+    """The userinfo of `value` (a URL's, or the scp-like form's user), or None."""
+    return _URL_USERINFO.match(value) or (None if "://" in value else _SCP_USERINFO.match(value))
+
+
+def has_credential(value: object) -> bool:
+    """Whether `value`'s userinfo carries a secret (ADR 205).
+
+    A password (`user:secret@`) in any scheme, or a token standing alone as
+    the user (`ghp_...@`). A bare login name (`git@github.com:o/r.git`,
+    `ssh://git@host/r.git`) is not one. `_problems` asks this before the
+    form, so a remote refused for its form never carries a secret into the
+    message either.
+    """
+    if not isinstance(value, str):
+        return False
+    match = _userinfo(value)
+    if match is None:
+        return False
+    userinfo = match["userinfo"]
+    return not _BARE_USER.match(userinfo) or bool(_TOKEN_USER.match(userinfo))
+
+
+def redact_remote(value: object) -> object:
+    """`value` with a secret-bearing userinfo replaced by `***`, for a message.
+
+    A bare login name is kept, so `git@host:o/r.git` reads as it is; anything
+    else before the `@` is gone, password and token alike. A non-string is
+    returned as it is.
+    """
+    if not isinstance(value, str) or not has_credential(value):
+        return value
+    match = _userinfo(value)
+    return f"{match['scheme']}***@{value[match.end():]}"
+
+
 def is_ssh_remote(value: object) -> bool:
-    return isinstance(value, str) and bool(_SCP_REMOTE.match(value) or _SSH_URL.match(value))
+    """A remote the record can hold: in SSH form, with no credential in it."""
+    return (
+        isinstance(value, str)
+        and bool(_SCP_REMOTE.match(value) or _SSH_URL.match(value))
+        and not has_credential(value)
+    )
 
 
 def ssh_remote(url: str | None) -> str | None:
@@ -122,13 +174,25 @@ def ssh_remote(url: str | None) -> str | None:
     An SSH remote is kept as it is. An `https://host/owner/repo` one becomes
     `git@host:owner/repo.git`, dropping any credentials in it: the deploy key
     (Decisions 2) authenticates over SSH, and a token in a URL is the thing
-    the record must never carry. A local path has no SSH form.
+    the record must never carry. An `ssh://user:secret@host/...` one keeps
+    its user and loses the password, for the same reason; one whose user is a
+    token has no SSH form this can write, since the login it stood for is not
+    known. A local path has no SSH form.
     """
     if not url:
         return None
     url = url.strip()
     if is_ssh_remote(url):
         return url
+    if _SSH_URL.match(url):
+        match = _URL_USERINFO.match(url)
+        if match is None:
+            return None
+        user = match["userinfo"].split(":", 1)[0]
+        if not _BARE_USER.match(user) or _TOKEN_USER.match(user):
+            return None
+        stripped = f"ssh://{user}@{url[match.end():]}"
+        return stripped if is_ssh_remote(stripped) else None
     match = _HTTPS_REMOTE.match(url)
     if match is None:
         return None
@@ -163,7 +227,12 @@ def _problems(data: object) -> list[str]:
     if "title" in data and not (isinstance(data["title"], str) and data["title"].strip()):
         problems.append("its title is empty")
     remote = data.get("remote")
-    if remote is not None and not is_ssh_remote(remote):
+    if has_credential(remote):
+        problems.append(
+            f"its remote {redact_remote(remote)!r} carries a password or token in its "
+            "userinfo: the record never holds a credential"
+        )
+    elif remote is not None and not is_ssh_remote(remote):
         problems.append(f"its remote {remote!r} is not in SSH form (git@host:owner/repo.git)")
     branch = data.get("base_branch")
     if branch is not None and not (isinstance(branch, str) and branch.strip()):
