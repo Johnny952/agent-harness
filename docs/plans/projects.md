@@ -263,7 +263,10 @@ module; steps 2, 4 and 5 need its queue and worker.
    (`docs/decisions.md` ADR 207): `POST /api/epics/<id>/start` queues one
    start per task of the epic in *Ready*, in the board's order, each waiting
    as `project` until the one before reaches *Awaiting review*, so it needs
-   no lock of its own. The console's *Start epic* button is still to build.
+   no lock of its own. *Stop epic* and the console's *Start epic* and *Stop
+   epic* buttons, on the epic's task page, are built 2026-10-20
+   (`docs/decisions.md` ADR NNN). Still open: queuing a later task as its
+   dependencies merge, and the epic's spending limit.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR 208): the

@@ -27,16 +27,17 @@
  * deliberately not entries of `FORWARDED`, whose sixteen routes, count and
  * rejection message describe the api alone.
  *
- * **Eleven method and path pairs go to the board-service** (`docs/decisions.md`
- * ADR 136, ADR 157, ADR 190, ADR 195 for the two thread records, and ADR 206
- * for the two project records):
+ * **Thirteen method and path pairs go to the board-service** (`docs/decisions.md`
+ * ADR 136, ADR 157, ADR 190, ADR 195 for the two thread records, ADR 206
+ * for the two project records, and ADR NNN for the two epic actions):
  * `POST /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`,
  * `POST /api/tasks/<id>/accept`, `POST /api/threads` and
  * `PATCH /api/threads/<id>`, the three action routes
  * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
  * `POST /api/threads/<id>/turns`, and the two project-record writes
- * `POST /api/projects` and `PATCH /api/projects/<slug>`, onto the same paths
- * there; the last five carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
+ * `POST /api/projects` and `PATCH /api/projects/<slug>`, and the two epic actions
+ * `POST /api/epics/<id>/start` and `POST /api/epics/<id>/stop`, onto the same paths
+ * there; the last seven carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
  * `GET /api/threads` is still the api's list, a
@@ -167,6 +168,14 @@ const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
 const ACTION_CANCEL = /^\/api\/actions\/([^/]+)\/cancel$/;
 
 /**
+ * *Start epic* and *Stop epic* (ADR 207, ADR NNN): `POST`s to the board-service,
+ * with the actions bearer. A start's body is rebuilt as a task's is, a stop's is
+ * `{}` as a cancel's is.
+ */
+const EPIC_START = /^\/api\/epics\/([^/]+)\/start$/;
+const EPIC_STOP = /^\/api\/epics\/([^/]+)\/stop$/;
+
+/**
  * Sending a turn to a thread (ADR 181, ADR 190): a `POST` to the board-service,
  * with the actions bearer. The path is shared with nothing else.
  */
@@ -273,7 +282,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the eleven exact pairs: a method
+  // Also before the read-only check, and only for the thirteen exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -458,14 +467,16 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the eleven writes goes, or `null` for any
+ * Where on the board-service one of the thirteen writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
- * The three action routes are `POST` only and carry `action` (ADR 157, ADR 190).
+ * The action routes, the two epic ones too, are `POST` only and carry `action` (ADR 157, ADR 190).
  * A thread id that is not one the harness makes is a 404 here too, for a turn
  * and for a record's `PATCH`, and so is a project slug the harness would not
- * take. The two project-record writes carry `action` "project" (ADR 206).
+ * take. The two project-record writes carry `action` "project" (ADR 206). The
+ * two epic actions carry `action` "start" and "cancel", since their bodies are
+ * a task start's and a cancel's (ADR NNN).
  */
 function boardTarget(method: string, path: string): Resolution | null {
   if (method === "POST" && path === BACKLOG) {
@@ -509,23 +520,31 @@ function boardTarget(method: string, path: string): Resolution | null {
         action: "turn",
       };
     }
-    const start = TASK_START.exec(path);
-    const cancel = start ? null : ACTION_CANCEL.exec(path);
-    const hit = start ?? cancel;
-    if (hit) {
-      const what = start ? "task" : "action";
+    const actionRoutes = [
+      { pattern: TASK_START, route: "tasks", tail: "start", what: "task", action: "start" },
+      {
+        pattern: ACTION_CANCEL,
+        route: "actions",
+        tail: "cancel",
+        what: "action",
+        action: "cancel",
+      },
+      { pattern: EPIC_START, route: "epics", tail: "start", what: "epic", action: "start" },
+      { pattern: EPIC_STOP, route: "epics", tail: "stop", what: "epic", action: "cancel" },
+    ] as const;
+    for (const { pattern, route, tail, what, action } of actionRoutes) {
+      const hit = pattern.exec(path);
+      if (!hit) continue;
       let id: string;
       try {
         id = decodeURIComponent(hit[1]!);
       } catch {
         return { kind: "reject", status: 404, error: `${path} is not a readable ${what} id.` };
       }
-      const route = start ? "tasks" : "actions";
-      const tail = start ? "start" : "cancel";
       return {
         kind: "forward",
         target: `${BOARD_SERVICE_URL}/api/${route}/${encodeURIComponent(id)}/${tail}`,
-        action: start ? "start" : "cancel",
+        action,
       };
     }
   }
@@ -594,7 +613,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its eleven writes (`docs/decisions.md`
+ * The board-service's answer to one of its thirteen writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -625,6 +644,8 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
  * body may hold only `note` (else 400, `project` included: the project is the
  * console's, set here); the upstream body is rebuilt from it. A cancel sends `{}`.
+ * *Start epic* and *Stop epic* (ADR NNN) are a start and a cancel here: the same
+ * checks, the same rebuilt body and the same `{}`.
  * A turn's body crosses unchanged: the route validates `text` itself.
  * The two project-record writes (ADR 203, ADR 206) carry the same bearer, since
  * the route asks for it, and nothing else of the action routes: no

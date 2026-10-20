@@ -11588,3 +11588,76 @@ row carries `project` (ADR 199, ADR 204), null for a card that names none.
   harness's screens.
 - Treating a null project as the harness's own project slug: the slug is not
   known to the console, and guessing it would put cards under the wrong name.
+
+## ADR NNN — Stop epic drops the epic's waiting starts, and the epic's page has both buttons
+
+**Context.** ADR 207 built `POST /api/epics/<id>/start`, backend only: one
+start per task of the epic in *Ready*, in the board's order, the note copied
+to each and `params.epic` naming the epic. `board-service.md`'s *Per epic*
+also asks for *Stop epic*, which "drops what is queued and leaves running
+phases alone", and for the two buttons on the epic's view. The queue already
+has a cancel (ADR 142, ADR 148): a `cancel` action the worker runs, which
+drops a pending target and stops a claimed one. Stopping a running phase is
+exactly what *Stop epic* must not do.
+
+**Decision.**
+1. `POST /api/epics/<id>/stop` (`board_service/app.py:epic_stop`), behind the
+   actions bearer as the other creators, with an empty body (anything else is
+   400). 404 for no such task, 409 for a task that is not an epic.
+2. It reads the queue under one hold of `write.lock`
+   (`dispatcher/actions.py:create_epic_cancels`): the starts whose
+   `params.epic` is the epic, pending or claimed. It queues one `cancel` per
+   pending start that no pending cancel already names, and names the claimed
+   ones as left running. The answer is `{epic, cancels, dropped, left}`, the
+   last two as `{action, task_id}`. 409 when the epic has no start queued, or
+   when every pending one already has its cancel (a second press before the
+   worker ran the first). With only claimed starts, nothing is written and the
+   answer is 201 with empty `cancels`.
+3. The cancels carry `params.only_pending: true`, a new optional key of the
+   cancel record that must be `true` when present. The worker drops a pending
+   target as before; a target claimed by the time the cancel runs is not
+   stopped: the cancel ends `failed`, "target … was taken before the stop
+   reached it; it is left running". The worker stays the only mover of
+   records; the route moves no file.
+4. A start queued for one of the epic's tasks by itself (*Start development*)
+   has no `params.epic` and is not the epic's: the route leaves it, and the
+   console does not count it.
+5. The console forwards both epic routes (`forward.ts`, now thirteen board
+   pairs): *Start epic* as a task start, its body rebuilt to
+   `{project: CONSOLE_PROJECT, note}` and anything but `note` refused with 400;
+   *Stop epic* as a cancel, the body sent as `{}`. `client.ts` has
+   `startEpic` and `stopEpic`, `queries.ts` the two mutations, which refetch
+   the queue and the tasks.
+6. The epic's task page (`task-epic.tsx`, `epic-actions.tsx`) has *Start
+   epic* and, while the queue holds a start of the epic or could not be read,
+   *Stop epic*, with a count of the epic's starts waiting and running.
+   *Start epic*'s confirmation names the children in *Ready*, in
+   `/api/ready`'s order, that would be queued and the ones that would not,
+   shows `lib/slots.ts`'s standing line for the first of them (ADR 198,
+   ADR 204), never a time, and takes the optional note. It says the spending
+   limit is not built and that the route refuses a number (400); with no
+   child in *Ready* its *Start* is disabled. *Stop epic*'s confirmation names
+   the waiting starts it would drop and the running ones it leaves. Each
+   toast reports what the route answered, counts included; a refusal is a
+   toast with the route's error.
+
+**Consequences.**
+- A start the worker takes between the press and the cancel's run keeps
+  running; the queue shows that cancel as failed with the reason above.
+- What the dialogs list is the console's read of `/api/ready` and
+  `/api/actions` at the moment; the route decides on its own read, and the
+  toast reports that one.
+- The buttons are on the epic's task page only, not on the board's swimlane
+  header.
+- Still open (`board-service.md`, *Per epic*): queuing each later task as its
+  dependencies merge, the arquitecto's sub-tasks, and the epic's spending
+  limit.
+
+**Ruled out.**
+- Reusing the plain cancel for *Stop epic*: a start claimed between the read
+  and the worker's run would have its phase stopped, which the plan rules
+  out.
+- Moving the pending start files from the route: the worker is the only
+  mover (ADR 142).
+- Counting a child's own single start as the epic's: the person queued it on
+  its own, so *Stop epic* would drop what it did not start.

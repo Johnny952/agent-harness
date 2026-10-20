@@ -20,7 +20,14 @@ import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/re
 import { toast } from "sonner";
 import { Route } from "./tasks.$taskId";
 import { renderRoute, type Answer, type Served } from "@/test/render-route";
-import type { Task, TaskComment, TaskDetail, Thread } from "@/lib/api/types";
+import type {
+  ActionQueue,
+  ActionRecord,
+  Task,
+  TaskComment,
+  TaskDetail,
+  Thread,
+} from "@/lib/api/types";
 import { OPEN_THREAD_EVENT } from "@/hooks/use-console";
 
 // `renderRoute` draws no Toaster, so the toast is asserted at its call.
@@ -768,5 +775,179 @@ describe("the epic view", () => {
     await taskPage({ ...TASK, epic: "T-100" });
     await screen.findByText("task body");
     expect(screen.queryByText(EPIC_VIEW)).toBeNull();
+  });
+});
+
+/** An action record as `dispatcher/actions.py:create` writes it, an epic's start by default. */
+function action(taskId: string, over: Partial<ActionRecord> = {}): ActionRecord {
+  return {
+    version: 1,
+    id: `act-${taskId}`,
+    kind: "start",
+    project: "ia-harness",
+    task_id: taskId,
+    params: { limit: null, epic: "T-101" },
+    actor: "operator",
+    note: null,
+    created_at: "2026-10-20T12:00:00Z",
+    claimed_at: null,
+    started_at: null,
+    finished_at: null,
+    status: "pending",
+    waiting: null,
+    result: null,
+    error: null,
+    ...over,
+  } as ActionRecord;
+}
+
+function queueOf(over: Partial<ActionQueue> = {}): { data: ActionQueue } {
+  return {
+    data: {
+      pending: [],
+      claimed: [],
+      done: [],
+      done_total: 0,
+      worker: { heartbeat: null, stale: true, stale_after_seconds: 30 },
+      ...over,
+    } as ActionQueue,
+  };
+}
+
+describe("Start epic and Stop epic (ADR NNN)", () => {
+  const epic: TaskDetail = {
+    ...TASK,
+    status: "epic",
+    split_into: ["T-104", "T-102", "T-109", "T-103"],
+  };
+  const list = [
+    row("T-101", { status: "epic", split_into: epic.split_into, epic: null }),
+    row("T-102", { status: "done", merged: true }),
+    row("T-103", { status: "pending" }),
+    row("T-104", { status: "pending" }),
+    row("T-109", { status: "pending" }),
+  ];
+
+  async function epicPage(extra: Served = {}) {
+    const out = await taskPage(epic, [], undefined, {
+      "/api/tasks": { data: list },
+      // The dispatcher's order, which is not the split's: the dialog follows it.
+      "/api/ready": { data: ["T-109", "T-104", "T-200"] },
+      "/api/accounts": { data: [] },
+      "/api/actions": queueOf(),
+      ...extra,
+    });
+    await screen.findByTestId("epic-actions");
+    return out;
+  }
+
+  async function open(name: string) {
+    fireEvent.click(await screen.findByRole("button", { name }));
+    return await screen.findByRole("dialog");
+  }
+
+  it("says what Start epic would queue and what it leaves out, with the slots and no limit", async () => {
+    await epicPage();
+    const dialog = await open("Start epic");
+    const summary = within(dialog).getByTestId("epic-start-summary");
+    await waitFor(() =>
+      expect(summary.textContent).toContain("2 starts would be queued: T-109, T-104"),
+    );
+    expect(summary.textContent).toContain("Not in Ready, not queued: T-102, T-103");
+    expect(within(dialog).getByTestId("standing-line").textContent).toMatch(
+      /^For the first of them: /,
+    );
+    expect(within(dialog).getByTestId("epic-limit").textContent).toContain("(400)");
+  });
+
+  it("sends the note, toasts what was queued and what was left out", async () => {
+    const { sent } = await epicPage({
+      "POST /api/epics/T-101/start": {
+        bare: { epic: "T-101", queued: [action("T-109"), action("T-104")], not_ready: ["T-102"] },
+        status: 201,
+      },
+    });
+    const dialog = await open("Start epic");
+    await within(dialog).findByText(/would be queued/);
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "go" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "2 starts of T-101 queued; 1 task not in Ready left out",
+      ),
+    );
+    const post = sent.find((r) => r.method === "POST");
+    expect(post?.path).toBe("/api/epics/T-101/start");
+    expect(post?.body).toEqual({ note: "go" });
+  });
+
+  it("toasts a refusal and keeps the dialog", async () => {
+    await epicPage({
+      "POST /api/epics/T-101/start": {
+        status: 409,
+        error: "a start for task T-109 is already queued",
+      },
+    });
+    const dialog = await open("Start epic");
+    await within(dialog).findByText(/would be queued/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("a start for task T-109 is already queued"),
+    );
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
+  it("does not let Start through when no child is in Ready", async () => {
+    await epicPage({ "/api/ready": { data: ["T-200"] } });
+    const dialog = await open("Start epic");
+    await within(dialog).findByText(/No task of this epic is in Ready/);
+    expect(
+      (within(dialog).getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("offers no Stop epic while the queue holds none of the epic's starts", async () => {
+    // A start of a child queued by itself carries no `params.epic`: not the epic's.
+    await epicPage({
+      "/api/actions": queueOf({ pending: [action("T-104", { params: { limit: null } })] }),
+    });
+    await screen.findByRole("button", { name: "Start epic" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop epic" })).toBeNull());
+    expect(screen.queryByTestId("epic-queued")).toBeNull();
+  });
+
+  it("names the waiting starts it drops and the running one it leaves, then toasts the answer", async () => {
+    const { sent } = await epicPage({
+      "/api/actions": queueOf({
+        pending: [action("T-104"), action("T-103", { params: { limit: null } })],
+        claimed: [action("T-109", { status: "claimed" })],
+      }),
+      "POST /api/epics/T-101/stop": {
+        bare: {
+          epic: "T-101",
+          cancels: [action("A-1", { kind: "cancel", task_id: null })],
+          dropped: [{ action: "act-T-104", task_id: "T-104" }],
+          left: [{ action: "act-T-109", task_id: "T-109" }],
+        },
+        status: 201,
+      },
+    });
+    expect((await screen.findByTestId("epic-queued")).textContent).toBe(
+      "1 start waiting, 1 running",
+    );
+    const dialog = await open("Stop epic");
+    const summary = within(dialog).getByTestId("epic-stop-summary");
+    expect(summary.textContent).toContain("1 waiting start would be dropped: T-104");
+    expect(summary.textContent).toContain("Running, left alone: T-109");
+    expect(summary.textContent).not.toContain("T-103");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Stop" }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "1 waiting start of T-101 dropped; 1 running start left alone",
+      ),
+    );
+    const post = sent.find((r) => r.method === "POST");
+    expect(post?.path).toBe("/api/epics/T-101/stop");
+    expect(post?.body).toEqual({});
   });
 });

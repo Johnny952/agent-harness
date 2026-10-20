@@ -379,6 +379,51 @@ def test_a_cancel_on_a_running_start(cfg, worker, cycle):
     assert "last_phase" in got["result"]
 
 
+def test_stop_epic_drops_the_waiting_starts_and_leaves_the_running_one(cfg, worker, cycle):
+    # *Stop epic* (ADR NNN): the first start is running, the two after it wait
+    # as `project`; the stop cancels those two and the run goes on.
+    order = ["T-1", "T-2", "T-3"]
+    for task_id in order:
+        _task(cfg, task_id)
+    cycle.hold("T-1")
+    queued = actions.create_starts(
+        cfg.state_dir, "proj", order, params={"limit": None, "epic": "T-9"}
+    )
+    worker.tick()
+    cycle.wait_entered("T-1")
+    made = actions.create_epic_cancels(cfg.state_dir, "T-9")
+    assert [r["id"] for r in made["dropped"]] == [r["id"] for r in queued[1:]]
+    assert [r["id"] for r in made["left"]] == [queued[0]["id"]]
+    worker.tick()
+    for later in queued[1:]:
+        state, got = where(cfg, later["id"])
+        assert state == "done" and got["status"] == "cancelled"
+    for c in made["cancels"]:
+        assert where(cfg, c["id"])[1]["status"] == "done"
+    assert where(cfg, queued[0]["id"])[0] == "claimed"
+    cycle.release("T-1")
+    worker.join()
+    assert where(cfg, queued[0]["id"])[1]["status"] == "done"
+    assert [c[0] for c in cycle.calls] == ["T-1"]
+
+
+def test_a_stop_cancel_whose_start_was_taken_leaves_it_running(cfg, worker, cycle):
+    # Taken between the stop's read and its cancel's run: the start keeps its run.
+    cycle.hold("T-1")
+    target = start(cfg, "T-1")
+    worker.tick()
+    cycle.wait_entered("T-1")
+    c = actions.create(
+        cfg.state_dir, "cancel", params={"target": target["id"], "only_pending": True}
+    )
+    worker.tick()
+    got = where(cfg, c["id"])[1]
+    assert got["status"] == "failed" and "left running" in got["error"]
+    cycle.release("T-1")
+    worker.join()
+    assert where(cfg, target["id"])[1]["status"] == "done"
+
+
 def test_a_cancel_on_a_finished_target_fails(cfg, worker, cycle):
     done = start(cfg, "T-1")
     worker.tick()

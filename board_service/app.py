@@ -402,6 +402,34 @@ def epic_start(
     }
 
 
+def epic_stop(hive_dir: str, state_dir: str, epic_id: str) -> dict:
+    """*Stop epic*'s queue write (ADR NNN): drop the epic's starts still waiting.
+
+    A `cancel` is queued for each start *Start epic* queued for the epic
+    (`params.epic`) that is still in `pending/`; the worker runs it before it
+    takes another start (ADR 148). A start already claimed is a running
+    phase and is left alone: named in `left`, not cancelled. A start queued
+    for one of the epic's tasks by itself (*Start development*) carries no
+    `params.epic` and is not this call's.
+    """
+    epic = task_store.read_all_tasks(hive_dir).get(epic_id)
+    if epic is None:
+        raise actions.ActionRefused(404, f"no task {epic_id}")
+    if epic.status != "epic":
+        raise actions.ActionRefused(409, f"{epic_id} is not an epic")
+    made = actions.create_epic_cancels(state_dir, epic_id, actor="operator")
+
+    def start(record: dict) -> dict:
+        return {"action": record["id"], "task_id": record["task_id"]}
+
+    return {
+        "epic": epic_id,
+        "cancels": made["cancels"],
+        "dropped": [start(r) for r in made["dropped"]],
+        "left": [start(r) for r in made["left"]],
+    }
+
+
 def _names_task(text: str, task_id: str) -> bool:
     """Whether `text` has `task_id` as a whole token, in any case (ADR 187, 4).
 
@@ -830,7 +858,7 @@ def create_app(config_path: str) -> Flask:
     def http_accept(task_id: str):
         return _http(hive_dir, "backlog_accept", task_id)
 
-    # The action queue's four creators (ADR 142, ADR 151, ADR 181): behind a bearer, and
+    # The action queue's creators (ADR 142, ADR 151, ADR 181, ADR 207, ADR NNN): behind a bearer, and
     # the queue is made on the first create, never here.
 
     @app.post("/api/tasks/<task_id>/start")
@@ -861,6 +889,17 @@ def create_app(config_path: str) -> Flask:
                 hive_dir, state_dir, epic_id, project=body.get("project"),
                 note=body.get("note"),
             )
+
+        return _action(actions_token, make)
+
+    @app.post("/api/epics/<epic_id>/stop")
+    def http_epic_stop(epic_id: str):
+        # *Stop epic* (ADR NNN): what is queued for the epic is dropped, a
+        # running phase is left alone.
+        def make(body: dict):
+            if body:
+                raise actions.ActionRefused(400, "a stop takes an empty body")
+            return epic_stop(hive_dir, state_dir, epic_id)
 
         return _action(actions_token, make)
 

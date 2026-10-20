@@ -66,6 +66,11 @@
  * /api/projects/<slug>`), bare like the others. The forward adds the board
  * service's bearer on the server; nothing here carries it. No screen calls them
  * yet.
+ *
+ * **Two writes for an epic** (`docs/decisions.md` ADR 207, ADR NNN): `startEpic`
+ * (`POST /api/epics/<id>/start`, body `{note}` as a task's start) and `stopEpic`
+ * (`POST /api/epics/<id>/stop`, body `{}`), bare like the others, for the
+ * *Start epic* and *Stop epic* buttons on an epic's page.
  */
 import type {
   AcceptTaskBody,
@@ -73,6 +78,8 @@ import type {
   Account,
   ActionQueue,
   ActionRecord,
+  EpicStartResult,
+  EpicStopResult,
   ApiResult,
   SendTurnBody,
   CreateThreadBody,
@@ -500,6 +507,31 @@ export function startTask(taskId: string, note: string | null): Promise<ActionRe
   return readBare<ActionRecord>(`/api/tasks/${encodeURIComponent(taskId)}/start`, {
     method: "POST",
     body,
+  });
+}
+
+/**
+ * *Start epic* (ADR 207): `POST /api/epics/<id>/start` with `{note}`, as a task's
+ * start. The answer names the starts queued and the tasks not in Ready; a refusal
+ * (404, 409 for a task already started or nothing in Ready) is an `ApiError`.
+ */
+export function startEpic(epicId: string, note: string | null): Promise<EpicStartResult> {
+  const body: StartTaskBody = { note };
+  return readBare<EpicStartResult>(`/api/epics/${encodeURIComponent(epicId)}/start`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * *Stop epic* (ADR NNN): `POST /api/epics/<id>/stop` with an empty body. The
+ * answer names the waiting starts dropped and the running ones left alone; a 409
+ * when nothing of the epic is queued, or every waiting start already has a cancel.
+ */
+export function stopEpic(epicId: string): Promise<EpicStopResult> {
+  return readBare<EpicStopResult>(`/api/epics/${encodeURIComponent(epicId)}/stop`, {
+    method: "POST",
+    body: {},
   });
 }
 
