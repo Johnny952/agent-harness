@@ -27,14 +27,16 @@
  * deliberately not entries of `FORWARDED`, whose sixteen routes, count and
  * rejection message describe the api alone.
  *
- * **Nine method and path pairs go to the board-service** (`docs/decisions.md`
- * ADR 136, ADR 157, ADR 190, and ADR 195 for the two thread records):
+ * **Eleven method and path pairs go to the board-service** (`docs/decisions.md`
+ * ADR 136, ADR 157, ADR 190, ADR 195 for the two thread records, and ADR 206
+ * for the two project records):
  * `POST /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`,
  * `POST /api/tasks/<id>/accept`, `POST /api/threads` and
- * `PATCH /api/threads/<id>`, and the three action routes
+ * `PATCH /api/threads/<id>`, the three action routes
  * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
- * `POST /api/threads/<id>/turns`, onto the same paths there; the last three
- * carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
+ * `POST /api/threads/<id>/turns`, and the two project-record writes
+ * `POST /api/projects` and `PATCH /api/projects/<slug>`, onto the same paths
+ * there; the last five carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
  * `GET /api/threads` is still the api's list, a
@@ -193,6 +195,27 @@ const THREADS = "/api/threads";
  */
 const THREAD_RECORD = /^\/api\/threads\/([^/]+)$/;
 
+/**
+ * Making a project record (ADR 203, ADR 206): a `POST` to the board-service
+ * with the actions bearer, which the route asks for. Nothing in the api answers
+ * a `GET` here, so every other method keeps the answer it had.
+ */
+const PROJECTS = "/api/projects";
+
+/**
+ * Changing one project record (ADR 203, ADR 206): a `PATCH` to the
+ * board-service with the actions bearer, the slug checked against
+ * `PROJECT_SLUG`. No other method on the path is forwarded.
+ */
+const PROJECT_RECORD = /^\/api\/projects\/([^/]+)$/;
+
+/**
+ * The slugs a project may have: `dispatcher/tasks.py`'s `_PROJECT_SLUG`, written
+ * again here. A record `PATCH` for any other slug is the console's 404 and
+ * never crosses, as a thread id that is not one the harness makes is.
+ */
+const PROJECT_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 /** The words every failure body uses for the board-service: never its address. */
 const BOARD = "the board-service";
 
@@ -231,7 +254,7 @@ const SETTINGS_KEY = /^\/api\/settings\/([^/]+)$/;
 const WRITER = "the config-writer service";
 
 type Resolution =
-  | { kind: "forward"; target: string; action?: "start" | "cancel" | "turn" }
+  | { kind: "forward"; target: string; action?: "start" | "cancel" | "turn" | "project" }
   | { kind: "reject"; status: number; error: string };
 
 /**
@@ -250,7 +273,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the nine exact pairs: a method
+  // Also before the read-only check, and only for the eleven exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -435,13 +458,14 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the nine writes goes, or `null` for any
+ * Where on the board-service one of the eleven writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
  * The three action routes are `POST` only and carry `action` (ADR 157, ADR 190).
  * A thread id that is not one the harness makes is a 404 here too, for a turn
- * and for a record's `PATCH`.
+ * and for a record's `PATCH`, and so is a project slug the harness would not
+ * take. The two project-record writes carry `action` "project" (ADR 206).
  */
 function boardTarget(method: string, path: string): Resolution | null {
   if (method === "POST" && path === BACKLOG) {
@@ -450,7 +474,20 @@ function boardTarget(method: string, path: string): Resolution | null {
   if (method === "POST" && path === THREADS) {
     return { kind: "forward", target: `${BOARD_SERVICE_URL}${THREADS}` };
   }
+  if (method === "POST" && path === PROJECTS) {
+    return { kind: "forward", target: `${BOARD_SERVICE_URL}${PROJECTS}`, action: "project" };
+  }
   if (method === "PATCH") {
+    const project = PROJECT_RECORD.exec(path);
+    if (project) {
+      const slug = projectSlug(path, project[1]!);
+      if (typeof slug !== "string") return slug;
+      return {
+        kind: "forward",
+        target: `${BOARD_SERVICE_URL}${PROJECTS}/${encodeURIComponent(slug)}`,
+        action: "project",
+      };
+    }
     const record = THREAD_RECORD.exec(path);
     if (record) {
       const id = threadId(path, record[1]!);
@@ -535,7 +572,29 @@ function threadId(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its nine writes (`docs/decisions.md`
+ * A project slug from a path segment, decoded and checked against
+ * `PROJECT_SLUG`, or the 404 that names the path: one undecodable, or not a
+ * slug the harness takes.
+ */
+function projectSlug(path: string, raw: string): string | Resolution {
+  let slug: string;
+  try {
+    slug = decodeURIComponent(raw);
+  } catch {
+    return { kind: "reject", status: 404, error: `${path} is not a readable project slug.` };
+  }
+  if (!PROJECT_SLUG.test(slug)) {
+    return {
+      kind: "reject",
+      status: 404,
+      error: `${path} names no project slug the harness takes.`,
+    };
+  }
+  return slug;
+}
+
+/**
+ * The board-service's answer to one of its eleven writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -567,6 +626,10 @@ function threadId(path: string, raw: string): string | Resolution {
  * body may hold only `note` (else 400, `project` included: the project is the
  * console's, set here); the upstream body is rebuilt from it. A cancel sends `{}`.
  * A turn's body crosses unchanged: the route validates `text` itself.
+ * The two project-record writes (ADR 203, ADR 206) carry the same bearer, since
+ * the route asks for it, and nothing else of the action routes: no
+ * `CONSOLE_PROJECT` (the record names its own slug), the 64 KiB cap, and the
+ * body unchanged, the route refusing an unknown field or a wrong type itself.
  * The token is in no response and no log.
  */
 async function forwardBoard(request: Request, url: URL, resolved: Resolution): Promise<Response> {
@@ -598,7 +661,7 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     return jsonResponse(
       {
         error:
-          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s action routes. ` +
+          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s ${action === "project" ? "project" : "action"} routes. ` +
           "Set it to the board-service's token and restart the console.",
       },
       503,

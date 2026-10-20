@@ -11399,3 +11399,55 @@ URL, so a credential in a record is always a leak and never a configuration.
 - A second validator for the board routes: the one check stays the reader's.
 - Accepting https with a userinfo-free URL as a record remote: out of scope
   here; the harness's remotes are SSH (ADR 199).
+## ADR 206 — The console forwards the project record's writes
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 203 put two routes on the board service, `POST /api/projects`
+and `PATCH /api/projects/<slug>`, behind the `BOARD_ACTIONS_TOKEN` bearer, and
+`docs/plans/projects.md` step 1 said the console's proxy did not carry them.
+The front reaches the board service only through `front/src/lib/api/forward.ts`,
+which holds the bearer on the server (ADR 136, ADR 157), so without a forward no
+screen can write a record.
+
+**Decision.**
+1. `forward.ts` forwards the two pairs onto the same paths, making eleven
+   board-service pairs. They are matched by method and path before the api's
+   read-only check, as the other nine are: every other method on those paths
+   keeps the answer it had (a `GET` is still the api whitelist's 404, a `PUT`
+   or `DELETE` still the 405).
+2. Both carry `Authorization: Bearer BOARD_ACTIONS_TOKEN`, added on the
+   server; the browser's own `Authorization` never crosses, and the token is in
+   no response and no log. Without the token both are the console's 503, whose
+   message names `BOARD_ACTIONS_TOKEN` and the project routes, sending nothing.
+   They need no `CONSOLE_PROJECT`: the record names its own slug.
+3. The slug of a `PATCH` is decoded and checked against `PROJECT_SLUG`,
+   `dispatcher/tasks.py`'s `_PROJECT_SLUG` written again, as a thread id is
+   checked against `THREAD_ID` (ADR 190, ADR 195). An undecodable slug, or one
+   the harness would not take (a leading dot, a `/` once decoded), is the
+   console's 404 and never crosses; a good one is re-encoded into the target.
+4. Everything else is the other board writes': the CSRF checks first (415,
+   then 403 for `Sec-Fetch-Site` and `Origin`), the 64 KiB cap (413), the body
+   crossing unchanged under the console's own `Content-Type`, and the board
+   service's status, body and content type passed back, so its 400, 401, 404,
+   409 and 503 reach the browser in its own words. 504 and 502 for a board
+   service that did not answer.
+5. `client.ts` gets `createProject(body)` and `changeProject(slug, body)`,
+   bare like the other board writes, typed by `ProjectRecord`,
+   `CreateProjectBody` and `ChangeProjectBody` in `types.ts`. No screen calls
+   them yet.
+
+**Consequences.**
+- The two project routes and the three action routes share one token, so a
+  console that can start a task can also write a record. ADR 203 chose that
+  bearer for the routes; the forward follows it.
+- The slug rule now lives in two places, like the thread id's. A change to
+  `_PROJECT_SLUG` has to change `PROJECT_SLUG` too, or the console refuses a
+  slug the service would take, or forwards one it would refuse in its own
+  words.
+
+**Ruled out.**
+- Forwarding without checking the slug and letting the board service refuse
+  it: the other path parameters are checked here, and a slug that decodes to
+  `a/b` should not reach another service's router.
+- A UI in this change: the plan's console step is its own surface.

@@ -627,6 +627,56 @@ export interface UpdateThreadBody {
   status?: "open" | "archived";
 }
 
+/**
+ * The settings a project record may override (`dispatcher/projects.py`'s
+ * `_SETTINGS`); one left out falls back to `config.yaml`.
+ */
+export interface ProjectSettings {
+  allowed_tools?: string[];
+  merge_on_done?: boolean;
+  gates_enabled?: boolean;
+  /** A whole number of seconds above 0. */
+  gates_test_timeout_seconds?: number;
+  push_task_branch?: boolean;
+}
+
+/** A project record as the board service answers it (ADR 203): `ProjectRecord.to_dict()`. */
+export interface ProjectRecord {
+  slug: string;
+  title: string;
+  remote: string | null;
+  base_branch: string | null;
+  /** The deploy key's public half, by fingerprint; `null` until one is made. */
+  key: { fingerprint: string; created: string } | null;
+  settings: ProjectSettings;
+  created: string;
+  status: "active" | "archived";
+}
+
+/**
+ * `POST /api/projects` (ADR 203): `slug` names the record; a key left out is the
+ * service's default. `status` is not taken: a record starts active.
+ */
+export interface CreateProjectBody {
+  slug: string;
+  title?: string;
+  remote?: string | null;
+  base_branch?: string | null;
+  settings?: ProjectSettings;
+}
+
+/**
+ * `PATCH /api/projects/<slug>` (ADR 203): the keys to change. `slug`, `key` and
+ * `created` are not taken. A setting given as `null` drops that override.
+ */
+export interface ChangeProjectBody {
+  title?: string;
+  remote?: string | null;
+  base_branch?: string | null;
+  settings?: { [K in keyof ProjectSettings]?: ProjectSettings[K] | null };
+  status?: "active" | "archived";
+}
+
 /** `POST /api/tasks/<id>/start`: exactly `{note}`, the forward refuses any other key (ADR 157). */
 export interface StartTaskBody {
   note: string | null;
