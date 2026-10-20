@@ -20,6 +20,14 @@ until ADR 198, decision 4, names it *Waiting for the project*.
 Before building step 3, read `_consider` and the `start` serial key: part of
 the rule already exists, and step 3 may only need to widen it.
 
+## Since T-116
+
+Step 3 is built (`docs/decisions.md` ADR 200). `_consider` now also takes the
+project's `flock` (`dispatcher/project_lock.py`) for a `project:` key, and
+writes the same `waiting: project` when another process — a `run-task`, a
+queue, a second worker — holds it. The rule above is history; the wait it
+describes is still how a pending `start` reads.
+
 ## Evidence
 
 `dispatcher/actions.py` `KINDS` (the `start` row) and `dispatcher/worker.py`
