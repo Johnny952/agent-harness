@@ -263,6 +263,43 @@ def test_check_of_a_key_the_remote_will_not_take_a_push_from(git_host, tmp_path,
     assert list((tmp_path / "scratch").iterdir()) == []
 
 
+def test_check_reads_a_refusal_real_git_meets_at_receive_pack(git_host, tmp_path, monkeypatch):
+    # Real git, whatever version runs the suite (2.39.5 in the agent image,
+    # ADR 217): a stand-in ssh refuses where GitHub does. A pre-receive hook
+    # would not do, a dry-run push never reaches it.
+    root, keys, _ = git_host
+    _place_key(keys)
+    refuser = tmp_path / "ssh-refuser"
+    refuser.write_text(
+        "#!/bin/sh\n"
+        "echo 'ERROR: The key you are authenticating with has been marked as read only.' >&2\n"
+        "exit 1\n"
+    )
+    refuser.chmod(0o755)
+    local_exec = docker_exec.run_docker_exec
+
+    def refusing(container, workdir, command, env=None, timeout=None):
+        if command[:1] == ["git"] and "push" in command:
+            # No insteadOf rewrite: git goes over ssh to _URL and meets the refuser.
+            return _run(
+                command, workdir,
+                env={**(env or {}), "GIT_SSH_COMMAND": str(refuser)}, timeout=timeout,
+            )
+        return local_exec(container, workdir, command, env=env, timeout=timeout)
+
+    monkeypatch.setattr(docker_exec, "run_docker_exec", refusing)
+
+    out = docker_exec.check_remote(_CONTAINER, str(root), "myproj", _URL, keys_dir=str(keys))
+
+    assert out.ok and out.writable is False
+    assert (
+        "it refused a dry-run push: ERROR: The key you are authenticating with "
+        "has been marked as read only." in out.detail
+    )
+    assert "fatal: Could not read from remote repository." in out.detail
+    assert list((tmp_path / "scratch").iterdir()) == []
+
+
 def test_check_that_cannot_make_its_scratch_repository_leaves_write_untested(
     git_host, monkeypatch,
 ):
