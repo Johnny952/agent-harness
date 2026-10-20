@@ -955,8 +955,9 @@ def test_no_agent_or_sidecar_joins_console_net() -> None:
 def test_the_board_service_writes_only_the_hive_and_mounts_no_socket(compose_file: str) -> None:
     """Step 5 writes the hive (ADR 129), locks/ included; config.yaml and
     config.d stay `:ro`; the one state mount is the actions queue (ADR 142
-    decision 3, ADR 166), never the whole state dir; no socket, no .data, no
-    projects, no credentials. The only variable is the optional actions token."""
+    decision 3, ADR 166), never the whole state dir; no socket, no projects,
+    and of .data only the VAPID private key, one file `:ro` (ADR 229), never
+    another credential. The only variable is the optional actions token."""
     board = _load(compose_file)["services"]["board-service"]
 
     assert board["volumes"] == [
@@ -964,6 +965,7 @@ def test_the_board_service_writes_only_the_hive_and_mounts_no_socket(compose_fil
         "../../config.yaml:/app/config.yaml:ro",
         "../../config.d:/app/config.d:ro",
         "../../dispatcher_state/actions:/state/actions",
+        "../../.data/credentials/vapid-private.pem:/run/secrets/vapid-private.pem:ro",
     ]
     assert "/state" not in [v.split(":")[1] for v in board["volumes"]]
     assert "docker.sock" not in yaml.safe_dump(board)

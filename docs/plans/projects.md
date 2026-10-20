@@ -282,7 +282,8 @@ module; steps 2, 4 and 5 need its queue and worker.
    227). The epic's pause notifies as *Blocked* (`docs/decisions.md` ADR
    221), and a single start's own limit, `budget_reached` with its *Blocked*
    notification, is built the same day (`docs/decisions.md` ADR 230),
-   backend only.
+   and the console's *Start development* dialog takes it in an optional
+   field (`docs/decisions.md` ADR 231).
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR 208): the

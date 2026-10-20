@@ -570,16 +570,20 @@ export function cancelAction(actionId: string): Promise<ActionRecord> {
 
 /**
  * Queue a task's development cycle: `POST /api/tasks/<id>/start`. The body is
- * `{note}`, with `floor` (the start's pool floor in percent, ADR 226) only when
- * one is given: null leaves it out, the worker's default. A refusal is an
+ * `{note}`, with `floor` (the start's pool floor in percent, ADR 226) and
+ * `limit` (its own spending limit in measured tokens, ADR 230) each only when
+ * given: null leaves it out, the worker's default and no limit. A refusal is an
  * `ApiError` with the board-service's message.
  */
 export function startTask(
   taskId: string,
   note: string | null,
   floor: number | null = null,
+  limit: number | null = null,
 ): Promise<ActionRecord> {
-  const body: StartTaskBody = floor === null ? { note } : { note, floor };
+  const body: StartTaskBody = { note };
+  if (floor !== null) body.floor = floor;
+  if (limit !== null) body.limit = limit;
   return readBare<ActionRecord>(`/api/tasks/${encodeURIComponent(taskId)}/start`, {
     method: "POST",
     body,

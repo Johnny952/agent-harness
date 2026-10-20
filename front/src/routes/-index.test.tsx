@@ -622,6 +622,62 @@ describe("Start development on a Ready card", () => {
     expect(sent.some((r) => r.method === "POST")).toBe(false);
   });
 
+  it("has an optional spending limit field, blank for none (ADR 230)", async () => {
+    await board();
+    const dialog = await open();
+    const field = within(dialog).getByLabelText("Spending limit") as HTMLInputElement;
+    expect(field.value).toBe("");
+    expect(within(dialog).getByTestId("start-limit").textContent).toContain(
+      "Spending limit (measured tokens, optional)",
+    );
+    expect(within(dialog).getByTestId("start-limit-help").textContent).toContain("No limit");
+  });
+
+  it("sends the spending limit typed in the dialog (ADR 230)", async () => {
+    const { sent } = await board(undefined, {
+      "POST /api/tasks/T-301/start": { data: action("T-301") },
+    });
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText("Spending limit"), {
+      target: { value: "50000" },
+    });
+    expect(within(dialog).getByTestId("start-limit-help").textContent).toContain(
+      "once it has spent 50000 measured tokens",
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, limit: 50000 });
+  });
+
+  it("sends the limit beside the floor, and leaves it out when blank", async () => {
+    const { sent } = await board(undefined, {
+      "POST /api/tasks/T-301/start": { data: action("T-301") },
+    });
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText("Spending limit"), { target: { value: "7" } });
+    fireEvent.change(within(dialog).getByLabelText("Spending limit"), { target: { value: "" } });
+    fireEvent.change(within(dialog).getByLabelText("Pool floor"), { target: { value: "20" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, floor: 20 });
+  });
+
+  it("refuses a limit that is not a whole number of at least 1 before sending it", async () => {
+    const { sent } = await board();
+    const dialog = await open();
+    for (const value of ["0", "2.5", "-3"]) {
+      fireEvent.change(within(dialog).getByLabelText("Spending limit"), { target: { value } });
+      expect(
+        (within(dialog).getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled,
+      ).toBe(true);
+      expect(
+        within(dialog).getByText(`${value} is not a whole number of at least 1.`),
+      ).toBeTruthy();
+    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    expect(sent.some((r) => r.method === "POST")).toBe(false);
+  });
+
   const acct = (name: string, state: string) => ({
     name,
     container: name,

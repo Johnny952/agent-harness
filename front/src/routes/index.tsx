@@ -16,6 +16,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { commentProblem } from "@/lib/comments";
 import { readFloor } from "@/lib/floor";
 import { FloorField } from "@/components/console/floor-field";
+import { LimitField } from "@/components/console/limit-field";
+import { readLimit } from "@/lib/limit";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
   Absent,
@@ -564,10 +566,13 @@ function StartControl({
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
   const [floorText, setFloorText] = useState("");
+  const [limitText, setLimitText] = useState("");
   // A note is optional, so blank is not the comment rule's "needs some text".
   const problem = note.trim() ? commentProblem(note) : null;
   // Blank is the worker's default floor (ADR 226).
   const floor = readFloor(floorText);
+  // Blank is no limit; else the start's own, in measured tokens (ADR 230).
+  const limit = readLimit(limitText);
   const chip = "mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground";
 
   if (loading) return null;
@@ -577,13 +582,19 @@ function StartControl({
   const taskId = task.task_id;
   const confirm = () =>
     start.mutate(
-      { taskId, note: note.trim() ? note : null, floor: floor.ok ? floor.value : null },
+      {
+        taskId,
+        note: note.trim() ? note : null,
+        floor: floor.ok ? floor.value : null,
+        limit: limit.ok ? limit.value : null,
+      },
       {
         onSuccess: () => {
           toast.success(`${taskId} queued to start`);
           setOpen(false);
           setNote("");
           setFloorText("");
+          setLimitText("");
         },
         onError: (e) => toast.error(e instanceof Error ? e.message : `${taskId} was not started`),
       },
@@ -615,6 +626,18 @@ function StartControl({
             <Textarea value={note} onChange={(e) => setNote(e.target.value)} />
           </label>
           {problem && <p className="text-xs text-destructive">{problem}</p>}
+          <LimitField
+            testId="start-limit"
+            value={limitText}
+            reading={limit}
+            onChange={setLimitText}
+          >
+            <p className="text-xs text-muted-foreground" data-testid="start-limit-help">
+              {limit.ok && limit.value !== null
+                ? `The cycle stops Blocked once it has spent ${limit.value} measured tokens; a phase already running finishes.`
+                : "No limit: the cycle is not stopped for what it spends."}
+            </p>
+          </LimitField>
           <FloorField value={floorText} onChange={setFloorText} />
           <DialogFooter>
             <Button variant="outline" type="button" onClick={() => setOpen(false)}>
@@ -622,7 +645,7 @@ function StartControl({
             </Button>
             <Button
               type="button"
-              disabled={problem !== null || !floor.ok || start.isPending}
+              disabled={problem !== null || !floor.ok || !limit.ok || start.isPending}
               onClick={confirm}
             >
               Start

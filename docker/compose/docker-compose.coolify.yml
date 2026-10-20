@@ -204,6 +204,7 @@ services:
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
       - ../../dispatcher_state/actions:/state/actions
+      - ../../.data/credentials/vapid-private.pem:/run/secrets/vapid-private.pem:ro
     environment:
       - BOARD_ACTIONS_TOKEN=${BOARD_ACTIONS_TOKEN:-}
     networks:
