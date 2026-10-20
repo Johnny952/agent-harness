@@ -8,7 +8,8 @@ four write tools, `backlog_propose`, `task_edit`, `task_comment` and
 as the operator. None moves a task once it is on the board, and none
 dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 `start`, a `cancel` or a `command_verdict` in the dispatcher's action queue
-(ADR 142, ADR 151).
+(ADR 142, ADR 151), and two behind the same bearer create a project record and
+change its settings (ADR NNN), through `dispatcher/projects.py`'s one writer.
 
 Everything here reads and writes through `dispatcher/tasks.py` and
 `dispatcher/context_transfer.py`, so there is no second copy of the task file
@@ -38,6 +39,7 @@ import yaml
 from flask import Flask, jsonify, request
 
 from dispatcher import actions, context_transfer
+from dispatcher import projects as project_store
 from dispatcher import tasks as task_store
 from dispatcher import threads as thread_store
 from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS, THREAD
@@ -693,6 +695,7 @@ def create_app(config_path: str) -> Flask:
     cfg = load_config(config_path)
     hive_dir = cfg.hive_tasks_dir
     state_dir = cfg.state_dir
+    hive_root = context_transfer.hive_root(hive_dir)
     # Read once, as the config is: rotating it is a restart (ADR 151, 5).
     actions_token = os.environ.get(ACTIONS_TOKEN_ENV, "")
     app = Flask(__name__)
@@ -863,6 +866,23 @@ def create_app(config_path: str) -> Flask:
 
         return _action(actions_token, make)
 
+    # The project record's two writes (ADR NNN): a person's, from the console
+    # or a shell, behind the same bearer as the action queue, since a record
+    # decides a project's allowed_tools and merge_on_done. No MCP tool: no
+    # role in the plan writes a record.
+
+    @app.post("/api/projects")
+    def http_project_create():
+        return _project_http(
+            actions_token, lambda body: project_store.create(hive_root, body), 201
+        )
+
+    @app.patch("/api/projects/<slug>")
+    def http_project_change(slug: str):
+        return _project_http(
+            actions_token, lambda body: project_store.change(hive_root, slug, body), 200
+        )
+
     return app
 
 
@@ -878,25 +898,38 @@ def _bearer_ok(token: str) -> bool:
     return hmac.compare_digest(presented.encode(), token.encode())
 
 
-def _action(token: str, make):
-    """One action route: ADR 151's guards in order, then `make(body)`'s record as 201.
+def _bearer_guards(token: str, routes: str):
+    """ADR 151's guards in order, then the body: `(body, None)`, or `(None, answer)`.
 
-    The token is never put in an answer or a log.
+    `routes` names the routes the missing token turns off. The token is never
+    put in an answer or a log.
     """
     if request.headers.get("Origin"):
-        return jsonify({"error": "no browser origin may call this service"}), 403
+        return None, (jsonify({"error": "no browser origin may call this service"}), 403)
     if not token:
-        return jsonify({"error": "the action routes are off: no BOARD_ACTIONS_TOKEN is set"}), 503
+        return None, (
+            jsonify({"error": f"the {routes} routes are off: no BOARD_ACTIONS_TOKEN is set"}), 503
+        )
     if not _bearer_ok(token):
-        return (
+        return None, (
             jsonify({"error": "a bearer token is required"}), 401,
             {"WWW-Authenticate": "Bearer"},
         )
     if request.args:
-        return jsonify({"error": f"unknown query parameter {sorted(request.args)[0]!r}"}), 400
+        return None, (
+            jsonify({"error": f"unknown query parameter {sorted(request.args)[0]!r}"}), 400
+        )
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        return jsonify({"error": "the body is not a JSON object"}), 400
+        return None, (jsonify({"error": "the body is not a JSON object"}), 400)
+    return body, None
+
+
+def _action(token: str, make):
+    """One action route: ADR 151's guards in order, then `make(body)`'s record as 201."""
+    body, refused = _bearer_guards(token, "action")
+    if refused is not None:
+        return refused
     try:
         record = make(body)
     except actions.ActionRefused as exc:
@@ -904,6 +937,32 @@ def _action(token: str, make):
     except OSError as exc:
         return jsonify({"error": f"the action queue could not be written: {exc}"}), 503
     return jsonify(record), 201
+
+
+def _project_http(token: str, write, ok_status: int):
+    """One project-record route (ADR NNN): the action routes' guards, then `write(body)`.
+
+    The record's own check is `dispatcher/projects.py`'s `parse`, the one the
+    dispatcher reads it with, so a refusal is in the reader's words and what
+    is accepted here is what the dispatcher reads.
+    """
+    body, refused = _bearer_guards(token, "project")
+    if refused is not None:
+        return refused
+    try:
+        record = write(body)
+    except project_store.NoRecord as exc:
+        return jsonify({"error": str(exc)}), 404
+    except project_store.RecordExists:
+        slug = body.get("slug")
+        return jsonify({"error": f"project {slug!r} already has a record"}), 409
+    except project_store.BrokenRecord as exc:
+        return jsonify({"error": f"the record does not read, so it is not changed: {exc}"}), 409
+    except project_store.RecordError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": f"the project record could not be written: {exc}"}), 503
+    return jsonify(record.to_dict()), ok_status
 
 
 #: The body fields of the thread routes and their JSON type (ADR 170, 7).

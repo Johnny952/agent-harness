@@ -237,7 +237,12 @@ module; steps 2, 4 and 5 need its queue and worker.
    The dispatcher reads the record's settings over `config.yaml`'s. Built
    2026-10-20 (`docs/decisions.md` ADR 199): `dispatcher/projects.py`, and
    `dispatch migrate [--project SLUG]` writes the first records and stamps the
-   cards.
+   cards. The board service's write route is built too (ADR NNN): `POST
+   /api/projects` creates a record and `PATCH /api/projects/<slug>` changes
+   its title, remote, base branch, settings and status, behind the
+   `BOARD_ACTIONS_TOKEN` bearer, through `dispatcher/projects.py`'s one check
+   and writer. The console's proxy does not carry them yet, and the clone of
+   step 5 is not theirs: a record is written whether or not its clone exists.
 2. **SSH in the dispatcher.** Built 2026-10-11. The image's `openssh-client`
    and pinned host key, `GIT_SSH_COMMAND`, and a CLI command, `project-keygen
    --project <slug>`, that makes the pair and prints the public half. This is
