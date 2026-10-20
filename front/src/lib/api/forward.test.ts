@@ -846,6 +846,39 @@ describe("the board-service action routes", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("forwards Start epic as a start: the bearer, the console's project, the note (ADR 211)", async () => {
+    const fetchMock = stubApi('{"epic":"T-1","queued":[]}', 201);
+    const answer = await forwardApiRequest(post("/api/epics/T-1/start", '{"note":"go"}'));
+    expect(answer?.status).toBe(201);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/epics/T-1/start`);
+    const init = sent(fetchMock);
+    expect(init.headers).toEqual(HEADERS);
+    expect(init.body).toBe('{"project":"ia-harness","note":"go"}');
+    vi.restoreAllMocks();
+    const refused = stubApi();
+    expect((await forwardApiRequest(post("/api/epics/T-1/start", '{"limit":5}')))?.status).toBe(
+      400,
+    );
+    expect(refused).not.toHaveBeenCalled();
+  });
+
+  it("forwards Stop epic as a cancel: the bearer and an empty object (ADR 211)", async () => {
+    const fetchMock = stubApi('{"epic":"T-1","dropped":[],"left":[]}', 201);
+    await forwardApiRequest(post("/api/epics/..%2fx/stop", '{"x":1}'));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/epics/..%2Fx/stop`);
+    const init = sent(fetchMock);
+    expect(init.headers).toEqual(HEADERS);
+    expect(init.body).toBe("{}");
+    vi.restoreAllMocks();
+    const none = stubApi();
+    expect((await forwardApiRequest(post("/api/epics/%zz/stop", "{}")))?.status).toBe(404);
+    expect((await forwardApiRequest(get("/api/epics/T-1/stop")))?.status).toBe(404);
+    expect((await forwardApiRequest(post("/api/epics/T-1/start", "{}", {}, "PUT")))?.status).toBe(
+      405,
+    );
+    expect(none).not.toHaveBeenCalled();
+  });
+
   it("gives the four backlog writes no Authorization", async () => {
     const fetchMock = stubApi();
     await forwardApiRequest(post("/api/tasks/T-014/accept", "{}"));
@@ -1309,7 +1342,12 @@ describe("the action routes without their configuration", () => {
   it("503s start and cancel naming BOARD_ACTIONS_TOKEN, sending nothing", async () => {
     const forward = await configured({ BOARD_ACTIONS_TOKEN: null });
     const fetchMock = stubApi();
-    for (const path of ["/api/tasks/T-014/start", "/api/actions/A-1/cancel"]) {
+    for (const path of [
+      "/api/tasks/T-014/start",
+      "/api/actions/A-1/cancel",
+      "/api/epics/T-1/start",
+      "/api/epics/T-1/stop",
+    ]) {
       const answer = await forward(post(path));
       expect(answer?.status).toBe(503);
       expect(answer?.headers.get("content-type")).toBe("application/json");
@@ -1387,8 +1425,11 @@ describe("the action routes without their configuration", () => {
     expect(answer?.status).toBe(503);
     expect((await answer!.json()).error).toContain("CONSOLE_PROJECT is not set");
     expect(fetchMock).not.toHaveBeenCalled();
+    expect((await forward(post("/api/epics/T-1/start")))?.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect((await forward(post("/api/actions/A-1/cancel")))?.status).toBe(200);
     expect(fetchMock.mock.calls[0]![1]!.body).toBe("{}");
+    expect((await forward(post("/api/epics/T-1/stop")))?.status).toBe(200);
   });
 });
 

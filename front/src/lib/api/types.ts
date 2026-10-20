@@ -586,6 +586,32 @@ export interface ActionRecord {
   error: string | null;
 }
 
+/** `POST /api/epics/<id>/start` (`board_service/app.py:epic_start`, ADR 207). */
+export interface EpicStartResult {
+  epic: string;
+  /** One `start` per task of the epic in Ready, in the board's order. */
+  queued: ActionRecord[];
+  /** The epic's tasks not in Ready when it was pressed: named, not queued. */
+  not_ready: string[];
+}
+
+/** One start *Stop epic* names: its action id and its task. */
+export interface EpicStopStart {
+  action: string;
+  task_id: string | null;
+}
+
+/** `POST /api/epics/<id>/stop` (`board_service/app.py:epic_stop`, ADR 211). */
+export interface EpicStopResult {
+  epic: string;
+  /** The `cancel` actions queued, one per start in `dropped`. */
+  cancels: ActionRecord[];
+  /** The epic's starts still waiting, which the cancels drop. */
+  dropped: EpicStopStart[];
+  /** The epic's starts already taken: running phases, left alone. */
+  left: EpicStopStart[];
+}
+
 /** `GET /api/actions` (`observability/api/app.py:action_queue`). */
 export interface ActionQueue {
   pending: ActionRecord[];

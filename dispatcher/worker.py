@@ -402,6 +402,11 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
             end("failed", f"target {target} was taken before it could be cancelled")
             return
         end("done", target=target, target_status="cancelled")
+    elif state == actions.CLAIMED and record["params"].get("only_pending"):
+        # *Stop epic*'s cancel (ADR 211) drops a start that is still waiting and
+        # leaves one that is running alone: taken in between, it keeps its run.
+        end("failed", f"target {target} was taken before the stop reached it; "
+                      "it is left running")
     elif state == actions.CLAIMED:
         with worker._lock:
             entry = next(

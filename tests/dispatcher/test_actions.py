@@ -100,6 +100,7 @@ def test_unknown_kind_is_refused_400(tmp_path):
         ("start", dict(**START, actor="two words")),
         ("cancel", dict(params={"target": "nope"})),
         ("cancel", dict(task_id="T-1", params={"target": "a-20260101T000000000000Z-abcd"})),
+        ("cancel", dict(params={"target": "a-20260101T000000000000Z-abcd", "only_pending": False})),
         ("command_verdict", dict(**{**VERDICT, "params": {"n": 0, "verdict": "run"}})),
         ("command_verdict", dict(**{**VERDICT, "params": {"n": True, "verdict": "run"}})),
         ("command_verdict", dict(**{**VERDICT, "params": {"n": 1, "verdict": "maybe"}})),
@@ -436,3 +437,58 @@ def test_params_epic_must_be_a_task_id(tmp_path, epic):
     with pytest.raises(ActionRefused) as refused:
         create(tmp_path, "start", **START, params={"limit": None, "epic": epic})
     assert refused.value.status == 400 and "params.epic" in refused.value.reason
+
+
+# ---- *Stop epic* (ADR 211) --------------------------------------------------
+
+
+def epic_starts(tmp_path, tasks=("T-1", "T-2", "T-3"), epic="T-9"):
+    return actions.create_starts(tmp_path, "proj", list(tasks),
+                                 params={"limit": None, "epic": epic})
+
+
+def test_create_epic_cancels_cancels_each_pending_start_and_names_the_claimed(tmp_path):
+    queued = epic_starts(tmp_path)
+    assert actions.claim(tmp_path, queued[0]["id"]) is not None
+    other = create(tmp_path, "start", project="proj", task_id="T-4")  # not the epic's
+    made = actions.create_epic_cancels(tmp_path, "T-9")
+    assert [r["id"] for r in made["dropped"]] == [r["id"] for r in queued[1:]]
+    assert [r["id"] for r in made["left"]] == [queued[0]["id"]]
+    assert [c["params"] for c in made["cancels"]] == [
+        {"target": r["id"], "only_pending": True} for r in queued[1:]
+    ]
+    for c in made["cancels"]:
+        assert actions.validate(c) == []
+        assert c["project"] is None and c["task_id"] is None
+    # Nothing moved: the starts are where they were, the cancels are pending.
+    pending = names(tmp_path, "pending")
+    assert f"{queued[1]['id']}.json" in pending and f"{other['id']}.json" in pending
+    assert len(pending) == 5
+    assert names(tmp_path, "claimed") == [f"{queued[0]['id']}.json"]
+
+
+def test_only_running_starts_write_nothing_and_name_them(tmp_path):
+    queued = epic_starts(tmp_path, tasks=("T-1",))
+    actions.claim(tmp_path, queued[0]["id"])
+    made = actions.create_epic_cancels(tmp_path, "T-9")
+    assert made["cancels"] == [] and made["dropped"] == []
+    assert [r["id"] for r in made["left"]] == [queued[0]["id"]]
+    assert names(tmp_path, "pending") == []
+
+
+def test_a_second_stop_before_the_worker_ran_is_refused(tmp_path):
+    epic_starts(tmp_path)
+    assert len(actions.create_epic_cancels(tmp_path, "T-9")["cancels"]) == 3
+    with pytest.raises(ActionRefused) as refused:
+        actions.create_epic_cancels(tmp_path, "T-9")
+    assert refused.value.status == 409 and "already has a cancel" in refused.value.reason
+    assert len(names(tmp_path, "pending")) == 6
+
+
+def test_create_epic_cancels_refuses_an_epic_with_nothing_queued(tmp_path):
+    epic_starts(tmp_path, epic="T-8")
+    with pytest.raises(ActionRefused) as refused:
+        actions.create_epic_cancels(tmp_path, "T-9")
+    assert refused.value.status == 409
+    assert refused.value.reason == "epic T-9 has no start queued"
+    assert len(names(tmp_path, "pending")) == 3

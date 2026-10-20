@@ -2,10 +2,12 @@
  * An epic's page body: its children in the order it was split, each with its
  * title, status and merged state, what it waits on, and the epic's progress
  * (`lib/epic.ts`, ADR 139). The rows are one `/api/tasks` read, not one detail
- * read per child; an id that read does not hold is named as missing.
+ * read per child; an id that read does not hold is named as missing. Above them,
+ * *Start epic* and *Stop epic* (`epic-actions.tsx`, ADR 211).
  */
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { EpicActions } from "@/components/console/epic-actions";
 import { Absent, ErrorState, Mono, StatusPill } from "@/components/console/primitives";
 import { tasksQuery } from "@/lib/api/queries";
 import type { Task } from "@/lib/api/types";
@@ -33,6 +35,7 @@ export function EpicView({ epic }: { epic: Task }) {
 
   return (
     <div className="space-y-2">
+      <EpicActions epic={epic} ids={ids} />
       <p className="text-xs" data-testid="epic-progress">
         <span className="font-medium">
           {p.merged} of {p.total} merged

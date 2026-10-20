@@ -166,6 +166,29 @@ export const startTaskMutation = (qc: QueryClient) =>
       ),
   });
 
+/** *Start epic* (ADR 207): `POST /api/epics/<id>/start`. Refetches as a start does. */
+export const startEpicMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "start-epic"],
+    mutationFn: ({ epicId, note }: { epicId: string; note: string | null }) =>
+      api.startEpic(epicId, note),
+    onSettled: () =>
+      Promise.all(
+        [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),
+      ),
+  });
+
+/** *Stop epic* (ADR 211): `POST /api/epics/<id>/stop`. Refetches as a cancel does. */
+export const stopEpicMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "stop-epic"],
+    mutationFn: (epicId: string) => api.stopEpic(epicId),
+    onSettled: () =>
+      Promise.all(
+        [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),
+      ),
+  });
+
 /** How many finished records the Queue screen asks for; `done_total` counts the rest. */
 export const QUEUE_DONE_LIMIT = 20;
 

@@ -153,10 +153,12 @@ def _validate_cancel(record: dict) -> list[str]:
     if record.get("task_id") is not None:
         problems.append("task_id must be null")
     params = record["params"]
-    problems += _extra_keys(params, ("target",))
+    problems += _extra_keys(params, ("target", "only_pending"))
     target = params.get("target")
     if not isinstance(target, str) or not ID_RE.fullmatch(target):
         problems.append("params.target must be an action id")
+    if "only_pending" in params and params["only_pending"] is not True:
+        problems.append("params.only_pending must be true when present")
     return problems
 
 
@@ -384,6 +386,58 @@ def create_starts(
     return _write_all(state_dir, records, ready)
 
 
+def create_epic_cancels(
+    state_dir, epic_id: str, *, actor: str = "operator", note=None
+) -> dict:
+    """*Stop epic*'s creator (ADR 211): one `cancel` per start of `epic_id` still waiting.
+
+    Under one hold of `write.lock` it reads the starts *Start epic* queued for
+    the epic (`params.epic`), and writes a cancel for each one in `pending/`
+    that no pending cancel already names; each carries `only_pending`, so a
+    start the worker takes before its cancel runs is left running (ADR 142:
+    the worker stays the only mover, so nothing here moves a file). The
+    starts in `claimed/` are left alone and named. Returns
+    `{"cancels", "dropped", "left"}`: the cancels written, the start records
+    they drop, and the start records running; with only running ones there
+    are no cancels and nothing is written. Refused with 409 when the epic has
+    no start pending or claimed, or when each pending one already has its
+    cancel queued (a second press before the worker ran the first).
+    """
+    root = ensure_dirs(state_dir)
+    with _write_locked(root):
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        named = {
+            e.record["params"].get("target")
+            for e in held
+            if e.state == PENDING and e.record.get("kind") == "cancel"
+        }
+        mine = [
+            e for e in held
+            if e.record.get("kind") == "start"
+            and (e.record.get("params") or {}).get("epic") == epic_id
+        ]
+        dropped = [
+            e.record for e in mine
+            if e.state == PENDING and e.record.get("id") not in named
+        ]
+        left = [e.record for e in mine if e.state == CLAIMED]
+        if not mine:
+            raise ActionRefused(409, f"epic {epic_id} has no start queued")
+        if not dropped and not left:
+            raise ActionRefused(
+                409, f"every start queued for epic {epic_id} already has a cancel queued"
+            )
+        records = [
+            _new_record(
+                "cancel", None, None,
+                {"target": start["id"], "only_pending": True}, actor, note,
+            )
+            for start in dropped
+        ]
+        _place(root, records)
+    return {"cancels": records, "dropped": dropped, "left": left}
+
+
 def _new_record(kind, project, task_id, params, actor, note) -> dict:
     """A pending record with no id yet; raises ActionRefused(400) when it is not valid."""
     if kind not in KINDS:
@@ -425,25 +479,30 @@ def _write_all(state_dir, records: list[dict], ready) -> list[dict]:
     with _write_locked(root):
         for record in records:
             _refuse_locked(root, record, ready)
-        # The ids are taken under the lock, so ids sort in the order creates land;
-        # within one batch each is made to sort after the one before.
-        last = None
-        for record in records:
-            record["id"] = new_id()
-            while last is not None and record["id"] <= last:
-                record["id"] = new_id()
-            last = record["id"]
-        tmps = [root / TMP / f"{record['id']}.json" for record in records]
-        try:
-            for tmp, record in zip(tmps, records):
-                tmp.write_text(json.dumps(record))
-            for tmp in tmps:
-                os.rename(tmp, root / PENDING / tmp.name)
-        except BaseException:
-            for tmp in tmps:
-                tmp.unlink(missing_ok=True)
-            raise
+        _place(root, records)
     return records
+
+
+def _place(root: Path, records: list[dict]) -> None:
+    """Give `records` their ids and write them into `pending/`; `write.lock` is held."""
+    # The ids are taken under the lock, so ids sort in the order creates land;
+    # within one batch each is made to sort after the one before.
+    last = None
+    for record in records:
+        record["id"] = new_id()
+        while last is not None and record["id"] <= last:
+            record["id"] = new_id()
+        last = record["id"]
+    tmps = [root / TMP / f"{record['id']}.json" for record in records]
+    try:
+        for tmp, record in zip(tmps, records):
+            tmp.write_text(json.dumps(record))
+        for tmp in tmps:
+            os.rename(tmp, root / PENDING / tmp.name)
+    except BaseException:
+        for tmp in tmps:
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 # ---- the worker -------------------------------------------------------------
