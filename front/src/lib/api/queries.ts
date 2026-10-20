@@ -195,11 +195,13 @@ export const startTaskMutation = (qc: QueryClient) =>
       taskId,
       note,
       floor = null,
+      limit = null,
     }: {
       taskId: string;
       note: string | null;
       floor?: number | null;
-    }) => api.startTask(taskId, note, floor),
+      limit?: number | null;
+    }) => api.startTask(taskId, note, floor, limit),
     onSettled: () =>
       Promise.all(
         [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),

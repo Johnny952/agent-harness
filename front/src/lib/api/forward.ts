@@ -711,8 +711,9 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * The three action routes (ADR 157, on ADR 151; the turn is ADR 190) carry `Authorization: Bearer
  * BOARD_ACTIONS_TOKEN`, and after the CSRF checks above, in this order: 503 if
  * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
- * body may hold only `note` (else 400, `project` included: the project is the
- * console's, set here); the upstream body is rebuilt from it. A cancel sends `{}`.
+ * body may hold only `note`, `floor` and `limit` (else 400, `project` included:
+ * the project is the console's, set here); the upstream body is rebuilt from
+ * them, the route checking the floor's and the limit's values. A cancel sends `{}`.
  * *Start epic* and *Stop epic* (ADR 211) are a start and a cancel here: the same
  * checks, the same rebuilt body and the same `{}`.
  * A turn's body crosses unchanged: the route validates `text` itself.
@@ -781,9 +782,9 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     if (action === "cancel") {
       body = "{}";
     } else if (action === "start") {
-      const note = startNote(read);
-      if (typeof note === "object" && note !== null) return jsonResponse(note, 400);
-      body = JSON.stringify({ project: CONSOLE_PROJECT, note: note ?? null });
+      const start = startBody(read);
+      if ("error" in start) return jsonResponse(start, 400);
+      body = JSON.stringify({ project: CONSOLE_PROJECT, ...start });
     }
   }
 
@@ -821,11 +822,17 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
 }
 
 /**
- * A start's `note` from the browser's body: a string, `null` or `undefined` for
- * absent, or `{ error }` for a 400. Only `note` may be present; `project` is the
- * console's (ADR 157 part 1), so a browser one is refused rather than ignored.
+ * A start's fields from the browser's body, or `{ error }` for a 400: `note`, a
+ * string or null (absent is null), and `floor` and `limit` (ADR 227, ADR 230),
+ * passed on only when present, their values checked by the board-service's
+ * route. Nothing else may be present; `project` is the console's (ADR 157
+ * part 1), so a browser one is refused rather than ignored.
  */
-function startNote(bytes: ArrayBuffer): string | null | undefined | { error: string } {
+const START_FIELDS = new Set(["note", "floor", "limit"]);
+
+type StartFields = { note: string | null; floor?: unknown; limit?: unknown };
+
+function startBody(bytes: ArrayBuffer): StartFields | { error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(bytes));
@@ -837,19 +844,22 @@ function startNote(bytes: ArrayBuffer): string | null | undefined | { error: str
   }
   const fields = parsed as Record<string, unknown>;
   for (const key of Object.keys(fields)) {
-    if (key === "note") continue;
+    if (START_FIELDS.has(key)) continue;
     return {
       error:
         key === "project"
           ? "A start's body may not name a project: the project is the console's."
-          : `A start's body may hold only a note, not ${JSON.stringify(key)}.`,
+          : `A start's body may hold only a note, a floor and a limit, not ${JSON.stringify(key)}.`,
     };
   }
   const note = fields["note"];
   if (note !== undefined && note !== null && typeof note !== "string") {
     return { error: "A start's note must be a string." };
   }
-  return note;
+  const start: StartFields = { note: note ?? null };
+  if (fields["floor"] !== undefined) start.floor = fields["floor"];
+  if (fields["limit"] !== undefined) start.limit = fields["limit"];
+  return start;
 }
 
 /**

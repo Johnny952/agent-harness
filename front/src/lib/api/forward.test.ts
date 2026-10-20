@@ -860,6 +860,21 @@ describe("the board-service action routes", () => {
     }
   });
 
+  it("passes a start's floor and limit on when present, values for the route to check (ADR 230)", async () => {
+    const cases: [string, string][] = [
+      ['{"note":"go","limit":5000}', '{"project":"ia-harness","note":"go","limit":5000}'],
+      ['{"floor":20,"limit":1}', '{"project":"ia-harness","note":null,"floor":20,"limit":1}'],
+      ['{"limit":null}', '{"project":"ia-harness","note":null,"limit":null}'],
+      ['{"limit":0}', '{"project":"ia-harness","note":null,"limit":0}'],
+    ];
+    for (const [body, upstream] of cases) {
+      const fetchMock = stubApi('{"id":"A-1"}', 201);
+      await forwardApiRequest(post("/api/tasks/T-014/start", body));
+      expect(sent(fetchMock).body).toBe(upstream);
+      vi.restoreAllMocks();
+    }
+  });
+
   it("forwards a cancel with the bearer and an empty object, whatever the browser sent", async () => {
     const fetchMock = stubApi();
     await forwardApiRequest(post("/api/actions/A-1/cancel", '{"x":1}'));
@@ -935,11 +950,9 @@ describe("the board-service action routes", () => {
     expect(init.headers).toEqual(HEADERS);
     expect(init.body).toBe('{"project":"ia-harness","note":"go"}');
     vi.restoreAllMocks();
-    const refused = stubApi();
-    expect((await forwardApiRequest(post("/api/epics/T-1/start", '{"limit":5}')))?.status).toBe(
-      400,
-    );
-    expect(refused).not.toHaveBeenCalled();
+    const limited = stubApi('{"epic":"T-1","queued":[]}', 201);
+    await forwardApiRequest(post("/api/epics/T-1/start", '{"note":null,"limit":5,"floor":20}'));
+    expect(sent(limited).body).toBe('{"project":"ia-harness","note":null,"floor":20,"limit":5}');
   });
 
   it("forwards Stop epic as a cancel: the bearer and an empty object (ADR 211)", async () => {

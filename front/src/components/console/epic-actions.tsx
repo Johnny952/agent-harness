@@ -39,9 +39,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FloorField } from "@/components/console/floor-field";
+import { LimitField } from "@/components/console/limit-field";
 import { Mono } from "@/components/console/primitives";
 import {
   accountsQuery,
@@ -56,6 +56,7 @@ import type { ActionRecord, EpicRun, Task, UsageGroup } from "@/lib/api/types";
 import { commentProblem } from "@/lib/comments";
 import { epicChildren, suggestLimit } from "@/lib/epic";
 import { readFloor } from "@/lib/floor";
+import { readLimit } from "@/lib/limit";
 import { deriveSlots, standingLine } from "@/lib/slots";
 
 function plural(n: number, word: string): string {
@@ -83,23 +84,6 @@ function goingRun(list: unknown, epicId: string): EpicRun | null {
     (r) => typeof r === "object" && r !== null && r.epic === epicId && r.stopped_at === null,
   );
   return run ?? null;
-}
-
-/** The limit field's text as the route takes it: blank is null, else a whole number of at least 1. */
-function readLimit(
-  text: string,
-  spent: number | null,
-): { ok: true; value: number | null } | { ok: false; why: string } {
-  const t = text.trim();
-  if (t === "") return { ok: true, value: null };
-  if (!/^\d+$/.test(t) || Number(t) < 1) {
-    return { ok: false, why: `${t} is not a whole number of at least 1.` };
-  }
-  const value = Number(t);
-  if (spent !== null && value <= spent) {
-    return { ok: false, why: `The run has already spent ${spent} measured tokens.` };
-  }
-  return { ok: true, value };
 }
 
 function IdList({ ids }: { ids: string[] }) {
@@ -306,31 +290,28 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
             <Textarea value={note} onChange={(e) => setNote(e.target.value)} />
           </label>
           {problem && <p className="text-xs text-destructive">{problem}</p>}
-          <label className="space-y-1 text-xs" data-testid="epic-limit">
-            {paused && run
-              ? `New spending limit (measured tokens; ${run.spent.tokens} spent of ${run.limit})`
-              : "Spending limit (measured tokens, optional)"}
-            <Input
-              aria-label="Spending limit"
-              type="number"
-              step={1}
-              min={1}
-              className="h-7 w-40 text-xs"
-              value={shownLimit}
-              onChange={(e) => {
-                setLimitText(e.target.value);
-                setLimitTouched(true);
-              }}
-            />
-          </label>
-          {!limitTouched && suggestion && (
-            <p className="text-xs text-muted-foreground" data-testid="epic-limit-prefill">
-              Prefilled from {plural(suggestion.measured, "merged task")} of this epic: about{" "}
-              {suggestion.perTask} measured tokens each, for {plural(suggestion.left, "task")} still
-              to land{spent !== null ? `, on top of the ${spent} spent` : ""}.
-            </p>
-          )}
-          {!limit.ok && <p className="text-xs text-destructive">{limit.why}</p>}
+          <LimitField
+            testId="epic-limit"
+            label={
+              paused && run
+                ? `New spending limit (measured tokens; ${run.spent.tokens} spent of ${run.limit})`
+                : undefined
+            }
+            value={shownLimit}
+            reading={limit}
+            onChange={(text) => {
+              setLimitText(text);
+              setLimitTouched(true);
+            }}
+          >
+            {!limitTouched && suggestion && (
+              <p className="text-xs text-muted-foreground" data-testid="epic-limit-prefill">
+                Prefilled from {plural(suggestion.measured, "merged task")} of this epic: about{" "}
+                {suggestion.perTask} measured tokens each, for {plural(suggestion.left, "task")}{" "}
+                still to land{spent !== null ? `, on top of the ${spent} spent` : ""}.
+              </p>
+            )}
+          </LimitField>
           {paused && limit.ok && limit.value === null && (
             <p className="text-xs text-muted-foreground">
               No limit given: the run resumes with none.

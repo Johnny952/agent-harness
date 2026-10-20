@@ -392,8 +392,9 @@ counted from the task's usage-log offset taken when the start began; the
 cycle checks it before each phase, so a running phase finishes, and at the
 limit it ends *Blocked* with `budget_reached` and a *Blocked* notification
 that names the spend. No separate retry count: the dispatcher's retries are
-already bounded. Not built: the field in the console's start dialog, and the
-default numbers from real cycles.
+already bounded. The console's *Start development* dialog takes the limit in
+an optional field, blank for none, shared with *Start epic*'s (ADR NNN). Not
+built: the default numbers from real cycles.
 
 ### 5. The service
 

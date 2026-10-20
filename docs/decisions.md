@@ -12953,3 +12953,51 @@ rather than blocking it.
   *Blocked*, because the stop waits on the person.
 - Stopping a phase mid-run: it would lose the phase's work for tokens
   already spent.
+
+## ADR NNN — The console's task start dialog takes a spending limit
+
+**Status:** accepted (2026-10-20), built by a subagent of the operator's
+session.
+
+**Context.** A start's own spending limit (ADR 230) was built backend only:
+`POST /api/tasks/<id>/start` takes `limit`, but the console's *Start
+development* dialog had no field for it. *Start epic* already had one (ADR
+218), with its validation inline in `epic-actions.tsx`, and both start
+dialogs share the floor field (ADR 227, `floor-field.tsx`). The console's
+forward (`lib/api/forward.ts`) rebuilt a start's body from `note` alone and
+answered 400 to any other key, so a `floor` or a `limit` typed in either
+dialog never reached the board-service.
+
+**Decision.**
+1. The limit field is one component, `components/console/limit-field.tsx`
+   (`LimitField`), and its reading one function, `lib/limit.ts:readLimit`,
+   both moved out of `epic-actions.tsx`. *Start epic* uses them unchanged in
+   look and wording; *Start development* uses them with the default label
+   "Spending limit (measured tokens, optional)".
+2. In *Start development*, blank sends no `limit`; a whole number of at
+   least 1 is sent as `limit`; anything else ("0", "2.5", "-3") disables
+   *Start* and shows "N is not a whole number of at least 1." under the
+   field. A help line says what the value does: "The cycle stops Blocked
+   once it has spent N measured tokens; a phase already running finishes.",
+   or, blank, "No limit: the cycle is not stopped for what it spends."
+3. `api.startTask` and `startTaskMutation` take `limit` beside `floor`, and
+   add each to the body only when it is not null (`StartTaskBody.limit`).
+4. The forward passes a start's `note`, `floor` and `limit` on, the last two
+   only when present, and leaves their values to the board-service's route,
+   which already checks them. Any other key, `project` included, is still a
+   400. This applies to the task and the epic start routes alike.
+
+**Consequences.**
+- A task start from the console can carry its own limit, and the floor and
+  the epic limit typed in the console now reach the backend; before this
+  the forward refused them with a 400.
+- The two dialogs cannot drift apart in how they read or word a limit.
+- The default numbers from real cycles are still not set: blank stays no
+  limit.
+
+**Ruled out.**
+- Checking the floor's and the limit's values in the forward too: the route
+  is the one place that owns them, and a second copy could disagree.
+- Prefilling the task dialog's limit from a stored run, as the epic's
+  paused run does: a single start's limit is not raised in place (ADR 230
+  part 5), so there is no going value to show.

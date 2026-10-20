@@ -817,11 +817,15 @@ export interface ChangeProjectBody {
   status?: "active" | "archived";
 }
 
-/** `POST /api/tasks/<id>/start`: exactly `{note}`, the forward refuses any other key (ADR 157). */
-/** `floor` in percent, sent only when the operator set one (ADR 226, ADR 227). */
+/**
+ * `POST /api/tasks/<id>/start`: `{note}`, the project being the console's (ADR 157);
+ * `floor` in percent and `limit` in measured tokens, each sent only when the
+ * operator set one (ADR 226, ADR 227, ADR 230).
+ */
 export interface StartTaskBody {
   note: string | null;
   floor?: number;
+  limit?: number;
 }
 
 /**
