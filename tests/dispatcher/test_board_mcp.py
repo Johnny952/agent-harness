@@ -45,6 +45,7 @@ def test_the_service_and_the_dispatcher_read_one_table() -> None:
             "backlog_accept",
         ),
         "arquitecto": ("board_list", "board_get", "backlog_propose", "task_comment"),
+        "thread": ("board_list", "board_get", "task_start"),
     }
 
 
@@ -196,3 +197,23 @@ def test_a_revisor_phase_carries_no_config(tmp_path, monkeypatch, fake_git) -> N
 
     assert "mcp_config" not in calls[0]
     assert calls[0]["allowed_tools"] == []
+
+
+# --- the thread role (ADR 187) ----------------------------------------------
+
+
+def test_the_thread_row_is_its_own_and_no_other_row_gained_a_tool() -> None:
+    assert board_mcp.ROLE_TOOLS[board_mcp.THREAD] == ("board_list", "board_get", "task_start")
+    assert board_mcp.allowed_tools("thread") == [
+        "mcp__board__board_list", "mcp__board__board_get", "mcp__board__task_start",
+    ]
+    others = {r: t for r, t in board_mcp.ROLE_TOOLS.items() if r != "thread"}
+    assert not any("task_start" in tools for tools in others.values())
+
+
+def test_mcp_config_carries_the_turn_only_when_given() -> None:
+    url = "http://board-service:8792/mcp"
+    with_turn = _server(board_mcp.mcp_config(url, "thread", turn="a-1"))["url"]
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(with_turn).query)
+    assert query == {"role": ["thread"], "turn": ["a-1"]}
+    assert _server(board_mcp.mcp_config(url, "arquitecto"))["url"] == f"{url}?role=arquitecto"

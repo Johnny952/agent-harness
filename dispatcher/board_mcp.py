@@ -23,6 +23,10 @@ SERVER_NAME = "board"
 #: launches it, so nothing here writes a config for it.
 OPERATOR = "operator"
 
+#: The conversational thread's turn (ADR 187). Not a phase: the worker's `turn`
+#: handler gives it the server, and its one write queues a `start`.
+THREAD = "thread"
+
 #: Which tools each role may list and call (section 6), reads and writes. A
 #: role not named gets none, and the dispatcher gives its phases no server
 #: either. `backlog_accept` and `task_edit` are the operator's alone: accepting
@@ -38,6 +42,7 @@ ROLE_TOOLS: dict[str, tuple[str, ...]] = {
         "backlog_accept",
     ),
     "arquitecto": ("board_list", "board_get", "backlog_propose", "task_comment"),
+    THREAD: ("board_list", "board_get", "task_start"),
 }
 
 #: Where the phases reach the service: by its compose name on ia_harness_net,
@@ -51,13 +56,17 @@ def allowed_tools(role: str) -> list[str]:
     return [f"mcp__{SERVER_NAME}__{tool}" for tool in ROLE_TOOLS.get(role, ())]
 
 
-def mcp_config(url: str, role: str) -> str:
+def mcp_config(url: str, role: str, *, turn: str | None = None) -> str:
     """The `--mcp-config` value for a phase of `role`, as one compact JSON string.
 
     The role goes in the query, which is the only thing the service reads it
     from; the URL is expected to carry no query of its own, since the service
-    refuses any parameter but `role`.
+    refuses any parameter but `role` and, for the thread, `turn`: the id of the
+    running turn, written by the worker so the model cannot choose it (ADR 187).
     """
-    query = urllib.parse.urlencode({"role": role})
+    params = {"role": role}
+    if turn is not None:
+        params["turn"] = turn
+    query = urllib.parse.urlencode(params)
     server = {"type": "http", "url": f"{url}?{query}"}
     return json.dumps({"mcpServers": {SERVER_NAME: server}}, separators=(",", ":"))
