@@ -151,6 +151,44 @@ def test_a_change_on_a_broken_record_leaves_it(client, root):
     assert path.read_text() == "{}"
 
 
+SECRET = "s3cr3t-Value"
+
+
+@pytest.mark.parametrize("remote", [
+    f"ssh://git:{SECRET}@github.com/me/shop.git",
+    f"https://me:{SECRET}@github.com/me/shop.git",
+    f"https://ghp_{SECRET}@github.com/me/shop.git",
+])
+def test_a_remote_with_a_credential_is_refused_without_echoing_it(client, root, remote):
+    res = create(client, {"slug": "shop", "remote": remote})
+    assert res.status_code == 400
+    error = res.get_json()["error"]
+    assert "password or token" in error and SECRET not in error
+    assert projects.slugs(root) == []
+
+    assert create(client).status_code == 201
+    before = on_disk(root)
+    res = change(client, body={"remote": remote})
+    assert res.status_code == 400 and SECRET not in res.get_json()["error"]
+    assert on_disk(root) == before
+
+
+def test_a_change_on_a_record_holding_a_credential_is_refused_redacted(client, root):
+    path = Path(projects.record_path(root, "shop"))
+    path.parent.mkdir(parents=True)
+    stored = {
+        "slug": "shop", "title": "shop", "remote": f"ssh://git:{SECRET}@github.com/me/shop.git",
+        "base_branch": None, "key": None, "settings": {}, "created": "2026-10-20T12:00:00Z",
+        "status": "active",
+    }
+    path.write_text(json.dumps(stored))
+    res = change(client, body={"title": "Shop"})
+    assert res.status_code == 409
+    assert "ssh://***@github.com" in res.get_json()["error"]
+    assert SECRET not in res.get_json()["error"]
+    assert json.loads(path.read_text()) == stored
+
+
 def test_a_change_with_a_bad_field_is_refused_in_the_readers_words(client, root):
     create(client)
     before = on_disk(root)

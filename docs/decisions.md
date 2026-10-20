@@ -11337,3 +11337,65 @@ project saw none of it, so two of them ran two cycles on one clone.
   cadence, so no thread sleeps inside the kernel holding something else.
 - The lock per cycle under a parallel queue: two of the queue's own cycles
   would then exclude each other and the queue would run one at a time.
+
+## ADR NNN — The project record never holds a credential in its remote
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** The record's remote check (ADR 199, ADR 203) accepts only SSH
+form: scp-like `user@host:path` or `ssh://authority/path`. It already refused
+https, http, git:// and file:// remotes, but three gaps remained. An
+`ssh://user:password@host/...` URL passed, because the authority pattern took
+any non-slash text. A token used as the scp user (`ghp_...@github.com:o/r.git`)
+passed. And the "not in SSH form" refusal echoed the whole remote, so
+`https://user:token@github.com/...` put the token in the board's 400, in the
+dispatcher's log and in any error a person read. The harness authenticates
+https through git's `store` credential helper mounted at
+`/run/secrets/git-credentials` (`docs/plans/projects.md`), never through the
+URL, so a credential in a record is always a leak and never a configuration.
+
+**Decision.**
+1. **The rule.** A remote's userinfo, for any scheme, may be only a bare
+   login (`[A-Za-z0-9._-]+`): `git@github.com:o/r.git`,
+   `ssh://git@host/r.git` and `ssh://host/r.git` stay valid. A userinfo with a
+   `:` (a password) or any other character is a credential. In a URL the
+   userinfo runs to the last `@` of the authority, so a password holding `@`
+   is caught whole; in scp form it runs to the first `@`, so a path holding
+   `@` is not mistaken for one.
+2. **Token-shaped users.** A bare login that starts with a known token prefix
+   (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`, `glpat-`, any case)
+   is a credential too: it is a token used as a user name.
+3. **http(s) remotes.** They stay refused for their form, as before. When they
+   carry a userinfo, that userinfo is treated as a credential and the
+   refusal says so; a bare https URL with no userinfo is still named in full
+   in the "not in SSH form" message, because it holds no secret.
+4. **Redaction.** No message shows the credential: the refusal names the
+   problem and shows the remote with its userinfo as `***`
+   (`ssh://***@github.com/o/r.git`). `projects.redact_remote` does it, and
+   `projects.has_credential` is the test; both live beside the one check in
+   `dispatcher/projects.py`, not in a second validator.
+5. **Every path.** The check is in `_problems`, so it runs on create and
+   change (the board's 400), and on read: a stored record holding a
+   credential is a broken record, so `read` raises its RecordError, `change`
+   its BrokenRecord (the board's 409) and the dispatcher's cycle blocks and
+   logs it, all with the userinfo redacted.
+6. **`dispatch migrate`.** `ssh_remote`, which maps a clone's remote to the
+   record's form, already dropped an https userinfo when it rewrote the URL
+   to `git@host:path`. It now strips the password of an `ssh://user:pw@` URL
+   and keeps the user, and gives no remote (null) for a token-shaped user, so
+   migrate never writes a credential and never fails on one.
+
+**Consequences.**
+- A record that held a credential by hand is reported as broken until a
+  person fixes the file; the board cannot change it, since change reads the
+  record first.
+- The token prefixes are a heuristic: a token from another forge used as a
+  bare login passes. A password always has a `:` and is always caught.
+
+**Ruled out.**
+- Rewriting a person's input in create or change (dropping the password and
+  keeping the rest): ADR 203 refuses what the reader would refuse rather than
+  fixing it silently, and a person who pasted a token should learn it.
+- A second validator for the board routes: the one check stays the reader's.
+- Accepting https with a userinfo-free URL as a record remote: out of scope
+  here; the harness's remotes are SSH (ADR 199).

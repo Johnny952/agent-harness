@@ -506,3 +506,123 @@ def test_change_refuses_a_missing_or_broken_record(tmp_path) -> None:
     assert path.read_text() == "{}"
     with pytest.raises(projects.RecordError, match="renamed"):
         projects.change(root, "shop", {"slug": "blog"})
+
+
+# -- no credential in a record's remote (ADR NNN) -----------------------------
+
+_SECRET = "s3cr3t-Value"
+
+
+@pytest.mark.parametrize("remote", [
+    f"ssh://deploy:{_SECRET}@example.com/acme/shop.git",
+    f"ssh://git:{_SECRET}@github.com:22/acme/shop.git",
+    f"ssh://git:p@ss{_SECRET}@github.com/acme/shop.git",
+    f"https://me:{_SECRET}@github.com/acme/shop.git",
+    f"http://me:{_SECRET}@example.com/acme/shop.git",
+    f"git://me:{_SECRET}@example.com/acme/shop.git",
+    f"file://me:{_SECRET}@localhost/srv/shop.git",
+    f"me:{_SECRET}@github.com:acme/shop.git",
+    f"https://ghp_{_SECRET}@github.com/acme/shop.git",
+    f"https://github_pat_{_SECRET}@github.com/acme/shop.git",
+    f"glpat-{_SECRET}@gitlab.com:acme/shop.git",
+    f"ssh://ghp_{_SECRET}@github.com/acme/shop.git",
+])
+def test_a_remote_with_a_credential_is_refused_and_the_secret_not_echoed(remote) -> None:
+    assert projects.has_credential(remote)
+    assert not projects.is_ssh_remote(remote)
+    with pytest.raises(projects.RecordError) as raised:
+        projects.parse(_record(remote=remote))
+
+    message = str(raised.value)
+    assert "password or token" in message and "***@" in message
+    assert _SECRET not in message
+
+
+@pytest.mark.parametrize("remote", [
+    "git@github.com:acme/shop.git",
+    "ssh://git@github.com/acme/shop.git",
+    "ssh://deploy@example.com:2222/acme/shop.git",
+    "ssh://example.com/acme/shop.git",
+    "git@github.com:acme/shop@v2.git",
+])
+def test_a_remote_with_a_bare_user_is_kept(remote) -> None:
+    assert not projects.has_credential(remote)
+    assert projects.redact_remote(remote) == remote
+    assert projects.parse(_record(remote=remote)).remote == remote
+
+
+def test_an_https_remote_with_no_credential_is_named_as_it_is() -> None:
+    # Not a credential, only the wrong form: the message shows the URL whole.
+    with pytest.raises(projects.RecordError) as raised:
+        projects.parse(_record(remote="https://github.com/acme/shop.git"))
+
+    assert "'https://github.com/acme/shop.git' is not in SSH form" in str(raised.value)
+
+
+def test_a_stored_record_with_a_credential_is_broken_and_reported_redacted(tmp_path) -> None:
+    root = tmp_path / "hive"
+    (root / "projects").mkdir(parents=True)
+    (root / "projects" / "shop.json").write_text(
+        json.dumps(_record(remote=f"ssh://git:{_SECRET}@github.com/acme/shop.git"))
+    )
+
+    with pytest.raises(projects.RecordError) as raised:
+        projects.read(str(root), "shop")
+    assert "ssh://***@github.com/acme/shop.git" in str(raised.value)
+    assert _SECRET not in str(raised.value)
+
+    with pytest.raises(projects.BrokenRecord) as changed:
+        projects.change(str(root), "shop", {"title": "Shop"})
+    assert _SECRET not in str(changed.value)
+
+
+def test_a_cycle_on_a_record_with_a_credential_logs_it_redacted(tmp_path, caplog) -> None:
+    from dispatcher import dispatcher as core
+
+    cfg = _config(tmp_path, str(tmp_path / "projects"))
+    directory = Path(context_transfer.hive_root(cfg.hive_tasks_dir)) / "projects"
+    directory.mkdir(parents=True)
+    (directory / "shop.json").write_text(
+        json.dumps(_record(remote=f"https://me:{_SECRET}@github.com/acme/shop.git"))
+    )
+
+    with caplog.at_level("ERROR"):
+        assert core.run_task_cycle(cfg, "task-1", "shop") == core.CycleOutcome.BLOCKED
+    assert any("project shop" in r.getMessage() for r in caplog.records)
+    assert not any(_SECRET in r.getMessage() for r in caplog.records)
+
+
+def test_create_and_change_refuse_a_credential(tmp_path) -> None:
+    root = str(tmp_path / ".hive")
+    with pytest.raises(projects.RecordError) as raised:
+        projects.create(root, {"slug": "shop", "remote": f"ssh://git:{_SECRET}@github.com/a/s.git"})
+    assert _SECRET not in str(raised.value)
+    assert projects.slugs(root) == []
+
+    projects.create(root, {"slug": "shop", "remote": "git@github.com:a/s.git"}, now=_NOW)
+    with pytest.raises(projects.RecordError) as raised:
+        projects.change(root, "shop", {"remote": f"https://me:{_SECRET}@github.com/a/s.git"})
+    assert _SECRET not in str(raised.value)
+    assert projects.read(root, "shop").remote == "git@github.com:a/s.git"
+
+
+@pytest.mark.parametrize("remote, ssh", [
+    (f"ssh://git:{_SECRET}@github.com/acme/shop.git", "ssh://git@github.com/acme/shop.git"),
+    (f"ssh://ghp_{_SECRET}@github.com/acme/shop.git", None),
+    (f"https://me:{_SECRET}@github.com/acme/shop.git", "git@github.com:acme/shop.git"),
+    (f"https://ghp_{_SECRET}@github.com/acme/shop.git", "git@github.com:acme/shop.git"),
+])
+def test_migrate_drops_a_credential_from_what_it_reads_off_a_clone(remote, ssh) -> None:
+    assert projects.ssh_remote(remote) == ssh
+
+
+def test_migrate_writes_a_clone_whose_remote_carries_a_password(tmp_path) -> None:
+    hive = _hive(tmp_path)
+    clones = [projects.Clone("shop", f"ssh://git:{_SECRET}@github.com/acme/shop.git", "main")]
+
+    report = _migrate(tmp_path, hive, clones)
+
+    assert report.written == ["shop"]
+    root = context_transfer.hive_root(hive)
+    assert projects.read(root, "shop").remote == "ssh://git@github.com/acme/shop.git"
+    assert _SECRET not in Path(projects.record_path(root, "shop")).read_text()
