@@ -1407,7 +1407,8 @@ def _probe_push(
     pack and updates no ref. Over https:// the same command asks for the
     receive-pack service, which GitHub grants only to a token that may write.
     It does not see branch protection: GitHub checks that per ref, on a real
-    update, and this one names a new branch.
+    update, and this one names a new branch. The exit status is what is read;
+    it was measured on git 2.39.5, the agent image's, as well (ADR 215).
 
     The commit lives in a throwaway repository under `scratch_root`, never the
     project's directory, which a check runs before there is one; it is removed
