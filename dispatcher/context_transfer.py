@@ -597,6 +597,24 @@ def read_usage(hive_dir: str, task_id: str) -> UsageLog:
     return UsageLog(lines=lines, skipped=skipped)
 
 
+def measured_tokens(line: dict) -> int | None:
+    """One usage line's tokens as ADR 79 counts them, or None if it measured none.
+
+    The four token fields, each per call (ADR 64), summed unweighted: any
+    weighting would be an estimate of a price, and the limit is never
+    estimated. `total_cost_usd` is cumulative over a session and never read.
+    """
+    fields = (
+        line.get("input_tokens"),
+        line.get("output_tokens"),
+        line.get("cache_creation_input_tokens"),
+        line.get("cache_read_input_tokens"),
+    )
+    if not line.get("measured", True) or all(f is None for f in fields):
+        return None
+    return sum(f for f in fields if isinstance(f, int))
+
+
 def _is_single_path_component(name: str) -> bool:
     """Is this a name that can only ever be one entry inside a directory?"""
     if not name or name in (".", "..") or "\0" in name:

@@ -336,8 +336,11 @@ ruling before it is built (*Open questions*).
   buttons are built 2026-10-20 (ADR 211): `POST /api/epics/<id>/stop` queues
   one cancel per start of the epic still waiting and names the taken ones,
   left running; the epic's task page has *Start epic* and *Stop epic*, each
-  behind a confirmation. Not built: queuing each later task as its
-  dependencies merge, the arquitecto's sub-tasks, and the epic's limit.
+  behind a confirmation. Queuing each later task as its dependencies merge
+  and the epic's limit are built 2026-10-20 (ADR NNN): the press keeps the
+  epic's run (`actions/epics/<id>.json`), every merge record queues a going
+  run's tasks now in *Ready*, and the run stops queuing at its limit. Not
+  built: the arquitecto's sub-tasks.
 - **Accepting is still not starting.** Accepting moves an item onto the
   board and spends nothing; starting is the separate act that spends quota.
   They stay two clicks, because a person may accept now and start later.
@@ -369,6 +372,13 @@ reaching it pauses the work rather than failing it.
   (`notifications.md`), because it waits on the person.
 
 The default numbers are set when this is built, from real cycles.
+
+**Per epic built 2026-10-20** (`docs/decisions.md` ADR NNN): the limit is
+in measured tokens, the usage log's `result` lines summed from the press;
+at the limit nothing new is queued and the epic shows *Paused: limit
+reached* with *Resume epic*, which asks a new limit. Not built: the
+prefill from past cycles (the field is blank), the per-task limit and
+`budget_reached`, the pool's floor, and the notification.
 
 ### 5. The service
 

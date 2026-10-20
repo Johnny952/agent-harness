@@ -359,22 +359,9 @@ def _usage_lines(cfg: Config, task_id: str) -> list[dict]:
     return context_transfer.read_usage(cfg.hive_tasks_dir, task_id).lines
 
 
-def measured_tokens(line: dict) -> int | None:
-    """One usage line's tokens as ADR 79 counts them, or None if it measured none.
-
-    The four token fields, each per call (ADR 64), summed unweighted: any
-    weighting would be an estimate of a price, and the limit is never
-    estimated. `total_cost_usd` is cumulative over a session and never read.
-    """
-    fields = (
-        line.get("input_tokens"),
-        line.get("output_tokens"),
-        line.get("cache_creation_input_tokens"),
-        line.get("cache_read_input_tokens"),
-    )
-    if not line.get("measured", True) or all(f is None for f in fields):
-        return None
-    return sum(f for f in fields if isinstance(f, int))
+#: One usage line's tokens as ADR 79 counts them; moved beside the log it
+#: reads so the epic's limit (ADR NNN) counts the same way.
+measured_tokens = context_transfer.measured_tokens
 
 
 def _spend(cfg: Config, entry: Entry) -> tuple[int, int]:

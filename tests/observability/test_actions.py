@@ -83,6 +83,7 @@ def test_no_actions_dir_is_an_empty_queue_and_makes_nothing(tmp_path):
             "stale": True,
             "stale_after_seconds": api_app.WORKER_STALE_SECONDS,
         },
+        "epics": [],
     }
     assert warnings == []
     assert not actions.actions_dir(harness.state_dir).exists()
@@ -204,3 +205,41 @@ def test_route_is_read_only(tmp_path):
     before = {p: os.stat(p).st_mtime_ns for p in root.rglob("*")}
     _data(harness, PATH)
     assert {p: os.stat(p).st_mtime_ns for p in root.rglob("*")} == before
+
+
+def test_a_started_epic_is_served_with_its_spend_and_limit(tmp_path):
+    """The run file `start_epic_run` writes, read with its measured spend (ADR NNN)."""
+    from dispatcher import context_transfer, epic_runs
+
+    harness = _harness(tmp_path)
+    hive = str(tmp_path / "hive" / "tasks")
+    actions.start_epic_run(
+        harness.state_dir, "T-1", "demo", ["T-1-S1"],
+        offset=lambda tid: epic_runs.usage_offset(hive, tid),
+        spent=lambda run: 0, limit=100, note="go",
+    )
+    context_transfer.append_usage(hive, "T-1-S1", {
+        "input_tokens": 70, "output_tokens": 30,
+        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+    })
+    context_transfer.append_usage(hive, "T-1-S1", {"measured": False})
+    before = _tree(Path(harness.state_dir))
+    data, warnings = _data(harness, PATH)
+    assert warnings == []
+    [run] = data["epics"]
+    assert run["epic"] == "T-1" and run["project"] == "demo" and run["note"] == "go"
+    assert run["limit"] == 100 and run["paused"] is None and run["stopped_at"] is None
+    assert run["spent"] == {"tokens": 100, "unmeasured": 1}
+    assert run["limit_reached"] is True
+    assert list(run["queued"]) == ["T-1-S1"]
+    assert _tree(Path(harness.state_dir)) == before
+
+
+def test_an_unreadable_epic_run_is_a_warning(tmp_path):
+    harness = _harness(tmp_path)
+    directory = actions.actions_dir(harness.state_dir) / actions.EPICS
+    directory.mkdir(parents=True)
+    (directory / "T-1.json").write_text("{not json")
+    data, warnings = _data(harness, PATH)
+    assert data["epics"] == []
+    assert len(warnings) == 1 and "T-1" in warnings[0]

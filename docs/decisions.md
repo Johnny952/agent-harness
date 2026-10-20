@@ -12019,3 +12019,69 @@ host's git 2.43 only, and the agent image, where the worker runs it, carries
 **Ruled out.**
 - Parsing the porcelain's `*`/`!` lines: it would add a second reading that
   agrees with the exit status in every measured case.
+
+## ADR NNN — An epic's run queues its next tasks as they merge, up to a limit in measured tokens
+
+**Status:** accepted (2026-10-20, `docs/plans/projects.md` step 3).
+
+**Context.** *Start epic* (ADR 207) queued the epic's tasks in *Ready* at the
+press and no more: a task whose dependencies merged later had to be started
+by hand. `board-service.md`'s *Spending limit* asks for the epic's limit,
+counted from what the usage log already wrote, never an estimate, and for
+*Paused: limit reached* with *Resume*. The plan leaves the unit open.
+
+**Decision.**
+1. The press keeps the epic's run, `actions/epics/<epic>.json` under the
+   queue's root and written under its lock: the project, note and actor the
+   press gave, the `limit`, `started_at`, `stopped_at`, `paused`,
+   `paused_at`, and `queued`, each task the run queued with its start's id
+   and the length of the task's usage log at that moment (`usage_offset`).
+   `actions.start_epic_run` writes the starts and the run in one hold.
+2. Every merge record runs the follow-on: `record_merge` in
+   `dispatcher/dispatcher.py`, which both cycle paths and `merge-task` call,
+   ends with `epic_runs.follow_on`. It looks at every going run, not only the
+   merged task's epic, since a task may wait on another epic's. For each it
+   queues, through the same `start_epic_run`, the epic's tasks now in
+   *Ready* that the run has not queued before and that hold no start in the
+   queue. A stopped or paused run queues nothing. A failure is a line in the
+   merge's output, never a raise: the merge record stands.
+3. The unit is measured tokens: a `result` line's `input_tokens`,
+   `output_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens`
+   summed unweighted (ADR 79's total), from each queued task's
+   `usage_offset` on. `total_cost_usd` is not used: ADR 64 found it
+   cumulative over a resumed session, so summing it would count twice, and
+   on the subscription it is not money spent. A line that measured nothing
+   is counted apart as `unmeasured`, shown, and not guessed at.
+4. The limit is checked at queue time only. At or past it, the follow-on
+   writes `paused: "limit_reached"` and queues nothing; starts already
+   queued and running phases are left to finish, so the spend can pass the
+   limit by what they use. The pause is written at the next queue write;
+   `epic_runs.view` computes `limit_reached` live, so the console shows it
+   as soon as the usage log reaches the limit.
+5. *Resume* is the same `POST /api/epics/<id>/start` with a new `limit`. On
+   a run paused or at its limit, a task with a start queued is skipped
+   rather than refused, nothing in *Ready* is not a refusal, and a limit at
+   or under the spend so far is a 409. A press after *Stop epic* begins a
+   new run, its spend from zero. *Stop epic* also marks the going run
+   stopped, and is answered 201 with nothing to drop while a run goes.
+6. `/api/actions` serves the runs as `epics`, each with `spent` and
+   `limit_reached`; an unreadable run file is a warning. The epic's page
+   shows the spend against the limit, *Paused: limit reached*, a limit field
+   in the dialog and *Resume epic*.
+
+**Consequences.**
+- A task the run queued once is not queued again by the run: if its phase
+  fails back to *Ready*, the person starts it, as a single start.
+- `limit: null` is a run with no limit; it still follows the merges.
+- The limit's unit is tokens, not the plan's "cost": the field says so.
+
+**Ruled out.**
+- `total_cost_usd`: cumulative over a resume (ADR 64), see 3.
+- Checking the limit before each phase in the worker: the plan stops
+  *queuing* at the limit and lets running phases finish.
+- A prefilled limit from past cycles: the median `token-economy.md` P4
+  would give is not built, so the field starts blank rather than with a
+  made-up number.
+
+**Open.** The prefill, the per-task limit and `budget_reached`, the pool's
+floor, the limit's *Blocked* notification, and the arquitecto's sub-tasks.

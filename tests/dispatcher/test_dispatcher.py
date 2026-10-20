@@ -7150,6 +7150,93 @@ def test_record_merge_reports_what_it_could_not_write_and_does_not_raise(tmp_pat
     assert recorded == [] and tasks.MIGRATE_COMMAND in problem
 
 
+def _start_epic_run(cfg, limit=None) -> None:
+    """*Start epic* on `task-0` as the board service queues it (ADR NNN)."""
+    from dispatcher import actions, epic_runs
+    actions.start_epic_run(
+        cfg.state_dir, "task-0", "myproj", ["task-0-S1"],
+        offset=lambda tid: epic_runs.usage_offset(cfg.hive_tasks_dir, tid),
+        spent=lambda run: epic_runs.spend(cfg.hive_tasks_dir, run)[0],
+        limit=limit, actor="test",
+    )
+
+
+def _queued_starts(cfg) -> list[str]:
+    from dispatcher import actions
+    entries, _ = actions.read_all(cfg.state_dir)
+    return [e.record["task_id"] for e in entries if e.state == "pending"]
+
+
+def test_record_merge_queues_a_started_epics_next_task_once(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    _start_epic_run(cfg)
+    merged = _merge(dispatcher_mod.docker_exec.MERGED)
+
+    recorded, problem = dispatcher_mod.record_merge(cfg, "task-0-S1", merged)
+
+    assert problem is None
+    assert recorded[-1] == "epic task-0: queued task-0-S2"
+    assert _queued_starts(cfg) == ["task-0-S1", "task-0-S2"]
+    # `merge-task` run again records nothing new and queues nothing twice.
+    up_to_date = _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
+    assert dispatcher_mod.record_merge(cfg, "task-0-S1", up_to_date) == ([], None)
+    assert _queued_starts(cfg) == ["task-0-S1", "task-0-S2"]
+
+
+def test_record_merge_queues_nothing_for_a_stopped_or_unstarted_epic(tmp_path) -> None:
+    from dispatcher import actions
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    dispatcher_mod.record_merge(cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.MERGED))
+    assert _queued_starts(cfg) == []
+
+    _start_epic_run(cfg)
+    actions.create_epic_cancels(cfg.state_dir, "task-0", actor="test")
+    tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S1", "release")
+    recorded, problem = dispatcher_mod.record_merge(
+        cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.MERGED)
+    )
+    assert problem is None and not any(line.startswith("epic") for line in recorded)
+    assert "task-0-S2" not in _queued_starts(cfg)
+
+
+def test_record_merge_does_not_queue_a_task_already_started(tmp_path) -> None:
+    from dispatcher import actions
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    _start_epic_run(cfg)
+    tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S1", "main")
+    actions.create_starts(cfg.state_dir, "myproj", ["task-0-S2"], actor="test")
+
+    recorded, _ = dispatcher_mod.record_merge(
+        cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
+    )
+
+    assert not any(line.startswith("epic") for line in recorded)
+    assert _queued_starts(cfg).count("task-0-S2") == 1
+
+
+def test_record_merge_pauses_an_epic_at_its_limit(tmp_path) -> None:
+    from dispatcher import actions, context_transfer
+    cfg = _make_config(tmp_path)
+    _epic(cfg)
+    _start_epic_run(cfg, limit=10)
+    context_transfer.append_usage(cfg.hive_tasks_dir, "task-0-S1", {
+        "input_tokens": 15, "output_tokens": 5,
+        "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+    })
+
+    recorded, problem = dispatcher_mod.record_merge(
+        cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.MERGED)
+    )
+
+    assert problem is None
+    assert recorded[-1] == "epic task-0: paused, its limit is reached"
+    assert _queued_starts(cfg) == ["task-0-S1"]
+    assert actions.read_epic_run(cfg.state_dir, "task-0")["paused"] == actions.PAUSED_LIMIT
+
+
 def _refused_by_open_cycle(cfg, caplog, task_id="task-1", description=None) -> str:
     """Open a cycle that must be refused, and check nothing was written to the hive."""
     before = _hive_bytes(cfg)
