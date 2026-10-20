@@ -271,11 +271,19 @@ export function debtTaskId(id: string): string | null {
   return /^(.+)-D\d+$/.exec(id)?.[1] ?? null;
 }
 
-export async function listDebt(): Promise<ApiResult<DebtEntry[]>> {
-  // The project slug is added by the forward, server-side, from CONSOLE_PROJECT:
-  // `?project=` is the one parameter this route takes and it is not the browser's
-  // to choose. ADR 24.
-  const { data, warnings } = await readEnvelope<Omit<DebtEntry, "task_id">[]>("/api/debt");
+/**
+ * `?project=` for the three project-scoped reads: none on the harness's screens,
+ * where the forward adds `CONSOLE_PROJECT` server-side (ADR 24), and the slug
+ * on a project's screen under `/p/$slug/` (ADR NNN).
+ */
+function projectPath(path: string, project: string | null): string {
+  return project === null ? path : `${path}?project=${encodeURIComponent(project)}`;
+}
+
+export async function listDebt(project: string | null = null): Promise<ApiResult<DebtEntry[]>> {
+  const { data, warnings } = await readEnvelope<Omit<DebtEntry, "task_id">[]>(
+    projectPath("/api/debt", project),
+  );
   return { data: data.map((row) => ({ ...row, task_id: debtTaskId(row.id) })), warnings };
 }
 
@@ -307,12 +315,11 @@ export function listPhases(taskId?: string): Promise<ApiResult<Phase[]>> {
  * would be the boundary contradicting the route (`docs/decisions.md` ADR 42).
  * Both of its callers filter rather than re-sort.
  *
- * The project slug is added by the forward, server-side, from `CONSOLE_PROJECT`,
- * the way `/api/debt`'s is: `?project=` is the one parameter this route takes and
- * it is not the browser's to choose. ADR 24.
+ * The project is `/api/debt`'s: the console's own unless a project's screen
+ * names one (`projectPath`, ADR 24, ADR NNN).
  */
-export function listLearnings(): Promise<ApiResult<LearningEntry[]>> {
-  return readEnvelope<LearningEntry[]>("/api/learnings");
+export function listLearnings(project: string | null = null): Promise<ApiResult<LearningEntry[]>> {
+  return readEnvelope<LearningEntry[]>(projectPath("/api/learnings", project));
 }
 
 /**
@@ -333,12 +340,12 @@ export function listUsage(taskId: string): Promise<ApiResult<UsageGroup[] | null
  *
  * One read and no mapping: the bands, their order and the month groups of
  * `no_plan.past` are the api's (`observability/api/app.py`, T-072), and which
- * of them a screen hides is the Roadmap screen's decision. The project slug is
- * added by the forward, server-side, from `CONSOLE_PROJECT`, the way
- * `/api/debt`'s is. ADR 24.
+ * of them a screen hides is the Roadmap screen's decision. The project is
+ * `/api/debt`'s: the console's own unless a project's screen names one
+ * (`projectPath`, ADR 24, ADR NNN).
  */
-export function getRoadmap(): Promise<ApiResult<Roadmap>> {
-  return readEnvelope<Roadmap>("/api/roadmap");
+export function getRoadmap(project: string | null = null): Promise<ApiResult<Roadmap>> {
+  return readEnvelope<Roadmap>(projectPath("/api/roadmap", project));
 }
 
 /**

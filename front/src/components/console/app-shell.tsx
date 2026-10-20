@@ -176,6 +176,10 @@ function SectionLabel({ children }: { children: ReactNode }) {
 const PROJECT_PAGES = [
   { to: "/p/$slug", suffix: "", label: "Board" },
   { to: "/p/$slug/backlog", suffix: "/backlog", label: "Backlog" },
+  // The project's own debt, learnings and roadmap (ADR NNN).
+  { to: "/p/$slug/debt", suffix: "/debt", label: "Debt" },
+  { to: "/p/$slug/learnings", suffix: "/learnings", label: "Learnings" },
+  { to: "/p/$slug/roadmap", suffix: "/roadmap", label: "Roadmap" },
 ] as const;
 
 /**

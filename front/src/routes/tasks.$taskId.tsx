@@ -48,6 +48,7 @@ import {
 } from "@/lib/format";
 import { openThread, useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
+import { useProjectScope } from "@/lib/projects";
 
 export const Route = createFileRoute("/tasks/$taskId")({
   head: ({ params }) => ({
@@ -142,9 +143,11 @@ function TaskDetailRoute() {
 export function TaskDetailPage({ taskId }: { taskId: string }) {
   const now = useNow();
   const task = useQuery(taskQuery(taskId));
-  const debt = useQuery(debtQuery);
+  // A project's task reads that project's debt and learnings (ADR NNN).
+  const project = useProjectScope();
+  const debt = useQuery(debtQuery(project));
   const phases = useQuery(phasesQuery(taskId));
-  const learnings = useQuery(learningsQuery);
+  const learnings = useQuery(learningsQuery(project));
   const usage = useQuery(usageQuery(taskId));
   // The thread's own read, here only for its warnings; `CommentThread` reads the
   // same key, so this is one request, not two.

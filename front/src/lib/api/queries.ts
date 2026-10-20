@@ -41,18 +41,25 @@ export const accountsQuery = queryOptions({
   refetchInterval: POLL_MS,
 });
 
-export const debtQuery = queryOptions({
-  queryKey: ["debt"],
-  queryFn: () => api.listDebt(),
-  refetchInterval: POLL_MS * 2,
-});
+/**
+ * The three project-scoped reads take the screen's scope (`useProjectScope()`):
+ * `null` on the harness's screens, the slug under `/p/$slug/`. Keyed by it, so
+ * a project's rows never stand in another's cache. ADR NNN.
+ */
+export const debtQuery = (project: string | null = null) =>
+  queryOptions({
+    queryKey: ["debt", project],
+    queryFn: () => api.listDebt(project),
+    refetchInterval: POLL_MS * 2,
+  });
 
 /** Plans change on a merge, not every second: the debt index's pace. */
-export const roadmapQuery = queryOptions({
-  queryKey: ["roadmap"],
-  queryFn: () => api.getRoadmap(),
-  refetchInterval: POLL_MS * 2,
-});
+export const roadmapQuery = (project: string | null = null) =>
+  queryOptions({
+    queryKey: ["roadmap", project],
+    queryFn: () => api.getRoadmap(project),
+    refetchInterval: POLL_MS * 2,
+  });
 
 /** Keyed by the state filter, so each filter keeps its own cache. ADR 123. */
 export const commandRequestsQuery = (state?: CommandRequestState) =>
@@ -62,11 +69,12 @@ export const commandRequestsQuery = (state?: CommandRequestState) =>
     refetchInterval: POLL_MS,
   });
 
-export const learningsQuery = queryOptions({
-  queryKey: ["learnings"],
-  queryFn: () => api.listLearnings(),
-  refetchInterval: POLL_MS * 2,
-});
+export const learningsQuery = (project: string | null = null) =>
+  queryOptions({
+    queryKey: ["learnings", project],
+    queryFn: () => api.listLearnings(project),
+    refetchInterval: POLL_MS * 2,
+  });
 
 /** An append-only log of finished calls: it moves slower than a phase does. */
 export const usageQuery = (taskId: string) =>

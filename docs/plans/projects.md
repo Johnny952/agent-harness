@@ -271,9 +271,12 @@ module; steps 2, 4 and 5 need its queue and worker.
    screens as they were, and `/p/$slug/`, `/p/$slug/backlog` and
    `/p/$slug/tasks/$taskId`, the harness's own Board, Backlog and task page
    narrowed to the slug. No api route lists the records, so the list is the
-   `project` the tasks name, by slug. The project's debt and learnings, the
-   counts of running and waiting, the archived toggle and *New project* are
-   not built.
+   `project` the tasks name, by slug. The project's debt, learnings and
+   roadmap are built the same day (ADR NNN): `/p/$slug/debt`,
+   `/p/$slug/learnings` and `/p/$slug/roadmap`, the harness's own screens over
+   `?project=<slug>`, which the api already took and the console's forward now
+   passes on. The counts of running and waiting, the archived toggle and
+   *New project* are not built.
 5. **New project and the key from the console**: the `clone`, `init`,
    `keygen` and `check` actions in the worker, and the form.
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front

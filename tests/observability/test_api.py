@@ -1583,6 +1583,21 @@ def test_project_is_optional_with_one_checkout_and_required_with_two(tmp_path: P
     assert _get(two, "/api/debt?project=scratch").status_code == 200
 
 
+def test_each_project_reads_its_own_clones_debt_and_none_is_empty(tmp_path: Path) -> None:
+    """The console's `/p/$slug/debt` asks per request (ADR NNN): the rows are
+    that clone's index, and a clone with no index is the empty list the
+    harness's screen shows for none, never another project's rows."""
+    two = _harness(tmp_path, projects=("ia-harness", "scratch"))
+    _debt_index(two.projects_root, "scratch", _INDEX)
+
+    scratch = _get(two, "/api/debt?project=scratch").get_json()
+    bare = _get(two, "/api/debt?project=ia-harness").get_json()
+
+    assert len(scratch["data"]) > 0
+    assert bare["data"] == []
+    assert "no readable debt index" in bare["warnings"][0]
+
+
 def test_a_project_with_no_checkout_answers_404(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
 

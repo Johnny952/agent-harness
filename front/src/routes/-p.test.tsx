@@ -7,11 +7,15 @@
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route as ProjectBoardRoute } from "./p.$slug.index";
 import { Route as ProjectBacklogRoute } from "./p.$slug.backlog";
 import { Route as ProjectTaskRoute } from "./p.$slug.tasks.$taskId";
+import { Route as ProjectDebtRoute } from "./p.$slug.debt";
+import { Route as ProjectLearningsRoute } from "./p.$slug.learnings";
+import { Route as ProjectRoadmapRoute } from "./p.$slug.roadmap";
 import { Route as BoardRoute } from "./index";
+import { Route as DebtRoute } from "./debt";
 import { renderRoute, type Served } from "@/test/render-route";
 import { deriveProjects, inProject, scoped } from "@/lib/projects";
 import type { ActionQueue, Task, TaskDetail } from "@/lib/api/types";
@@ -74,6 +78,14 @@ function boardServed(tasks: Task[] = TASKS): Served {
 
 const sidebar = () => screen.getByRole("navigation");
 
+/** The `project` each read of `path` carried, in order; `null` for a read with none. */
+function asked(fetchMock: { mock: { calls: unknown[][] } }, path: string): (string | null)[] {
+  return fetchMock.mock.calls
+    .map(([input]) => new URL(String(input), "http://console.test"))
+    .filter((url) => url.pathname === path)
+    .map((url) => url.searchParams.get("project"));
+}
+
 describe("deriveProjects", () => {
   it("names each project once, in slug order, and none for a task with no project", () => {
     expect(
@@ -133,7 +145,115 @@ describe("the sidebar's projects", () => {
     const hrefs = within(list)
       .getAllByRole("link")
       .map((a) => a.getAttribute("href"));
-    expect(hrefs).toEqual(["/p/alpha", "/p/alpha", "/p/alpha/backlog", "/p/beta"]);
+    expect(hrefs).toEqual([
+      "/p/alpha",
+      "/p/alpha",
+      "/p/alpha/backlog",
+      "/p/alpha/debt",
+      "/p/alpha/learnings",
+      "/p/alpha/roadmap",
+      "/p/beta",
+    ]);
+  });
+});
+
+describe("a project's debt, learnings and roadmap", () => {
+  const EMPTY_ROADMAP = {
+    project: "alpha",
+    bands: { future: [], now: [], past: [] },
+    no_plan: { now: [], past: [] },
+  };
+
+  it("reads the project's debt index, and says it is empty as the harness's screen does", async () => {
+    const { fetchMock } = await renderRoute(
+      ProjectDebtRoute,
+      "/p/$slug/debt",
+      {
+        "/api/tasks": { data: TASKS },
+        "/api/debt": { data: [], warnings: ["no readable debt index"] },
+      },
+      "/p/alpha/debt",
+    );
+    expect(await screen.findByText("The debt index is empty")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Debt index · alpha" })).toBeTruthy();
+    expect(asked(fetchMock, "/api/debt")).toEqual(["alpha"]);
+  });
+
+  it("links a debt row's task inside the project", async () => {
+    const row = { id: "T-201-D1", what: "w", where: "x", fix: "f", card: "none", resolved: false };
+    await renderRoute(
+      ProjectDebtRoute,
+      "/p/$slug/debt",
+      { "/api/tasks": { data: TASKS }, "/api/debt": { data: [row] } },
+      "/p/alpha/debt",
+    );
+    await screen.findByText("T-201-D1");
+    const links = screen
+      .getAllByRole("link")
+      .map((a) => a.getAttribute("href"))
+      .filter((h) => h?.includes("T-201"));
+    expect(links.length).toBeGreaterThan(0);
+    expect(links.every((h) => h === "/p/alpha/tasks/T-201")).toBe(true);
+  });
+
+  it("reads the learnings that apply to the project, and says none as the harness's screen does", async () => {
+    const { fetchMock } = await renderRoute(
+      ProjectLearningsRoute,
+      "/p/$slug/learnings",
+      { "/api/tasks": { data: TASKS }, "/api/learnings": { data: [] } },
+      "/p/beta/learnings",
+    );
+    expect(await screen.findByText("No phase has written a learning entry")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Learnings inbox · beta" })).toBeTruthy();
+    expect(asked(fetchMock, "/api/learnings")).toEqual(["beta"]);
+  });
+
+  it("reads the project's roadmap, and says it has none as the harness's screen does", async () => {
+    const { fetchMock } = await renderRoute(
+      ProjectRoadmapRoute,
+      "/p/$slug/roadmap",
+      { "/api/tasks": { data: TASKS }, "/api/roadmap": { data: EMPTY_ROADMAP } },
+      "/p/alpha/roadmap",
+    );
+    expect(await screen.findByText("This project has no roadmap yet")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Roadmap · alpha" })).toBeTruthy();
+    expect(asked(fetchMock, "/api/roadmap")).toEqual(["alpha"]);
+  });
+
+  it("moves the roadmap's filter on the project's own path", async () => {
+    const { router } = await renderRoute(
+      ProjectRoadmapRoute,
+      "/p/$slug/roadmap",
+      { "/api/tasks": { data: TASKS }, "/api/roadmap": { data: EMPTY_ROADMAP } },
+      "/p/alpha/roadmap",
+    );
+    await screen.findByText("This project has no roadmap yet");
+    fireEvent.click(screen.getByRole("button", { name: "Current only" }));
+    await waitFor(() => expect(router.state.location.href).toBe("/p/alpha/roadmap?view=current"));
+  });
+
+  // The gate draws the screen while the tasks read is in flight (ADR 208), so a
+  // read of the unknown slug may already have gone out; the api 404s it.
+  it("is a plain not-found for a slug no task names", async () => {
+    await renderRoute(
+      ProjectRoadmapRoute,
+      "/p/$slug/roadmap",
+      { "/api/tasks": { data: TASKS }, "/api/roadmap": { data: EMPTY_ROADMAP } },
+      "/p/gamma/roadmap",
+    );
+    expect((await screen.findByTestId("project-not-found")).textContent).toContain(
+      "No project named gamma",
+    );
+    expect(screen.queryByText("This project has no roadmap yet")).toBeNull();
+  });
+
+  it("leaves the harness's screens reading with no project", async () => {
+    const { fetchMock } = await renderRoute(DebtRoute, "/debt", {
+      "/api/tasks": { data: TASKS },
+      "/api/debt": { data: [] },
+    });
+    expect(await screen.findByText("The debt index is empty")).toBeTruthy();
+    expect(asked(fetchMock, "/api/debt")).toEqual([null]);
   });
 });
 
@@ -218,6 +338,18 @@ describe("a project's task page", () => {
     );
     await waitFor(() => expect(document.body.textContent).toContain("title of T-201"));
     expect(screen.queryByTestId("project-not-found")).toBeNull();
+  });
+
+  it("reads the debt and learnings of the task's project", async () => {
+    const { fetchMock } = await renderRoute(
+      ProjectTaskRoute,
+      "/p/$slug/tasks/$taskId",
+      served(detail("T-201", "alpha")),
+      "/p/alpha/tasks/T-201",
+    );
+    await waitFor(() => expect(document.body.textContent).toContain("title of T-201"));
+    await waitFor(() => expect(asked(fetchMock, "/api/debt")).toEqual(["alpha"]));
+    await waitFor(() => expect(asked(fetchMock, "/api/learnings")).toEqual(["alpha"]));
   });
 
   it("is a plain not-found for a task of another project", async () => {
