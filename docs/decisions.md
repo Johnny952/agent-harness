@@ -13001,3 +13001,64 @@ dialog never reached the board-service.
 - Prefilling the task dialog's limit from a stored run, as the epic's
   paused run does: a single start's limit is not raised in place (ADR 230
   part 5), so there is no going value to show.
+## ADR 232 — The console forwards the push routes, registers a service worker and is installable
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** Step 4 of `docs/plans/notifications.md`. The board service
+stores subscriptions and pushes each record (ADR 229), but nothing in the
+console subscribes a browser: the push routes are not forwarded, there is no
+service worker to receive a push, and the console cannot be installed, which
+an iPhone needs before it shows a web push. The operator asked for no new
+npm dependency and no edit to the generated `vite.config.ts`.
+
+**Decision.**
+1. `front/src/lib/api/forward.ts` forwards three more routes to the board
+   service. `POST` and `DELETE /api/push/subscriptions` are board writes like
+   the project writes, with the same CSRF checks and the bearer from
+   `BOARD_ACTIONS_TOKEN`, 503 without it; the eighteen writes become twenty.
+   `GET /api/push/key` is a board-service read on its own path
+   (`forwardPushKey`): no token, no query, no browser header, the status and
+   body passed back, 502 or 504 when the board service does not answer. The
+   api's own twenty-one routes are unchanged.
+2. `front/public/sw.js` is hand-written and served as it is. On `push` it
+   shows the payload's title, with the kind as the body, since the payload
+   (`{id, kind, title, url, tag}`) carries no other text, and the payload's
+   tag, so a newer push about the same subject replaces the older one. On
+   `notificationclick` it focuses a console window and navigates it to the
+   url, or opens one. Only a console path is followed; anything else opens
+   `/notifications`. It caches nothing and does not intercept `fetch`.
+3. `front/public/manifest.webmanifest` (standalone, start `/`, the favicon as
+   its icon), linked from the root route's `head()` in `__root.tsx`. The
+   console has no `index.html`: TanStack Start writes the document from that
+   route.
+4. `front/src/lib/push.ts` is the browser's half. The inbox gets a control
+   that reads the state each time it opens: *unsupported* without a service
+   worker, the Push API or the Notification API; *denied* when the browser
+   blocks notifications; *server-off* when the key route answers no key or
+   no answer; then *on* when this browser holds a subscription, else *off*.
+   Turning it on asks permission on that click and never on load, registers
+   `/sw.js`, subscribes with the key as `applicationServerKey` (dropping a
+   subscription made under another key first) and posts it. If the post is
+   refused, the browser's subscription is dropped and the refusal is shown.
+   Turning it off deletes the endpoint on the server, where a 404 also
+   counts as off, then unsubscribes.
+
+**Consequences.**
+- A browser receives pushes once the key is mounted into the board service
+  (ADR 229) and push is turned on from the inbox.
+- *On* is the browser's word: the server never says which endpoint is this
+  browser's. A subscription the server dropped after a 404 or 410 still
+  reads *on* until it is turned off and on again.
+- The icon is the 256-pixel favicon. Install prompts that want a 192 and a
+  512 PNG may show a generic icon until those exist.
+- The worker is outside the TypeScript build and the lint, which cover
+  `src/`; its tests are the control's, against a fake browser.
+
+**Ruled out.**
+- vite-plugin-pwa or Workbox: a dependency and a `vite.config.ts` edit,
+  both refused, to precache a console whose reads must be live.
+- Asking for permission on load: browsers penalise it and the person has not
+  chosen yet.
+- Remembering *on* in `localStorage`: the browser's subscription is the
+  truth, and a remembered flag would drift from it.

@@ -47,6 +47,16 @@
  * `POST /api/tasks` is still the 405, a `GET /api/backlog` still the 404. They
  * are the only writes that are not the settings', so they carry the console's
  * CSRF checks, written at `forwardBoard`.
+ *
+ * **Three more go to the board-service for Web Push** (ADR 229, and ADR 232 for
+ * the forward): `POST` and `DELETE /api/push/subscriptions`, which store and
+ * drop this browser's subscription, carry the same bearer and the same CSRF
+ * checks as the action routes, the body unchanged, so with the eighteen above
+ * they make twenty writes. `GET /api/push/key`, the VAPID public key, is a read
+ * of the board-service and not of the api: no token, no query parameter, no
+ * header of the browser's (`forwardPushKey`). Every other method on these two
+ * paths keeps the answer it had: the 405 for a write, the whitelist's 404 for a
+ * read.
  */
 import {
   API_BASE_URL,
@@ -275,6 +285,14 @@ const PROJECT_SETUP = /^\/api\/projects\/([^/]+)\/(clone|init|keygen|check)$/;
  */
 const PROJECT_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * Web Push (ADR 229, ADR 232): the VAPID public key, a `GET` of the
+ * board-service, and this browser's subscription, a `POST` to store it and a
+ * `DELETE` to drop it, both with the actions bearer the route asks for.
+ */
+const PUSH_KEY = "/api/push/key";
+const PUSH_SUBSCRIPTIONS = "/api/push/subscriptions";
+
 /** The words every failure body uses for the board-service: never its address. */
 const BOARD = "the board-service";
 
@@ -313,7 +331,11 @@ const SETTINGS_KEY = /^\/api\/settings\/([^/]+)$/;
 const WRITER = "the config-writer service";
 
 type Resolution =
-  | { kind: "forward"; target: string; action?: "start" | "cancel" | "turn" | "project" }
+  | {
+      kind: "forward";
+      target: string;
+      action?: "start" | "cancel" | "turn" | "project" | "push";
+    }
   | { kind: "reject"; status: number; error: string };
 
 /**
@@ -332,7 +354,10 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the eighteen exact pairs: a method
+  // The push key is a read, but the board-service's and not the api's (ADR 232).
+  if (request.method === "GET" && url.pathname === PUSH_KEY) return forwardPushKey();
+
+  // Also before the read-only check, and only for the twenty exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -517,7 +542,7 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the eighteen writes goes, or `null` for any
+ * Where on the board-service one of the twenty writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
@@ -526,9 +551,13 @@ function capitalise(text: string): string {
  * and for a record's `PATCH`, and so is a project slug the harness would not
  * take. The two project-record writes carry `action` "project" (ADR 206). The
  * two epic actions carry `action` "start" and "cancel", since their bodies are
- * a task start's and a cancel's (ADR 211).
+ * a task start's and a cancel's (ADR 211). The two push-subscription writes
+ * carry `action` "push" (ADR 232).
  */
 function boardTarget(method: string, path: string): Resolution | null {
+  if ((method === "POST" || method === "DELETE") && path === PUSH_SUBSCRIPTIONS) {
+    return { kind: "forward", target: `${BOARD_SERVICE_URL}${PUSH_SUBSCRIPTIONS}`, action: "push" };
+  }
   if (method === "POST" && path === BACKLOG) {
     return { kind: "forward", target: `${BOARD_SERVICE_URL}${BACKLOG}` };
   }
@@ -682,7 +711,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its eighteen writes (`docs/decisions.md`
+ * The board-service's answer to one of its twenty writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -721,6 +750,9 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * the route asks for it, and nothing else of the action routes: no
  * `CONSOLE_PROJECT` (the record names its own slug), the 64 KiB cap, and the
  * body unchanged, the route refusing an unknown field or a wrong type itself.
+ * The two push-subscription writes (ADR 232) are the project writes' twins:
+ * the bearer, the 64 KiB cap and the body unchanged, the route checking the
+ * subscription whole.
  * The token is in no response and no log.
  */
 async function forwardBoard(request: Request, url: URL, resolved: Resolution): Promise<Response> {
@@ -752,7 +784,7 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     return jsonResponse(
       {
         error:
-          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s ${action === "project" ? "project" : "action"} routes. ` +
+          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s ${action === "project" || action === "push" ? action : "action"} routes. ` +
           "Set it to the board-service's token and restart the console.",
       },
       503,
@@ -813,6 +845,39 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
 
   // The board-service's status (201 for something made), body and content type,
   // as the api's are passed back.
+  const answer = await upstream.arrayBuffer();
+  const contentType = upstream.headers.get("content-type");
+  return new Response(answer, {
+    status: upstream.status,
+    headers: contentType ? { "content-type": contentType } : {},
+  });
+}
+
+/**
+ * The board-service's answer to `GET /api/push/key` (ADR 229, ADR 232): its
+ * VAPID public key, or the 404 that says push is off there. Nothing of the
+ * browser's request crosses, not even its query string, which the route
+ * refuses; the key is public, so no token goes either. A failure to reach the
+ * board-service is its 502 or 504, as for the writes.
+ */
+async function forwardPushKey(): Promise<Response> {
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${BOARD_SERVICE_URL}${PUSH_KEY}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(BOARD_SERVICE_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    const why = describe(cause);
+    console.error(`[forward] ${BOARD_SERVICE_URL} did not answer: ${why}`);
+    if (isTimeout(cause)) {
+      return jsonResponse(
+        { error: `${capitalise(BOARD)} did not answer within ${BOARD_SERVICE_TIMEOUT_MS} ms.` },
+        504,
+      );
+    }
+    return jsonResponse({ error: `${capitalise(BOARD)} could not be reached.` }, 502);
+  }
   const answer = await upstream.arrayBuffer();
   const contentType = upstream.headers.get("content-type");
   return new Response(answer, {

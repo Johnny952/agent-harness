@@ -1,0 +1,11 @@
+{
+  "name": "Harness operations console",
+  "short_name": "Harness",
+  "description": "Internal operations console for a multi-agent development harness.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#14161b",
+  "theme_color": "#14161b",
+  "icons": [{ "src": "/favicon.ico", "sizes": "256x256", "type": "image/x-icon" }]
+}
