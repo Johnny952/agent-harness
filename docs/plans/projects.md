@@ -277,8 +277,9 @@ module; steps 2, 4 and 5 need its queue and worker.
    is built the same day (`docs/decisions.md` ADR 226), with the free share
    decided as the primary account's alone, 100 minus the tighter of its
    session and week windows: a start waits as `pool` while it is under the
-   start's floor, 5% by default. Still open: a floor field in the console's
-   start dialogs, and the limit's notification, which is
+   start's floor, 5% by default. The console's start dialogs take the floor
+   in an optional field, blank for the default (`docs/decisions.md` ADR
+   NNN). Still open: the limit's notification, which is
    `notifications.md`'s.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its

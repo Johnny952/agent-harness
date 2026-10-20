@@ -384,8 +384,10 @@ the primary account only, its free share is 100 minus the tighter of the
 session and week windows, read through the picker's own `/usage` probe, and
 the default is 5%, which a start or *Start epic* may override with `floor`.
 A start under it waits as `pool` before it is claimed; an unreadable reading
-fails open. Not built: the per-task limit and `budget_reached`, a floor
-field in the console's start dialogs, and the notification.
+fails open. The console's start and *Start epic* dialogs take the floor in
+an optional field, blank for the default, and a going run's stored floor
+prefills it (ADR NNN). Not built: the per-task limit and `budget_reached`,
+and the notification.
 
 ### 5. The service
 

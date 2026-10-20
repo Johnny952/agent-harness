@@ -12733,3 +12733,47 @@ never hardcoded.
   start, and the picker already fails open.
 - The default in `config.yaml`: a start already carries its own, and the
   config is not this change's to touch.
+
+## ADR NNN — The console's start dialogs take a pool floor
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's
+session; the console half of the pool's floor (ADR 226), which left the
+field out.
+
+**Context.** ADR 226 lets `POST /api/tasks/<id>/start` and
+`POST /api/epics/<id>/start` take `floor`, the primary account's free share in
+percent under which the start waits as `pool`, and ends with the console's
+*Start development* and *Start epic* dialogs having no field for it: a floor
+other than the default could only be set through the api. The epic run
+already stores its floor, and `/api/actions` already serves the run with it.
+
+**Decision.**
+1. Both dialogs carry one optional field, *Pool floor*
+   (`components/console/floor-field.tsx`). Blank is the default, and the help
+   under it says so: "The start waits while the primary account has less
+   than the default 5% free", or the typed percent.
+2. The field is read by `lib/floor.ts:readFloor`: blank is null, anything
+   else must be a whole number from 0 to 100, as `check_floor` takes it. Any
+   other text is refused in the form, the reason shown under the field and
+   *Start* disabled, before anything is sent.
+3. `floor` is sent only when set: a blank field sends the body the endpoints
+   took before, `{note}` or `{note, limit}`.
+4. While an epic run is going, the *Start epic* (or *Resume epic*) field is
+   prefilled from the run's stored `floor`, as the limit field is from the
+   spend: a resume sends the run's floor back unless the operator changed it,
+   since the resume overwrites the run's floor with what it is sent. Once
+   typed in, the field is the operator's.
+5. `DEFAULT_POOL_FLOOR_PCT = 5` is mirrored in `lib/floor.ts` to name the
+   default in the help; the worker's constant stays the one that decides.
+
+**Consequences.**
+- A floor is set from the console; the api stays the same.
+- The front's default can drift from `dispatcher/actions.py`'s if one is
+  changed without the other; the help text would then misname it, while the
+  start itself would still get the worker's default.
+
+**Ruled out.**
+- Always sending `floor`, null when blank: it changes every start's body for
+  no gain, since a missing key and null mean the same default.
+- A backend read of the default or of the run's floor: the run already
+  reaches the front through `/api/actions`, and the default is one constant.

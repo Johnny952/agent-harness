@@ -20,6 +20,10 @@
  * run's spend, and a line says what it came from. With no merged child measured
  * the field is blank; once typed in, the field is the operator's.
  *
+ * The pool floor (ADR 226, ADR NNN) is optional, blank for the worker's
+ * default, and carried by every start the run queues. While a run is going its
+ * stored floor prefills the field, so a *Resume* keeps it unless changed.
+ *
  * *Stop epic* drops the epic's starts still waiting and leaves a running one
  * alone; its answer names both, and the toast counts them.
  */
@@ -37,6 +41,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { FloorField } from "@/components/console/floor-field";
 import { Mono } from "@/components/console/primitives";
 import {
   accountsQuery,
@@ -50,6 +55,7 @@ import {
 import type { ActionRecord, EpicRun, Task, UsageGroup } from "@/lib/api/types";
 import { commentProblem } from "@/lib/comments";
 import { epicChildren, suggestLimit } from "@/lib/epic";
+import { readFloor } from "@/lib/floor";
 import { deriveSlots, standingLine } from "@/lib/slots";
 
 function plural(n: number, word: string): string {
@@ -124,6 +130,9 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
   const [limitText, setLimitText] = useState("");
   // Until typed in, the field shows the prefill rather than `limitText`.
   const [limitTouched, setLimitTouched] = useState(false);
+  const [floorText, setFloorText] = useState("");
+  // Until typed in, the field shows the going run's floor rather than `floorText`.
+  const [floorTouched, setFloorTouched] = useState(false);
   // A note is optional, so blank is not the comment rule's "needs some text".
   const problem = note.trim() ? commentProblem(note) : null;
   const epicId = epic.task_id;
@@ -155,6 +164,9 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
   const suggestion = children === null ? null : suggestLimit(children, usage, spent);
   const shownLimit = limitTouched ? limitText : suggestion ? String(suggestion.value) : "";
   const limit = readLimit(shownLimit, spent);
+  const runFloor = typeof run?.floor === "number" ? String(run.floor) : "";
+  const shownFloor = floorTouched ? floorText : runFloor;
+  const floor = readFloor(shownFloor);
 
   const slotsView = useMemo(
     () =>
@@ -180,7 +192,12 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
 
   const confirmStart = () =>
     start.mutate(
-      { epicId, note: note.trim() ? note : null, limit: limit.ok ? limit.value : null },
+      {
+        epicId,
+        note: note.trim() ? note : null,
+        limit: limit.ok ? limit.value : null,
+        floor: floor.ok ? floor.value : null,
+      },
       {
         onSuccess: (out) => {
           const left = out.not_ready.length;
@@ -193,6 +210,8 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
           setNote("");
           setLimitText("");
           setLimitTouched(false);
+          setFloorText("");
+          setFloorTouched(false);
         },
         onError: (e) => toast.error(e instanceof Error ? e.message : `${epicId} was not started`),
       },
@@ -317,6 +336,13 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
               No limit given: the run resumes with none.
             </p>
           )}
+          <FloorField
+            value={shownFloor}
+            onChange={(text) => {
+              setFloorText(text);
+              setFloorTouched(true);
+            }}
+          />
           <DialogFooter>
             <Button variant="outline" type="button" onClick={() => setStarting(false)}>
               Cancel
@@ -326,6 +352,7 @@ export function EpicActions({ epic, ids }: { epic: Task; ids: string[] }) {
               disabled={
                 problem !== null ||
                 !limit.ok ||
+                !floor.ok ||
                 start.isPending ||
                 (!paused && inReady?.length === 0)
               }

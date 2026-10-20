@@ -667,12 +667,18 @@ export interface EpicStartResult {
   not_ready: string[];
   /** The run's spending limit, in measured tokens, or null for none (ADR 218). */
   limit: number | null;
+  /** The run's pool floor, in percent, or null for the default (ADR 226). */
+  floor?: number | null;
 }
 
-/** `POST /api/epics/<id>/start`'s body: `limit` in measured tokens, or null (ADR 218). */
+/**
+ * `POST /api/epics/<id>/start`'s body: `limit` in measured tokens, or null (ADR 218);
+ * `floor` in percent, sent only when the operator set one (ADR 226, ADR NNN).
+ */
 export interface StartEpicBody {
   note: string | null;
   limit: number | null;
+  floor?: number;
 }
 
 /**
@@ -686,6 +692,8 @@ export interface EpicRun {
   project: string | null;
   note: string | null;
   limit: number | null;
+  /** The pool floor each of the run's starts carries, or null for the default (ADR 226). */
+  floor?: number | null;
   started_at: string | null;
   stopped_at: string | null;
   paused: string | null;
@@ -810,8 +818,10 @@ export interface ChangeProjectBody {
 }
 
 /** `POST /api/tasks/<id>/start`: exactly `{note}`, the forward refuses any other key (ADR 157). */
+/** `floor` in percent, sent only when the operator set one (ADR 226, ADR NNN). */
 export interface StartTaskBody {
   note: string | null;
+  floor?: number;
 }
 
 /**
