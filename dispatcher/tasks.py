@@ -524,7 +524,17 @@ def field_problems(task: context_transfer.TaskFile) -> list[str]:
         problems.append(f"its rank is {task.rank!r}, not an integer from 0 to {MAX_RANK}")
     if task.debt_id is not None and not is_debt_id(task.debt_id):
         problems.append(f"its debt_id is {task.debt_id!r}, not a debt entry id like T-001-D1")
+    if task.project is not None and not is_project_slug(task.project):
+        problems.append(f"its project is {task.project!r}, not a project slug")
     return problems
+
+
+_PROJECT_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_project_slug(value: object) -> bool:
+    """A project's slug, one directory name: the rule `projects.is_slug` holds the record to."""
+    return isinstance(value, str) and bool(_PROJECT_SLUG.match(value))
 
 
 def is_debt_id(value: object) -> bool:
@@ -1445,6 +1455,8 @@ def file_split(hive_dir: str, parent_id: str, subtasks: list[SubTask]) -> list[s
                     heartbeat=None,
                     body="",
                     epic=parent_id,
+                    # A subtask is work on its epic's project.
+                    project=parent.project,
                 ),
             )
     if parent.split_into != ids:
@@ -1893,6 +1905,94 @@ def migrate(hive_dir: str, ttl_seconds: int) -> MigrateReport:
             context_transfer.write_task_file(task_path, task)
             moved.append((task_id, path))
     return MigrateReport(moved=moved, emptied=emptied, refused=refused, already=already)
+
+
+@dataclasses.dataclass(frozen=True)
+class StampReport:
+    """What `stamp_project` did: `refused` is (task id, reason)."""
+
+    stamped: list[str]
+    refused: list[tuple[str, str]]
+    already: int
+
+
+def _card_project(hive_dir: str, task_id: str) -> tuple[bool, object]:
+    """(readable, the `project` its frontmatter has) for one card, read as YAML made it."""
+    try:
+        fm = _read_frontmatter(context_transfer.task_file_path(hive_dir, task_id))
+    except (OSError, ValueError, yaml.YAMLError):
+        return False, None
+    if not isinstance(fm, dict):
+        return False, None
+    return True, fm.get("project")
+
+
+def unstamped_ids(hive_dir: str) -> list[str]:
+    """The cards (tasks, epics, backlog items) that name no project, sorted."""
+    return sorted(
+        task_id for task_id in context_transfer.list_task_ids(hive_dir)
+        if _card_project(hive_dir, task_id) == (True, None)
+    )
+
+
+def stamped_count(hive_dir: str) -> int:
+    """How many cards already name a project."""
+    return sum(
+        1 for task_id in context_transfer.list_task_ids(hive_dir)
+        if _card_project(hive_dir, task_id)[1] is not None
+    )
+
+
+def stamp_project(hive_dir: str, project: str, ttl_seconds: int) -> StampReport:
+    """Give every card that names no project `project` (ADR 199), once.
+
+    The other half of `dispatch migrate` after the records: a card with no
+    `project` belongs to the one project the harness had before (projects.md,
+    Decisions 3), and this writes that down on it. A card that names one is
+    not rewritten, so a second run changes nothing. Each card under its write
+    lock, with `migrate`'s guards: a live lock is refused rather than raced,
+    and a card that still carries its description in the frontmatter is left
+    for `migrate` to move first, since rewriting it here would drop it. The
+    second caller of the raw `write_task_file`, for `migrate`'s reason: only
+    the one key is added to what `read_task_file` read.
+    """
+    if not is_project_slug(project):
+        raise ValueError(f"{project!r} is not a project slug")
+    stamped: list[str] = []
+    refused: list[tuple[str, str]] = []
+    already = 0
+    for task_id in sorted(context_transfer.list_task_ids(hive_dir)):
+        with task_lock(hive_dir, task_id):
+            task_path = context_transfer.task_file_path(hive_dir, task_id)
+            try:
+                fm = _read_frontmatter(task_path)
+                if not isinstance(fm, dict):
+                    raise ValueError("its frontmatter is not a mapping")
+                if fm.get("project") is not None:
+                    already += 1
+                    continue
+                if _LEGACY_KEY in fm:
+                    refused.append((
+                        task_id,
+                        f"it still carries its description; `{MIGRATE_COMMAND}` moves it "
+                        "first, then run it again",
+                    ))
+                    continue
+                task = context_transfer.read_task_file(task_path)
+                live = _lock_is_live(task, ttl_seconds)
+            except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as exc:
+                refused.append((task_id, f"unreadable task file: {exc!r}"))
+                continue
+            if live:
+                refused.append((
+                    task_id,
+                    f"its lock is live (owner {task.owner}): a dispatcher is still running "
+                    f"it; run `{MIGRATE_COMMAND}` again when that cycle has ended",
+                ))
+                continue
+            context_transfer.write_task_file(task_path, dataclasses.replace(task, project=project))
+            stamped.append(task_id)
+    return StampReport(stamped=stamped, refused=refused, already=already)
 
 
 # The board's write tools (`docs/plans/board-service.md` section 6, ADR 129).

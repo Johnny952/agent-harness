@@ -11043,3 +11043,76 @@ left unused.
 - Parsing the probe's reset clauses: a guessed time.
 - Deriving *Waiting for an account* from the slots: the worker's `waiting` is
   what holds the start.
+
+
+## ADR 199 — The project record, and `project` on every card
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/projects.md` step 1. A project was a directory under
+`projects_root` and nothing more: its settings were `config.yaml`'s, the same
+for every project, and a task did not say which project it belonged to (the run
+named it). The plan's *Decisions* 1 asks for a record per project, and its open
+question left where the record lives to this step.
+
+**Decision.**
+1. The record is `<hive>/projects/<slug>.json`, in the hive beside `tasks/`:
+   the volume the dispatcher, the board service and the api already mount (the
+   dispatcher does not mount the projects). It holds `slug`, `title`, `remote`
+   in SSH form (or null), `base_branch`, `key` (the deploy key's fingerprint and
+   created time, never the key), `settings`, `created` and `status`
+   (`active` or `archived`).
+2. `dispatcher/projects.py` is the one reader, validator and writer. The record
+   is strict: an unknown key, a bad slug, a remote not in SSH form or a setting
+   of the wrong type is a named `RecordError`. The writer never writes over a
+   record unless asked to replace it (it links a temporary file into place, so
+   two writers cannot both win). The board service is its writer on a person's
+   act once its routes exist (steps 4 and 5); until then only `migrate` writes.
+3. The settings a record may carry are `allowed_tools`, `merge_on_done`,
+   `gates_enabled`, `gates_test_timeout_seconds` and `push_task_branch`. Each
+   one the record names wins over `config.yaml`'s; each it leaves out is
+   `config.yaml`'s. A project with no record runs on `config.yaml` alone, so a
+   harness with one hand-configured project runs unchanged.
+4. `push_task_branch` is recorded and validated, and read by nothing: the
+   task-branch push it governs is not built.
+5. A record that does not parse blocks the project's work: `run_task_cycle`,
+   the saved split and `run_single_phase` log `task <id>: project <slug>: ...`
+   and do not start, and the pre-merge check refuses with the same words. They
+   do not fall back to `config.yaml`.
+6. Tasks, epics and backlog items carry `project`, a slug, in their task file.
+   A card with none belongs to the harness's one pre-existing project.
+   `board_list` and the api's task rows serve it, null when unset. A split's
+   subtasks inherit their parent's.
+7. `dispatch migrate` gains a second half, idempotent like the first: it lists
+   the clone directories under `projects_root` (through an agent container,
+   which mounts them), writes a record for each that has none (title the slug,
+   remote and base branch read from the clone, empty settings, the key's
+   fingerprint when one is on file), never writes over one that exists, and
+   stamps `project` on the cards that name none. The stamp is `--project SLUG`,
+   or the one record when there is exactly one; with several and no
+   `--project` it stamps nothing and exits 1. A card whose cycle is in flight is
+   refused, as the first half refuses it. A second run prints `nothing to
+   migrate`.
+
+**Consequences.**
+- The plan's open question *Where the record lives* is settled: the hive.
+- Settings differ per project from here on, but only by editing a record by
+  hand until the console writes them.
+- A broken record stops one project, named in the log, instead of running it on
+  settings nobody chose for it. The task is not marked blocked: the cycle does
+  not open.
+- `migrate` needs an agent container to list the clones. With no account
+  configured, or a listing that fails, it writes no record, still stamps against
+  the records already there, and exits 1.
+- The front does not show `project` yet; the console and the sidebar are later
+  steps, as is one cycle per project.
+
+**Ruled out.**
+- The record in the clone: it would travel with the repository, but a phase
+  could write it.
+- Guessing the default project when there are several clones: a card stamped
+  with the wrong project is worse than one stamped later.
+- Falling back to `config.yaml` on a broken record: the record says this
+  project's settings differ.
+- Ignoring unknown keys in the record: a typo would be a setting that silently
+  does nothing.

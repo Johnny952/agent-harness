@@ -34,21 +34,27 @@ The user settled three points in the same conversation:
 
 ## What exists today
 
-Checked on 2026-10-11.
+Checked on 2026-10-11; the record and `project` on the cards updated on
+2026-10-20, when step 1 was built.
 
 - **The dispatcher is already per project.** `run`, `phase`, `bootstrap`,
   `merge` and `cleanup` take a slug, and the project's clone is
   `{projects_root}/{slug}`. The learnings are filtered by project.
 - **The board and the hive are not.** `local_board.dir` is one directory,
-  `/state/board`, and `hive_tasks_dir` is one `.hive/tasks`. A task does not
-  say which project it belongs to; the run names it.
+  `/state/board`, and `hive_tasks_dir` is one `.hive/tasks`. Since step 1 a
+  task, epic or backlog item names its project in `project`; a card with none
+  belongs to the harness's one pre-existing project (`docs/decisions.md`
+  ADR 199).
 - **The console is not.** Its routes are global: `index`, `approvals`,
   `backlog`, `debt`, `learnings`, `models`, `pool`, `queue`, `sessions`,
   `tail`, `tasks.$taskId` and `tokens`.
 - **`.data/projects/` holds two clones**, `ia-harness` and `scratch`.
 - **A project is a directory, today.** Every non-dotted subdirectory of
   `projects_root` is one (`observability/api/app.py:_project_slugs`;
-  `docs/business.md`), so a checkout parked there counts as a project.
+  `docs/business.md`), so a checkout parked there counts as a project. Since
+  step 1 a registered project also has a record in `.hive/projects/<slug>.json`
+  (`dispatcher/projects.py`), and a directory without one is *Not registered*;
+  the api's `_project_slugs` is unchanged.
 - **The Git credential is one HTTPS token for every project.** It is the
   read-only mount `/run/secrets/git-credentials`
   (`dispatcher/docker_exec.py`, `GIT_CREDENTIALS_PATH`), from
@@ -228,7 +234,10 @@ Each step is a single surface. Steps 1, 3 and 4 need `board-service.md`'s
 module; steps 2, 4 and 5 need its queue and worker.
 
 1. **The project record**, and `project` on every card, with its migration.
-   The dispatcher reads the record's settings over `config.yaml`'s.
+   The dispatcher reads the record's settings over `config.yaml`'s. Built
+   2026-10-20 (`docs/decisions.md` ADR 199): `dispatcher/projects.py`, and
+   `dispatch migrate [--project SLUG]` writes the first records and stamps the
+   cards.
 2. **SSH in the dispatcher.** Built 2026-10-11. The image's `openssh-client`
    and pinned host key, `GIT_SSH_COMMAND`, and a CLI command, `project-keygen
    --project <slug>`, that makes the pair and prints the public half. This is
@@ -250,9 +259,9 @@ module; steps 2, 4 and 5 need its queue and worker.
 
 ## Open questions
 
-- **Where the record lives.** `.hive/projects/` keeps it beside the board; a
-  file in the clone would travel with the repository but be written by a
-  phase. The hive is assumed until step 1 says otherwise.
+- **Where the record lives.** Settled by step 1: the hive,
+  `.hive/projects/<slug>.json` (ADR 199). A file in the clone would travel
+  with the repository but be written by a phase.
 - **Creating a repository on GitHub.** *Create* makes a local repository with
   no remote. Creating one on GitHub needs a token with that scope, which a
   deploy key cannot be, so it is left to the person.

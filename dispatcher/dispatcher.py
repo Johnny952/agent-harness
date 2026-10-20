@@ -26,6 +26,7 @@ from dispatcher import (
     handoff,
     learnings,
     project_docs,
+    projects,
     quota,
     role_skills,
     state_machine,
@@ -2382,6 +2383,12 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
     without touching the task's status: there is nothing to resolve, only
     something to run again.
     """
+    try:
+        # `merge-task` comes here with `config.yaml`'s settings; the gate is
+        # the project's (ADR 199). Laying the record over twice changes nothing.
+        cfg = projects.settings_for(cfg, slug)
+    except projects.RecordError as exc:
+        return PreMergeVerdict(False, f"task {task_id}: project {slug}: {exc}")
     project_dir = f"{cfg.projects_root}/{slug}"
     try:
         outcome = docker_exec.premerge_base(container, cfg.projects_root, slug, task_id)
@@ -2811,6 +2818,21 @@ class CycleContext:
     completed: bool = False
     # Set once the scheduler granted this cycle its write window.
     write_window: bool = False
+
+
+def project_config(cfg: Config, task_id: str, slug: str) -> Config | None:
+    """`cfg` with the project's record laid over it, or None when the record is bad.
+
+    `docs/plans/projects.md` step 1 (ADR 199): a setting the record names wins,
+    one it leaves out is `config.yaml`'s, and a project with no record runs on
+    `config.yaml` exactly as before. A record that is there and broken stops
+    the task rather than running it on settings nobody chose.
+    """
+    try:
+        return projects.settings_for(cfg, slug)
+    except projects.RecordError as exc:
+        logger.error("task %s: project %s: %s", task_id, slug, exc)
+        return None
 
 
 def open_cycle(
@@ -3276,6 +3298,9 @@ def file_saved_split(cfg: Config, task_id: str, slug: str) -> CycleOutcome:
     a cycle that died before filing left behind. It opens no cycle, so nothing
     is reaped, reconciled or marked, and a refusal leaves the task as it was.
     """
+    cfg = project_config(cfg, task_id, slug)
+    if cfg is None:
+        return CycleOutcome.BLOCKED
     hive = cfg.hive_tasks_dir
     payload = context_transfer.read_handoff(hive, task_id, "arquitecto")
     if payload is None:
@@ -3343,6 +3368,9 @@ def run_single_phase(
     unsuccessful result with `no_account` set — it did not land either,
     but the CLI exits on it with the held code, not the failed one.
     """
+    cfg = project_config(cfg, task_id, slug)
+    if cfg is None:
+        return None
     ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
         return None
@@ -3609,6 +3637,9 @@ def run_task_cycle(
     (`scheduler.enter_write_window(task_id, surface)`, which waits for the
     surface lock) and leaves it when it ends (`leave_write_window(task_id)`).
     """
+    cfg = project_config(cfg, task_id, slug)
+    if cfg is None:
+        return CycleOutcome.BLOCKED
     ctx = open_cycle(cfg, task_id, slug, description=description)
     if ctx is None:
         return CycleOutcome.BLOCKED

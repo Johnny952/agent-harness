@@ -41,6 +41,17 @@ _LEGACY_TASK_FILE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_clones(monkeypatch) -> list:
+    """`migrate` lists the clones in an agent container; no test reaches docker.
+
+    The list is the clones the next `migrate` finds, empty unless a test fills it.
+    """
+    clones: list = []
+    monkeypatch.setattr(cli_mod.projects, "discover", lambda container, root: list(clones))
+    return clones
+
+
 def _legacy(tmp_path: Path, task_id: str = "task-9") -> Path:
     hive = tmp_path / "hive"
     hive.mkdir(parents=True, exist_ok=True)
@@ -207,6 +218,78 @@ def test_cli_migrate_prints_what_it_moved_and_then_nothing(
     _run_command(monkeypatch, config_path, "migrate")
 
     assert capsys.readouterr().out == "nothing to migrate\n"
+
+
+def test_cli_migrate_writes_the_project_record_and_stamps_the_cards(
+    tmp_path: Path, monkeypatch, capsys, _no_clones,
+) -> None:
+    from dispatcher import context_transfer, projects
+
+    config_path = _write_config(tmp_path)
+    _legacy(tmp_path)
+    hive = str(tmp_path / "hive")
+    _no_clones.append(projects.Clone("shop", "https://github.com/acme/shop.git", "main"))
+
+    _run_command(monkeypatch, config_path, "migrate")
+
+    out = capsys.readouterr().out
+    root = context_transfer.hive_root(hive)
+    record = projects.read(root, "shop")
+    assert record.remote == "git@github.com:acme/shop.git" and record.settings == {}
+    assert "shop: project record written" in out
+    assert "task-9: project shop" in out
+    assert context_transfer.read_task_file(
+        context_transfer.task_file_path(hive, "task-9")
+    ).project == "shop"
+    before = Path(projects.record_path(root, "shop")).read_bytes()
+
+    _run_command(monkeypatch, config_path, "migrate")
+
+    assert capsys.readouterr().out == "nothing to migrate\n"
+    assert Path(projects.record_path(root, "shop")).read_bytes() == before
+
+
+def test_cli_migrate_with_two_projects_needs_project_to_stamp(
+    tmp_path: Path, monkeypatch, capsys, _no_clones,
+) -> None:
+    from dispatcher import context_transfer, projects
+
+    config_path = _write_config(tmp_path)
+    _legacy(tmp_path)
+    hive = str(tmp_path / "hive")
+    _no_clones.extend([projects.Clone("shop", None, "main"), projects.Clone("blog", None, "main")])
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "migrate")
+
+    assert excinfo.value.code == 1
+    assert "pass --project" in capsys.readouterr().err
+    path = context_transfer.task_file_path(hive, "task-9")
+    assert context_transfer.read_task_file(path).project is None
+
+    _run_command(monkeypatch, config_path, "migrate", "--project", "blog")
+
+    assert "task-9: project blog" in capsys.readouterr().out
+    assert context_transfer.read_task_file(path).project == "blog"
+
+
+def test_cli_migrate_exits_one_when_the_clones_cannot_be_listed(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    from dispatcher import projects
+
+    config_path = _write_config(tmp_path)
+
+    def fail(container, root):
+        raise projects.DiscoverError("listing /data/projects failed: boom")
+
+    monkeypatch.setattr(cli_mod.projects, "discover", fail)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_command(monkeypatch, config_path, "migrate")
+
+    assert excinfo.value.code == 1
+    assert "projects: not listed: listing /data/projects failed: boom" in capsys.readouterr().err
 
 
 def test_cli_migrate_exits_one_when_it_refused_a_file(
