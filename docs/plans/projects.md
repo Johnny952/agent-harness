@@ -273,9 +273,13 @@ module; steps 2, 4 and 5 need its queue and worker.
    *Paused: limit reached* with *Resume*. The limit prefilled from past
    cycles is built the same day (`docs/decisions.md` ADR 220): the epic's
    merged tasks' mean measured tokens times the tasks still to land, plus a
-   paused run's spend, and blank when none was measured. Still open: the
-   pool's floor, a design decision on what the pool's free share counts, and
-   the limit's notification, which is `notifications.md`'s.
+   paused run's spend, and blank when none was measured. The pool's floor
+   is built the same day (`docs/decisions.md` ADR 226), with the free share
+   decided as the primary account's alone, 100 minus the tighter of its
+   session and week windows: a start waits as `pool` while it is under the
+   start's floor, 5% by default. Still open: a floor field in the console's
+   start dialogs, and the limit's notification, which is
+   `notifications.md`'s.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR 208): the

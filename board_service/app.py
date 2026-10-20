@@ -376,6 +376,7 @@ def _ready_check(hive_dir: str):
 
 def epic_start(
     hive_dir: str, state_dir: str, epic_id: str, project=None, note=None, limit=None,
+    floor=None,
 ) -> dict:
     """*Start epic*'s queue write (ADR 207): a `start` per Ready task of the epic.
 
@@ -390,8 +391,13 @@ def epic_start(
     next tasks as their dependencies land. On a run paused at its limit this
     is *Resume*: the new limit is taken, a task already queued is skipped,
     and no task in Ready is not a refusal.
+
+    `floor` is the run's pool floor, in percent, or null for the default
+    (`actions.DEFAULT_POOL_FLOOR_PCT`): each of its starts waits as `pool`
+    while the primary account's free share is under it.
     """
     actions.check_limit(limit)
+    actions.check_floor(floor)
     tasks = task_store.read_all_tasks(hive_dir)
     epic = tasks.get(epic_id)
     if epic is None:
@@ -419,7 +425,7 @@ def epic_start(
         return tid in read_once[0]
 
     records, run = actions.start_epic_run(
-        state_dir, epic_id, project, queue, limit=limit, note=note,
+        state_dir, epic_id, project, queue, limit=limit, floor=floor, note=note,
         actor="operator", ready=ready,
         offset=lambda tid: epic_runs.usage_offset(hive_dir, tid),
         spent=lambda r: epic_runs.spend(hive_dir, r)[0],
@@ -429,6 +435,7 @@ def epic_start(
         "queued": records,
         "not_ready": [tid for tid in covered if tid not in ready_now],
         "limit": run["limit"],
+        "floor": run["floor"],
     }
 
 
@@ -918,12 +925,17 @@ def create_app(config_path: str) -> Flask:
     @app.post("/api/tasks/<task_id>/start")
     def http_start(task_id: str):
         def make(body: dict):
-            unknown = sorted(set(body) - {"project", "note"})
+            unknown = sorted(set(body) - {"project", "note", "floor"})
             if unknown:
                 raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+            # The start's pool floor, in percent, or null for the default.
+            floor = body.get("floor")
+            actions.check_floor(floor)
+            params = None if floor is None else {"limit": None, "floor": floor}
             return actions.create(
                 state_dir, "start", project=body.get("project"), task_id=task_id,
-                note=body.get("note"), actor="operator", ready=_ready_check(hive_dir),
+                params=params, note=body.get("note"), actor="operator",
+                ready=_ready_check(hive_dir),
             )
 
         return _action(actions_token, make)
@@ -934,13 +946,14 @@ def create_app(config_path: str) -> Flask:
         # board's order, queued at once. The project's lock (ADR 200) makes
         # each wait as `project` until the one before is awaiting review.
         def make(body: dict):
-            unknown = sorted(set(body) - {"project", "note", "limit"})
+            unknown = sorted(set(body) - {"project", "note", "limit", "floor"})
             if unknown:
                 raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
-            # The epic's spending limit, in measured tokens, or null (ADR 218).
+            # The epic's spending limit, in measured tokens, or null (ADR 218),
+            # and its starts' pool floor, in percent, or null for the default.
             return epic_start(
                 hive_dir, state_dir, epic_id, project=body.get("project"),
-                note=body.get("note"), limit=body.get("limit"),
+                note=body.get("note"), limit=body.get("limit"), floor=body.get("floor"),
             )
 
         return _action(actions_token, make)

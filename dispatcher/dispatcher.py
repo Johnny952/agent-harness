@@ -799,27 +799,50 @@ def _park(cfg: Config, account: str, state: AccountState) -> None:
         )
 
 
-def check_quota_ok(cfg: Config, account: str) -> bool:
+def _read_usage(cfg: Config, account: str) -> tuple[str, object]:
+    """Run `/usage` on `account` and say what came back, without acting on it.
+
+    One of ("exec_failed", exc), ("refused", result), ("auth", result),
+    ("unparsed", exc) or ("usage", UsageInfo). `check_quota_ok` and
+    `primary_free_pct` both read through here, so there is one reader of the
+    probe and each caller decides what an answer means to it.
+    """
     container = container_for(cfg, account)
-    # The /usage probe parses free-text CLI output (design spec sec. 4a
-    # caveat), so any drift in that format must not crash dispatch — fail
-    # open here and let the reactive rate-limit handling in dispatch_phase
-    # (is_rate_limit_error on the real phase call) be the fallback.
     try:
         result = docker_exec.exec_claude(
             container, cfg.projects_root, "/usage", timeout_seconds=_USAGE_PROBE_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        logger.warning(
-            "quota probe failed for account %s: %s; waving it through unverified", account, exc,
-        )
-        return True
+        return "exec_failed", exc
     # Read the refusal before the numbers. /usage is a local slash command and
     # normally costs nothing, but if the CLI refuses even that, the refusal is
     # the one thing the probe can tell us that its own counters never could —
     # and parse_usage_output would raise on the error text, dropping it into
     # the fail-open below.
     if is_rate_limit_error(result):
+        return "refused", result
+    # Same reasoning, and it has to come before the parse for the same
+    # reason: a rejected login is something a probe can actually report.
+    if is_auth_error(result):
+        return "auth", result
+    try:
+        return "usage", quota.parse_usage_output(result.result_text)
+    except Exception as exc:
+        return "unparsed", exc
+
+
+def check_quota_ok(cfg: Config, account: str) -> bool:
+    # The /usage probe parses free-text CLI output (design spec sec. 4a
+    # caveat), so any drift in that format must not crash dispatch — fail
+    # open here and let the reactive rate-limit handling in dispatch_phase
+    # (is_rate_limit_error on the real phase call) be the fallback.
+    what, got = _read_usage(cfg, account)
+    if what == "exec_failed":
+        logger.warning(
+            "quota probe failed for account %s: %s; waving it through unverified", account, got,
+        )
+        return True
+    if what == "refused":
         logger.warning(
             "account %s answered the quota probe with a rate-limit refusal; it goes COOLING_DOWN "
             "and the phase looks for another account",
@@ -828,21 +851,18 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
         state_machine.record_rate_limit(cfg.state_dir, account)
         _park(cfg, account, AccountState.COOLING_DOWN)
         return False
-    # Same reasoning, and it has to come before the parse for the same
-    # reason: a rejected login is something a probe can actually report, and
-    # waving it through unverified hands the phase to an account that cannot
-    # run it.
-    if is_auth_error(result):
+    # Waving a rejected login through unverified would hand the phase to an
+    # account that cannot run it.
+    if what == "auth":
         _park_auth_expired(cfg, account, "the quota probe")
         return False
-    try:
-        usage = quota.parse_usage_output(result.result_text)
-    except Exception as exc:
+    if what == "unparsed":
         logger.warning(
             "quota probe for account %s returned an unreadable usage report: %s; "
-            "waving it through unverified", account, exc,
+            "waving it through unverified", account, got,
         )
         return True
+    usage = got
     decision = _quota_decision(cfg, account, usage)
     if decision.exceeds:
         logger.warning(
@@ -853,6 +873,33 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
         _park(cfg, account, AccountState.PRE_COOLDOWN)
         return False
     return True
+
+
+def primary_free_pct(cfg: Config) -> int | None:
+    """The pool's free share: 100 minus the primary's tighter `/usage` window.
+
+    The floor a `start` waits on (docs/plans/board-service.md). The primary is whatever config
+    and its live override name (`refresh_primary`), never a fixed account.
+    The tighter window is the larger of the session and week percentages,
+    since the picker refuses an account on either. A rate-limit refusal reads
+    as 0 free. No primary, a failed exec, an auth refusal or an unreadable
+    report is None, no reading, and the caller lets the start through: that is
+    the picker's fail-open on the same probe. This only reads: parking an
+    account stays the picker's job, on its own probe.
+    """
+    account = refresh_primary(cfg)
+    if account is None:
+        return None
+    what, got = _read_usage(cfg, account)
+    if what == "usage":
+        return max(0, 100 - max(got.session_pct, got.week_pct))
+    if what == "refused":
+        return 0
+    logger.warning(
+        "pool floor: could not read the primary account %s's usage (%s: %s); "
+        "the floor is not applied", account, what, got if what != "auth" else "login rejected",
+    )
+    return None
 
 
 def _recheck_cooling_accounts(cfg: Config) -> list[str]:

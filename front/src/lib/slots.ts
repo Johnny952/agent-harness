@@ -42,7 +42,8 @@ export interface Slot {
   project: string | null;
 }
 
-export type WaitingReason = "account" | "project" | "between" | "queued" | "no-account" | "unknown";
+export type WaitingReason =
+  "account" | "project" | "pool" | "between" | "queued" | "no-account" | "unknown";
 
 export interface Waiting {
   taskId: string;
@@ -142,6 +143,13 @@ export function resetText(reset: SlotReset): string {
 
 interface Start extends StartRecord {
   waiting: string | null;
+  /** The start's own pool floor (`params.floor`), in percent; `null` is the worker's default. */
+  floor: number | null;
+}
+
+function floorOf(params: unknown): number | null {
+  const floor = isObject(params) ? params["floor"] : null;
+  return typeof floor === "number" && Number.isInteger(floor) ? floor : null;
 }
 
 /** The `start` records, one per task, claimed over pending (ADR 160), claimed first. */
@@ -151,7 +159,13 @@ function startsOf(queue: Json): Start[] {
     for (const r of records(queue[state])) {
       const taskId = str(r.task_id);
       if (r.kind !== "start" || taskId === null || byTask.has(taskId)) continue;
-      byTask.set(taskId, { taskId, state, project: str(r.project), waiting: str(r.waiting) });
+      byTask.set(taskId, {
+        taskId,
+        state,
+        project: str(r.project),
+        waiting: str(r.waiting),
+        floor: floorOf(r["params"]),
+      });
     }
   }
   return [...byTask.values()];
@@ -229,6 +243,13 @@ export function deriveSlots(accounts: Account[], tasks: Task[] | null, queue: un
           reason: "project",
           detail: holder ? `behind ${holder.taskId}` : null,
         });
+      } else if (s.waiting === "pool") {
+        // The pool's floor: the primary account's free share is under the start's.
+        waiting.push({
+          taskId: s.taskId,
+          reason: "pool",
+          detail: s.floor === null ? "the default floor" : `its ${s.floor}% floor`,
+        });
       } else {
         waiting.push({ taskId: s.taskId, reason: "queued", detail: s.waiting });
       }
@@ -260,6 +281,8 @@ export function waitingText(w: Waiting): string {
       return `Waiting for an account — ${w.detail}`;
     case "project":
       return w.detail ? `Waiting for the project — ${w.detail}` : "Waiting for the project";
+    case "pool":
+      return `Waiting for the pool — the primary account is under ${w.detail}`;
     case "between":
       return "Between phases";
     case "queued":

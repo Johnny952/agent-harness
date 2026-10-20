@@ -4,7 +4,9 @@ ADR 142 split item 2, ADR 148).
 One worker at a time (a `flock` on `actions/worker.lock`), one pass every
 `POLL_SECONDS`. A `cancel` runs at once on the loop thread; a `start` or a
 `command_verdict` is claimed when its project is free and an account is open
-and runs in its own thread. The handlers are in `HANDLERS`, not in
+and runs in its own thread; a `start` also waits as `pool` while the primary
+account's free share is under its floor (the pool's floor,
+docs/plans/board-service.md). The handlers are in `HANDLERS`, not in
 `actions.KINDS` (ADR 148, 1). A `turn` runs a streamed `claude -p` in a thread's
 container and logs it (ADR 173). A `clone`, `init`, `keygen` or `check` sets a
 new project up from the console (ADR 212), spending no quota.
@@ -117,6 +119,8 @@ class Worker:
         self.running: dict[str, Running] = {}
         self._lock = threading.Lock()
         self._closed_until: datetime | None = None
+        #: The primary's free share and when it was read (the pool's floor).
+        self._pool_read: tuple[datetime, int | None] | None = None
 
     @property
     def state_dir(self) -> str:
@@ -234,6 +238,20 @@ class Worker:
                 lock.release()
             self._wait(record, "account")
             return
+        # The pool's floor: a start waits while the primary's free share is
+        # under its floor, read at the claim and paced like the account.
+        if kind == "start":
+            free, floor = self._pool_free(), actions.start_floor(record)
+            if free is not None and free < floor:
+                if lock is not None:
+                    lock.release()
+                if record.get("waiting") != "pool":
+                    logger.info(
+                        "start %s waits for the pool: the primary account has %d%% free, "
+                        "under its floor of %d%%", aid, free, floor,
+                    )
+                self._wait(record, "pool")
+                return
         try:
             claimed = actions.claim(self.state_dir, aid)
         except BaseException:
@@ -263,6 +281,15 @@ class Worker:
             return True
         self._closed_until = now + timedelta(seconds=self.account_poll)
         return False
+
+    def _pool_free(self) -> int | None:
+        """The primary's free share, read again once `account_poll` has passed."""
+        now = _utc_now()
+        if self._pool_read is not None and now < self._pool_read[0] + timedelta(seconds=self.account_poll):
+            return self._pool_read[1]
+        free = core.primary_free_pct(self.cfg)
+        self._pool_read = (now, free)
+        return free
 
     def _wait(self, record: dict, why: str) -> None:
         if record.get("waiting") == why:
