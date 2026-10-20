@@ -33,29 +33,6 @@ export interface ContainerToken {
   device_code: { user_code: string; verification_url: string; expires_at: string } | null;
 }
 
-export type ApprovalKind =
-  "push" | "merge-task" | "cleanup-task" | "tool-permission" | "budget-override";
-export type ApprovalState = "pending" | "approved" | "rejected";
-
-export interface Approval {
-  id: string;
-  kind: ApprovalKind;
-  task_id: string | null;
-  requested_by: string;
-  requested_at: string;
-  summary: string;
-  state: ApprovalState;
-  decided_at: string | null;
-  /** push only */
-  push: {
-    branch: string;
-    base: string;
-    commits: { sha: string; message: string }[];
-    diff: string;
-    gate_worst: "note" | "warning" | "blocking" | null;
-  } | null;
-}
-
 export interface ModelOption {
   id: string;
   label: string;

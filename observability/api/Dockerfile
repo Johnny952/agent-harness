@@ -2,6 +2,13 @@
 # Build context: repo root (see docker/compose/docker-compose.yml).
 FROM python:3.11-slim
 
+# `git`, for one read: `/api/tasks/<task_id>/diff` runs `git diff` over the
+# `:ro` project checkouts, the review screen's diff (ADR 219). Without it that
+# route answers `data: null` and says git is missing; nothing else needs it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY pyproject.toml .
 COPY observability/ observability/

@@ -514,6 +514,26 @@ export interface TaskComments {
 }
 
 /**
+ * `data` of `GET /api/tasks/<id>/diff` (ADR 219): the task branch against its
+ * merge base with the branch the project's checkout is on — what a
+ * `dispatch merge-task` would bring in. `diff` is `git diff`'s text, unparsed;
+ * `""` is a branch with no change of its own. `commit` is the tip it was taken
+ * at, the one a comment's anchor is compared with. `data` is `null`, with the
+ * reason in `warnings`, when there is no branch, no base or no `git` to read.
+ */
+export interface TaskDiff {
+  task_id: string;
+  project: string;
+  branch: string;
+  base: string;
+  commit: string;
+  merge_base: string;
+  diff: string;
+  /** The diff was over the api's cap and is cut at a whole line; a warning says so. */
+  truncated: boolean;
+}
+
+/**
  * The board-service's four writes (ADR 136), as `board_service/app.py:TOOLS`
  * takes them. The task id is the path's and never the body's.
  */

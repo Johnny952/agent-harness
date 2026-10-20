@@ -113,6 +113,7 @@ import type {
   Task,
   TaskComments,
   TaskDetail,
+  TaskDiff,
   Thread,
   ThreadEventRow,
   UsageGroup,
@@ -453,6 +454,21 @@ export function listComments(taskId: string): Promise<ApiResult<TaskComments | n
 }
 
 /**
+ * A task branch's diff against its merge base (ADR 219). `project` names the
+ * checkout; left out, the api takes the task file's own `project`. `data` is
+ * `null` with the reason in `warnings` when there is nothing to diff; an
+ * unknown task or project is the api's 404, an `ApiError`.
+ */
+export function getTaskDiff(
+  taskId: string,
+  project?: string | null,
+): Promise<ApiResult<TaskDiff | null>> {
+  return readEnvelope<TaskDiff | null>(
+    projectPath(`/api/tasks/${encodeURIComponent(taskId)}/diff`, project ?? null),
+  );
+}
+
+/**
  * Propose a task for the backlog: `POST /api/backlog`. `created` is false when
  * the board-service found the same proposal already there, and `tasks` is what
  * it wrote (`board_service/app.py`).
@@ -759,10 +775,9 @@ export async function pingActionBackend(): Promise<boolean> {
   return !actionBackendDown;
 }
 
-/* ── Sessions, tokens, approvals ─────────────────────────────────────── */
-import type { Approval, ContainerToken, SessionInfo, SessionLogLine } from "./ops-types";
+/* ── Sessions and tokens ─────────────────────────────────────── */
+import type { ContainerToken, SessionInfo, SessionLogLine } from "./ops-types";
 import {
-  initialApprovals,
   initialTokens,
   mockSessionLines,
   mockSessions,
@@ -771,8 +786,6 @@ import {
 
 let tokenState: ContainerToken[] | null = null;
 const tokens = () => (tokenState ??= initialTokens());
-let approvalState: Approval[] | null = null;
-const approvals = () => (approvalState ??= initialApprovals());
 
 export async function listSessions(): Promise<SessionInfo[]> {
   await latency();
@@ -829,23 +842,4 @@ export async function reauthContainer(container: string): Promise<ContainerToken
   });
   if (!updated) throw new ApiError(`Container ${container} not found`, 404);
   return updated;
-}
-
-export async function listApprovals(): Promise<Approval[]> {
-  await latency();
-  return approvals();
-}
-
-export async function decideApproval(
-  id: string,
-  decision: "approved" | "rejected",
-): Promise<Approval> {
-  await latency();
-  if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
-  const a = approvals().find((x) => x.id === id);
-  if (!a) throw new ApiError(`Approval ${id} not found`, 404);
-  if (a.state !== "pending") throw new ApiError(`Approval ${id} was already ${a.state}`, 409);
-  const next = { ...a, state: decision, decided_at: new Date().toISOString() };
-  approvalState = approvals().map((x) => (x.id === id ? next : x));
-  return next;
 }

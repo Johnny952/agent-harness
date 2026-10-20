@@ -100,6 +100,18 @@ export const commentsQuery = (taskId: string) =>
   });
 
 /**
+ * One task branch's diff, for the Approvals screen's review (ADR 219). Polled
+ * slowly: each read is four `git` calls on the api, and a branch under review
+ * moves only when a phase commits to it.
+ */
+export const taskDiffQuery = (taskId: string, project: string | null) =>
+  queryOptions({
+    queryKey: ["task-diff", taskId, project],
+    queryFn: () => api.getTaskDiff(taskId, project),
+    refetchInterval: POLL_MS * 4,
+  });
+
+/**
  * After a board-service write, every read it can have moved: the board, the
  * ready order, and — for a write to one task — that task and its comments.
  * Settled rather than succeeded, because a refusal can follow a write another
@@ -326,12 +338,6 @@ export const sessionsQuery = queryOptions({
 export const tokensQuery = queryOptions({
   queryKey: ["tokens"],
   queryFn: () => api.listTokens(),
-  refetchInterval: POLL_MS,
-});
-
-export const approvalsQuery = queryOptions({
-  queryKey: ["approvals"],
-  queryFn: () => api.listApprovals(),
   refetchInterval: POLL_MS,
 });
 

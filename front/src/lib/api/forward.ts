@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Eighteen console paths map one-to-one
- * onto eighteen api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Twenty console paths map one-to-one
+ * onto twenty api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose eighteen routes, count and
+ * deliberately not entries of `FORWARDED`, whose twenty routes, count and
  * rejection message describe the api alone.
  *
  * **Thirteen method and path pairs go to the board-service** (`docs/decisions.md`
@@ -166,6 +166,14 @@ const THREAD_EVENT_PARAMETERS = ["limit", "since"] as const;
  * with `THREAD_EVENT_PARAMETERS`, the two the api takes.
  */
 const TASK_EVENTS = /^\/api\/tasks\/([^/]+)\/events$/;
+
+/**
+ * One task branch's diff against its base (ADR 219), the Approvals screen's
+ * review: `TASK_USAGE`'s shape, tested before `TASK_DETAIL`. Its `?project=` is
+ * `PROJECT_SCOPED`'s: the browser's when shaped like a slug, since a task names
+ * the project whose clone holds its branch, else the console's own.
+ */
+const TASK_DIFF = /^\/api\/tasks\/([^/]+)\/diff$/;
 
 /** Accepting a backlog item: a `POST` to the board-service, never a read. */
 const TASK_ACCEPT = /^\/api\/tasks\/([^/]+)\/accept$/;
@@ -918,6 +926,20 @@ function resolveTarget(url: URL): Resolution {
     };
   }
 
+  const diff = TASK_DIFF.exec(path);
+  if (diff) {
+    let id: string;
+    try {
+      id = decodeURIComponent(diff[1]!);
+    } catch {
+      return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
+    }
+    const target = new URL(`${API_BASE_URL}/api/tasks/${encodeURIComponent(id)}/diff`);
+    const scoped = scopeProject(url, target);
+    if (scoped) return scoped;
+    return { kind: "forward", target: target.toString() };
+  }
+
   // One project record (ADR 209): the slug checked as a `PATCH`'s is, so one the
   // harness does not take is the console's 404 and never crosses.
   const record = PROJECT_RECORD.exec(path);
@@ -950,7 +972,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the eighteen.
+      // `%zz` and friends. A path the console cannot read is not one of the twenty.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -965,7 +987,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the eighteen routes the console forwards.`,
+      error: `${path} is not one of the twenty routes the console forwards.`,
     };
   }
 
@@ -982,17 +1004,28 @@ function resolveTarget(url: URL): Resolution {
     // makes never crosses: it is the console's 400, not a fall-back to
     // `CONSOLE_PROJECT`, which would answer another project's rows under this
     // one's name. Whether the slug has a clone is the api's 404. ADR 210.
-    const asked = url.searchParams.get("project");
-    if (asked) {
-      if (!PROJECT_SLUG.test(asked)) {
-        return { kind: "reject", status: 400, error: `${asked} is not a project slug.` };
-      }
-      target.searchParams.set("project", asked);
-    } else if (CONSOLE_PROJECT) {
-      target.searchParams.set("project", CONSOLE_PROJECT);
-    }
+    const scoped = scopeProject(url, target);
+    if (scoped) return scoped;
   }
   return { kind: "forward", target: target.toString() };
+}
+
+/**
+ * Sets a project-scoped read's `?project=` on `target`: the browser's when it is
+ * shaped like a slug, the console's own when absent. A refusal for one that is
+ * not, or `null` once it is set.
+ */
+function scopeProject(url: URL, target: URL): Resolution | null {
+  const asked = url.searchParams.get("project");
+  if (asked) {
+    if (!PROJECT_SLUG.test(asked)) {
+      return { kind: "reject", status: 400, error: `${asked} is not a project slug.` };
+    }
+    target.searchParams.set("project", asked);
+  } else if (CONSOLE_PROJECT) {
+    target.searchParams.set("project", CONSOLE_PROJECT);
+  }
+  return null;
 }
 
 function jsonResponse(body: { error: string }, status: number): Response {
