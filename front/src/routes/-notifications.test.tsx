@@ -2,7 +2,9 @@
  * The inbox, `/notifications` (`docs/plans/notifications.md` step 2, ADR 225):
  * the api's records newest first, each a link to its record; the ones newer
  * than this browser's last-seen marker marked as new, and the marker moved on
- * by opening it; and the sidebar's unread count on every other screen.
+ * by opening it; and the sidebar's unread count on every other screen. And the
+ * `?thread=<id>` a turn's record links, which opens the dock on any screen
+ * (ADR 228).
  *
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
@@ -12,6 +14,7 @@ import { Route } from "./notifications";
 import { Route as QueueRoute } from "./queue";
 import { renderRoute } from "@/test/render-route";
 import { LAST_SEEN_KEY, readLastSeen } from "@/lib/notifications";
+import { OPEN_THREAD_EVENT } from "@/hooks/use-console";
 import type { ActionQueue, Notification } from "@/lib/api/types";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -154,5 +157,57 @@ describe("the sidebar's inbox entry", () => {
     });
     await screen.findByText("Nothing has been queued");
     expect(within(inbox()).queryByTestId("inbox-unread")).toBeNull();
+  });
+});
+
+describe("a thread's url, ?thread=<id>", () => {
+  const SERVED = {
+    "/api/actions": { data: EMPTY_QUEUE },
+    "/api/notifications": { data: [] },
+  };
+
+  function listen(): { opened: unknown[]; stop: () => void } {
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener(OPEN_THREAD_EVENT, onOpen);
+    return { opened, stop: () => window.removeEventListener(OPEN_THREAD_EVENT, onOpen) };
+  }
+
+  it("opens the dock on the thread and drops the param in place", async () => {
+    const { opened, stop } = listen();
+    try {
+      const { router } = await renderRoute(QueueRoute, "/queue", SERVED, "/queue?thread=t-7");
+      await waitFor(() => expect(opened).toEqual(["t-7"]));
+      expect(await screen.findByRole("button", { name: "Close chat" })).toBeTruthy();
+      await waitFor(() => expect(router.state.location.search).toEqual({}));
+      expect(router.state.location.pathname).toBe("/queue");
+      // Replaced, not pushed: a step back leaves the console, not into the param.
+      expect(router.history.length).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
+  it("keeps the screen's other params", async () => {
+    const { router } = await renderRoute(
+      QueueRoute,
+      "/queue",
+      SERVED,
+      "/queue?view=current&thread=t-7",
+    );
+    await screen.findByRole("button", { name: "Close chat" });
+    await waitFor(() => expect(router.state.location.search).toEqual({ view: "current" }));
+  });
+
+  it("opens nothing without it", async () => {
+    const { opened, stop } = listen();
+    try {
+      await renderRoute(QueueRoute, "/queue", SERVED);
+      await screen.findByText("Nothing has been queued");
+      expect(opened).toEqual([]);
+      expect(screen.queryByRole("button", { name: "Close chat" })).toBeNull();
+    } finally {
+      stop();
+    }
   });
 });

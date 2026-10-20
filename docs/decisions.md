@@ -12777,3 +12777,51 @@ already stores its floor, and `/api/actions` already serves the run with it.
   no gain, since a missing key and null mean the same default.
 - A backend read of the default or of the run's floor: the run already
   reaches the front through `/api/actions`, and the default is one constant.
+## ADR 228 — A thread's turn notifies when it ends, except on a cancel, and links `/?thread=<id>`
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's
+session; the `turn_finished` row of `docs/plans/notifications.md`, which had
+no writer (ADR 221).
+
+**Context.** The kinds table has "a thread's turn finished", informs, off by
+default, and ADR 221 left it without a writer. A turn ends in the worker's
+`_turn`, which writes `turn_end` to the thread's log and finishes the action
+done, failed, interrupted or cancelled; a worker that died mid-turn has the
+turn closed as interrupted on recovery. The console has no route for a
+thread: a thread is the chat dock, opened by `openThread` on any screen, and
+the dock's open state lives in no url. The operator decided on 2026-10-20 to
+notify every end except a cancel.
+
+**Decision.**
+1. `notifications.thread_url(id)` is `/?thread=<id>`, the id quoted as
+   `task_url` quotes a task's: the board, with the thread's dock open.
+2. The worker appends `turn_finished` about the thread after `turn_end` and
+   `actions.finish`, in `_turn` and in `_close_interrupted_turn`, titled as a
+   task's records are: "<thread id> turn done: <thread title>", or `turn
+   failed`, `turn interrupted`. The thread is the record's one subject.
+3. A cancelled turn writes nothing: a cancel is the person's own act, and
+   there is nobody to tell. A turn refused before it starts (an unknown or
+   archived thread, an unconfigured or parked account) has no `turn_start`
+   and writes nothing either.
+4. `append` never raises, and it is called after the turn's record is
+   finished, so an unwritable file leaves the turn's outcome as it was.
+5. The console's `AppShell`, on every screen, reads a `thread` search param:
+   it opens the dock through `openThread`, the `console:open-thread` event a
+   screen's own button sends, then drops the param from the url with a
+   replace. The dock's state is not in the url anywhere else, so a param
+   kept would reopen the dock on a reload, or on a step back after the
+   person closed it; a push would leave that step in the history. The
+   screen's other params stay.
+
+**Consequences.**
+- `/?thread=<id>` and `/queue?thread=<id>` both work; the record links the
+  board because that is where the person lands from a push.
+- An unknown thread id opens the dock as `openThread` with that id would;
+  nothing checks it first.
+- The kind stays off by default; the settings (step 5) read that default.
+
+**Ruled out.**
+- A `/threads/<id>` route: the thread has no screen of its own, and a route
+  for the dock means `routeTree.gen.ts` and a second way to show one thread.
+- Keeping `?thread=` in the url: it would reopen a dock the person closed.
+- Notifying a cancel: the person who cancelled it already knows.

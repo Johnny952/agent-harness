@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Callable
 
 from dispatcher import (
-    actions, board_mcp, command_run, context_transfer, docker_exec, project_keys, projects,
-    state_machine, tasks, threads,
+    actions, board_mcp, command_run, context_transfer, docker_exec, notifications, project_keys,
+    projects, state_machine, tasks, threads,
 )
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
@@ -157,11 +157,14 @@ class Worker:
             record = actions._load(path)
             if record.get("kind") != "turn" or not record.get("started_at"):
                 return
+            thread_id = record["params"]["thread"]
             threads.append_conversation(
-                self.cfg.hive_tasks_dir, record["params"]["thread"],
+                self.cfg.hive_tasks_dir, thread_id,
                 _harness_line("turn_end", action=aid, status="interrupted",
                               error=record.get("error"), session_id=None),
             )
+            title = threads.read_thread(self.cfg.hive_tasks_dir, thread_id).get("title")
+            _notify_turn(self.cfg, thread_id, "interrupted", title)
         except (OSError, ValueError, KeyError, threads.ThreadRefused):
             logger.exception("worker: could not close the log of turn %s", aid)
 
@@ -667,6 +670,24 @@ def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
         summary = {k: result.get(k) for k in
                    ("session_id", "total_cost_usd", "usage", "num_turns")}
     actions.finish(sd, aid, status, result=summary, error=error)
+    _notify_turn(cfg, thread_id, status, thread.get("title"))
+
+
+def _notify_turn(cfg: Config, thread_id: str, status: str, title: object) -> None:
+    """A `turn_finished` notification for a turn that ended `status` (ADR 228).
+
+    Every end but `cancelled`: a cancel is the person's own act, so there is
+    nobody to tell. Written after the turn's own record, and `append` never
+    raises, so the turn ends the same with or without it. A turn refused
+    before it started has no `turn_start`, and no notification either.
+    """
+    if status == "cancelled":
+        return
+    notifications.append(
+        cfg.hive_tasks_dir, "turn_finished", thread=thread_id,
+        title=notifications.task_title(thread_id, f"turn {status}", title),
+        url=notifications.thread_url(thread_id),
+    )
 
 
 # ---- a new project's setup (ADR 212) ----------------------------------------

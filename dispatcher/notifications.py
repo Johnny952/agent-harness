@@ -82,6 +82,11 @@ def task_url(task_id: str) -> str:
 POOL_URL = "/pool"
 
 
+def thread_url(thread_id: str) -> str:
+    """The board with the thread's dock open: the console opens `?thread=` on any screen."""
+    return f"/?thread={urllib.parse.quote(thread_id, safe='')}"
+
+
 def task_title(task_id: str, what: str, title: object = None) -> str:
     """`<id> <what>`, and the task's own title after a colon when it has one."""
     head = f"{task_id} {what}"

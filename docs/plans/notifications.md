@@ -113,9 +113,13 @@ Each step is a single surface:
    `<hive root>/notifications.jsonl`, written by `tasks` (conflict, blocked,
    command request, phase failed, merged, epic closed), the dispatcher
    (awaiting review at a cycle's end, an account available again) and
-   `epic_runs` (a run paused at its limit, as blocked). Turn finished has
-   no writer yet: see the ADR. Pool dry is written since 2026-10-20 (ADR
-   224), by the park that takes the last configured account out of the pool.
+   `epic_runs` (a run paused at its limit, as blocked). Pool dry is written
+   since 2026-10-20 (ADR 224), by the park that takes the last configured
+   account out of the pool. Turn finished is written since 2026-10-20 (ADR
+   228), by the worker when a thread's turn ends done, failed or
+   interrupted, never cancelled; its url, `/?thread=<id>`, opens the
+   thread's dock on the board, and the console opens `?thread=` on any
+   screen.
 2. `GET /api/notifications`, and the inbox in the console, polled. It is
    useful on its own, before any push. **Built 2026-10-20** (ADR 221, ADR
    225): the route serves the newest 500 records, newest first. The
