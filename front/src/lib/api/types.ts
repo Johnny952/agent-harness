@@ -490,6 +490,40 @@ export interface Task {
 export type ReadyOrder = string[];
 
 /**
+ * The eight things a notification can be about (`dispatcher/notifications.py`
+ * `KINDS`, ADR 221). The first four need the person; the last four inform.
+ */
+export type NotificationKind =
+  | "awaiting_review"
+  | "conflict"
+  | "command_request"
+  | "blocked"
+  | "merged"
+  | "pool"
+  | "phase_failed"
+  | "turn_finished";
+
+/**
+ * One record of `/api/notifications`' `data`, newest first (ADR 221). Exactly
+ * one of `task`, `thread` and `account` names what it is about. `kind` is typed
+ * as the eight but read as a string: a writer newer than this console may append
+ * a ninth, and the inbox shows it rather than dropping it.
+ */
+export interface Notification {
+  /** `n-<UTC timestamp to the microsecond>Z-<4 hex>`: ids sort as written. */
+  id: string;
+  kind: NotificationKind | (string & {});
+  /** ISO 8601 with an offset, the writer's clock. */
+  at: string;
+  task?: string;
+  thread?: string;
+  account?: string;
+  title: string;
+  /** A console path, such as `/tasks/T-123` or `/pool`. */
+  url: string;
+}
+
+/**
  * One comment on a task (`dispatcher/tasks.py:add_comment`). `file`, `line` and
  * `commit` come together or not at all: a comment pinned to a place in the code.
  */

@@ -97,7 +97,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/sessions"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/sessions is not one of the twenty routes the console forwards.",
+      error: "/api/sessions is not one of the twenty-one routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -234,6 +234,21 @@ describe("the ready order", () => {
     const fetchMock = stubApi('{"data":[],"warnings":[]}');
     await forwardApiRequest(get("/api/ready?project=other&limit=3"));
     expect(target(fetchMock)).toBe(`${BASE}/api/ready`);
+  });
+});
+
+describe("the notifications inbox", () => {
+  it("is forwarded with no parameter and no project", async () => {
+    const fetchMock = stubApi('{"data":[],"warnings":[]}');
+    await forwardApiRequest(get("/api/notifications?project=other&limit=3"));
+    expect(target(fetchMock)).toBe(`${BASE}/api/notifications`);
+  });
+
+  it("is a read only: a write is the console's 405, never the api's", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get("/api/notifications", { method: "POST" }));
+    expect(answer?.status).toBe(405);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -577,7 +592,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the twenty routes the console forwards.",
+      error: "/api/settingsx is not one of the twenty-one routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });

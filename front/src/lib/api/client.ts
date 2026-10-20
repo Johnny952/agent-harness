@@ -79,6 +79,11 @@
  * /api/projects/<slug>/{clone,init,keygen,check}`, bare like the others. Each
  * answers the queued action; the worker's outcome is read back from
  * `getActionQueue`, as a start's is.
+ *
+ * **One read for the inbox** (ADR 221, `docs/plans/notifications.md` step 2):
+ * `listNotifications` reads `GET /api/notifications`, the api's envelope,
+ * hive-wide and without parameters. Read state is not the api's: the console
+ * keeps it per browser (`@/lib/notifications`).
  */
 import type {
   AcceptTaskBody,
@@ -104,6 +109,7 @@ import type {
   EditTaskResult,
   HookEvent,
   LearningEntry,
+  Notification,
   Phase,
   ProposeBacklogBody,
   ProposeBacklogResult,
@@ -443,6 +449,15 @@ export function resetSetting(key: string, revision: string | null): Promise<ApiR
  */
 export function getReady(): Promise<ApiResult<ReadyOrder>> {
   return readEnvelope<ReadyOrder>("/api/ready");
+}
+
+/**
+ * The inbox: the newest 500 notification records, newest first (ADR 221).
+ * No parameter and no project, like `getReady`. `data` is `null` when the api
+ * could not read the file, with the reason in `warnings`.
+ */
+export function listNotifications(): Promise<ApiResult<Notification[] | null>> {
+  return readEnvelope<Notification[] | null>("/api/notifications");
 }
 
 /**

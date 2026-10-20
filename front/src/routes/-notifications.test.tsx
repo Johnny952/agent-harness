@@ -1,0 +1,158 @@
+/**
+ * The inbox, `/notifications` (`docs/plans/notifications.md` step 2, ADR NNN):
+ * the api's records newest first, each a link to its record; the ones newer
+ * than this browser's last-seen marker marked as new, and the marker moved on
+ * by opening it; and the sidebar's unread count on every other screen.
+ *
+ * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { Route } from "./notifications";
+import { Route as QueueRoute } from "./queue";
+import { renderRoute } from "@/test/render-route";
+import { LAST_SEEN_KEY, readLastSeen } from "@/lib/notifications";
+import type { ActionQueue, Notification } from "@/lib/api/types";
+
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
+
+const OLD = "n-20261020T110000000000Z-aaaa";
+const MID = "n-20261020T120000000000Z-bbbb";
+const NEW = "n-20261020T130000000000Z-cccc";
+
+const RECORDS: Notification[] = [
+  {
+    id: NEW,
+    kind: "awaiting_review",
+    at: "2026-10-20T13:00:00+00:00",
+    task: "T-301",
+    title: "T-301 is waiting for review",
+    url: "/tasks/T-301",
+  },
+  {
+    id: MID,
+    kind: "pool",
+    at: "2026-10-20T12:00:00+00:00",
+    account: "cuenta2",
+    title: "cuenta2 is cooling",
+    url: "/pool",
+  },
+  {
+    id: OLD,
+    kind: "merged",
+    at: "2026-10-20T11:00:00+00:00",
+    task: "T-300",
+    title: "T-300 was merged",
+    url: "/tasks/T-300",
+  },
+];
+
+function rows(): HTMLElement[] {
+  return within(screen.getByRole("list", { name: "Notifications" })).getAllByRole("listitem");
+}
+
+function row(i: number): HTMLElement {
+  const li = rows()[i];
+  if (!li) throw new Error(`no row ${i}`);
+  return li;
+}
+
+describe("the inbox", () => {
+  it("lists the records newest first, each linking to its record", async () => {
+    await renderRoute(Route, "/notifications", { "/api/notifications": { data: RECORDS } });
+    await screen.findByText("T-301 is waiting for review");
+    const links = rows().map((li) => within(li).getByRole("link"));
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([
+      "/tasks/T-301",
+      "/pool",
+      "/tasks/T-300",
+    ]);
+    expect(within(row(0)).getByText("awaiting review")).toBeTruthy();
+    expect(within(row(1)).getByText("cuenta2")).toBeTruthy();
+  });
+
+  it("marks what this browser has not seen as new, then marks it seen", async () => {
+    window.localStorage.setItem(LAST_SEEN_KEY, MID);
+    await renderRoute(Route, "/notifications", { "/api/notifications": { data: RECORDS } });
+    await screen.findByText("T-301 is waiting for review");
+    expect(rows().map((li) => li.getAttribute("data-unread"))).toEqual(["true", "false", "false"]);
+    await waitFor(() => expect(readLastSeen()).toBe(NEW));
+    // Still highlighted while the page is open: it was new when it was opened.
+    expect(row(0).getAttribute("data-unread")).toBe("true");
+  });
+
+  it("says read state is this browser's", async () => {
+    await renderRoute(Route, "/notifications", { "/api/notifications": { data: RECORDS } });
+    expect(await screen.findByText(/kept in this browser/)).toBeTruthy();
+  });
+
+  it("is the empty state when nothing has been notified", async () => {
+    await renderRoute(Route, "/notifications", { "/api/notifications": { data: [] } });
+    expect(await screen.findByText("Nothing to see yet")).toBeTruthy();
+    expect(readLastSeen()).toBeNull();
+  });
+
+  it("is the error state when the read fails, and marks nothing seen", async () => {
+    await renderRoute(Route, "/notifications", {
+      "/api/notifications": { status: 503, error: "down" },
+    });
+    expect(await screen.findByText("The notifications could not be read")).toBeTruthy();
+    expect(readLastSeen()).toBeNull();
+  });
+
+  it("shows the api's warning when the file could not be read", async () => {
+    await renderRoute(Route, "/notifications", {
+      "/api/notifications": { data: null, warnings: ["notifications.jsonl: permission denied"] },
+    });
+    expect(await screen.findByText("notifications.jsonl: permission denied")).toBeTruthy();
+    expect(screen.getByText("The notifications could not be read")).toBeTruthy();
+  });
+});
+
+const EMPTY_QUEUE: ActionQueue = {
+  pending: [],
+  claimed: [],
+  done: [],
+  done_total: 0,
+  worker: { heartbeat: null, stale: true, stale_after_seconds: 30 },
+};
+
+describe("the sidebar's inbox entry", () => {
+  function inbox(): HTMLElement {
+    const harness = screen.getByRole("list", { name: "Harness" });
+    return within(harness).getByRole("link", { name: /Inbox/ });
+  }
+
+  it("links to the inbox and counts what this browser has not seen", async () => {
+    window.localStorage.setItem(LAST_SEEN_KEY, OLD);
+    await renderRoute(QueueRoute, "/queue", {
+      "/api/actions": { data: EMPTY_QUEUE },
+      "/api/notifications": { data: RECORDS },
+    });
+    await waitFor(() => expect(within(inbox()).getByTestId("inbox-unread").textContent).toBe("2"));
+    expect(inbox().getAttribute("href")).toBe("/notifications");
+  });
+
+  it("shows no count when everything is seen, or the read failed", async () => {
+    window.localStorage.setItem(LAST_SEEN_KEY, NEW);
+    const { queryClient } = await renderRoute(QueueRoute, "/queue", {
+      "/api/actions": { data: EMPTY_QUEUE },
+      "/api/notifications": { data: RECORDS },
+    });
+    await waitFor(() => expect(queryClient.getQueryData(["notifications"])).toBeTruthy());
+    expect(within(inbox()).queryByTestId("inbox-unread")).toBeNull();
+    cleanup();
+    window.localStorage.clear();
+    await renderRoute(QueueRoute, "/queue", {
+      "/api/actions": { data: EMPTY_QUEUE },
+      "/api/notifications": { status: 503, error: "down" },
+    });
+    await screen.findByText("Nothing has been queued");
+    expect(within(inbox()).queryByTestId("inbox-unread")).toBeNull();
+  });
+});

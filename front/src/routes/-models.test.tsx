@@ -168,7 +168,12 @@ function writes(sent: Sent[]): Sent[] {
  * list and the list's fallback, ADR 208, ADR 209) and `/api/actions` (its waiting
  * counts, ADR 217) are not among them.
  */
-const SIDEBAR_READS = new Set(["/api/projects", "/api/tasks", "/api/actions"]);
+const SIDEBAR_READS = new Set([
+  "/api/projects",
+  "/api/tasks",
+  "/api/actions",
+  "/api/notifications",
+]);
 function reads(sent: Sent[]): number {
   return sent.filter((s) => s.method === "GET" && !SIDEBAR_READS.has(s.path)).length;
 }

@@ -8,8 +8,9 @@ supersedes: []
 # Notifications — the console tells the person when it needs them
 
 **Status:** building, accepted in outline by the user on 2026-10-11. The
-record and its writers are built (ADR 221), and so is the read route; the
-inbox, the push and the settings are not.
+record and its writers are built (ADR 221), and so are the read route and the
+polled inbox, with read state per browser (ADR NNN); the push and the settings
+are not.
 It records a gap the user named that day: push notifications for an awaited
 approval, a finished development and the like. It fills a weakness the main
 thread's analysis of the same day found: in a near-automatic workflow, the
@@ -115,9 +116,14 @@ Each step is a single surface:
    `epic_runs` (a run paused at its limit, as blocked). Pool dry and turn
    finished have no writer yet: see the ADR.
 2. `GET /api/notifications`, and the inbox in the console, polled. It is
-   useful on its own, before any push. **Partly built 2026-10-20** (ADR
-   221): the route serves the newest 500 records, newest first; the inbox,
-   and read state with it, are not built.
+   useful on its own, before any push. **Built 2026-10-20** (ADR 221, ADR
+   NNN): the route serves the newest 500 records, newest first. The
+   console's `/notifications` lists them, each linking to its record, and
+   the sidebar's Inbox entry (`g i`) carries the unread count, both polled
+   every five seconds. **Read state is per browser until the console has
+   users:** one last-seen id in `localStorage`, moved to the newest record
+   when the inbox is opened. Another browser, a private window or cleared
+   storage counts everything as unread, and the api knows nothing of it.
 3. The notifier, and the endpoint that stores a subscription (a write, so in
    the board service). The server's Web Push library is its own ask, and the
    VAPID key's location gets an ADR, like the git credential.
