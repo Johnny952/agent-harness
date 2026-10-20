@@ -233,7 +233,9 @@ def _problems(data: object) -> list[str]:
             "userinfo: the record never holds a credential"
         )
     elif remote is not None and not is_ssh_remote(remote):
-        problems.append(f"its remote {remote!r} is not in SSH form (git@host:owner/repo.git)")
+        # Not quoted: a token in a query string or fragment is no userinfo, so
+        # `redact_remote` would let it through to `/api/projects`.
+        problems.append("its remote is not in SSH form (git@host:owner/repo.git)")
     branch = data.get("base_branch")
     if branch is not None and not (isinstance(branch, str) and branch.strip()):
         problems.append(f"its base_branch {branch!r} is not a branch name")

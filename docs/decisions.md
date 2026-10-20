@@ -11876,3 +11876,27 @@ credentials volume; the board service never holds a key.
 - Clone before keygen: the clone would fail on every SSH remote.
 - The board service running `ssh-keygen` itself: it would hold the key, which
   *Decisions*, 2 keeps in the dispatcher's volume.
+
+## ADR 213 — A remote not in SSH form is refused without quoting it
+
+**Context.** ADR 205 refuses a project record whose remote carries a password
+or token in its userinfo, and shows that remote redacted. A remote not in SSH
+form is refused too, but its message quoted the remote as written, on the
+grounds that a remote with no userinfo holds no secret. ADR 209 noted the gap:
+a token in a query string or a fragment is not userinfo, so `redact_remote`
+leaves it, and the warning `/api/projects` serves for a broken record carried
+it.
+
+**Decision.** The refusal names the form only: "its remote is not in SSH form
+(git@host:owner/repo.git)". The record's slug still names which record it is.
+
+**Consequences.**
+- No part of a remote that fails the SSH check reaches a message, however the
+  token is placed.
+- The operator no longer sees which URL was stored; they read it from the
+  record file on the host.
+
+**Ruled out.**
+- Redacting query strings and fragments as well: it would be a second list of
+  places a token may hide, and an SSH remote has neither, so nothing is lost by
+  quoting none.

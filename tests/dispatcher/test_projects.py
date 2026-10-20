@@ -551,12 +551,15 @@ def test_a_remote_with_a_bare_user_is_kept(remote) -> None:
     assert projects.parse(_record(remote=remote)).remote == remote
 
 
-def test_an_https_remote_with_no_credential_is_named_as_it_is() -> None:
-    # Not a credential, only the wrong form: the message shows the URL whole.
+def test_a_remote_not_in_ssh_form_is_not_quoted() -> None:
+    # A token outside the userinfo (here a query string) is not caught as a
+    # credential, so the message names the form, never the URL.
     with pytest.raises(projects.RecordError) as raised:
-        projects.parse(_record(remote="https://github.com/acme/shop.git"))
+        projects.parse(_record(remote="https://github.com/acme/shop.git?access_token=s3cr3t"))
 
-    assert "'https://github.com/acme/shop.git' is not in SSH form" in str(raised.value)
+    assert "its remote is not in SSH form" in str(raised.value)
+    assert "s3cr3t" not in str(raised.value)
+    assert "github.com" not in str(raised.value)
 
 
 def test_a_stored_record_with_a_credential_is_broken_and_reported_redacted(tmp_path) -> None:
