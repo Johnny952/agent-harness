@@ -68,7 +68,7 @@ async function fill(slug: string, remote: string | null) {
 
 describe("New project", () => {
   it("writes the record, queues a keygen, and shows only the public key with the deploy-key step", async () => {
-    const { sent } = await renderRoute(Route, "/projects/new", {
+    const { sent, fetchMock } = await renderRoute(Route, "/projects/new", {
       "POST /api/projects": { bare: project(), status: 201 },
       "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
       "/api/actions/a-key": [{ data: action("a-key", "keygen") }, { data: KEY_DONE }],
@@ -76,8 +76,12 @@ describe("New project", () => {
     await fill("shop", REMOTE);
 
     expect((await screen.findByTestId("public-key")).textContent).toBe(PUBLIC);
-    // Read by its id: the queue's list of the newest finished is never asked.
-    expect(sent.some((s) => s.path === "/api/actions")).toBe(false);
+    // Read by its id: the queue's list of the newest finished is never asked;
+    // the sidebar's count (`?limit=1`, ADR 217) is the only list read.
+    const lists = fetchMock.mock.calls
+      .map(([input]) => new URL(String(input), "http://console.test"))
+      .filter((url) => url.pathname === "/api/actions" && url.search !== "?limit=1");
+    expect(lists).toEqual([]);
     expect(screen.getByText("SHA256:abc")).toBeTruthy();
     expect(screen.getByText(/Settings → Deploy keys/)).toBeTruthy();
     const writes = sent.filter((s) => s.method === "POST");

@@ -12,8 +12,9 @@
  */
 import { createContext, useContext, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { projectsQuery, tasksQuery } from "@/lib/api/queries";
+import { actionQueueQuery, projectsQuery, tasksQuery } from "@/lib/api/queries";
 import type { ProjectRecord, Task } from "@/lib/api/types";
+import { isBoardCard } from "@/lib/board";
 
 /** The projects named on `tasks`, each once, in slug order. A non-string or empty project names none. */
 export function deriveProjects(tasks: readonly Task[]): string[] {
@@ -114,6 +115,108 @@ export function useProjectList(): ProjectList {
     }
     return { entries: null, source: "tasks", failed: tasksFailed };
   }, [recordsRead, recordsFailed, tasksRead, tasksFailed]);
+}
+
+/**
+ * What one project has running and waiting, for the sidebar (ADR 217).
+ * `waiting` is `null` when the queue was not read: a count is never guessed.
+ */
+export interface ProjectCounts {
+  running: number;
+  waiting: number | null;
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function slugOf(v: unknown): string | null {
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
+/**
+ * The counts per project slug, from `GET /api/tasks` and `GET /api/actions`
+ * (`null` when that read failed). ADR 217:
+ *
+ * - **running** is a board card (not a backlog item, not an epic row), not
+ *   merged, with status `in_progress`, whatever its phase: a role's lane and
+ *   *No live phase* alike, since a project is busy from its cycle's first phase
+ *   until its task leaves `in_progress` (`docs/plans/projects.md`, *Decisions*, 5);
+ * - **waiting** is a task with a `start` pending or claimed in the queue that
+ *   is not running by the rule above and not merged: started, and not in a
+ *   phase yet (*Decisions*, 6, *What waits*). Its project is the start record's
+ *   `project`, or the task row's when the record names none.
+ *
+ * A project with nothing is absent from the map; a task counts once.
+ */
+export function projectCounts(tasks: readonly Task[], queue: unknown): Map<string, ProjectCounts> {
+  const counted = isObject(queue);
+  const counts = new Map<string, ProjectCounts>();
+  const entry = (slug: string): ProjectCounts => {
+    let c = counts.get(slug);
+    if (!c) {
+      c = { running: 0, waiting: counted ? 0 : null };
+      counts.set(slug, c);
+    }
+    return c;
+  };
+  const rows = new Map<string, Task>();
+  const running = new Set<string>();
+  for (const t of tasks) {
+    if (!isObject(t) || typeof t.task_id !== "string") continue;
+    rows.set(t.task_id, t);
+    const slug = slugOf(t.project);
+    if (slug === null || t.merged === true || t.status !== "in_progress" || !isBoardCard(t)) {
+      continue;
+    }
+    running.add(t.task_id);
+    entry(slug).running += 1;
+  }
+  if (!counted) return counts;
+  const seen = new Set<string>();
+  for (const state of ["claimed", "pending"]) {
+    const list = queue[state];
+    if (!Array.isArray(list)) continue;
+    for (const r of list) {
+      if (!isObject(r) || r["kind"] !== "start") continue;
+      const id = slugOf(r["task_id"]);
+      if (id === null || seen.has(id) || running.has(id)) continue;
+      seen.add(id);
+      const row = rows.get(id);
+      if (row?.merged === true) continue;
+      const slug = slugOf(r["project"]) ?? slugOf(row?.project);
+      if (slug === null) continue;
+      const c = entry(slug);
+      c.waiting = (c.waiting ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
+/**
+ * The sidebar's counts, or what kept them from being drawn. `counts` is `null`
+ * until the task list answers and while it has failed (`tasksFailed`): with no
+ * task rows there is no running count to draw. `queueFailed` says the queue
+ * read failed, so every `waiting` is `null`.
+ */
+export interface ProjectCountsRead {
+  counts: Map<string, ProjectCounts> | null;
+  tasksFailed: boolean;
+  queueFailed: boolean;
+}
+
+export function useProjectCounts(): ProjectCountsRead {
+  const tasks = useQuery(tasksQuery);
+  const queue = useQuery(actionQueueQuery);
+  const tasksRead = answer(tasks);
+  const tasksFailed = failed(tasks);
+  const queueRead = answer(queue);
+  const queueFailed = failed(queue);
+  return useMemo((): ProjectCountsRead => {
+    // While the queue is in flight it is not counted yet, as if unread.
+    const counts = tasksRead ? projectCounts(tasksRead, queueRead) : null;
+    return { counts, tasksFailed, queueFailed };
+  }, [tasksRead, tasksFailed, queueRead, queueFailed]);
 }
 
 /**
