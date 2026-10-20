@@ -36,7 +36,9 @@
  * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
  * `POST /api/threads/<id>/turns`, and the two project-record writes
  * `POST /api/projects` and `PATCH /api/projects/<slug>`, onto the same paths
- * there; the last five carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
+ * there; the last five carry a bearer. Four more, a new project's setup actions
+ * `POST /api/projects/<slug>/{clone,init,keygen,check}` (ADR NNN), go there
+ * too with the same bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
  * `GET /api/threads` is still the api's list, a
@@ -208,6 +210,14 @@ const PROJECTS = "/api/projects";
  * `PROJECT_SLUG`. No other method on the path is forwarded.
  */
 const PROJECT_RECORD = /^\/api\/projects\/([^/]+)$/;
+
+/**
+ * A new project's four setup actions (ADR NNN): a `POST` to the board-service
+ * with the actions bearer, as a record write is, the slug checked against
+ * `PROJECT_SLUG` and the body unchanged (the route takes only `replace`, on a
+ * keygen). No other method on these paths is forwarded.
+ */
+const PROJECT_SETUP = /^\/api\/projects\/([^/]+)\/(clone|init|keygen|check)$/;
 
 /**
  * The slugs a project may have: `dispatcher/tasks.py`'s `_PROJECT_SLUG`, written
@@ -499,6 +509,16 @@ function boardTarget(method: string, path: string): Resolution | null {
     }
   }
   if (method === "POST") {
+    const setup = PROJECT_SETUP.exec(path);
+    if (setup) {
+      const slug = projectSlug(path, setup[1]!);
+      if (typeof slug !== "string") return slug;
+      return {
+        kind: "forward",
+        target: `${BOARD_SERVICE_URL}${PROJECTS}/${encodeURIComponent(slug)}/${setup[2]!}`,
+        action: "project",
+      };
+    }
     const turns = THREAD_TURNS.exec(path);
     if (turns) {
       const id = threadId(path, turns[1]!);

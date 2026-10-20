@@ -6,7 +6,8 @@ One worker at a time (a `flock` on `actions/worker.lock`), one pass every
 `command_verdict` is claimed when its project is free and an account is open
 and runs in its own thread. The handlers are in `HANDLERS`, not in
 `actions.KINDS` (ADR 148, 1). A `turn` runs a streamed `claude -p` in a thread's
-container and logs it (ADR 173).
+container and logs it (ADR 173). A `clone`, `init`, `keygen` or `check` sets a
+new project up from the console (ADR NNN), spending no quota.
 Stdlib only.
 """
 
@@ -17,6 +18,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -26,7 +28,8 @@ from pathlib import Path
 from typing import Callable
 
 from dispatcher import (
-    actions, board_mcp, command_run, context_transfer, docker_exec, state_machine, tasks, threads,
+    actions, board_mcp, command_run, context_transfer, docker_exec, project_keys, projects,
+    state_machine, tasks, threads,
 )
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
@@ -634,8 +637,124 @@ def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     actions.finish(sd, aid, status, result=summary, error=error)
 
 
+# ---- a new project's setup (ADR NNN) ----------------------------------------
+
+
+def _setup_record(worker: Worker, record: dict):
+    """The project's record, or None once the action is finished failed."""
+    cfg, sd = worker.cfg, worker.state_dir
+    slug = record["project"]
+    try:
+        project = projects.read(context_transfer.hive_root(cfg.hive_tasks_dir), slug)
+    except projects.RecordError as exc:
+        actions.finish(sd, record["id"], "failed",
+                       error=_one_line(f"the record of {slug} does not read: {exc}"))
+        return None
+    if project is None:
+        actions.finish(sd, record["id"], "failed",
+                       error=f"no project record {slug}; write the record first")
+        return None
+    record["started_at"] = _utc_now().isoformat()
+    actions.rewrite(sd, record)
+    return project
+
+
+def _end_setup(worker: Worker, record: dict, outcome) -> None:
+    status = "done" if outcome.ok else "failed"
+    actions.finish(
+        worker.state_dir, record["id"], status,
+        result={"detail": outcome.detail},
+        error=None if outcome.ok else _one_line(outcome.detail),
+    )
+
+
+def _clone(worker: Worker, record: dict, _cancelled=None) -> None:
+    """Clone the record's remote into `<projects_root>/<slug>` (ADR NNN)."""
+    project = _setup_record(worker, record)
+    if project is None:
+        return
+    if not project.remote:
+        actions.finish(worker.state_dir, record["id"], "failed",
+                       error=f"{project.slug} has no remote to clone; init makes an empty repository")
+        return
+    if projects.has_credential(project.remote):
+        # The record refuses one already (ADR 205); this is that refusal again,
+        # at the one place a remote is handed to git, and it never names it.
+        actions.finish(worker.state_dir, record["id"], "failed",
+                       error=f"the remote of {project.slug} carries a credential; it is not cloned")
+        return
+    _end_setup(worker, record, core.make_project_checkout(
+        worker.cfg, project.slug, project.remote, project.base_branch,
+    ))
+
+
+def _init(worker: Worker, record: dict, _cancelled=None) -> None:
+    """An empty repository at `<projects_root>/<slug>`, for a record with no remote."""
+    project = _setup_record(worker, record)
+    if project is None:
+        return
+    if project.remote:
+        actions.finish(worker.state_dir, record["id"], "failed",
+                       error=f"{project.slug} has a remote; clone it instead")
+        return
+    _end_setup(worker, record, core.make_project_checkout(
+        worker.cfg, project.slug, None, project.base_branch,
+    ))
+
+
+def _keygen(worker: Worker, record: dict, _cancelled=None) -> None:
+    """The project's deploy key (`project-keygen`'s function) and its record's
+    fingerprint. The result holds the public half only: the private half is
+    named by the path it is written to and never read here."""
+    cfg, sd = worker.cfg, worker.state_dir
+    project = _setup_record(worker, record)
+    if project is None:
+        return
+    replace = bool(record["params"].get("replace"))
+    try:
+        key = project_keys.generate(cfg.project_keys_dir, project.slug, replace=replace)
+    except project_keys.KeyExists:
+        actions.finish(sd, record["id"], "failed",
+                       error=f"{project.slug} already has a deploy key; replacing it was not asked")
+        return
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # ssh-keygen's stderr says nothing of the key it did not make (cli's
+        # _run_project_keygen shows it for the same reason).
+        why = getattr(exc, "stderr", None) or exc
+        actions.finish(sd, record["id"], "failed",
+                       error=_one_line(f"could not make a key for {project.slug}: {why}"))
+        return
+    projects.record_key(
+        context_transfer.hive_root(cfg.hive_tasks_dir), project.slug, cfg.project_keys_dir,
+    )
+    actions.finish(sd, record["id"], "done", result={
+        "public": key.public, "fingerprint": key.fingerprint, "replaced": replace,
+    })
+
+
+def _check(worker: Worker, record: dict, _cancelled=None) -> None:
+    """Whether the record's remote answers the project's deploy key.
+
+    Done either way, with `reachable` saying which: a remote that does not
+    answer yet is the expected answer before the key is pasted on GitHub, not
+    a failure of the check.
+    """
+    project = _setup_record(worker, record)
+    if project is None:
+        return
+    if not project.remote:
+        actions.finish(worker.state_dir, record["id"], "failed",
+                       error=f"{project.slug} has no remote to check")
+        return
+    outcome = core.check_project_remote(worker.cfg, project.slug, project.remote)
+    actions.finish(worker.state_dir, record["id"], "done", result={
+        "reachable": outcome.ok, "detail": outcome.detail,
+    })
+
+
 HANDLERS = {
     "start": _start, "cancel": _cancel, "command_verdict": _command_verdict, "turn": _turn,
+    "clone": _clone, "init": _init, "keygen": _keygen, "check": _check,
 }
 
 

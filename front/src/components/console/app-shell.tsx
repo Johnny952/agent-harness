@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Milestone,
   Server,
+  Plus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
@@ -258,6 +259,19 @@ export function ProjectNav({ pathname }: { pathname: string }) {
     <div className="mb-2">
       <SectionLabel>Projects</SectionLabel>
       {body}
+      {/* The New project form (ADR NNN). */}
+      <Link
+        to="/projects/new"
+        className={cn(
+          "mt-0.5 flex items-center gap-2 rounded-sm px-2 py-1.5 text-[11px] transition-colors",
+          pathname === "/projects/new"
+            ? "bg-surface-2 text-foreground"
+            : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
+        )}
+      >
+        <Plus className="size-3.5" />
+        New project
+      </Link>
     </div>
   );
 }

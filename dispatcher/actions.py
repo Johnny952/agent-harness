@@ -201,6 +201,26 @@ def _validate_turn(record: dict) -> list[str]:
     return problems
 
 
+def _validate_project_setup(record: dict) -> list[str]:
+    """`clone`, `init`, `keygen`, `check`: one project, no task (ADR NNN).
+
+    None of them carries a remote: the worker reads it from the project's
+    record, which already refuses a credential (ADR 205), so no URL ever sits
+    in an action file. Only `keygen` takes a param, whether to replace a key.
+    """
+    problems = _slug_problem("project", record.get("project"))
+    if record.get("task_id") is not None:
+        problems.append("task_id must be null")
+    params = record["params"]
+    if record.get("kind") == "keygen":
+        problems += _extra_keys(params, ("replace",))
+        if "replace" in params and type(params["replace"]) is not bool:
+            problems.append("params.replace must be true or false")
+    else:
+        problems += _extra_keys(params, ())
+    return problems
+
+
 @dataclass(frozen=True)
 class Kind:
     name: str
@@ -232,11 +252,34 @@ KINDS: dict[str, Kind] = {
             "turn", _validate_turn, lambda r: f"thread:{r['params']['thread']}",
             True, "interrupt", "interrupted before the turn finished",
         ),
+        # A new project's setup (ADR NNN). A clone or an init makes the
+        # project's directory, so it holds the project like a start does and
+        # is not rerun after a crash: a half-made directory is the person's to
+        # look at, and a rerun would only refuse it. A keygen may have written
+        # the pair before the crash, so it is not rerun either; a check only
+        # reads, so it is.
+        Kind(
+            "clone", _validate_project_setup, lambda r: f"project:{r['project']}",
+            False, "interrupt",
+            "interrupted during the clone; the project's directory may be partial",
+        ),
+        Kind(
+            "init", _validate_project_setup, lambda r: f"project:{r['project']}",
+            False, "interrupt",
+            "interrupted during the init; the project's directory may be partial",
+        ),
+        Kind(
+            "keygen", _validate_project_setup, lambda r: None, False, "interrupt",
+            "interrupted during the keygen; look at the project's key before another",
+        ),
+        Kind("check", _validate_project_setup, lambda r: None, False, "rerun", None),
     )
 }
 
 #: Kinds a second pending or claimed action for the same task is refused.
 _ONE_PER_TASK = ("start", "command_verdict")
+#: Kinds a second pending or claimed action for the same project is refused.
+_ONE_PER_PROJECT = ("clone", "init", "keygen", "check")
 
 
 def validate(record: dict) -> list[str]:
@@ -404,7 +447,8 @@ def _new_record(kind, project, task_id, params, actor, note) -> dict:
 
 
 def _refuse_locked(root: Path, record: dict, ready) -> None:
-    """The checks made under `write.lock`: one start (or verdict) per task, and Ready."""
+    """The checks made under `write.lock`: one start (or verdict) per task,
+    one setup action of each kind per project, and Ready."""
     kind, project, task_id = record["kind"], record["project"], record["task_id"]
     if kind in _ONE_PER_TASK:
         held, _ = _scan(root, (PENDING, CLAIMED))
@@ -415,6 +459,13 @@ def _refuse_locked(root: Path, record: dict, ready) -> None:
             for e in held
         ):
             raise ActionRefused(409, f"a {kind} for task {task_id} is already queued")
+    if kind in _ONE_PER_PROJECT:
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        if any(
+            e.record.get("kind") == kind and e.record.get("project") == project
+            for e in held
+        ):
+            raise ActionRefused(409, f"a {kind} for project {project} is already queued")
     if kind == "start" and ready is not None and not ready(project, task_id):
         raise ActionRefused(409, f"task {task_id} is not in Ready")
 

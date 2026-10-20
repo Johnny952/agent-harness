@@ -1208,6 +1208,161 @@ def update_project_branch(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class SetupOutcome:
+    """What became of a new project's clone, init or remote check (ADR NNN).
+
+    `ok` is whether it did what it was asked; `detail` is the one line that
+    says what happened, in git's words when git refused.
+    """
+
+    ok: bool
+    detail: str
+
+
+def _new_project_dir(container: str, projects_root: str, slug: str) -> str | SetupOutcome:
+    """`<projects_root>/<slug>`, or the refusal when something is already there.
+
+    A clone or an init never lands on top of a directory, whatever is in it:
+    an existing directory is someone's checkout, or what is left of one, and
+    neither is this action's to replace.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug)
+    project_dir = f"{projects_root}/{slug}"
+    if path_exists(container, project_dir):
+        return SetupOutcome(False, f"{project_dir} already exists; it is left as it is")
+    return project_dir
+
+
+def clone_project(
+    container: str,
+    projects_root: str,
+    slug: str,
+    remote_url: str,
+    base_branch: str | None = None,
+    *,
+    credentials_path: str = GIT_CREDENTIALS_PATH,
+    keys_dir: str = PROJECT_KEYS_DIR,
+    timeout: float | None = None,
+) -> SetupOutcome:
+    """Clone `remote_url` into `<projects_root>/<slug>`, with the project's key.
+
+    The same access as every fetch and push (`_remote_access`): an SSH remote
+    goes with the project's deploy key or is not tried, so a clone that fails
+    here fails the way the first task's fetch would. `base_branch` is checked
+    out when given; otherwise the remote's default branch is.
+    """
+    project_dir = _new_project_dir(container, projects_root, slug)
+    if isinstance(project_dir, SetupOutcome):
+        return project_dir
+    access = _remote_access(
+        container, slug, remote_url, remote_url, credentials_path, keys_dir
+    )
+    if isinstance(access, str):
+        return SetupOutcome(False, f"not cloned: {access}")
+    branch_args = ["--branch", base_branch] if base_branch else []
+    cloned = run_docker_exec(
+        container, projects_root,
+        ["git", *access.git_args, "clone", "--quiet", *branch_args, "--", remote_url, slug],
+        env=access.env,
+        timeout=timeout,
+    )
+    if cloned.returncode != 0:
+        # git removes the directory a failed clone made, so nothing is left
+        # half-made to refuse the next try.
+        return SetupOutcome(
+            False, f"cloning {remote_url} failed: {_output_tail(cloned)}{access.missing}"
+        )
+    branch = current_branch(container, project_dir)
+    on = f" on {branch}" if branch else ""
+    return SetupOutcome(True, f"cloned {remote_url} into {project_dir}{on}")
+
+
+def init_project(
+    container: str,
+    projects_root: str,
+    slug: str,
+    base_branch: str | None = None,
+    *,
+    author_name: str,
+    author_email: str,
+) -> SetupOutcome:
+    """An empty repository at `<projects_root>/<slug>`, with one empty commit.
+
+    The commit is there because a task's branch is cut from the checkout's
+    HEAD (`_add_writer_worktree`'s `-b` form), and an unborn HEAD has nothing
+    to cut from. It holds no file, so the project's first task writes the
+    first one. The branch is `base_branch`, or git's own default when none.
+    """
+    project_dir = _new_project_dir(container, projects_root, slug)
+    if isinstance(project_dir, SetupOutcome):
+        return project_dir
+    branch_args = ["--initial-branch", base_branch] if base_branch else []
+    made = run_docker_exec(
+        container, projects_root,
+        ["git", "init", "--quiet", *branch_args, "--", slug],
+        env=_GIT_ENV,
+    )
+    if made.returncode != 0:
+        return SetupOutcome(False, f"git init failed: {_output_tail(made)}")
+    # The author in the environment, which git ranks above any user.name a
+    # config in the container might set, so the commit is always this one's.
+    author = {
+        "GIT_AUTHOR_NAME": author_name, "GIT_AUTHOR_EMAIL": author_email,
+        "GIT_COMMITTER_NAME": author_name, "GIT_COMMITTER_EMAIL": author_email,
+    }
+    committed = run_docker_exec(
+        container, project_dir,
+        ["git", "commit", "--quiet", "--allow-empty", "-m", "Empty repository"],
+        env={**_GIT_ENV, **author},
+    )
+    if committed.returncode != 0:
+        return SetupOutcome(
+            False,
+            f"{project_dir} was made but its first commit failed: {_output_tail(committed)}",
+        )
+    branch = current_branch(container, project_dir)
+    on = f" on {branch}" if branch else ""
+    return SetupOutcome(True, f"made an empty repository at {project_dir}{on}")
+
+
+def check_remote(
+    container: str,
+    projects_root: str,
+    slug: str,
+    remote_url: str,
+    *,
+    credentials_path: str = GIT_CREDENTIALS_PATH,
+    keys_dir: str = PROJECT_KEYS_DIR,
+    timeout: float | None = None,
+) -> SetupOutcome:
+    """Whether `remote_url` answers the project's key: `git ls-remote --heads`.
+
+    Run in `projects_root`, so it needs no clone: it is the step between
+    pasting the deploy key on GitHub and cloning with it. It lists heads and
+    reads nothing else; whether the key may also push is not something a read
+    can tell, and is not claimed.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug)
+    access = _remote_access(
+        container, slug, remote_url, remote_url, credentials_path, keys_dir
+    )
+    if isinstance(access, str):
+        return SetupOutcome(False, f"not checked: {access}")
+    listed = run_docker_exec(
+        container, projects_root,
+        ["git", *access.git_args, "ls-remote", "--heads", "--", remote_url],
+        env=access.env,
+        timeout=timeout,
+    )
+    if listed.returncode != 0:
+        return SetupOutcome(
+            False, f"{remote_url} did not answer: {_output_tail(listed)}{access.missing}"
+        )
+    heads = len([line for line in listed.stdout.splitlines() if line.strip()])
+    return SetupOutcome(True, f"{remote_url} answered with {heads} branch(es)")
+
+
 PUSHED = "pushed"
 NO_UPSTREAM = "no-upstream"
 PUSH_REFUSED = "push-refused"
