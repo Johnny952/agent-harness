@@ -259,7 +259,14 @@ module; steps 2, 4 and 5 need its queue and worker.
    lock of its own.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
-   own ask for a build.
+   own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR NNN): the
+   sidebar's *Projects* section above a *Harness* section that holds the
+   screens as they were, and `/p/$slug/`, `/p/$slug/backlog` and
+   `/p/$slug/tasks/$taskId`, the harness's own Board, Backlog and task page
+   narrowed to the slug. No api route lists the records, so the list is the
+   `project` the tasks name, by slug. The project's debt and learnings, the
+   counts of running and waiting, the archived toggle and *New project* are
+   not built.
 5. **New project and the key from the console**: the `clone`, `init`,
    `keygen` and `check` actions in the worker, and the form.
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front

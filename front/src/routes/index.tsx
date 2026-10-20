@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch } from "lucide-react";
 import { toast } from "sonner";
@@ -50,6 +50,8 @@ import { deriveSlots, standingLine } from "@/lib/slots";
 import { epicChildren, epicProgress } from "@/lib/epic";
 import { useNow, useSearchHotkey } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
+import { scoped, useProjectScope } from "@/lib/projects";
+import { TaskLink } from "@/components/console/project-scope";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -78,7 +80,12 @@ export const Route = createFileRoute("/")({
  */
 const NO_READY_ORDER = ": no ready order: ";
 
-function BoardPage() {
+/**
+ * The board. On the harness's own screen it holds every task; under
+ * `/p/$slug/` (ADR NNN) the same screen holds that project's tasks only.
+ */
+export function BoardPage() {
+  const project = useProjectScope();
   const now = useNow();
   const searchRef = useSearchHotkey();
   const tasks = useQuery(tasksQuery);
@@ -101,7 +108,7 @@ function BoardPage() {
   // not answered, and `useNow` re-renders this screen every two seconds, so the
   // board below recomputed on every tick. The memo is here for the array's
   // identity, not for the cost of `??`. `docs/decisions.md` ADR 40.
-  const rows = useMemo(() => tasks.data?.data ?? [], [tasks.data]);
+  const rows = useMemo(() => scoped(tasks.data?.data ?? [], project), [tasks.data, project]);
 
   const readyFailed =
     ready.isError || (ready.data?.warnings ?? []).some((w) => w.includes(NO_READY_ORDER));
@@ -225,8 +232,12 @@ function BoardPage() {
   return (
     <AppShell>
       <PageHeader
-        title="Board"
-        subtitle="Accepted tasks by where they are: ready, waiting, in a role's phase, stopped, merged. One lane per epic."
+        title={project === null ? "Board" : `Board · ${project}`}
+        subtitle={
+          project === null
+            ? "Accepted tasks by where they are: ready, waiting, in a role's phase, stopped, merged. One lane per epic."
+            : `${project}'s accepted tasks by where they are: ready, waiting, in a role's phase, stopped, merged. One lane per epic.`
+        }
         right={
           <>
             <RefreshedAt at={tasks.dataUpdatedAt} />
@@ -359,11 +370,7 @@ function Swimlane({
         {lane.id === null ? (
           <span className="text-[11px] font-semibold text-muted-foreground">No epic</span>
         ) : (
-          <Link
-            to="/tasks/$taskId"
-            params={{ taskId: lane.id }}
-            className="flex items-baseline gap-2 hover:underline"
-          >
+          <TaskLink taskId={lane.id} className="flex items-baseline gap-2 hover:underline">
             <Mono className="text-[11px] font-semibold">{lane.id}</Mono>
             <span className="text-[11px]">
               {lane.head ? (
@@ -372,7 +379,7 @@ function Swimlane({
                 <Absent label="epic not served by /api/tasks" />
               )}
             </span>
-          </Link>
+          </TaskLink>
         )}
         {progress && (
           <span className="mono text-[10px] text-muted-foreground">
@@ -475,7 +482,7 @@ export function TaskCard({
         dense ? "px-2 py-1.5" : "px-2 py-2",
       )}
     >
-      <Link to="/tasks/$taskId" params={{ taskId: task.task_id }} className="block">
+      <TaskLink taskId={task.task_id} className="block">
         <div className="flex items-center justify-between gap-2">
           <Mono className="text-[11px] font-semibold">{task.task_id}</Mono>
           <HeartbeatDot heartbeat={task.heartbeat} lockExpired={task.lock_expired} now={now} />
@@ -519,7 +526,7 @@ export function TaskCard({
             </span>
           )}
         </div>
-      </Link>
+      </TaskLink>
       {footer && <div className="mt-1.5">{footer}</div>}
     </div>
   );

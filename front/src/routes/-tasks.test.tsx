@@ -757,7 +757,10 @@ describe("the epic view", () => {
     const { sent } = await taskPage(epic, [], undefined, { "/api/tasks": { data: list } });
     await screen.findByTestId("epic-progress");
     const paths = sent.map((s) => s.path);
-    expect(paths.filter((p) => p === "/api/tasks")).toHaveLength(1);
+    // The list is read, by the epic view and by the sidebar's project list (ADR NNN),
+    // and no child is read on its own.
+    expect(paths.filter((p) => p === "/api/tasks").length).toBeGreaterThanOrEqual(1);
+    expect(paths.filter((p) => p === "/api/tasks").length).toBeLessThanOrEqual(2);
     expect(paths.some((p) => /^\/api\/tasks\/T-10[2-9]$/.test(p))).toBe(false);
   });
 

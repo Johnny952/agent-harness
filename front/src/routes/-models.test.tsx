@@ -163,8 +163,9 @@ function writes(sent: Sent[]): Sent[] {
   return sent.filter((s) => s.method !== "GET");
 }
 
+/** The screen's reads: the sidebar's `/api/tasks` (its project list, ADR NNN) is not one. */
 function reads(sent: Sent[]): number {
-  return sent.filter((s) => s.method === "GET").length;
+  return sent.filter((s) => s.method === "GET" && s.path !== "/api/tasks").length;
 }
 
 function brokenBanner(): HTMLElement {

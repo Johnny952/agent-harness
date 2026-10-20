@@ -32,6 +32,8 @@ import {
   type RankWrite,
 } from "@/lib/backlog";
 import { cn } from "@/lib/utils";
+import { scoped, useProjectScope } from "@/lib/projects";
+import { TaskLink } from "@/components/console/project-scope";
 
 export const Route = createFileRoute("/backlog")({
   head: () => ({
@@ -67,14 +69,19 @@ const VERDICT_DONE: Record<Verdict, string> = {
   dropped: "dropped",
 };
 
-function BacklogPage() {
+/**
+ * The backlog. On the harness's own screen it holds every task; under
+ * `/p/$slug/backlog` (ADR NNN) the same screen holds that project's only.
+ */
+export function BacklogPage() {
+  const project = useProjectScope();
   const q = useQuery(tasksQuery);
   const qc = useQueryClient();
   const [statuses, setStatuses] = useState<string[]>(DEFAULT_STATUSES);
   const [tag, setTag] = useState<string>(ANY);
   const [source, setSource] = useState<string>(ANY);
 
-  const tasks = useMemo(() => q.data?.data ?? [], [q.data]);
+  const tasks = useMemo(() => scoped(q.data?.data ?? [], project), [q.data, project]);
   const backlog = useMemo(() => tasks.filter(isBacklog), [tasks]);
   const groups = useMemo(() => groupBacklog(tasks), [tasks]);
   const filter: BacklogFilter = useMemo(
@@ -155,7 +162,7 @@ function BacklogPage() {
     <AppShell>
       <div className="flex h-full flex-col">
         <PageHeader
-          title="Backlog"
+          title={project === null ? "Backlog" : `Backlog · ${project}`}
           subtitle={`${counts} · in the board's order: priority, then rank, then id`}
           right={<RefreshedAt at={q.dataUpdatedAt} />}
         />
@@ -290,9 +297,9 @@ function EpicHeader({ id, head }: { id: string; head: Task | null }) {
     <tr className="border-b border-border/50 bg-surface-2/40">
       <td className="px-3 py-1.5" />
       <td className="px-3 py-1.5">
-        <Link to="/tasks/$taskId" params={{ taskId: id }}>
+        <TaskLink taskId={id}>
           <Mono className="font-semibold hover:underline">{id}</Mono>
-        </Link>
+        </TaskLink>
       </td>
       <td className="px-3 py-1.5" colSpan={4}>
         <span className="mr-2 text-[10px] uppercase text-muted-foreground">epic</span>
@@ -364,9 +371,9 @@ function ItemRow({
         ) : null}
       </td>
       <td className={cn("whitespace-nowrap px-3 py-1.5", child && "pl-8")}>
-        <Link to="/tasks/$taskId" params={{ taskId: id }}>
+        <TaskLink taskId={id}>
           <Mono className="font-semibold hover:underline">{id}</Mono>
-        </Link>
+        </TaskLink>
       </td>
       <td className="px-3 py-1.5">
         {epic ? (
