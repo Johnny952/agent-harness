@@ -108,6 +108,35 @@ def test_a_null_limit_is_accepted(client, hive, state):
     assert len(pending(state)) == 3
 
 
+def test_a_floor_is_kept_on_the_run_and_carried_by_each_start(client, hive, state):
+    # The pool's floor (docs/plans/board-service.md): each start waits as
+    # `pool` while the primary account's free share is under it.
+    epic(hive)
+    res = start_epic(client, body={"project": "demo", "floor": 20})
+    assert res.status_code == 201, res.get_json()
+    assert res.get_json()["floor"] == 20
+    assert {r["params"]["floor"] for r in pending(state)} == {20}
+    assert actions.read_epic_run(state, "T-1")["floor"] == 20
+
+
+def test_without_a_floor_the_run_takes_the_default(client, hive, state):
+    epic(hive)
+    res = start_epic(client, body={"project": "demo", "floor": None})
+    assert res.status_code == 201
+    assert res.get_json()["floor"] is None
+    assert {actions.start_floor(r) for r in pending(state)} == {actions.DEFAULT_POOL_FLOOR_PCT}
+
+
+def test_a_single_start_takes_a_floor(client, hive, state):
+    task(hive, "T-2")
+    res = client.post("/api/tasks/T-2/start", json={"project": "demo", "floor": 0}, headers=AUTH)
+    assert res.status_code == 201, res.get_json()
+    assert pending(state)[0]["params"] == {"limit": None, "floor": 0}
+    bad = client.post("/api/tasks/T-2/start", json={"project": "demo", "floor": 101}, headers=AUTH)
+    assert bad.status_code == 400
+    assert "floor must be" in bad.get_json()["error"]
+
+
 def test_a_second_press_is_refused_and_writes_nothing(client, hive, state):
     epic(hive)
     assert start_epic(client).status_code == 201
@@ -158,6 +187,10 @@ def test_an_epic_with_no_task_in_ready_is_refused(client, hive, state):
     ({"project": "demo", "limit": "1000"}, "limit must be"),
     ({"project": "demo", "limit": 1.5}, "limit must be"),
     ({"project": "demo", "limit": True}, "limit must be"),
+    ({"project": "demo", "floor": 101}, "floor must be"),
+    ({"project": "demo", "floor": -1}, "floor must be"),
+    ({"project": "demo", "floor": "5"}, "floor must be"),
+    ({"project": "demo", "floor": 2.5}, "floor must be"),
     ({"project": "demo", "tasks": ["T-1-S1"]}, "unknown field 'tasks'"),
     ({"project": "demo", "note": 7}, "note"),
 ])

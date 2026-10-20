@@ -276,8 +276,8 @@ const BUSY_QUEUE: ActionQueue = {
 describe("projectCounts", () => {
   it("counts in_progress cards as running, and started tasks not in progress as waiting", () => {
     expect(Object.fromEntries(projectCounts(BUSY_TASKS, BUSY_QUEUE))).toEqual({
-      alpha: { running: 2, waiting: 1, waitingFor: { account: 0, project: 1 } },
-      beta: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } },
+      alpha: { running: 2, waiting: 1, waitingFor: { account: 0, project: 1, pool: 0 } },
+      beta: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0, pool: 0 } },
     });
   });
 
@@ -290,17 +290,24 @@ describe("projectCounts", () => {
         start("T-7", { project: "gamma", waiting: "account" }),
         start("T-8", { project: "gamma", waiting: "project" }),
         start("T-9", { project: "gamma", waiting: "something new" }),
+        start("T-10", { project: "gamma", waiting: "pool" }),
       ],
     };
     const gamma = projectCounts([], queue).get("gamma")!;
-    expect(gamma).toEqual({ running: 0, waiting: 4, waitingFor: { account: 1, project: 1 } });
-    expect(waitingTitle(gamma)).toBe("4 waiting: 1 for an account, 1 for the project, 2 other");
-    expect(waitingTitle({ running: 0, waiting: 2, waitingFor: { account: 0, project: 2 } })).toBe(
-      "2 waiting: 2 for the project",
+    expect(gamma).toEqual({
+      running: 0,
+      waiting: 5,
+      waitingFor: { account: 1, project: 1, pool: 1 },
+    });
+    expect(waitingTitle(gamma)).toBe(
+      "5 waiting: 1 for an account, 1 for the project, 1 for the pool, 2 other",
     );
-    expect(waitingTitle({ running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } })).toBe(
-      "1 waiting",
-    );
+    expect(
+      waitingTitle({ running: 0, waiting: 2, waitingFor: { account: 0, project: 2, pool: 0 } }),
+    ).toBe("2 waiting: 2 for the project");
+    expect(
+      waitingTitle({ running: 0, waiting: 1, waitingFor: { account: 0, project: 0, pool: 0 } }),
+    ).toBe("1 waiting");
   });
 
   it("takes a start's project from its record, else its task row, and counts a task once", () => {
@@ -311,8 +318,8 @@ describe("projectCounts", () => {
     };
     // T-7 has neither a record project nor a row: it names no project.
     expect(Object.fromEntries(projectCounts([task("T-9", { project: "beta" })], queue))).toEqual({
-      beta: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } },
-      gamma: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0 } },
+      beta: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0, pool: 0 } },
+      gamma: { running: 0, waiting: 1, waitingFor: { account: 0, project: 0, pool: 0 } },
     });
   });
 
@@ -321,7 +328,7 @@ describe("projectCounts", () => {
       ...EMPTY_QUEUE,
       pending: [start("T-203", { kind: "cancel" }), start("T-204")],
     };
-    const none = { account: 0, project: 0 };
+    const none = { account: 0, project: 0, pool: 0 };
     expect(projectCounts(BUSY_TASKS, queue).get("alpha")).toEqual({
       running: 2,
       waiting: 0,

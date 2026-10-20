@@ -165,6 +165,22 @@ describe("deriveSlots", () => {
     expect(v.waiting?.map(waitingText)).toEqual(["Queued — lane", "Queued"]);
   });
 
+  it("says waiting for the pool with the start's floor, or the default", () => {
+    const v = deriveSlots(
+      [account("a")],
+      [],
+      queue([
+        start("T-20", { waiting: "pool", params: { limit: null, floor: 20 } }),
+        start("T-21", { waiting: "pool" }),
+      ]),
+    );
+    expect(v.waiting?.[0]).toEqual({ taskId: "T-20", reason: "pool", detail: "its 20% floor" });
+    expect(v.waiting?.map(waitingText)).toEqual([
+      "Waiting for the pool — the primary account is under its 20% floor",
+      "Waiting for the pool — the primary account is under the default floor",
+    ]);
+  });
+
   it("names the task holding the project for a start waiting for the project", () => {
     const v = deriveSlots(
       [account("a"), account("b", { state: "BUSY", current_task_id: "T-12" })],

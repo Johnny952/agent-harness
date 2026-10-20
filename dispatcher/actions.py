@@ -40,7 +40,11 @@ WRITE_LOCK = "write.lock"
 VERSION = 1
 STATUSES = ("pending", "running", "done", "failed", "cancelled", "interrupted")
 FINAL = ("done", "failed", "cancelled", "interrupted")
-WAITING = (None, "project", "thread", "account")
+WAITING = (None, "project", "thread", "account", "pool")
+#: A start is not claimed while the primary account's free share is under its
+#: floor, in percent (the pool's floor). A start names its own in
+#: `params.floor`; null or absent is this.
+DEFAULT_POOL_FLOOR_PCT = 5
 VERDICTS = ("run", "deny", "allow")
 ID_RE = re.compile(r"a-\d{8}T\d{12}Z-[0-9a-f]{4}")
 
@@ -127,9 +131,11 @@ def _both_required(record: dict) -> list[str]:
 def _validate_start(record: dict) -> list[str]:
     problems = _both_required(record)
     params = record["params"]
-    problems += _extra_keys(params, ("limit", "thread", "turn", "epic"))
+    problems += _extra_keys(params, ("limit", "thread", "turn", "epic", "floor"))
     if params.get("limit") is not None:
         problems.append("params.limit must be null")
+    if not _floor_ok(params.get("floor")):
+        problems.append("params.floor must be null or a whole percent from 0 to 100")
     # A start queued by *Start epic* names the epic it was queued for (ADR 207).
     if "epic" in params and not _is_text(params["epic"], whitespace_ok=False):
         problems.append("params.epic must be a task id")
@@ -575,14 +581,16 @@ def _place(root: Path, records: list[dict]) -> None:
 # read by the console. It is not an action and the worker never reads it.
 #
 # `limit` is the epic's spending limit in measured tokens (ADR 79's count) or
-# null; `paused` is null or "limit_reached"; `queued` maps each task the run
-# queued a start for to `{"action", "usage_offset", "at"}`, the offset being
+# null; `floor` is the pool floor each of its starts carries, in percent, or
+# null for the default; `paused` is null or "limit_reached"; `queued` maps
+# each task the run queued a start for to `{"action", "usage_offset", "at"}`,
+# the offset being
 # the length of the task's usage log when it was first queued, so the run's
 # spend is what each task's log wrote after it.
 
 PAUSED_LIMIT = "limit_reached"
 RUN_FIELDS = (
-    "version", "epic", "project", "note", "actor", "limit", "started_at",
+    "version", "epic", "project", "note", "actor", "limit", "floor", "started_at",
     "stopped_at", "paused", "paused_at", "queued",
 )
 
@@ -642,6 +650,30 @@ def read_epic_run(state_dir, epic_id: str) -> dict | None:
     return _read_run(actions_dir(state_dir), epic_id)
 
 
+def _floor_ok(floor) -> bool:
+    return floor is None or (type(floor) is int and 0 <= floor <= 100)
+
+
+def check_floor(floor) -> None:
+    """A pool floor is null (the default) or a whole percent from 0 to 100."""
+    if not _floor_ok(floor):
+        raise ActionRefused(400, "floor must be null or a whole percent from 0 to 100")
+
+
+def start_floor(record: dict) -> int:
+    """The floor `record`, a start, waits on: its own, or the default."""
+    floor = (record.get("params") or {}).get("floor")
+    return DEFAULT_POOL_FLOOR_PCT if floor is None else floor
+
+
+def _start_params(epic_id: str, floor) -> dict:
+    """An epic run's start params; `floor` only when the run names one."""
+    params = {"limit": None, "epic": epic_id}
+    if floor is not None:
+        params["floor"] = floor
+    return params
+
+
 def check_limit(limit) -> None:
     """A spending limit is null or a whole number of measured tokens, at least 1."""
     if limit is not None and (type(limit) is not int or limit < 1):
@@ -659,6 +691,7 @@ def start_epic_run(
     offset: Callable[[str], int],
     spent: Callable[[dict], int],
     limit=None,
+    floor=None,
     note=None,
     actor: str = "operator",
     ready: Callable[[str, str], bool] | None = None,
@@ -674,9 +707,11 @@ def start_epic_run(
     already spent (`spent(run)`, its measured tokens so far) is refused with
     409. A task the run queued before keeps its usage offset, so a resumed
     run's spend counts from its first start. `offset(task_id)` is the length of
-    the task's usage log now.
+    the task's usage log now. `floor` is the run's pool floor, null for the
+    default; like the limit, each press sets it, and each start carries it.
     """
     check_limit(limit)
+    check_floor(floor)
     root = ensure_dirs(state_dir)
     with _write_locked(root):
         run = _read_run(root, epic_id)
@@ -706,14 +741,14 @@ def start_epic_run(
         if len(set(task_ids)) != len(task_ids):
             raise ActionRefused(400, "a task is named more than once")
         records = [
-            _new_record("start", project, tid, {"limit": None, "epic": epic_id}, actor, note)
+            _new_record("start", project, tid, _start_params(epic_id, floor), actor, note)
             for tid in task_ids
         ]
         for record in records:
             _refuse_locked(root, record, ready)
         _place(root, records)
         run.update(
-            project=project, note=note, actor=actor, limit=limit,
+            project=project, note=note, actor=actor, limit=limit, floor=floor,
             stopped_at=None, paused=None, paused_at=None,
         )
         _note_queued(run, records, offset)
@@ -768,7 +803,7 @@ def follow_epic_run(
         busy = {e.record.get("task_id") for e in held if e.record.get("kind") == "start"}
         records = [
             _new_record(
-                "start", run.get("project"), tid, {"limit": None, "epic": epic_id},
+                "start", run.get("project"), tid, _start_params(epic_id, run.get("floor")),
                 run.get("actor") or "operator", run.get("note"),
             )
             for tid in candidates()

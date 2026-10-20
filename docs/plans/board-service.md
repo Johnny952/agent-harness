@@ -379,8 +379,13 @@ at the limit nothing new is queued and the epic shows *Paused: limit
 reached* with *Resume epic*, which asks a new limit. The prefill from
 past cycles is built the same day (ADR 220), from the epic's own merged
 tasks' usage logs; the project's median waits on `token-economy.md` P4.
-Not built: the per-task limit and `budget_reached`, the pool's floor, and
-the notification.
+The pool's floor is built the same day (ADR NNN): the floor is measured on
+the primary account only, its free share is 100 minus the tighter of the
+session and week windows, read through the picker's own `/usage` probe, and
+the default is 5%, which a start or *Start epic* may override with `floor`.
+A start under it waits as `pool` before it is claimed; an unreadable reading
+fails open. Not built: the per-task limit and `budget_reached`, a floor
+field in the console's start dialogs, and the notification.
 
 ### 5. The service
 

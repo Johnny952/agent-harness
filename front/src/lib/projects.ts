@@ -146,10 +146,11 @@ export interface ProjectCounts {
   waiting: number | null;
   /**
    * Of `waiting`, the pending starts the worker marked as waiting for an
-   * account or for the project (the record's `waiting`, ADR 204); the rest
-   * carry no reason. Both zero when the queue was not read.
+   * account, for the project or for the pool (the record's `waiting`, ADR 204,
+   * and the pool's floor); the rest carry no reason. All zero when the queue
+   * was not read.
    */
-  waitingFor: { account: number; project: number };
+  waitingFor: { account: number; project: number; pool: number };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -183,7 +184,11 @@ export function projectCounts(tasks: readonly Task[], queue: unknown): Map<strin
   const entry = (slug: string): ProjectCounts => {
     let c = counts.get(slug);
     if (!c) {
-      c = { running: 0, waiting: counted ? 0 : null, waitingFor: { account: 0, project: 0 } };
+      c = {
+        running: 0,
+        waiting: counted ? 0 : null,
+        waitingFor: { account: 0, project: 0, pool: 0 },
+      };
       counts.set(slug, c);
     }
     return c;
@@ -218,7 +223,7 @@ export function projectCounts(tasks: readonly Task[], queue: unknown): Map<strin
       c.waiting = (c.waiting ?? 0) + 1;
       // The worker's word, read on a pending record only, as `deriveSlots` reads it.
       const why = state === "pending" ? r["waiting"] : null;
-      if (why === "account" || why === "project") c.waitingFor[why] += 1;
+      if (why === "account" || why === "project" || why === "pool") c.waitingFor[why] += 1;
     }
   }
   return counts;
@@ -231,11 +236,12 @@ export function projectCounts(tasks: readonly Task[], queue: unknown): Map<strin
  */
 export function waitingTitle(c: ProjectCounts): string {
   const n = c.waiting ?? 0;
-  const { account, project } = c.waitingFor;
-  const other = n - account - project;
+  const { account, project, pool } = c.waitingFor;
+  const other = n - account - project - pool;
   const parts = [
     account > 0 ? `${account} for an account` : null,
     project > 0 ? `${project} for the project` : null,
+    pool > 0 ? `${pool} for the pool` : null,
     other > 0 && other < n ? `${other} other` : null,
   ].filter((p): p is string => p !== null);
   return parts.length === 0 ? `${n} waiting` : `${n} waiting: ${parts.join(", ")}`;

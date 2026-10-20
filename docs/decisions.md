@@ -12545,3 +12545,67 @@ anything, so what a build or a run would show is still unknown.
 - Making the mount writable for the agents so a missing browser downloads
   itself: a phase would then install browsers, and a version mismatch would
   go silent.
+
+## ADR NNN — A start waits for the pool while the primary account is under its floor
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's
+session; the pool's floor of `docs/plans/board-service.md` (*A floor on the
+pool*) and `docs/plans/projects.md` step 3.
+
+**Context.** The plan has either start say "stop queuing when the pool's free
+share drops under N%", read from `/usage` as the picker reads it, so quota is
+kept for the conversation and the reviews. It left open what the pool's free
+share counts. The user decided on 2026-10-20: the primary account only, 5% by
+default, free as 100 minus usage read the way the picker reads it, the
+tighter of session and week, and the primary taken from config and state,
+never hardcoded.
+
+**Decision.**
+1. The picker's `/usage` probe is factored out as `_read_usage(cfg, account)`
+   in `dispatcher/dispatcher.py`, returning what it saw (`exec_failed`,
+   `refused`, `auth`, `unparsed` or `usage`) with its payload.
+   `check_quota_ok` is rebuilt on it with its behaviour unchanged, so there is
+   one reader, not two.
+2. `primary_free_pct(cfg)` names the primary through `refresh_primary(cfg)`,
+   as the picker does, and returns `max(0, 100 - max(session, week))`: the
+   tighter window wins. A rate-limit refusal reads as 0. With no primary
+   there is no floor. It writes no state: parking the primary stays the
+   picker's job.
+3. Unreadable usage (the exec fails, the output does not parse, auth fails)
+   fails open with a warning in the log, as `check_quota_ok` does: a start is
+   never held on a reading the harness could not make.
+4. The default is `DEFAULT_POOL_FLOOR_PCT = 5` in `dispatcher/actions.py`,
+   in code, not `config.yaml`. A start's `params.floor` overrides it, an
+   integer from 0 to 100 or null for the default; a bool or anything else is
+   refused. `POST /api/tasks/<id>/start` and `POST /api/epics/<id>/start` take
+   `floor`; the epic run stores it and each start it queues, the follow-ons
+   included, carries it.
+5. The worker checks it at claim time in `_consider`, after the serial key,
+   the project lock and the account gate, for `start` records only: a verdict,
+   a turn or a setup is never held. Under the floor the start stays pending
+   with `waiting: "pool"` and is claimed once the free share is back at the
+   floor. The reading is cached for `account_poll` seconds, so a queue of
+   starts costs one probe per poll, not one per record.
+6. The wait is logged once per transition: "start <id> waits for the pool: the
+   primary account has N% free, under its floor of M%". The console names it
+   as the sidebar names the other reasons (ADR 220): the dock reads "Waiting
+   for the pool — the primary account is under its 20% floor" (or "the
+   default floor"), and the project's waiting mark counts "N for the pool".
+
+**Consequences.**
+- The picker already parks the primary at `reserve_pct` for phases; the floor
+  is a different guard, holding starts before they are claimed, so a cycle
+  is not begun on quota the conversation needs.
+- `_recheck_cooling_accounts` is untouched.
+- The console's start and *Start epic* dialogs have no floor field yet: a
+  floor other than the default is set through the api.
+
+**Ruled out.**
+- A second `/usage` reader for the floor: two readers drift apart.
+- Summing the free share over every account: the worker accounts' quota is
+  spent by phases anyway; the floor keeps the primary's, the one the
+  conversation runs on.
+- Failing closed on an unreadable reading: a broken probe would stop every
+  start, and the picker already fails open.
+- The default in `config.yaml`: a start already carries its own, and the
+  config is not this change's to touch.
