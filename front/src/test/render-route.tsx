@@ -35,8 +35,15 @@ import {
 } from "@tanstack/react-router";
 import { vi } from "vitest";
 
-/** One answer: `{data, warnings}`, or a refusal with its status. */
-export type Answer = { data: unknown; warnings?: string[] } | { status: number; error: string };
+/**
+ * One answer: `{data, warnings}`, or a refusal with its status, or `{bare, status}`
+ * — a body answered as it is, for a board-service write that answers its record
+ * with no envelope (`POST /api/threads`, ADR 195).
+ */
+export type Answer =
+  | { data: unknown; warnings?: string[] }
+  | { status: number; error: string }
+  | { bare: unknown; status: number };
 
 /**
  * What `observability/api/` serves: `{data, warnings}`, keyed by the path asked for.
@@ -85,6 +92,9 @@ function stubApi(served: Served, sent: Sent[]) {
         status: 404,
         headers,
       });
+    }
+    if ("bare" in body) {
+      return new Response(JSON.stringify(body.bare), { status: body.status, headers });
     }
     if ("status" in body) {
       return new Response(JSON.stringify({ error: body.error }), { status: body.status, headers });

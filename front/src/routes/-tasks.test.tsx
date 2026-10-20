@@ -20,7 +20,8 @@ import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/re
 import { toast } from "sonner";
 import { Route } from "./tasks.$taskId";
 import { renderRoute, type Served } from "@/test/render-route";
-import type { Task, TaskComment, TaskDetail } from "@/lib/api/types";
+import type { Task, TaskComment, TaskDetail, Thread } from "@/lib/api/types";
+import { OPEN_THREAD_EVENT } from "@/hooks/use-console";
 
 // `renderRoute` draws no Toaster, so the toast is asserted at its call.
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -499,6 +500,67 @@ describe("the comment form", () => {
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("the text is blank")),
     );
+  });
+});
+
+describe("talk about this task (ADR 195)", () => {
+  const THREAD: Thread = {
+    id: "t-9",
+    title: "T-101: the dock",
+    project: "ia-harness",
+    account: "cuenta1",
+    model: "opus",
+    effort: "high",
+    segments: [],
+    created: "2026-10-19T00:00:00+00:00",
+    status: "open",
+    task: "T-101",
+  };
+
+  it("creates a thread with the task and opens the dock on it", async () => {
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener(OPEN_THREAD_EVENT, onOpen);
+    try {
+      const { sent } = await taskPage({ ...TASK, title: "the dock" }, [], undefined, {
+        "POST /api/threads": { bare: THREAD, status: 201 },
+        "/api/threads": { data: [] },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "Talk about this task" }));
+      await waitFor(() => expect(opened).toEqual(["t-9"]));
+      expect(sent.filter((s) => s.method === "POST")).toEqual([
+        { method: "POST", path: "/api/threads", body: { title: "T-101: the dock", task: "T-101" } },
+      ]);
+    } finally {
+      window.removeEventListener(OPEN_THREAD_EVENT, onOpen);
+    }
+  });
+
+  it("titles the thread with the id alone when the task has no title", async () => {
+    const { sent } = await taskPage(TASK, [], undefined, {
+      "POST /api/threads": { bare: THREAD, status: 201 },
+      "/api/threads": { data: [] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Talk about this task" }));
+    await waitFor(() => expect(sent.some((s) => s.method === "POST")).toBe(true));
+    expect(sent.find((s) => s.method === "POST")?.body).toEqual({ title: "T-101", task: "T-101" });
+  });
+
+  it("shows a refusal by the button and opens nothing", async () => {
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener(OPEN_THREAD_EVENT, onOpen);
+    try {
+      await taskPage(TASK, [], undefined, {
+        "POST /api/threads": { status: 400, error: "task 'T-101' has no task file" },
+        "/api/threads": { data: [] },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "Talk about this task" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("has no task file");
+      expect(opened).toEqual([]);
+    } finally {
+      window.removeEventListener(OPEN_THREAD_EVENT, onOpen);
+    }
   });
 });
 

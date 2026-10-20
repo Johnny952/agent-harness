@@ -13,8 +13,8 @@ as a whole; step 1 is built: the thread records and the model list by T-109
 T-110 (2026-10-19, ADR 173); step 4, the screen read-only, is built by T-111
 (2026-10-19, ADR 184); step 5's board-service route is built by T-112
 (2026-10-19, ADR 181) and its composer and stop button by T-114
-(2026-10-20, ADR 190), and the session seeding on 2026-10-20 (ADR 194), with
-*Talk about this task* still open; step 6 is built by T-113 (2026-10-20, ADR 187).
+(2026-10-20, ADR 190), the session seeding on 2026-10-20 (ADR 194), and the
+thread writes with *Talk about this task* on 2026-10-20 (ADR 195); step 6 is built by T-113 (2026-10-20, ADR 187).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -280,8 +280,10 @@ and worker.
    `cancelAction`. What seeds a new session is built (ADR 194): a fresh
    session of a thread on a task gets its description, latest start note and
    handoff trail in front of the first message, within `TURN_SEED_MAX_CHARS`,
-   logged as `turn_start.seed`. *Talk about this task* is not built: it needs
-   a write that makes a thread.
+   logged as `turn_start.seed`. *Talk about this task* is built (ADR 195):
+   the task page creates a thread with `task` set and opens the dock on it,
+   and the dock creates, renames, re-picks and archives threads (never
+   `main`).
 6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`). Built
    by T-113 (2026-10-20, ADR 187): the thread role's `task_start` queues a
    `start` inside a running turn whose message names the task, and the turn
@@ -289,8 +291,8 @@ and worker.
    line to its task and its action is built by T-114 (ADR 190, 8).
 7. The execution threads and the selector's slots (*Decisions*, 8). They read
    what the phases already write, so they need board Phase 5's transport and
-   `projects.md`'s slots, not the composer. *Talk about this task* comes with
-   step 5.
+   `projects.md`'s slots, not the composer. *Talk about this task* is built
+   with step 5 (ADR 195).
 
 ## Open questions
 

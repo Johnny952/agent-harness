@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
@@ -23,6 +23,7 @@ import { CommentThread } from "@/components/console/task-comments";
 import { EpicView } from "@/components/console/task-epic";
 import {
   commentsQuery,
+  createThreadMutation,
   debtQuery,
   learningsQuery,
   phasesQuery,
@@ -43,7 +44,7 @@ import {
   gateTone,
   roleColorVar,
 } from "@/lib/format";
-import { useNow } from "@/hooks/use-console";
+import { openThread, useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/tasks/$taskId")({
@@ -63,6 +64,43 @@ export const Route = createFileRoute("/tasks/$taskId")({
   }),
   component: TaskDetailPage,
 });
+
+/**
+ * *Talk about this task* (ADR 195): `POST /api/threads` with `task` set to this
+ * task's id, then the dock opens on the thread the service answered. The account,
+ * model and effort are the service's defaults. What the thread's session is first
+ * told about the task is the worker's, not this button's. A refusal is shown here.
+ */
+function TalkAboutTask({ taskId, title }: { taskId: string; title: string }) {
+  const qc = useQueryClient();
+  const create = useMutation(createThreadMutation(qc));
+  const [problem, setProblem] = useState<string | null>(null);
+  return (
+    <span className="flex items-center gap-2">
+      {problem && (
+        <span role="alert" className="max-w-xs text-[11px] text-destructive">
+          {problem}
+        </span>
+      )}
+      <button
+        disabled={create.isPending}
+        onClick={() => {
+          setProblem(null);
+          create.mutate(
+            { title: (title ? `${taskId}: ${title}` : taskId).slice(0, 200), task: taskId },
+            {
+              onSuccess: (record) => openThread(record.id),
+              onError: (e) => setProblem(e instanceof Error ? e.message : String(e)),
+            },
+          );
+        }}
+        className="rounded-sm border border-border px-2 py-0.5 text-[11px] hover:bg-surface-2 disabled:opacity-50"
+      >
+        {create.isPending ? "Opening…" : "Talk about this task"}
+      </button>
+    </span>
+  );
+}
 
 function TaskDetailPage() {
   const { taskId } = Route.useParams();
@@ -137,7 +175,15 @@ function TaskDetailPage() {
       <PageHeader
         title={taskId}
         subtitle={subtitle}
-        right={<RefreshedAt at={task.dataUpdatedAt} />}
+        right={
+          <div className="flex items-center gap-3">
+            <TalkAboutTask
+              taskId={taskId}
+              title={t && typeof t.title === "string" ? t.title : ""}
+            />
+            <RefreshedAt at={task.dataUpdatedAt} />
+          </div>
+        }
       />
 
       <WarningBanner warnings={warnings} />

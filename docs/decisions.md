@@ -10718,3 +10718,66 @@ task file or the note the person gave when starting the task.
   themselves.
 - Failing the turn on an unreadable part: the seed is a convenience.
 - Logging only a size or a hash: it would not show what the model was told.
+
+## ADR 195 — The dock creates, renames, re-picks and archives threads; the task page talks about a task
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** The dock could read threads, send turns and stop them (ADR 184,
+190), but nothing in the console opened, renamed, re-picked or archived a
+thread, and `docs/plans/main-thread.md` step 5's *Talk about this task* was not
+built. The board service already has `POST /api/threads` (201 with the record)
+and `PATCH /api/threads/<id>` (200), with no bearer (ADR 170): the title is
+required and at most 200 characters, `task` must name a task file that exists,
+`main: true` makes the id `main`, `main` cannot be archived, and account, model
+and effort fall back to the primary account, its default thread model and
+`default_effort`. The front holds no list of models per account.
+
+**Decision.**
+1. The forward carries `POST /api/threads` and `PATCH /api/threads/<id>` to the
+   board service, matched by method and path before the read-only check, with
+   the CSRF checks of the other board writes and no bearer. The `PATCH` id is
+   checked against `THREAD_ID` as a turn's is; `GET /api/threads` stays the
+   api's list. `forward.test.ts` covers both pairs and their refusals.
+2. `client.ts` gains `createThread` and `updateThread`, bare like `sendTurn`;
+   `queries.ts` gains their mutations, which put the answered record into the
+   cached `["threads"]` list so the dock can select a new thread before the
+   refetch, and refetch the list either way.
+3. *New thread* in the dock takes a title, an optional account (from
+   `/api/accounts`) and an optional effort; *the main thread* is offered only
+   when no `main` exists. The model is the account's default.
+4. *Edit* changes the title, model and effort and sends only the keys that
+   changed; the model is typed, since the front has no list of models.
+5. *Archive* and *Reopen* send the status. `main` has neither. Archived threads
+   stay listed and marked.
+6. A refused create or edit shows in its form and keeps what was typed; a
+   refused archive or reopen shows by the composer.
+7. `openThread(id)` (`hooks/use-console.ts`) sends `OPEN_THREAD_EVENT`, a window
+   event like `FOCUS_SEARCH_EVENT`; `AppShell` opens the dock and passes
+   `select={threadId, n}`, where `n` counts the asks so the same thread can be
+   selected again.
+8. The task page's *Talk about this task* creates a thread with `task` set to
+   the task's id, titled `"<id>: <title>"` cut to 200 characters (the id alone
+   when there is no title), and opens the dock on it. A refusal shows next to
+   the button. What the new session is first told is the worker's (ADR 194).
+9. `EFFORT_LEVELS` moves to `types.ts`, shared by the Models screen and the
+   dock.
+
+**Consequences.**
+- A thread's lifecycle is handled in the console, and any screen can open the
+  dock on a thread with one call.
+- Each click of *Talk about this task* makes a new thread; an open one on the
+  same task is not reused.
+- A mistyped model is caught only by the board service's refusal.
+- Changing an existing thread's account still needs another client.
+- The test helper `render-route.tsx` answers `{bare, status}` for writes whose
+  answer has no envelope.
+
+**Ruled out.**
+- A React context or store to reach the dock: the window event needs no
+  provider and follows `FOCUS_SEARCH_EVENT`.
+- A model list in the front: it would drift from the account settings the
+  board service reads.
+- Changing the account in *Edit*: kept to title, model and effort.
+- Waiting for the refetch before selecting a new thread: the selector would sit
+  on the wrong thread for one poll.

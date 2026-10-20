@@ -17,7 +17,7 @@ import {
   Server,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { FOCUS_SEARCH_EVENT } from "@/hooks/use-console";
+import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
 import { actionBackendQuery } from "@/lib/api/queries";
 import { ChatPanel } from "./chat-panel";
 import { Kbd } from "./primitives";
@@ -41,8 +41,22 @@ export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [chatOpen, setChatOpen] = useState(false);
+  // The thread a screen asked the dock to show (`openThread`, ADR 195). `n`
+  // counts the asks, so asking for the same thread twice selects it again.
+  const [chatSelect, setChatSelect] = useState<{ threadId: string; n: number } | null>(null);
   const [pendingG, setPendingG] = useState(false);
   const { data: backendUp } = useQuery(actionBackendQuery);
+
+  useEffect(() => {
+    function onOpen(e: Event) {
+      const threadId = (e as CustomEvent<unknown>).detail;
+      if (typeof threadId !== "string" || !threadId) return;
+      setChatSelect((s) => ({ threadId, n: (s?.n ?? 0) + 1 }));
+      setChatOpen(true);
+    }
+    window.addEventListener(OPEN_THREAD_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_THREAD_EVENT, onOpen);
+  }, []);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -140,7 +154,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       </main>
 
-      {chatOpen && <ChatPanel onClose={() => setChatOpen(false)} />}
+      {chatOpen && <ChatPanel onClose={() => setChatOpen(false)} select={chatSelect} />}
     </div>
   );
 }

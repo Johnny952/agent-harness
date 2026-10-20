@@ -285,12 +285,15 @@ describe("the thread reads", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("answers a write on a thread path itself: GET is all it forwards", async () => {
+  it("answers a write on a thread path the board pairs do not take", async () => {
+    // `POST /api/threads` and `PATCH /api/threads/<id>` are board pairs (ADR 195),
+    // tested with them below; every other write here is still the 405.
     const fetchMock = stubApi();
     for (const [method, path] of [
-      ["POST", "/api/threads"],
       ["PATCH", "/api/threads"],
-      ["PATCH", "/api/threads/main"],
+      ["PUT", "/api/threads"],
+      ["DELETE", "/api/threads/main"],
+      ["POST", "/api/threads/main"],
       ["POST", "/api/threads/main/events"],
     ] as const) {
       const answer = await forwardApiRequest(get(path, { method, body: "{}" }));
@@ -966,6 +969,135 @@ describe("the board-service turn route", () => {
   });
 });
 
+/** The eighth and ninth board pairs (ADR 195): making and changing a thread record. */
+describe("the board-service thread records", () => {
+  function write(path: string, body: string, method = "POST", headers = {}): Request {
+    return get(path, {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  const ORDINARY = "th-20261019T100000Z-abcdef";
+
+  function sent(fetchMock: ReturnType<typeof stubApi>) {
+    const init = fetchMock.mock.calls[0]![1]!;
+    return {
+      method: init.method,
+      headers: init.headers,
+      body: new TextDecoder().decode(init.body as ArrayBuffer),
+    };
+  }
+
+  it("forwards a create with no bearer, body unchanged", async () => {
+    const fetchMock = stubApi('{"id":"th-x"}', 201);
+    const body = '{"title":"About T-014","task":"T-014"}';
+    const answer = await forwardApiRequest(write("/api/threads", body));
+    expect(answer?.status).toBe(201);
+    expect(await answer!.text()).toBe('{"id":"th-x"}');
+    expect(target(fetchMock)).toBe(`${BOARD}/api/threads`);
+    expect(sent(fetchMock)).toEqual({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  });
+
+  it.each(["main", ORDINARY])("forwards a PATCH of %s with no bearer", async (id) => {
+    const fetchMock = stubApi('{"id":"x"}', 200);
+    const body = '{"status":"archived"}';
+    const answer = await forwardApiRequest(write(`/api/threads/${id}`, body, "PATCH"));
+    expect(answer?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/threads/${id}`);
+    expect(sent(fetchMock)).toEqual({
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+  });
+
+  it.each([400, 404, 409, 503])("passes the route's %s and its message back", async (status) => {
+    for (const request of [
+      write("/api/threads", '{"title":"x"}'),
+      write("/api/threads/main", '{"status":"archived"}', "PATCH"),
+    ]) {
+      stubApi('{"error":"nope"}', status);
+      const answer = await forwardApiRequest(request);
+      expect(answer?.status).toBe(status);
+      expect(await answer!.json()).toEqual({ error: "nope" });
+      vi.restoreAllMocks();
+    }
+  });
+
+  it.each([
+    ["POST", "/api/threads"],
+    ["PATCH", "/api/threads/main"],
+  ])("answers the CSRF refusals on %s %s first", async (method, path) => {
+    const fetchMock = stubApi();
+    expect(
+      (await forwardApiRequest(write(path, "{}", method, { "content-type": "text/plain" })))
+        ?.status,
+    ).toBe(415);
+    expect(
+      (await forwardApiRequest(write(path, "{}", method, { "sec-fetch-site": "cross-site" })))
+        ?.status,
+    ).toBe(403);
+    expect(
+      (await forwardApiRequest(write(path, "{}", method, { origin: "http://evil.test" })))?.status,
+    ).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["th-bogus", "main2", "MAIN", "%zz", "a%2Fb", "th-20261019T100000Z-ABCDEF"])(
+    "404s a PATCH of the id %s, sending nothing",
+    async (id) => {
+      const fetchMock = stubApi();
+      const answer = await forwardApiRequest(write(`/api/threads/${id}`, "{}", "PATCH"));
+      expect(answer?.status).toBe(404);
+      expect(typeof (await answer!.json()).error).toBe("string");
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("leaves every other method on the paths as it was", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/threads/main")))?.status).toBe(404);
+    for (const [method, path] of [
+      ["PUT", "/api/threads/main"],
+      ["DELETE", "/api/threads/main"],
+      ["POST", "/api/threads/main"],
+      ["PATCH", "/api/threads"],
+      ["DELETE", "/api/threads"],
+    ] as const) {
+      const answer = await forwardApiRequest(write(path, "{}", method));
+      expect(answer?.status, `${method} ${path}`).toBe(405);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+
+    // The list is still the api's read.
+    const api = stubApi("[]");
+    expect((await forwardApiRequest(get("/api/threads")))?.status).toBe(200);
+    expect(target(api)).toBe(`${BASE}/api/threads`);
+  });
+
+  it("413s a record body over 64 KiB", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(
+      write("/api/threads", JSON.stringify({ title: "y".repeat(70 * 1024) })),
+    );
+    expect(answer?.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 /** ADR 157's two 503s, each under a second mock of `server-env.ts`. */
 describe("the action routes without their configuration", () => {
   async function configured(overrides: Record<string, unknown>) {
@@ -1015,6 +1147,22 @@ describe("the action routes without their configuration", () => {
     expect(answer?.status).toBe(415);
     expect((await forward(post("/api/tasks/T-014/accept")))?.status).toBe(200);
     expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/T-014/accept`);
+  });
+
+  it("forwards the thread-record writes without the token (ADR 195)", async () => {
+    const forward = await configured({ BOARD_ACTIONS_TOKEN: null, CONSOLE_PROJECT: null });
+    const fetchMock = stubApi('{"id":"th-x"}', 201);
+    expect((await forward(post("/api/threads")))?.status).toBe(201);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/threads`);
+    vi.restoreAllMocks();
+    const patched = stubApi();
+    const patch = get("/api/threads/main", {
+      method: "PATCH",
+      body: "{}",
+      headers: { "content-type": "application/json" },
+    });
+    expect((await forward(patch))?.status).toBe(200);
+    expect(target(patched)).toBe(`${BOARD}/api/threads/main`);
   });
 
   it("503s a turn without the token, and needs no CONSOLE_PROJECT", async () => {
