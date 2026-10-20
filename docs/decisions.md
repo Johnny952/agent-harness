@@ -12607,3 +12607,66 @@ fire on every poll and on states that are not dry.
   the two writes.
 - Checking the pool after the park, outside its lock: two accounts parked
   at the same moment could both see the other parked and write two records.
+## ADR 225 — The inbox is polled and its read state is a per-browser marker
+
+**Status:** accepted (2026-10-20). Written by a subagent of the operator's
+session; the console half of step 2 of `docs/plans/notifications.md`. Builds
+on **ADR 221**, whose route it reads, and leaves it as written.
+
+**Context.** ADR 221 serves the newest 500 notification records at
+`GET /api/notifications`, newest first, as `{data, warnings}`. The plan wants
+an inbox with an unread count. "Read" needs someone who read it, and the
+console has no users: no login, no person id, nothing on the server to hang a
+read flag on.
+
+**Decision.**
+1. The forward whitelist (`front/src/lib/api/forward.ts`) serves
+   `/api/notifications` with no params and no project, GET only. It is the
+   twenty-first forwarded route.
+2. `listNotifications()` in `client.ts` and `notificationsQuery` in
+   `queries.ts` read it, polled at twice `POLL_MS` (five seconds). A
+   notification is news, not a live view, and the sidebar reads it on every
+   screen.
+3. `/notifications` (the sidebar's Inbox, `g i`) lists the records newest
+   first. Each row links to its `url` when that is a console path (it starts
+   with `/` and not `//`); any other url is shown and not followed. The four
+   kinds that need the person (awaiting review, conflict, command request,
+   blocked) are marked in the warning colour. The page has a loading line, an
+   empty state, and an error state for a failed read or a null `data`, with
+   the api's warnings above it.
+4. **Read state is per browser until the console has users.** It is one
+   marker in `localStorage` (`ia-harness.notifications-seen`): the id of the
+   newest record the inbox has shown. A record is unread when its id is
+   greater. Ids sort as written (`n-<UTC timestamp to the microsecond>Z-<hex>`),
+   so the comparison is a string one and needs no clock. With no marker,
+   every record is unread. Opening the inbox moves the marker to the newest
+   record. It never moves back, an empty or failed read leaves it alone, and
+   there is no per-record toggle. The rows that were new when the page opened
+   stay marked while it is open.
+5. The sidebar's Inbox entry shows the unread count, capped at `99+`, and
+   nothing at zero or when the read fails. It follows the marker through a
+   window event that this page fires and the `storage` event that other tabs
+   fire.
+6. Every storage read and write is in a try/catch. Blocked storage reads as
+   no marker and remembers nothing, and the inbox still works.
+
+**Consequences.**
+- Another browser, a private window or cleared site data counts every record
+  as unread. The inbox's subtitle says read state is kept in this browser.
+- The api is unchanged and knows nothing of read state. When the console has
+  users, the marker moves to the server, per user, and this ADR is
+  superseded; the id comparison carries over.
+- Every screen now reads `/api/notifications` through the sidebar. The tests
+  that count a screen's reads (`-models`, `-approvals`, `-approvals.review`)
+  set it aside with the sidebar's other reads.
+- The push (step 3), the service worker (step 4) and the settings are not
+  started.
+
+**Ruled out.**
+- Read state on the server now: it needs a person to key it on, and one
+  shared flag would mark a record read for every browser once anyone opened
+  the inbox.
+- A read flag per record in `localStorage`: it grows with the file, and the
+  ids already order the records, so one marker says the same.
+- Marking read on hover or per click: more state for the same answer to "is
+  there anything new", which is all the count is for.

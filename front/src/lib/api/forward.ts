@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Twenty console paths map one-to-one
- * onto twenty api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Twenty-one console paths map one-to-one
+ * onto twenty-one api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose twenty routes, count and
+ * deliberately not entries of `FORWARDED`, whose twenty-one routes, count and
  * rejection message describe the api alone.
  *
  * **Fourteen method and path pairs go to the board-service** (`docs/decisions.md`
@@ -94,6 +94,10 @@ const FORWARDED: Record<string, readonly string[]> = {
   // The action queue (`docs/decisions.md` ADR 142, T-103). Hive-wide like
   // `/api/ready`, so no `?project=` is added and none of the browser's is copied.
   "/api/actions": ["limit"],
+  // The inbox (`docs/decisions.md` ADR 221, `docs/plans/notifications.md`
+  // step 2). Hive-wide like `/api/ready`, and the api takes no parameter, so
+  // nothing is copied and no `?project=` is added.
+  "/api/notifications": [],
   // The thread list (`docs/decisions.md` ADR 177, ADR 184). Hive-wide like
   // `/api/actions`, and the api takes no parameter here at all, so nothing is
   // copied and no `?project=` is added. Only the `GET`: `POST /api/threads` is
@@ -989,7 +993,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the twenty.
+      // `%zz` and friends. A path the console cannot read is not one of the twenty-one.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -1004,7 +1008,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the twenty routes the console forwards.`,
+      error: `${path} is not one of the twenty-one routes the console forwards.`,
     };
   }
 

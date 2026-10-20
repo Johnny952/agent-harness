@@ -195,10 +195,17 @@ describe("the command-request card", () => {
     );
     // `/api/projects` and `/api/tasks` are the sidebar's project list and its
     // fallback (ADR 208, ADR 209) and the review's list (ADR 219), and
-    // `/api/actions` its waiting counts (ADR 217), not this screen's.
+    // `/api/actions` its waiting counts (ADR 217), and `/api/notifications` its
+    // inbox count (ADR 225), not this screen's.
     const urls = fetchMock.mock.calls
       .map((c) => String(c[0]))
-      .filter((u) => u !== "/api/tasks" && u !== "/api/projects" && !u.startsWith("/api/actions"));
+      .filter(
+        (u) =>
+          u !== "/api/tasks" &&
+          u !== "/api/projects" &&
+          u !== "/api/notifications" &&
+          !u.startsWith("/api/actions"),
+      );
     expect(urls.every((u) => u.startsWith("/api/command-requests"))).toBe(true);
     for (const call of fetchMock.mock.calls) {
       expect((call[1]?.method ?? "GET").toUpperCase()).toBe("GET");

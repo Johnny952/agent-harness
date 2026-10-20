@@ -15,6 +15,7 @@ import { Route as BacklogRouteImport } from './routes/backlog'
 import { Route as DebtRouteImport } from './routes/debt'
 import { Route as LearningsRouteImport } from './routes/learnings'
 import { Route as ModelsRouteImport } from './routes/models'
+import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as PoolRouteImport } from './routes/pool'
 import { Route as QueueRouteImport } from './routes/queue'
 import { Route as RoadmapRouteImport } from './routes/roadmap'
@@ -58,6 +59,11 @@ const LearningsRoute = LearningsRouteImport.update({
 const ModelsRoute = ModelsRouteImport.update({
   id: '/models',
   path: '/models',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NotificationsRoute = NotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PoolRoute = PoolRouteImport.update({
@@ -138,6 +144,7 @@ export interface FileRoutesByFullPath {
   '/debt': typeof DebtRoute
   '/learnings': typeof LearningsRoute
   '/models': typeof ModelsRoute
+  '/notifications': typeof NotificationsRoute
   '/pool': typeof PoolRoute
   '/queue': typeof QueueRoute
   '/roadmap': typeof RoadmapRoute
@@ -160,6 +167,7 @@ export interface FileRoutesByTo {
   '/debt': typeof DebtRoute
   '/learnings': typeof LearningsRoute
   '/models': typeof ModelsRoute
+  '/notifications': typeof NotificationsRoute
   '/pool': typeof PoolRoute
   '/queue': typeof QueueRoute
   '/roadmap': typeof RoadmapRoute
@@ -183,6 +191,7 @@ export interface FileRoutesById {
   '/debt': typeof DebtRoute
   '/learnings': typeof LearningsRoute
   '/models': typeof ModelsRoute
+  '/notifications': typeof NotificationsRoute
   '/pool': typeof PoolRoute
   '/queue': typeof QueueRoute
   '/roadmap': typeof RoadmapRoute
@@ -207,6 +216,7 @@ export interface FileRouteTypes {
     | '/debt'
     | '/learnings'
     | '/models'
+    | '/notifications'
     | '/pool'
     | '/queue'
     | '/roadmap'
@@ -229,6 +239,7 @@ export interface FileRouteTypes {
     | '/debt'
     | '/learnings'
     | '/models'
+    | '/notifications'
     | '/pool'
     | '/queue'
     | '/roadmap'
@@ -251,6 +262,7 @@ export interface FileRouteTypes {
     | '/debt'
     | '/learnings'
     | '/models'
+    | '/notifications'
     | '/pool'
     | '/queue'
     | '/roadmap'
@@ -274,6 +286,7 @@ export interface RootRouteChildren {
   DebtRoute: typeof DebtRoute
   LearningsRoute: typeof LearningsRoute
   ModelsRoute: typeof ModelsRoute
+  NotificationsRoute: typeof NotificationsRoute
   PoolRoute: typeof PoolRoute
   QueueRoute: typeof QueueRoute
   RoadmapRoute: typeof RoadmapRoute
@@ -332,6 +345,13 @@ declare module '@tanstack/react-router' {
       path: '/models'
       fullPath: '/models'
       preLoaderRoute: typeof ModelsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/notifications': {
+      id: '/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof NotificationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pool': {
@@ -442,6 +462,7 @@ const rootRouteChildren: RootRouteChildren = {
   DebtRoute: DebtRoute,
   LearningsRoute: LearningsRoute,
   ModelsRoute: ModelsRoute,
+  NotificationsRoute: NotificationsRoute,
   PoolRoute: PoolRoute,
   QueueRoute: QueueRoute,
   RoadmapRoute: RoadmapRoute,

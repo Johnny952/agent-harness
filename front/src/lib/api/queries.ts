@@ -85,6 +85,17 @@ export const usageQuery = (taskId: string) =>
     refetchInterval: POLL_MS * 2,
   });
 
+/**
+ * The inbox (ADR 221). Polled, not pushed (`docs/plans/notifications.md`
+ * step 2): the sidebar's unread count reads it on every screen, so it polls at
+ * half the board's rate; a notification is minutes, not seconds, of news.
+ */
+export const notificationsQuery = queryOptions({
+  queryKey: ["notifications"],
+  queryFn: () => api.listNotifications(),
+  refetchInterval: POLL_MS * 2,
+});
+
 /** The ready order moves when a task does, so it polls with the board. */
 export const readyQuery = queryOptions({
   queryKey: ["ready"],

@@ -356,11 +356,13 @@ describe("the review", () => {
     const paths = fetchMock.mock.calls.map((c) => new URL(String(c[0]), "http://x").pathname);
     expect(paths).toContain("/api/tasks/T-1/diff");
     expect(paths).toContain("/api/tasks/T-1/comments");
-    // `/api/actions` is the sidebar's waiting count (ADR 217).
+    // `/api/actions` is the sidebar's waiting count (ADR 217), `/api/notifications`
+    // its inbox count (ADR 225).
     const known = [
       "/api/tasks",
       "/api/projects",
       "/api/actions",
+      "/api/notifications",
       "/api/command-requests",
       "/api/tasks/T-1/diff",
       "/api/tasks/T-1/comments",

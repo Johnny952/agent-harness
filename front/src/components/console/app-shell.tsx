@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
+  Bell,
   BookOpen,
   CheckCircle2,
   Cpu,
@@ -22,7 +23,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
-import { actionBackendQuery } from "@/lib/api/queries";
+import { actionBackendQuery, notificationsQuery } from "@/lib/api/queries";
+import { unreadCount, useLastSeen } from "@/lib/notifications";
 import {
   listedProjects,
   readShowArchived,
@@ -48,7 +50,31 @@ const NAV = [
   { to: "/queue", key: "q", label: "Queue", icon: ListOrdered },
   { to: "/backlog", key: "k", label: "Backlog", icon: Layers },
   { to: "/models", key: "m", label: "Settings", icon: Cpu },
+  { to: "/notifications", key: "i", label: "Inbox", icon: Bell },
 ] as const;
+
+/**
+ * The Inbox entry's unread count (`docs/plans/notifications.md` step 2): the
+ * records newer than this browser's last-seen marker. Nothing while the read is
+ * in flight or failed, and nothing at zero; the inbox screen says why.
+ */
+function InboxCount() {
+  const { data } = useQuery(notificationsQuery);
+  const lastSeen = useLastSeen();
+  const records = Array.isArray(data?.data) ? data.data : null;
+  const n = unreadCount(records, lastSeen);
+  if (n === 0) return null;
+  const label = `${n} unread`;
+  return (
+    <span
+      data-testid="inbox-unread"
+      title={label}
+      className="mono rounded-sm bg-info/15 px-1 text-[10px] text-info"
+    >
+      {n > 99 ? "99+" : n}
+    </span>
+  );
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
@@ -139,6 +165,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   >
                     <Icon className="size-3.5" />
                     <span className="flex-1">{item.label}</span>
+                    {item.to === "/notifications" && <InboxCount />}
                     <Kbd>g {item.key}</Kbd>
                   </Link>
                 </li>
