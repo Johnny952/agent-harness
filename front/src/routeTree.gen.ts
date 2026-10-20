@@ -22,6 +22,9 @@ import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as TailRouteImport } from './routes/tail'
 import { Route as TokensRouteImport } from './routes/tokens'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks.$taskId'
+import { Route as PSlugIndexRouteImport } from './routes/p.$slug.index'
+import { Route as PSlugBacklogRouteImport } from './routes/p.$slug.backlog'
+import { Route as PSlugTasksTaskIdRouteImport } from './routes/p.$slug.tasks.$taskId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -88,6 +91,21 @@ const TasksTaskIdRoute = TasksTaskIdRouteImport.update({
   path: '/tasks/$taskId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PSlugIndexRoute = PSlugIndexRouteImport.update({
+  id: '/p/$slug/',
+  path: '/p/$slug/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PSlugBacklogRoute = PSlugBacklogRouteImport.update({
+  id: '/p/$slug/backlog',
+  path: '/p/$slug/backlog',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PSlugTasksTaskIdRoute = PSlugTasksTaskIdRouteImport.update({
+  id: '/p/$slug/tasks/$taskId',
+  path: '/p/$slug/tasks/$taskId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -103,6 +121,9 @@ export interface FileRoutesByFullPath {
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
+  '/p/$slug/backlog': typeof PSlugBacklogRoute
+  '/p/$slug/': typeof PSlugIndexRoute
+  '/p/$slug/tasks/$taskId': typeof PSlugTasksTaskIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -118,6 +139,9 @@ export interface FileRoutesByTo {
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
+  '/p/$slug/backlog': typeof PSlugBacklogRoute
+  '/p/$slug': typeof PSlugIndexRoute
+  '/p/$slug/tasks/$taskId': typeof PSlugTasksTaskIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -134,6 +158,9 @@ export interface FileRoutesById {
   '/tail': typeof TailRoute
   '/tokens': typeof TokensRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
+  '/p/$slug/backlog': typeof PSlugBacklogRoute
+  '/p/$slug/': typeof PSlugIndexRoute
+  '/p/$slug/tasks/$taskId': typeof PSlugTasksTaskIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -151,6 +178,9 @@ export interface FileRouteTypes {
     | '/tail'
     | '/tokens'
     | '/tasks/$taskId'
+    | '/p/$slug/backlog'
+    | '/p/$slug/'
+    | '/p/$slug/tasks/$taskId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -166,6 +196,9 @@ export interface FileRouteTypes {
     | '/tail'
     | '/tokens'
     | '/tasks/$taskId'
+    | '/p/$slug/backlog'
+    | '/p/$slug'
+    | '/p/$slug/tasks/$taskId'
   id:
     | '__root__'
     | '/'
@@ -181,6 +214,9 @@ export interface FileRouteTypes {
     | '/tail'
     | '/tokens'
     | '/tasks/$taskId'
+    | '/p/$slug/backlog'
+    | '/p/$slug/'
+    | '/p/$slug/tasks/$taskId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -197,6 +233,9 @@ export interface RootRouteChildren {
   TailRoute: typeof TailRoute
   TokensRoute: typeof TokensRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
+  PSlugBacklogRoute: typeof PSlugBacklogRoute
+  PSlugIndexRoute: typeof PSlugIndexRoute
+  PSlugTasksTaskIdRoute: typeof PSlugTasksTaskIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -292,6 +331,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TasksTaskIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/p/$slug/': {
+      id: '/p/$slug/'
+      path: '/p/$slug'
+      fullPath: '/p/$slug/'
+      preLoaderRoute: typeof PSlugIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/p/$slug/backlog': {
+      id: '/p/$slug/backlog'
+      path: '/p/$slug/backlog'
+      fullPath: '/p/$slug/backlog'
+      preLoaderRoute: typeof PSlugBacklogRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/p/$slug/tasks/$taskId': {
+      id: '/p/$slug/tasks/$taskId'
+      path: '/p/$slug/tasks/$taskId'
+      fullPath: '/p/$slug/tasks/$taskId'
+      preLoaderRoute: typeof PSlugTasksTaskIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -309,6 +369,9 @@ const rootRouteChildren: RootRouteChildren = {
   TailRoute: TailRoute,
   TokensRoute: TokensRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
+  PSlugBacklogRoute: PSlugBacklogRoute,
+  PSlugIndexRoute: PSlugIndexRoute,
+  PSlugTasksTaskIdRoute: PSlugTasksTaskIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

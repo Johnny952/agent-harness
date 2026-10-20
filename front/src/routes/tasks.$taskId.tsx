@@ -64,7 +64,7 @@ export const Route = createFileRoute("/tasks/$taskId")({
       },
     ],
   }),
-  component: TaskDetailPage,
+  component: TaskDetailRoute,
 });
 
 /**
@@ -130,8 +130,16 @@ function openThreadOn(threads: Thread[] | undefined, taskId: string): Thread | u
     );
 }
 
-function TaskDetailPage() {
+function TaskDetailRoute() {
   const { taskId } = Route.useParams();
+  return <TaskDetailPage taskId={taskId} />;
+}
+
+/**
+ * One task's page, by id: the harness's `/tasks/$taskId`, and the same page
+ * under `/p/$slug/tasks/$taskId` (ADR 208).
+ */
+export function TaskDetailPage({ taskId }: { taskId: string }) {
   const now = useNow();
   const task = useQuery(taskQuery(taskId));
   const debt = useQuery(debtQuery);

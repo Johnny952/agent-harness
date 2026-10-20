@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Cpu,
   KeyRound,
+  Folder,
   Layers,
   Terminal,
   LayoutGrid,
@@ -18,7 +19,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FOCUS_SEARCH_EVENT, OPEN_THREAD_EVENT } from "@/hooks/use-console";
-import { actionBackendQuery } from "@/lib/api/queries";
+import { actionBackendQuery, tasksQuery } from "@/lib/api/queries";
+import { deriveProjects } from "@/lib/projects";
 import { ChatPanel } from "./chat-panel";
 import { Kbd } from "./primitives";
 
@@ -106,29 +108,33 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span className="inline-block size-2 rounded-full bg-success" />
           <span className="mono text-[11px] font-semibold tracking-tight">harness/console</span>
         </div>
-        <ul className="flex-1 space-y-0.5 p-2">
-          {NAV.map((item) => {
-            const active = item.to === "/" ? pathname === "/" : pathname.startsWith(item.to);
-            const Icon = item.icon;
-            return (
-              <li key={item.to}>
-                <Link
-                  to={item.to}
-                  className={cn(
-                    "flex items-center gap-2 rounded-sm px-2 py-1.5 text-xs transition-colors",
-                    active
-                      ? "bg-surface-2 text-foreground"
-                      : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
-                  )}
-                >
-                  <Icon className="size-3.5" />
-                  <span className="flex-1">{item.label}</span>
-                  <Kbd>g {item.key}</Kbd>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          <ProjectNav pathname={pathname} />
+          <SectionLabel>Harness</SectionLabel>
+          <ul className="space-y-0.5" aria-label="Harness">
+            {NAV.map((item) => {
+              const active = item.to === "/" ? pathname === "/" : pathname.startsWith(item.to);
+              const Icon = item.icon;
+              return (
+                <li key={item.to}>
+                  <Link
+                    to={item.to}
+                    className={cn(
+                      "flex items-center gap-2 rounded-sm px-2 py-1.5 text-xs transition-colors",
+                      active
+                        ? "bg-surface-2 text-foreground"
+                        : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
+                    )}
+                  >
+                    <Icon className="size-3.5" />
+                    <span className="flex-1">{item.label}</span>
+                    <Kbd>g {item.key}</Kbd>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
         <div className="space-y-1 border-t border-border p-2">
           <button
             onClick={() => setChatOpen((o) => !o)}
@@ -155,6 +161,103 @@ export function AppShell({ children }: { children: ReactNode }) {
       </main>
 
       {chatOpen && <ChatPanel onClose={() => setChatOpen(false)} select={chatSelect} />}
+    </div>
+  );
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
+      {children}
+    </p>
+  );
+}
+
+const PROJECT_PAGES = [
+  { to: "/p/$slug", suffix: "", label: "Board" },
+  { to: "/p/$slug/backlog", suffix: "/backlog", label: "Backlog" },
+] as const;
+
+/**
+ * The sidebar's "Projects" section: one entry per project the board's tasks
+ * name, by slug (there is no read route for the project records, so no title
+ * either), each linking to its `/p/$slug/` screens. The open project lists its
+ * screens beneath it. Read-only: no project is made or edited here. ADR 208.
+ */
+export function ProjectNav({ pathname }: { pathname: string }) {
+  const q = useQuery(tasksQuery);
+  const projects = deriveProjects(q.data?.data ?? []);
+  let body: ReactNode;
+  if (q.isError) {
+    body = (
+      <p className="px-2 py-1 text-[11px] text-destructive">
+        Projects unread: the task list did not answer.
+      </p>
+    );
+  } else if (!q.data) {
+    body = <p className="px-2 py-1 text-[11px] text-muted-foreground">Reading projects…</p>;
+  } else if (projects.length === 0) {
+    body = (
+      <p className="px-2 py-1 text-[11px] text-muted-foreground">No project on the board yet.</p>
+    );
+  } else {
+    body = (
+      <ul className="space-y-0.5" aria-label="Projects">
+        {projects.map((slug) => {
+          const base = `/p/${slug}`;
+          const open = pathname === base || pathname.startsWith(`${base}/`);
+          return (
+            <li key={slug}>
+              <Link
+                to="/p/$slug"
+                params={{ slug }}
+                data-testid={`project-link-${slug}`}
+                className={cn(
+                  "flex items-center gap-2 rounded-sm px-2 py-1.5 text-xs transition-colors",
+                  open
+                    ? "bg-surface-2 text-foreground"
+                    : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
+                )}
+              >
+                <Folder className="size-3.5" />
+                <span className="mono flex-1 truncate">{slug}</span>
+              </Link>
+              {open && (
+                <ul className="mt-0.5 space-y-0.5 pl-5">
+                  {PROJECT_PAGES.map((page) => {
+                    const here =
+                      page.suffix === ""
+                        ? pathname === base || pathname === `${base}/`
+                        : pathname.startsWith(`${base}${page.suffix}`);
+                    return (
+                      <li key={page.label}>
+                        <Link
+                          to={page.to}
+                          params={{ slug }}
+                          className={cn(
+                            "block rounded-sm px-2 py-1 text-[11px] transition-colors",
+                            here
+                              ? "text-foreground"
+                              : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
+                          )}
+                        >
+                          {page.label}
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    );
+  }
+  return (
+    <div className="mb-2">
+      <SectionLabel>Projects</SectionLabel>
+      {body}
     </div>
   );
 }
