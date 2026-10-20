@@ -282,7 +282,7 @@ and worker.
    handoff trail in front of the first message, within `TURN_SEED_MAX_CHARS`,
    logged as `turn_start.seed`. *Talk about this task* is built (ADR 195):
    the task page creates a thread with `task` set and opens the dock on it,
-   and the dock creates, renames, re-picks and archives threads (never
+   or reopens the open thread already on the task (ADR 196), and the dock creates, renames, re-picks and archives threads (never
    `main`).
 6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`). Built
    by T-113 (2026-10-20, ADR 187): the thread role's `task_start` queues a

@@ -10781,3 +10781,46 @@ and effort fall back to the primary account, its default thread model and
 - Changing the account in *Edit*: kept to title, model and effort.
 - Waiting for the refetch before selecting a new thread: the selector would sit
   on the wrong thread for one poll.
+
+## ADR 196 — *Talk about this task* reopens the open thread on the task
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 195 built *Talk about this task* on the task page: each click
+posts `POST /api/threads` with `task` set and opens the dock on the answer. Its
+consequences said an open thread on the same task is not reused, so every click
+left one more thread on the task in the dock's selector. The thread list the dock
+reads, `GET /api/threads` (`threadsQuery`), already carries each thread's `task`,
+`status` and `created`.
+
+**Decision.**
+1. The button reads `threadsQuery`. When the list has a thread whose `task` is
+   this task and whose status is not `archived`, a click opens the dock on it
+   with `openThread` and posts nothing; with several, the most recently
+   `created`. Otherwise it creates as ADR 195 decision 8 says.
+2. While the list is first read the button is disabled, so a click in that
+   moment cannot make a duplicate. When the read failed it falls back to
+   creating, so a broken list does not take the button away.
+3. An archived thread on the task is ignored: it is not offered for reopening,
+   and a click makes a new thread. The dock's *Reopen* (ADR 195 decision 5)
+   still reaches it.
+4. The match is on `task` alone, as the list is served; the thread's project is
+   not compared.
+
+**Consequences.**
+- This amends ADR 195's consequence: a click reuses the open thread on the task,
+  and a second open thread on it is made only from another client.
+- Archiving a task's thread is how to start it afresh from the task page.
+- A thread opened elsewhere since the list's last poll is not seen until the
+  next one, so a click in that window can still create a second thread.
+- While the list's first read retries (the query client's default retries), the
+  button stays disabled for as long.
+
+**Ruled out.**
+- Offering to reopen an archived thread: a second control by the button for a
+  case the dock already covers.
+- Creating while the list is still loading: the duplicate this ADR exists to
+  stop.
+- Waiting on a failed list: the button would stay dead until the api answered.
+- A board-service lookup of a task's thread: the list the dock polls already
+  holds what the choice needs.
