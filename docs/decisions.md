@@ -12019,3 +12019,73 @@ host's git 2.43 only, and the agent image, where the worker runs it, carries
 **Ruled out.**
 - Parsing the porcelain's `*`/`!` lines: it would add a second reading that
   agrees with the exit status in every measured case.
+
+## ADR NNN — The sidebar counts running and waiting from the board and the queue, and hides the archived behind a toggle
+
+**Status:** accepted (2026-10-20).
+
+**Context.** `docs/plans/projects.md` (*Decisions*, 4) gives each project in
+the sidebar what it has running and waiting, and puts the archived projects
+behind a toggle. Step 4 built the list (ADR 208, ADR 209) and left both open.
+The api serves no per-project count, but two reads the console already polls
+hold what is needed: `GET /api/tasks`, each row with its `status`, `phase`,
+`merged` and `project`, and `GET /api/actions`, the queue's pending and
+claimed records, each with its `kind`, `task_id` and `project`.
+
+**Decision.**
+1. `projectCounts(tasks, queue)` in `front/src/lib/projects.ts` counts per
+   project slug, front only:
+   - **running**: a board card (`isBoardCard`: not a backlog item, not an
+     epic row), not `merged`, whose `status` is `in_progress`, whatever its
+     phase. A role's lane and *No live phase* (between phases, a stale lock,
+     a phase no role names) count alike, because a project is busy from its
+     cycle's first phase until its task leaves `in_progress` (*Decisions*,
+     5). Its project is the row's `project`.
+   - **waiting**: a task with a record of kind `start` in the queue's
+     `claimed` or `pending` list, which is not running by the rule above and
+     whose row is not `merged`: started and not in a phase yet (*Decisions*,
+     6, *What waits*). This covers a start held back as *Waiting for an
+     account* or *Waiting for the project* and one claimed whose cycle has
+     not set `in_progress` yet. Its project is the record's `project`, or the
+     task row's when the record names none; a start naming neither is not
+     counted.
+   - Each task counts once, in one of the two. No other status counts:
+     `pending` without a start, `blocked`, `conflict`, `done`, awaiting
+     review and merged are neither.
+2. The sidebar draws a count only above zero, as a small *play* or
+   *hourglass* mark with `N running` / `N waiting` as its title. When
+   `/api/tasks` failed no count is drawn at all and a note under the list
+   reads *Counts unread: the task list did not answer.* When `/api/actions`
+   failed `waiting` is `null` and not drawn, running still is, and the note
+   reads *Waiting unread: the action queue did not answer.* A count that was
+   not read is never drawn as 0; the note is what tells it from zero.
+3. *Show archived (n)* sits under the list when some record is archived. It
+   lists the archived records among the active ones, each marked *archived*,
+   and turns into *Hide archived (n)*. The choice is the viewer's, held in
+   the component's state; hidden is the default, as before.
+
+**Consequences.**
+- The counts are as fresh as the two polled reads (`tasksQuery`,
+  `actionQueueQuery`, shared with the board and the queue screen through
+  their query keys). The sidebar now reads both on every screen, so a screen
+  that reads the queue with another `limit` (`/projects/new`, `/queue`) makes
+  two queue requests per poll. `render-route` counts a served list per query
+  string, so a test's sequence for the screen's read is not consumed by the
+  sidebar's.
+- The *waiting* here is not the board's *Waiting* column, which is a pending
+  task `/api/ready` does not name: that one has not been started.
+- The tasks-fallback list (ADR 208) has no archived entries, so the toggle
+  never shows there.
+- The toggle is not kept across a reload, and a waiting start's reason is not
+  drawn per project: the queue screen and the slots (step 6) show it.
+
+**Ruled out.**
+- Counting *Between phases* as waiting, as *What waits* lists it under the
+  slots: the task holds its project's turn, so for the sidebar it is
+  running; the slots, which show per slot, can tell it apart.
+- Counting `blocked` or `conflict` as waiting: they wait on a person, not on
+  the harness, and the board already shows them.
+- A per-project count from the api: the two reads already hold it, and a new
+  route would be a backend change for a sidebar mark.
+- Keeping the toggle in the URL: it is not a screen's state, and every route
+  would have to carry it.

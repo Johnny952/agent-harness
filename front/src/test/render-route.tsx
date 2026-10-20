@@ -59,6 +59,11 @@ export type Answer =
  * the bare path, so a write and the read beside it answer differently. And a
  * value may be a list, answered one entry per request with the last repeated, so
  * the read a write's refetch makes can serve what the write left behind.
+ *
+ * A list is counted per query string as well as per key: `/api/actions?limit=1`
+ * (the sidebar's waiting count, ADR NNN) and `/api/actions?limit=20` (a screen's
+ * own read of the queue) each walk the list from its first entry, so the
+ * sidebar's poll does not take a turn the screen's sequence was written for.
  */
 export type Served = Record<string, Answer | Answer[]>;
 
@@ -83,8 +88,9 @@ function stubApi(served: Served, sent: Sent[]) {
     const named = `${method} ${url.pathname}`;
     const key = named in served ? named : url.pathname;
     const entry = served[key];
-    const n = asked[key] ?? 0;
-    asked[key] = n + 1;
+    const turn = `${key}${url.search}`;
+    const n = asked[turn] ?? 0;
+    asked[turn] = n + 1;
     const body = Array.isArray(entry) ? entry[Math.min(n, entry.length - 1)] : entry;
     const headers = { "content-type": "application/json" };
     if (!body) {

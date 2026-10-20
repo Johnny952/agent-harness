@@ -283,7 +283,15 @@ module; steps 2, 4 and 5 need its queue and worker.
    `/p/$slug/debt`, `/p/$slug/learnings` and `/p/$slug/roadmap`, the
    harness's own screens over `?project=<slug>`, which the api already took
    and the console's forward now passes on. The counts of running and
-   waiting and the archived toggle are not built; *New project* is step 5 (ADR 212).
+   waiting and the archived toggle are built the same day (ADR NNN), from
+   reads the api already served: running is a board card `in_progress` and
+   not merged, waiting a task with a `start` pending or claimed that is not
+   running, both drawn only above zero and not at all when their read
+   failed; *Show archived* lists the archived records, marked. Still open:
+   the counts are only as fresh as the board's polling, a waiting start's
+   reason (`waiting`: account or project) is not shown per project, the
+   toggle is not kept across a reload, and the tasks-fallback list has no
+   archived entries to show. *New project* is step 5 (ADR 212).
 5. **New project and the key from the console**: the `clone`, `init`,
    `keygen` and `check` actions in the worker, and the form. Built 2026-10-20
    (`docs/decisions.md` ADR 212): the four action kinds and

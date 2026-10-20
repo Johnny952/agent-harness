@@ -165,9 +165,10 @@ function writes(sent: Sent[]): Sent[] {
 
 /**
  * The screen's reads: the sidebar's `/api/projects` and `/api/tasks` (its project
- * list and the list's fallback, ADR 208, ADR 209) are not among them.
+ * list and the list's fallback, ADR 208, ADR 209) and `/api/actions` (its waiting
+ * counts, ADR NNN) are not among them.
  */
-const SIDEBAR_READS = new Set(["/api/projects", "/api/tasks"]);
+const SIDEBAR_READS = new Set(["/api/projects", "/api/tasks", "/api/actions"]);
 function reads(sent: Sent[]): number {
   return sent.filter((s) => s.method === "GET" && !SIDEBAR_READS.has(s.path)).length;
 }

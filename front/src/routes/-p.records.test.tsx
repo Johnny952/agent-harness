@@ -2,18 +2,19 @@
  * The sidebar's projects and `ProjectGate`, read from the project records
  * (`GET /api/projects`, ADR 209): titles with the slug as fallback, a project
  * with no task listed, an archived one hidden but reachable, and the tasks'
- * `project` fields as the list only when the records read fails. The routes
- * themselves are `-p.test.tsx`'s.
+ * `project` fields as the list only when the records read fails; each
+ * project's running and waiting counts and the archived toggle (ADR NNN). The
+ * routes themselves are `-p.test.tsx`'s.
  *
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { Route as ProjectBoardRoute } from "./p.$slug.index";
 import { Route as BoardRoute } from "./index";
 import { renderRoute, type Served } from "@/test/render-route";
-import { listedProjects, projectEntries } from "@/lib/projects";
-import type { ActionQueue, ProjectRecord, Task } from "@/lib/api/types";
+import { listedProjects, projectCounts, projectEntries } from "@/lib/projects";
+import type { ActionQueue, ActionRecord, ProjectRecord, Task } from "@/lib/api/types";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -218,5 +219,164 @@ describe("ProjectGate, from the records", () => {
     );
     expect(await screen.findByRole("heading", { name: "Board · delta" })).toBeTruthy();
     expect(screen.queryByTestId("project-not-found")).toBeNull();
+  });
+});
+
+function start(taskId: string, over: Partial<ActionRecord> = {}): ActionRecord {
+  return {
+    version: 1,
+    id: `A-${taskId}`,
+    kind: "start",
+    project: null,
+    task_id: taskId,
+    params: null,
+    actor: "console",
+    note: null,
+    created_at: "2026-10-20T12:00:00+00:00",
+    claimed_at: null,
+    started_at: null,
+    finished_at: null,
+    status: "pending",
+    waiting: null,
+    result: null,
+    error: null,
+    ...over,
+  };
+}
+
+/** `alpha`: two running (one between phases) and one started, waiting; `beta`: one waiting. */
+const BUSY_TASKS: Task[] = [
+  task("T-201", { project: "alpha", status: "in_progress", phase: "implementador" }),
+  task("T-202", { project: "alpha", status: "in_progress", phase: null }),
+  task("T-203", { project: "alpha" }),
+  task("T-204", { project: "alpha", status: "in_progress", merged: true }),
+  task("T-205", { project: "alpha", status: "done" }),
+  task("E-1", { project: "alpha", status: "in_progress", split_into: ["T-201"] }),
+  task("T-301", { project: "beta" }),
+];
+const BUSY_QUEUE: ActionQueue = {
+  ...EMPTY_QUEUE,
+  // T-201's claimed start is running, not waiting; T-301's record names its project.
+  claimed: [start("T-201", { status: "claimed", project: "alpha" })],
+  pending: [start("T-203", { waiting: "project" }), start("T-301", { project: "beta" })],
+};
+
+describe("projectCounts", () => {
+  it("counts in_progress cards as running, and started tasks not in progress as waiting", () => {
+    expect(Object.fromEntries(projectCounts(BUSY_TASKS, BUSY_QUEUE))).toEqual({
+      alpha: { running: 2, waiting: 1 },
+      beta: { running: 0, waiting: 1 },
+    });
+  });
+
+  it("takes a start's project from its record, else its task row, and counts a task once", () => {
+    const queue: ActionQueue = {
+      ...EMPTY_QUEUE,
+      claimed: [start("T-9", { status: "claimed" })],
+      pending: [start("T-9"), start("T-8", { project: "gamma" }), start("T-7")],
+    };
+    // T-7 has neither a record project nor a row: it names no project.
+    expect(Object.fromEntries(projectCounts([task("T-9", { project: "beta" })], queue))).toEqual({
+      beta: { running: 0, waiting: 1 },
+      gamma: { running: 0, waiting: 1 },
+    });
+  });
+
+  it("skips a merged task's start and other kinds, and leaves waiting null when unread", () => {
+    const queue: ActionQueue = {
+      ...EMPTY_QUEUE,
+      pending: [start("T-203", { kind: "cancel" }), start("T-204")],
+    };
+    expect(projectCounts(BUSY_TASKS, queue).get("alpha")).toEqual({ running: 2, waiting: 0 });
+    expect(projectCounts(BUSY_TASKS, null).get("alpha")).toEqual({ running: 2, waiting: null });
+    expect(projectCounts(BUSY_TASKS, null).has("beta")).toBe(false);
+  });
+});
+
+describe("the sidebar's counts", () => {
+  it("draws running and waiting beside each project, and nothing at zero", async () => {
+    await renderRoute(
+      BoardRoute,
+      "/",
+      served({ "/api/tasks": { data: BUSY_TASKS }, "/api/actions": { data: BUSY_QUEUE } }),
+    );
+    const nav = within(sidebar());
+    expect((await nav.findByTestId("project-running-alpha")).textContent).toBe("2");
+    expect((await nav.findByTestId("project-waiting-alpha")).getAttribute("title")).toBe(
+      "1 waiting",
+    );
+    expect(nav.getByTestId("project-waiting-beta").textContent).toBe("1");
+    expect(nav.queryByTestId("project-running-beta")).toBeNull();
+    expect(nav.queryByTestId("project-counts-unread")).toBeNull();
+  });
+
+  it("draws no count, not a zero, when the task list fails, and says so", async () => {
+    await renderRoute(
+      BoardRoute,
+      "/",
+      served({
+        "/api/tasks": { status: 503, error: "down" },
+        "/api/actions": { data: BUSY_QUEUE },
+      }),
+    );
+    const nav = within(sidebar());
+    expect((await nav.findByTestId("project-counts-unread")).textContent).toBe(
+      "Counts unread: the task list did not answer.",
+    );
+    expect(nav.queryByTestId("project-waiting-beta")).toBeNull();
+    expect(nav.queryByTestId("project-running-alpha")).toBeNull();
+    expect((await projectLinks()).map((a) => a.textContent)).toEqual(["The alpha site", "beta"]);
+  });
+
+  it("draws running but no waiting when the queue fails, and says so", async () => {
+    await renderRoute(
+      BoardRoute,
+      "/",
+      served({
+        "/api/tasks": { data: BUSY_TASKS },
+        "/api/actions": { status: 503, error: "down" },
+      }),
+    );
+    const nav = within(sidebar());
+    expect((await nav.findByTestId("project-counts-unread")).textContent).toBe(
+      "Waiting unread: the action queue did not answer.",
+    );
+    expect((await nav.findByTestId("project-running-alpha")).textContent).toBe("2");
+    expect(nav.queryByTestId("project-waiting-alpha")).toBeNull();
+    expect(nav.queryByTestId("project-waiting-beta")).toBeNull();
+  });
+});
+
+describe("the sidebar's archived toggle", () => {
+  it("hides the archived by default and lists them, marked, when asked", async () => {
+    await renderRoute(BoardRoute, "/", served());
+    expect((await projectLinks()).map((a) => a.textContent)).toEqual(["The alpha site", "beta"]);
+    const toggle = within(sidebar()).getByRole("button", { name: "Show archived (1)" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(toggle);
+    const links = await projectLinks();
+    expect(links.map((a) => a.getAttribute("href"))).toEqual(["/p/alpha", "/p/beta", "/p/old"]);
+    expect(within(sidebar()).getByTestId("project-link-old").textContent).toBe("Old thingarchived");
+    const hide = within(sidebar()).getByRole("button", { name: "Hide archived (1)" });
+    expect(hide.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(hide);
+    expect(within(sidebar()).queryByTestId("project-link-old")).toBeNull();
+  });
+
+  it("lists an archived project when it is the only record and the toggle is on", async () => {
+    await renderRoute(
+      BoardRoute,
+      "/",
+      served({ "/api/projects": { data: [record("old", { status: "archived" })] } }),
+    );
+    expect(await within(sidebar()).findByText("No active project recorded yet.")).toBeTruthy();
+    fireEvent.click(within(sidebar()).getByRole("button", { name: "Show archived (1)" }));
+    expect(within(sidebar()).getByTestId("project-link-old")).toBeTruthy();
+  });
+
+  it("has no toggle when the list comes from the tasks, which hold no archived", async () => {
+    await renderRoute(BoardRoute, "/", served({ "/api/projects": { status: 503, error: "down" } }));
+    await projectLinks();
+    expect(within(sidebar()).queryByRole("button", { name: /archived/ })).toBeNull();
   });
 });
