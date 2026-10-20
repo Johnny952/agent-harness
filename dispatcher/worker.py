@@ -31,6 +31,7 @@ from dispatcher import (
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
 from dispatcher.config import Config
+from dispatcher.project_lock import ProjectBusy, ProjectLock
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ class Running:
     cancelled: threading.Event
     #: Set by a `turn` handler once it has the pid; stops the process.
     kill: Callable[[], None] | None = None
+    #: The project's `flock` (ADR 200), held from the claim to the handler's end.
+    project_lock: ProjectLock | None = None
 
 
 class Worker:
@@ -213,14 +216,32 @@ class Worker:
         if busy:
             self._wait(record, "thread" if kind == "turn" else "project")
             return
+        # The key above is this worker's memory; the project's `flock` is
+        # what a `run-task` or a second worker process shows (ADR 200, 4).
+        lock = None
+        if key is not None and key.startswith("project:"):
+            try:
+                lock = ProjectLock.take(self.state_dir, record["project"], record.get("task_id"), "worker")
+            except ProjectBusy:
+                self._wait(record, "project")
+                return
         # A turn is held to its own thread's account by the handler (ADR 173, 5).
         if kind != "turn" and actions.KINDS[kind].spends_quota and not self._account_open():
+            if lock is not None:
+                lock.release()
             self._wait(record, "account")
             return
-        claimed = actions.claim(self.state_dir, aid)
+        try:
+            claimed = actions.claim(self.state_dir, aid)
+        except BaseException:
+            if lock is not None:
+                lock.release()
+            raise
         if claimed is None:
+            if lock is not None:
+                lock.release()
             return
-        entry = Running(aid, None, threading.Event())
+        entry = Running(aid, None, threading.Event(), project_lock=lock)
         thread = threading.Thread(
             target=self._run_handler, args=(key, claimed, entry),
             name=f"worker-{aid}", daemon=False,
@@ -253,6 +274,8 @@ class Worker:
         try:
             self._guarded(HANDLERS[record["kind"]], record, entry.cancelled)
         finally:
+            if entry.project_lock is not None:
+                entry.project_lock.release()
             with self._lock:
                 if self.running.get(key or record["id"]) is entry:
                     del self.running[key or record["id"]]
@@ -281,6 +304,13 @@ def _read_task(cfg: Config, task_id: str):
         return None
 
 
+def _held_project_lock(worker: Worker, record: dict) -> ProjectLock | None:
+    """The lock `_consider` took for this action, None when it was run without one."""
+    with worker._lock:
+        entry = next((r for r in worker.running.values() if r.action_id == record["id"]), None)
+    return entry.project_lock if entry is not None else None
+
+
 def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     cfg, sd = worker.cfg, worker.state_dir
     result = dict(record.get("result") or {})
@@ -300,6 +330,7 @@ def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     outcome = core.run_task_cycle(
         cfg, record["task_id"], record["project"], authorized=True,
         may_start_phase=lambda: not (cancelled.is_set() or worker.stopping.is_set()),
+        project_lock=_held_project_lock(worker, record),
     )
     task = _read_task(cfg, record["task_id"])
     result["outcome"] = outcome.value
@@ -328,6 +359,7 @@ def _command_verdict(worker: Worker, record: dict, _cancelled=None) -> None:
         outcome = command_run.run_command_request(
             cfg, record["task_id"], record["project"], params["n"], params["verdict"],
             params.get("comment"), by=record["actor"], prefix=params.get("prefix"),
+            project_lock=_held_project_lock(worker, record),
         )
     except command_run.VerdictRefused as exc:
         actions.finish(sd, record["id"], "failed", error=_one_line(str(exc)))

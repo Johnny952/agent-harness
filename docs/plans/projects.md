@@ -244,7 +244,14 @@ module; steps 2, 4 and 5 need its queue and worker.
    the part the user put first, and it needs no console: until the queue
    exists, the operator runs the command.
 3. **The worker's one-cycle-per-project rule**, and the epic taking one task
-   at a time.
+   at a time. Built 2026-10-20 (`docs/decisions.md` ADR 200): a `flock` per
+   project, `dispatcher/project_lock.py`, taken in `open_cycle` so `run-task`,
+   `run-phase`, the verdict commands, `run-queue` and a second worker all meet
+   it. The worker's start waits as `project`; a CLI start exits 75. *Start
+   epic* (`board-service.md`) is what is still to be built on it: it is not
+   built, and when it is, it queues one start per task, each waiting as
+   `project` until the one before reaches *Awaiting review*, so it needs no
+   lock of its own.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build.

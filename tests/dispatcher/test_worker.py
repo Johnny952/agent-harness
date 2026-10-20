@@ -16,6 +16,7 @@ import pytest
 
 from dispatcher import actions, command_run, state_machine, tasks, threads, worker as worker_mod
 from dispatcher import dispatcher as core
+from dispatcher.project_lock import ProjectBusy, ProjectLock
 from tests.dispatcher.test_dispatcher import _make_config
 from tests.dispatcher.test_queue import _task
 
@@ -28,6 +29,7 @@ class Cycle:
 
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
+        self.locks: list = []  # the project lock each call was handed
         self.entered: dict[str, threading.Event] = {}
         self.gates: dict[str, threading.Event] = {}
         self.raises: dict[str, Exception] = {}
@@ -42,8 +44,9 @@ class Cycle:
         assert self.entered.setdefault(task_id, threading.Event()).wait(WAIT)
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
-                 on_approve=None, may_start_phase=None, scheduler=None):
+                 on_approve=None, may_start_phase=None, scheduler=None, project_lock=None):
         assert authorized is True
+        self.locks.append(project_lock)
         self.calls.append((task_id, slug))
         self.entered.setdefault(task_id, threading.Event()).set()
         if task_id in self.raises:
@@ -67,7 +70,7 @@ class Verdict:
         self.outcome = core.CycleOutcome.FINISHED
 
     def __call__(self, cfg, task_id, slug, n, verdict, comment=None, by="operator",
-                 prefix=None):
+                 prefix=None, project_lock=None):
         self.calls.append({"task_id": task_id, "slug": slug, "n": n, "verdict": verdict,
                            "comment": comment, "by": by, "prefix": prefix})
         self.entered.set()
@@ -198,6 +201,35 @@ def test_one_claimed_start_per_project(cfg, worker, cycle):
     state, rec = where(cfg, second["id"])
     assert state == "done" and rec["status"] == "done" and rec["waiting"] is None
     assert [c[0] for c in cycle.calls] == ["T-1", "T-2"]
+
+
+def test_a_start_waits_while_another_process_holds_the_project(cfg, worker, cycle):
+    other = ProjectLock.take(cfg.state_dir, "proj", "T-9", "run-task")
+    first = start(cfg, "T-1")
+    worker.tick()
+    worker.join()
+    state, rec = where(cfg, first["id"])
+    assert state == "pending" and rec["waiting"] == "project"
+    assert cycle.calls == []
+    other.release()
+    worker.tick()
+    worker.join()
+    assert where(cfg, first["id"])[0] == "done"
+    assert [c[0] for c in cycle.calls] == ["T-1"]
+
+
+def test_the_worker_holds_the_lock_for_the_cycle_and_gives_it_back(cfg, worker, cycle):
+    cycle.hold("T-1")
+    start(cfg, "T-1")
+    worker.tick()
+    cycle.wait_entered("T-1")
+    with pytest.raises(ProjectBusy) as busy:
+        ProjectLock.take(cfg.state_dir, "proj", "T-2", "run-task")
+    assert busy.value.holder["via"] == "worker"
+    assert isinstance(cycle.locks[0], ProjectLock)
+    cycle.release("T-1")
+    worker.join()
+    ProjectLock.take(cfg.state_dir, "proj", "T-2", "run-task").release()
 
 
 def test_two_projects_run_at_once(cfg, worker, cycle):

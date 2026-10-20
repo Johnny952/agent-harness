@@ -351,6 +351,8 @@ def run_command_request(
     comment: str | None = None,
     by: str = OPERATOR,
     prefix: int | None = None,
+    project_lock=None,
+    via: str = "command-verdict",
 ) -> CycleOutcome:
     """Apply one verdict on a filed request, resume the phase, and carry the cycle on.
 
@@ -398,7 +400,8 @@ def run_command_request(
     if verdict == ALLOW:
         pattern = _allow_pattern(task_id, request, prefix)
 
-    ctx = open_cycle(cfg, task_id, slug)
+    # A busy project raises `ProjectBusy` here, before the verdict is recorded.
+    ctx = open_cycle(cfg, task_id, slug, project_lock=project_lock, via=via)
     if ctx is None:
         raise VerdictRefused(f"task {task_id} cannot be resumed; the log above says why")
     try:
@@ -514,7 +517,9 @@ def _logged_run(cfg: Config, task_id: str, entry: dict, request: dict) -> tuple[
     )
 
 
-def resume_command_verdict(cfg: Config, task_id: str, slug: str) -> CycleOutcome:
+def resume_command_verdict(
+    cfg: Config, task_id: str, slug: str, via: str = "command-resume",
+) -> CycleOutcome:
     """Resume the phase on a verdict already given, whose resume no account took.
 
     Raises `VerdictRefused` before anything happens when the task is not
@@ -561,7 +566,7 @@ def resume_command_verdict(cfg: Config, task_id: str, slug: str) -> CycleOutcome
             f"{', '.join(VERDICTS)}"
         )
 
-    ctx = open_cycle(cfg, task_id, slug)
+    ctx = open_cycle(cfg, task_id, slug, via=via)
     if ctx is None:
         raise VerdictRefused(f"task {task_id} cannot be resumed; the log above says why")
     try:

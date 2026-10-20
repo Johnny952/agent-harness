@@ -46,6 +46,7 @@ from collections.abc import Callable
 from dispatcher import context_transfer, project_docs, surface, surface_lock, tasks
 from dispatcher import dispatcher as core
 from dispatcher.config import Config
+from dispatcher.project_lock import ProjectBusy, ProjectLock
 
 logger = logging.getLogger(__name__)
 
@@ -475,14 +476,46 @@ def run(
 
     Saved before every cycle and after it, so the file is never behind by more
     than the one task it says is `running`.
+
+    The project is held for the whole run (ADR 200, 6): the queue waits for it
+    while another cycle has it, then passes the one lock to every cycle it
+    starts, so the cycles of a parallel queue neither exclude each other nor
+    the surface locks that order their writes (ADR 83).
     """
     if queue.status == Q_PUSH_REFUSED:
         logger.error("queue %s stopped on a refused push; nothing more runs", queue.queue_id)
         return queue
-    queue.status = Q_RUNNING
-    save(cfg, queue)
-    if queue.parallel > 1:
-        return _run_parallel(cfg, queue, sleep)
+    lock = _take_project(cfg, queue, sleep)
+    try:
+        queue.status = Q_RUNNING
+        save(cfg, queue)
+        if queue.parallel > 1:
+            return _run_parallel(cfg, queue, sleep, lock)
+        return _run_serial(cfg, queue, sleep, lock)
+    finally:
+        lock.release()
+
+
+def _take_project(
+    cfg: Config, queue: Queue, sleep: Callable[[float], None],
+) -> ProjectLock:
+    """The queue's project lock, polling while another cycle holds it."""
+    announced = False
+    while True:
+        try:
+            return ProjectLock.take(
+                cfg.state_dir, queue.project, None, f"queue {queue.queue_id}",
+            )
+        except ProjectBusy as exc:
+            if not announced:
+                logger.info("queue %s: waiting for the project: %s", queue.queue_id, exc)
+                announced = True
+            sleep(WAIT_POLL_SECONDS)
+
+
+def _run_serial(
+    cfg: Config, queue: Queue, sleep: Callable[[float], None], lock: ProjectLock,
+) -> Queue:
     while True:
         if queue.spent >= queue.limit:
             _stop_on_limit(cfg, queue, None)
@@ -517,6 +550,7 @@ def run(
             authorized=queue.authorized,
             on_approve=on_approve,
             may_start_phase=may_start_phase,
+            project_lock=lock,
         )
         entry.tokens, entry.unmeasured = _spend(cfg, entry)
         _settle(cfg, queue, entry, outcome, limit_hit)
@@ -610,7 +644,9 @@ class _Scheduler:
             self.cond.notify_all()
 
 
-def _run_parallel(cfg: Config, queue: Queue, sleep: Callable[[float], None]) -> Queue:
+def _run_parallel(
+    cfg: Config, queue: Queue, sleep: Callable[[float], None], lock: ProjectLock,
+) -> Queue:
     """`run` with up to `queue.parallel` cycles at once (B-3, ADR 83).
 
     A free slot goes to the first task of the confirmed order that can start,
@@ -661,6 +697,7 @@ def _run_parallel(cfg: Config, queue: Queue, sleep: Callable[[float], None]) -> 
                         on_approve=on_approve,
                         may_start_phase=may_start_phase,
                         scheduler=scheduler,
+                        project_lock=lock,
                     )
                 except Exception:  # noqa: BLE001 — one cycle's crash is that task's block
                     logger.exception("queue %s: task %s crashed", queue.queue_id, entry.task_id)
