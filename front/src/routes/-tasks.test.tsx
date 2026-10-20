@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { toast } from "sonner";
 import { Route } from "./tasks.$taskId";
-import { renderRoute, type Served } from "@/test/render-route";
+import { renderRoute, type Answer, type Served } from "@/test/render-route";
 import type { Task, TaskComment, TaskDetail, Thread } from "@/lib/api/types";
 import { OPEN_THREAD_EVENT } from "@/hooks/use-console";
 
@@ -526,7 +526,7 @@ describe("talk about this task (ADR 195)", () => {
         "POST /api/threads": { bare: THREAD, status: 201 },
         "/api/threads": { data: [] },
       });
-      fireEvent.click(await screen.findByRole("button", { name: "Talk about this task" }));
+      fireEvent.click(await talkButton());
       await waitFor(() => expect(opened).toEqual(["t-9"]));
       expect(sent.filter((s) => s.method === "POST")).toEqual([
         { method: "POST", path: "/api/threads", body: { title: "T-101: the dock", task: "T-101" } },
@@ -541,7 +541,7 @@ describe("talk about this task (ADR 195)", () => {
       "POST /api/threads": { bare: THREAD, status: 201 },
       "/api/threads": { data: [] },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "Talk about this task" }));
+    fireEvent.click(await talkButton());
     await waitFor(() => expect(sent.some((s) => s.method === "POST")).toBe(true));
     expect(sent.find((s) => s.method === "POST")?.body).toEqual({ title: "T-101", task: "T-101" });
   });
@@ -555,12 +555,113 @@ describe("talk about this task (ADR 195)", () => {
         "POST /api/threads": { status: 400, error: "task 'T-101' has no task file" },
         "/api/threads": { data: [] },
       });
-      fireEvent.click(await screen.findByRole("button", { name: "Talk about this task" }));
+      fireEvent.click(await talkButton());
       expect((await screen.findByRole("alert")).textContent).toContain("has no task file");
       expect(opened).toEqual([]);
     } finally {
       window.removeEventListener(OPEN_THREAD_EVENT, onOpen);
     }
+  });
+});
+
+/** *Talk about this task*, once the thread list is read and it can be clicked (ADR NNN). */
+async function talkButton(): Promise<HTMLButtonElement> {
+  const button = await screen.findByRole("button", { name: "Talk about this task" });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  return button as HTMLButtonElement;
+}
+
+describe("talk about this task reuses an open thread (ADR NNN)", () => {
+  const ON_TASK: Thread = {
+    id: "t-1",
+    title: "T-101: the dock",
+    project: "ia-harness",
+    account: "cuenta1",
+    model: "opus",
+    effort: "high",
+    segments: [],
+    created: "2026-10-18T00:00:00+00:00",
+    status: "open",
+    task: "T-101",
+  };
+  const CREATED: Thread = { ...ON_TASK, id: "t-new", created: "2026-10-19T00:00:00+00:00" };
+
+  /** Click the button with `threads` as the list; what opened and what was posted. */
+  async function click(threads: Answer) {
+    const opened: unknown[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<unknown>).detail);
+    window.addEventListener(OPEN_THREAD_EVENT, onOpen);
+    try {
+      const { sent } = await taskPage(TASK, [], undefined, {
+        "POST /api/threads": { bare: CREATED, status: 201 },
+        "/api/threads": threads,
+      });
+      fireEvent.click(await talkButton());
+      await waitFor(() => expect(opened.length).toBe(1));
+      return { opened, posts: sent.filter((s) => s.method === "POST") };
+    } finally {
+      window.removeEventListener(OPEN_THREAD_EVENT, onOpen);
+    }
+  }
+
+  it("opens the open thread on the task and posts nothing", async () => {
+    const { opened, posts } = await click({ data: [ON_TASK] });
+    expect(opened).toEqual(["t-1"]);
+    expect(posts).toEqual([]);
+  });
+
+  it("opens the most recently created when several are open", async () => {
+    const { opened, posts } = await click({
+      data: [
+        ON_TASK,
+        { ...ON_TASK, id: "t-2", created: "2026-10-18T12:00:00+00:00" },
+        { ...ON_TASK, id: "t-0", created: "2026-10-01T00:00:00+00:00" },
+      ],
+    });
+    expect(opened).toEqual(["t-2"]);
+    expect(posts).toEqual([]);
+  });
+
+  it("creates when no thread is on the task", async () => {
+    const { opened, posts } = await click({
+      data: [
+        { ...ON_TASK, id: "t-3", task: "T-202" },
+        { ...ON_TASK, id: "main", project: null, task: null },
+      ],
+    });
+    expect(opened).toEqual(["t-new"]);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("ignores an archived thread on the task and creates", async () => {
+    const { opened, posts } = await click({
+      data: [{ ...ON_TASK, status: "archived", created: "2026-10-19T06:00:00+00:00" }],
+    });
+    expect(opened).toEqual(["t-new"]);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("creates when the thread list could not be read", async () => {
+    const { opened, posts } = await click({ status: 503, error: "the api is down" });
+    expect(opened).toEqual(["t-new"]);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("waits while the thread list is first read", async () => {
+    const { fetchMock, queryClient } = await taskPage(TASK, [], undefined, {
+      "/api/threads": { data: [ON_TASK] },
+    });
+    // Hold the list's next read and drop what was read, so the list is pending again.
+    const answer = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) =>
+      new URL(String(input), "http://console.test").pathname === "/api/threads"
+        ? new Promise<Response>(() => {})
+        : answer(input, init),
+    );
+    // Not awaited: the refetch it starts never settles.
+    void queryClient.resetQueries({ queryKey: ["threads"] });
+    const button = await screen.findByRole("button", { name: "Talk about this task" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
   });
 });
 

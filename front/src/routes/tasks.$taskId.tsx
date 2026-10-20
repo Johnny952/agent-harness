@@ -28,11 +28,12 @@ import {
   learningsQuery,
   phasesQuery,
   taskQuery,
+  threadsQuery,
   usageQuery,
 } from "@/lib/api/queries";
 import { isEpic } from "@/lib/backlog";
 import { ROLES } from "@/lib/api/types";
-import type { ApiResult, Phase, Task, UsageGroup, UsageLine } from "@/lib/api/types";
+import type { ApiResult, Phase, Task, Thread, UsageGroup, UsageLine } from "@/lib/api/types";
 import {
   agoSeconds,
   asPathLine,
@@ -70,11 +71,18 @@ export const Route = createFileRoute("/tasks/$taskId")({
  * task's id, then the dock opens on the thread the service answered. The account,
  * model and effort are the service's defaults. What the thread's session is first
  * told about the task is the worker's, not this button's. A refusal is shown here.
+ *
+ * An open thread on this task is reused instead (ADR NNN): the dock opens on it
+ * and nothing is posted. The button waits while the thread list is first read,
+ * and falls back to creating when that read failed. An archived one is ignored.
  */
 function TalkAboutTask({ taskId, title }: { taskId: string; title: string }) {
   const qc = useQueryClient();
   const create = useMutation(createThreadMutation(qc));
+  const threads = useQuery(threadsQuery);
   const [problem, setProblem] = useState<string | null>(null);
+  const reading = threads.isPending;
+  const existing = openThreadOn(threads.data?.data, taskId);
   return (
     <span className="flex items-center gap-2">
       {problem && (
@@ -83,9 +91,13 @@ function TalkAboutTask({ taskId, title }: { taskId: string; title: string }) {
         </span>
       )}
       <button
-        disabled={create.isPending}
+        disabled={create.isPending || reading}
         onClick={() => {
           setProblem(null);
+          if (existing) {
+            openThread(existing.id);
+            return;
+          }
           create.mutate(
             { title: (title ? `${taskId}: ${title}` : taskId).slice(0, 200), task: taskId },
             {
@@ -100,6 +112,21 @@ function TalkAboutTask({ taskId, title }: { taskId: string; title: string }) {
       </button>
     </span>
   );
+}
+
+/**
+ * The open thread on `taskId` the button reuses, the most recently created when
+ * there are several (ADR NNN), or `undefined`. `created` is ISO, so it sorts as
+ * text. A list that is not one, as from a failed read, has none.
+ */
+function openThreadOn(threads: Thread[] | undefined, taskId: string): Thread | undefined {
+  if (!Array.isArray(threads)) return undefined;
+  return threads
+    .filter((t) => t.task === taskId && t.status !== "archived")
+    .reduce<Thread | undefined>(
+      (best, t) => (!best || t.created > best.created ? t : best),
+      undefined,
+    );
 }
 
 function TaskDetailPage() {
