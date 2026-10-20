@@ -54,8 +54,10 @@
  * and `listThreadEvents` one thread's log, `GET /api/threads/<id>/events` (ADR
  * 180), both the api's envelope. They replaced the mock thread the dock drew
  * before. `sendTurn` is the dock's one write, `POST /api/threads/<id>/turns`
- * (ADR 190), bare like the others; the dock stops a turn with `cancelAction`. The
- * writes that open a thread are not the console's yet.
+ * (ADR 190), bare like the others; the dock stops a turn with `cancelAction`.
+ * `createThread` (`POST /api/threads`) and `updateThread` (`PATCH
+ * /api/threads/<id>`) open, rename, re-pick and archive a thread (ADR NNN), bare
+ * too.
  */
 import type {
   AcceptTaskBody,
@@ -65,6 +67,8 @@ import type {
   ActionRecord,
   ApiResult,
   SendTurnBody,
+  CreateThreadBody,
+  UpdateThreadBody,
   CommandRequestState,
   CommandRequests,
   CommentTaskBody,
@@ -497,6 +501,23 @@ export function sendTurn(threadId: string, text: string): Promise<ActionRecord> 
   const body: SendTurnBody = { text };
   return readBare<ActionRecord>(`/api/threads/${encodeURIComponent(threadId)}/turns`, {
     method: "POST",
+    body,
+  });
+}
+
+/**
+ * Open a thread: `POST /api/threads` (ADR NNN). The answer is the new record; a
+ * refusal (400 for a bad value or an unknown task, 409 for a second main, 503) is
+ * an `ApiError` with the service's own message.
+ */
+export function createThread(body: CreateThreadBody): Promise<Thread> {
+  return readBare<Thread>("/api/threads", { method: "POST", body });
+}
+
+/** Change a thread: `PATCH /api/threads/<id>` (ADR NNN). The answer is the changed record. */
+export function updateThread(threadId: string, body: UpdateThreadBody): Promise<Thread> {
+  return readBare<Thread>(`/api/threads/${encodeURIComponent(threadId)}`, {
+    method: "PATCH",
     body,
   });
 }

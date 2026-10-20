@@ -2,10 +2,14 @@ import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react
 import * as api from "./client";
 import type {
   AcceptTaskBody,
+  ApiResult,
   CommandRequestState,
   CommentTaskBody,
+  CreateThreadBody,
   EditTaskBody,
   ProposeBacklogBody,
+  Thread,
+  UpdateThreadBody,
 } from "./types";
 
 /** Nothing polls faster than 2s. */
@@ -194,6 +198,40 @@ export const sendTurnMutation = (qc: QueryClient) =>
     mutationFn: ({ threadId, text }: { threadId: string; text: string }) =>
       api.sendTurn(threadId, text),
     onSettled: () => qc.invalidateQueries({ queryKey: ["action-queue"] }),
+  });
+
+/**
+ * The record a thread write answered, put in the cached list at once, so the dock
+ * can select a new thread before the refetch lands. The refetch still follows.
+ */
+function cacheThread(qc: QueryClient, record: Thread) {
+  qc.setQueryData<ApiResult<Thread[]>>(["threads"], (old) => {
+    if (!old || !Array.isArray(old.data)) return old;
+    const known = old.data.some((t) => t.id === record.id);
+    const data = known
+      ? old.data.map((t) => (t.id === record.id ? record : t))
+      : [...old.data, record];
+    return { ...old, data };
+  });
+}
+
+/** `POST /api/threads` (ADR NNN). The thread list refetches, settled either way. */
+export const createThreadMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["threads", "create"],
+    mutationFn: (body: CreateThreadBody) => api.createThread(body),
+    onSuccess: (record) => cacheThread(qc, record),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["threads"] }),
+  });
+
+/** `PATCH /api/threads/<id>` (ADR NNN). The thread list refetches, settled either way. */
+export const updateThreadMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["threads", "update"],
+    mutationFn: ({ threadId, body }: { threadId: string; body: UpdateThreadBody }) =>
+      api.updateThread(threadId, body),
+    onSuccess: (record) => cacheThread(qc, record),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["threads"] }),
   });
 
 export const actionBackendQuery = queryOptions({

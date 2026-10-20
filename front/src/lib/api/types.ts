@@ -3,6 +3,14 @@ export const ROLES = ["cartografo", "arquitecto", "implementador", "revisor", "a
 export type Role = (typeof ROLES)[number];
 
 /**
+ * The five effort levels, in order. A copy of `dispatcher/config.py:EFFORT_LEVELS`,
+ * which the writers validate against: a level added there and not here is one
+ * a select cannot offer, never one a writer accepts by mistake. The Models
+ * screen and the dock's thread controls both offer it.
+ */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/**
  * Every 200 the read api answers, as `client.ts` hands it on: `data` unwrapped
  * into the rows a screen takes, `warnings` riding beside it so nothing the api
  * went to the trouble of saying is dropped. `docs/decisions.md` ADR 16 and
@@ -588,6 +596,29 @@ export interface ActionQueue {
 /** `POST /api/threads/<id>/turns`: exactly `{text}`; the route refuses any other key (ADR 181, ADR 190). */
 export interface SendTurnBody {
   text: string;
+}
+
+/**
+ * `POST /api/threads` (ADR NNN): a key left out is the board service's default —
+ * the primary account, that account's default thread model, the default effort.
+ * `task` must name a task file; `main` opens the one main thread.
+ */
+export interface CreateThreadBody {
+  title: string;
+  account?: string;
+  model?: string;
+  effort?: string;
+  task?: string;
+  main?: boolean;
+}
+
+/** `PATCH /api/threads/<id>` (ADR NNN): the keys to change, at least one. `main` cannot be archived. */
+export interface UpdateThreadBody {
+  title?: string;
+  account?: string;
+  model?: string;
+  effort?: string;
+  status?: "open" | "archived";
 }
 
 /** `POST /api/tasks/<id>/start`: exactly `{note}`, the forward refuses any other key (ADR 157). */

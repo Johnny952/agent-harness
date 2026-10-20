@@ -13,18 +13,31 @@
  * after the history. *Stop* on a running turn and *Cancel* on a queued one are
  * both `cancelAction`. An archived thread has no composer. The unsent text is
  * kept per thread in this component's state only.
+ *
+ * *New thread* sends `POST /api/threads` and selects the record it answers;
+ * *Edit* sends `PATCH /api/threads/<id>` with the title, model and effort that
+ * changed; *Archive* and *Reopen* send the status (ADR NNN). `main` has no
+ * *Archive*: the board service refuses it. The console holds no list of an
+ * account's thread models, so a new thread takes the service's default model and
+ * a change of model is typed, checked by the service. A refused write is shown in
+ * its form and the form keeps what was typed. A screen opens the dock on a thread
+ * with `openThread` (`hooks/use-console.ts`), which arrives here as `select`.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ChevronRight, Wrench, X } from "lucide-react";
+import { ChevronRight, Plus, Wrench, X } from "lucide-react";
 import {
+  accountsQuery,
   actionQueueQuery,
   cancelActionMutation,
+  createThreadMutation,
   sendTurnMutation,
   threadsQuery,
+  updateThreadMutation,
 } from "@/lib/api/queries";
-import type { Thread } from "@/lib/api/types";
+import { EFFORT_LEVELS } from "@/lib/api/types";
+import type { CreateThreadBody, Thread, UpdateThreadBody } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 import { formatClock } from "@/lib/format";
 import {
@@ -48,11 +61,33 @@ function optionLabel(t: Thread): string {
   return `${name} — ${t.account} · ${t.model}${t.status === "archived" ? " (archived)" : ""}`;
 }
 
-export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: number }) {
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+export function ChatPanel({
+  onClose,
+  pollMs,
+  select,
+}: {
+  onClose: () => void;
+  pollMs?: number;
+  /** A thread another screen asked for (`openThread`); `n` changes on every ask. */
+  select?: { threadId: string; n: number } | null;
+}) {
   const { data, isError, error } = useQuery(threadsQuery);
   const threads = useMemo(() => orderThreads(data?.data ?? []), [data]);
-  const [chosen, setChosen] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<string | null>(select?.threadId ?? null);
   const [view, setView] = useState<ThreadView>(readStoredView);
+  // Which thread form is open: none, *New thread*, or *Edit* on the shown thread.
+  const [form, setForm] = useState<"new" | "edit" | null>(null);
+
+  useEffect(() => {
+    if (select) {
+      setChosen(select.threadId);
+      setForm(null);
+    }
+  }, [select]);
 
   const thread = threads.find((t) => t.id === chosen) ?? threads[0] ?? null;
   const events = useThreadEvents(thread?.id ?? null, pollMs);
@@ -75,6 +110,7 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
 
   const send = useMutation(sendTurnMutation(qc));
   const cancel = useMutation(cancelActionMutation(qc));
+  const update = useMutation(updateThreadMutation(qc));
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   // The last refusal, with the thread it was for: shown until the next send or a
   // change of thread (ADR 190, 5).
@@ -118,6 +154,16 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
     });
   }
 
+  function setStatus(status: "open" | "archived") {
+    if (!thread || update.isPending) return;
+    const id = thread.id;
+    setProblem(null);
+    update.mutate(
+      { threadId: id, body: { status } },
+      { onError: (e) => setProblem({ threadId: id, message: message(e) }) },
+    );
+  }
+
   return (
     <aside className="flex h-full w-[420px] shrink-0 flex-col border-l border-border bg-surface">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
@@ -138,6 +184,15 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
           ))}
         </select>
         <button
+          onClick={() => setForm((f) => (f === "new" ? null : "new"))}
+          aria-pressed={form === "new"}
+          className="rounded-sm p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+          aria-label="New thread"
+          title="New thread"
+        >
+          <Plus className="size-3.5" />
+        </button>
+        <button
           onClick={onClose}
           className="rounded-sm p-1 text-muted-foreground hover:bg-surface-2 hover:text-foreground"
           aria-label="Close chat"
@@ -146,12 +201,39 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
         </button>
       </div>
 
-      {thread && <Header thread={thread} meter={meter} view={view} onView={choose} />}
+      {form === "new" && (
+        <NewThreadForm
+          hasMain={hasMain}
+          onCancel={() => setForm(null)}
+          onCreated={(record) => {
+            setChosen(record.id);
+            setProblem(null);
+            setForm(null);
+          }}
+        />
+      )}
+
+      {thread && form === "edit" && (
+        <EditThreadForm key={thread.id} thread={thread} onDone={() => setForm(null)} />
+      )}
+
+      {thread && (
+        <Header
+          thread={thread}
+          meter={meter}
+          view={view}
+          onView={choose}
+          editing={form === "edit"}
+          onEdit={() => setForm((f) => (f === "edit" ? null : "edit"))}
+          busy={update.isPending}
+          onStatus={setStatus}
+        />
+      )}
 
       {data && !hasMain && (
         <Banner tone="info">
-          No <Mono>main</Mono> thread yet. The board service opens it with{" "}
-          <Mono>POST /api/threads</Mono>, which the console does not forward yet.
+          No <Mono>main</Mono> thread yet. <em>New thread</em> opens it with{" "}
+          <Mono>POST /api/threads</Mono> and <Mono>main: true</Mono>.
         </Banner>
       )}
       <WarningBanner warnings={[...(data?.warnings ?? []), ...events.warnings]} />
@@ -235,16 +317,228 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
   );
 }
 
+const FIELD =
+  "min-w-0 rounded-sm border border-border bg-surface-2 px-2 py-1 text-[11px] disabled:opacity-50";
+const SMALL_BUTTON =
+  "rounded-sm border border-border px-2 py-0.5 text-[11px] hover:bg-surface-2 disabled:opacity-50";
+
+/**
+ * `POST /api/threads` (ADR NNN). The account is one the config names, or the
+ * primary when left on the default; the effort is one of the five, or the
+ * default; the model is always the service's default for that account. A
+ * refusal stays in the form with what was typed.
+ */
+function NewThreadForm({
+  hasMain,
+  onCancel,
+  onCreated,
+}: {
+  hasMain: boolean;
+  onCancel: () => void;
+  onCreated: (record: Thread) => void;
+}) {
+  const qc = useQueryClient();
+  const create = useMutation(createThreadMutation(qc));
+  const accounts = useQuery(accountsQuery);
+  const names = (Array.isArray(accounts.data?.data) ? accounts.data.data : [])
+    .map((a) => a?.name)
+    .filter((n): n is string => typeof n === "string" && n !== "");
+  const [title, setTitle] = useState("");
+  const [account, setAccount] = useState("");
+  const [effort, setEffort] = useState("");
+  const [main, setMain] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  function submit() {
+    if (create.isPending || (!main && !title.trim())) return;
+    const body: CreateThreadBody = { title: title.trim() || "Main thread" };
+    if (main) body.main = true;
+    if (account) body.account = account;
+    if (effort) body.effort = effort;
+    setProblem(null);
+    create.mutate(body, {
+      onSuccess: (record) => onCreated(record),
+      onError: (e) => setProblem(message(e)),
+    });
+  }
+
+  return (
+    <form
+      aria-label="New thread"
+      className="space-y-1.5 border-b border-border px-3 py-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <input
+        aria-label="Title"
+        value={title}
+        placeholder={main ? "Main thread" : "What this thread is about"}
+        onChange={(e) => setTitle(e.target.value)}
+        className={cn(FIELD, "w-full")}
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          aria-label="Account"
+          value={account}
+          onChange={(e) => setAccount(e.target.value)}
+          className={FIELD}
+        >
+          <option value="">primary (default)</option>
+          {names.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Effort"
+          value={effort}
+          onChange={(e) => setEffort(e.target.value)}
+          className={FIELD}
+        >
+          <option value="">effort (default)</option>
+          {EFFORT_LEVELS.map((l) => (
+            <option key={l} value={l}>
+              {l}
+            </option>
+          ))}
+        </select>
+        {!hasMain && (
+          <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+            <input type="checkbox" checked={main} onChange={(e) => setMain(e.target.checked)} />
+            the main thread
+          </label>
+        )}
+      </div>
+      <p className="text-[10px] text-muted-foreground">
+        The model is the account's default thread model; change it after with <em>Edit</em>.
+      </p>
+      {problem && (
+        <p role="alert" className="whitespace-pre-wrap text-[11px] text-destructive">
+          {problem}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={create.isPending || (!main && !title.trim())}
+          className={SMALL_BUTTON}
+        >
+          {create.isPending ? "Creating…" : "Create"}
+        </button>
+        <button type="button" onClick={onCancel} className={SMALL_BUTTON}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * `PATCH /api/threads/<id>` with the keys that changed (ADR NNN). A new model or
+ * effort opens a segment on the service's side, which the log draws as a change
+ * line. A refusal stays in the form with what was typed.
+ */
+function EditThreadForm({ thread, onDone }: { thread: Thread; onDone: () => void }) {
+  const qc = useQueryClient();
+  const update = useMutation(updateThreadMutation(qc));
+  const [title, setTitle] = useState(thread.title ?? "");
+  const [model, setModel] = useState(thread.model ?? "");
+  const [effort, setEffort] = useState(thread.effort ?? "");
+  const [problem, setProblem] = useState<string | null>(null);
+  const efforts: string[] = (EFFORT_LEVELS as readonly string[]).includes(effort)
+    ? [...EFFORT_LEVELS]
+    : [effort, ...EFFORT_LEVELS];
+
+  function submit() {
+    if (update.isPending) return;
+    const body: UpdateThreadBody = {};
+    if (title.trim() !== thread.title) body.title = title.trim();
+    if (model.trim() !== thread.model) body.model = model.trim();
+    if (effort !== thread.effort) body.effort = effort;
+    if (Object.keys(body).length === 0) {
+      onDone();
+      return;
+    }
+    setProblem(null);
+    update.mutate(
+      { threadId: thread.id, body },
+      { onSuccess: () => onDone(), onError: (e) => setProblem(message(e)) },
+    );
+  }
+
+  return (
+    <form
+      aria-label="Edit thread"
+      className="space-y-1.5 border-b border-border px-3 py-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <input
+        aria-label="Title"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        className={cn(FIELD, "w-full")}
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          aria-label="Model"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          className={cn(FIELD, "mono flex-1")}
+        />
+        <select
+          aria-label="Effort"
+          value={effort}
+          onChange={(e) => setEffort(e.target.value)}
+          className={FIELD}
+        >
+          {efforts.map((l) => (
+            <option key={l} value={l}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </div>
+      {problem && (
+        <p role="alert" className="whitespace-pre-wrap text-[11px] text-destructive">
+          {problem}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button type="submit" disabled={update.isPending} className={SMALL_BUTTON}>
+          {update.isPending ? "Saving…" : "Save"}
+        </button>
+        <button type="button" onClick={onDone} className={SMALL_BUTTON}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function Header({
   thread,
   meter,
   view,
   onView,
+  editing,
+  onEdit,
+  busy,
+  onStatus,
 }: {
   thread: Thread;
   meter: ThreadMeter;
   view: ThreadView;
   onView: (view: ThreadView) => void;
+  editing: boolean;
+  onEdit: () => void;
+  busy: boolean;
+  onStatus: (status: "open" | "archived") => void;
 }) {
   const pct =
     meter.contextTokens !== null && meter.contextWindow
@@ -288,6 +582,27 @@ function Header({
             {label}
           </button>
         ))}
+        <span className="ml-auto flex gap-1">
+          <button
+            onClick={onEdit}
+            aria-pressed={editing}
+            className={SMALL_BUTTON}
+            aria-label="Edit thread"
+          >
+            Edit
+          </button>
+          {/* The board service refuses to archive `main` (ADR NNN), so it has no button. */}
+          {thread.id !== "main" &&
+            (thread.status === "archived" ? (
+              <button onClick={() => onStatus("open")} disabled={busy} className={SMALL_BUTTON}>
+                Reopen
+              </button>
+            ) : (
+              <button onClick={() => onStatus("archived")} disabled={busy} className={SMALL_BUTTON}>
+                Archive
+              </button>
+            ))}
+        </span>
       </div>
     </div>
   );

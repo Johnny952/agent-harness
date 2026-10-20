@@ -2,7 +2,8 @@
  * The chat dock over a stubbed `/api/threads` and thread log (`docs/decisions.md`
  * ADR 184): the selector's order, the switch and its memory, the meter, and the
  * cursor the log is polled from; and the composer, *stop* and the dispatch
- * line's links (ADR 190).
+ * line's links (ADR 190); and creating, editing, archiving and reopening a
+ * thread, and a screen's `openThread` arriving as `select` (ADR NNN).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -106,13 +107,46 @@ interface Extras {
   queue?: unknown;
   /** The answer to a `POST /api/threads/<id>/turns`; the default is a 201 record. */
   turn?: () => Response;
+  /** The account list the *New thread* form reads. */
+  accounts?: unknown;
+  /**
+   * The answer to a `POST /api/threads` or a `PATCH /api/threads/<id>`, given the
+   * method, the path and the parsed body; the default echoes a record built from
+   * the body.
+   */
+  write?: (method: string, path: string, body: Record<string, unknown>) => Response;
+}
+
+function created(body: unknown, status = 201) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 /** Serves the thread list, and the log's rows past each request's `since`. */
 function serve(threads: Thread[], log: { n: number; event: unknown }[] = LOG, extras: Extras = {}) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://console");
+    const method = init?.method ?? "GET";
+    const threadPath = /^\/api\/threads(\/[^/]+)?$/.test(url.pathname);
+    if (threadPath && (method === "POST" || method === "PATCH")) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (extras.write) return extras.write(method, url.pathname, body);
+      // The default write lands in `threads`, so the refetch after it reads it back.
+      if (method === "POST") {
+        const record = thread("t-new", body as Partial<Thread>);
+        threads.push(record);
+        return created(record);
+      }
+      const id = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+      const at = threads.findIndex((t) => t.id === id);
+      const record = { ...(threads[at] ?? thread(id)), ...body } as Thread;
+      if (at >= 0) threads[at] = record;
+      return created(record, 200);
+    }
     if (url.pathname === "/api/threads") return json(threads);
+    if (url.pathname === "/api/accounts") return json(extras.accounts ?? []);
     if (url.pathname.endsWith("/events")) {
       const since = Number(url.searchParams.get("since") ?? "0");
       return json(log.filter((r) => r.n > since));
@@ -145,6 +179,14 @@ function refusal(status: number, error: string) {
     });
 }
 
+/** The thread writes the dock made: `[method, path, parsed body]`. */
+function writes(fetch: ReturnType<typeof serve>) {
+  return fetch.mock.calls
+    .filter(([u, init]) => /^\/api\/threads(\/[^/]+)?$/.test(String(u)) && init?.method)
+    .filter(([, init]) => init?.method === "POST" || init?.method === "PATCH")
+    .map(([u, init]) => [init?.method, String(u), JSON.parse(String(init?.body))] as const);
+}
+
 /** The POSTs the dock made: `[path, parsed body]`. */
 function posts(fetch: ReturnType<typeof serve>) {
   return fetch.mock.calls
@@ -152,13 +194,19 @@ function posts(fetch: ReturnType<typeof serve>) {
     .map(([u, init]) => [String(u), JSON.parse(String(init?.body))] as const);
 }
 
-function mount(pollMs = 60_000) {
+function mount(pollMs = 60_000, select: { threadId: string; n: number } | null = null) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <ChatPanel onClose={() => {}} pollMs={pollMs} />
+      <ChatPanel onClose={() => {}} pollMs={pollMs} select={select} />
     </QueryClientProvider>,
   );
+}
+
+/** The thread the selector shows. */
+async function selected(): Promise<string> {
+  const select = (await screen.findByRole("combobox", { name: "Thread" })) as HTMLSelectElement;
+  return select.value;
 }
 
 /** The log of a turn the worker has claimed and not ended: `turn_start` with its action. */
@@ -204,7 +252,7 @@ describe("the selector", () => {
   it("says when there is no main thread yet, and reads the first one there is", async () => {
     const fetch = serve([thread("t-1")]);
     mount();
-    expect(await screen.findByText(/thread yet\. The board service opens it/)).toBeTruthy();
+    expect(await screen.findByText(/^No\s+thread yet\.\s+opens it with/)).toBeTruthy();
     await waitFor(() =>
       expect(fetch.mock.calls.map(([u]) => String(u))).toContain("/api/threads/t-1/events?since=0"),
     );
@@ -497,5 +545,184 @@ describe("the poll", () => {
     const { container } = mount();
     await screen.findByText("Listing.");
     expect(container.querySelector('[data-kind="bad"]')?.textContent).toContain("line 2");
+  });
+});
+
+describe("a new thread (ADR NNN)", () => {
+  it("posts the title, account and effort chosen, and selects the record", async () => {
+    const fetch = serve([thread("main"), thread("t-1")], LOG, {
+      accounts: [{ name: "cuenta1" }, { name: "cuenta2" }],
+    });
+    mount();
+    await waitFor(async () => expect(await selected()).toBe("main"));
+    fireEvent.click(screen.getByRole("button", { name: "New thread" }));
+    const form = screen.getByRole("form", { name: "New thread" });
+    const create = within(form).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "  the dock  " } });
+    await within(form).findByRole("option", { name: "cuenta2" });
+    fireEvent.change(within(form).getByLabelText("Account"), { target: { value: "cuenta2" } });
+    fireEvent.change(within(form).getByLabelText("Effort"), { target: { value: "max" } });
+    // `main` exists, so the form does not offer to open it.
+    expect(within(form).queryByLabelText("the main thread")).toBeNull();
+    fireEvent.click(create);
+    await waitFor(() => expect(screen.queryByRole("form", { name: "New thread" })).toBeNull());
+    expect(writes(fetch)).toEqual([
+      ["POST", "/api/threads", { title: "the dock", account: "cuenta2", effort: "max" }],
+    ]);
+    expect(await selected()).toBe("t-new");
+  });
+
+  it("leaves account and effort to the service when they are not picked", async () => {
+    const fetch = serve([thread("main")]);
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "New thread" }));
+    const form = screen.getByRole("form", { name: "New thread" });
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "plain" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(writes(fetch)).toHaveLength(1));
+    expect(writes(fetch)[0]).toEqual(["POST", "/api/threads", { title: "plain" }]);
+  });
+
+  it("opens the main thread with main: true when there is none", async () => {
+    const fetch = serve([thread("t-1")], LOG, {
+      write: (_m, _p, body) => created(thread("main", { title: String(body["title"]) })),
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "New thread" }));
+    const form = screen.getByRole("form", { name: "New thread" });
+    fireEvent.click(within(form).getByLabelText("the main thread"));
+    fireEvent.click(within(form).getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(writes(fetch)).toHaveLength(1));
+    expect(writes(fetch)[0]).toEqual([
+      "POST",
+      "/api/threads",
+      { title: "Main thread", main: true },
+    ]);
+  });
+
+  it("shows a refusal in the form and keeps what was typed", async () => {
+    serve([thread("main")], LOG, {
+      write: refusal(400, "task 'T-999' has no task file"),
+    });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "New thread" }));
+    const form = screen.getByRole("form", { name: "New thread" });
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "kept" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create" }));
+    expect((await within(form).findByRole("alert")).textContent).toContain("has no task file");
+    expect((within(form).getByLabelText("Title") as HTMLInputElement).value).toBe("kept");
+    expect(await selected()).toBe("main");
+  });
+});
+
+describe("editing a thread (ADR NNN)", () => {
+  it("renames with a PATCH that carries only the title", async () => {
+    const fetch = serve([thread("main"), thread("t-1")]);
+    mount();
+    await waitFor(async () => expect(await selected()).toBe("main"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Thread" }), {
+      target: { value: "t-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit thread" }));
+    const form = screen.getByRole("form", { name: "Edit thread" });
+    expect((within(form).getByLabelText("Title") as HTMLInputElement).value).toBe("Thread t-1");
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: " renamed " } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit thread" })).toBeNull());
+    expect(writes(fetch)).toEqual([["PATCH", "/api/threads/t-1", { title: "renamed" }]]);
+  });
+
+  it("sends a new model and effort, and nothing when nothing changed", async () => {
+    const fetch = serve([thread("main")]);
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit thread" }));
+    let form = screen.getByRole("form", { name: "Edit thread" });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit thread" })).toBeNull());
+    expect(writes(fetch)).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit thread" }));
+    form = screen.getByRole("form", { name: "Edit thread" });
+    fireEvent.change(within(form).getByLabelText("Model"), { target: { value: "sonnet" } });
+    fireEvent.change(within(form).getByLabelText("Effort"), { target: { value: "low" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(writes(fetch)).toHaveLength(1));
+    expect(writes(fetch)[0]).toEqual([
+      "PATCH",
+      "/api/threads/main",
+      { model: "sonnet", effort: "low" },
+    ]);
+  });
+
+  it("shows a refusal in the form and keeps what was typed", async () => {
+    serve([thread("main")], LOG, { write: refusal(400, "title is longer than 200 characters") });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit thread" }));
+    const form = screen.getByRole("form", { name: "Edit thread" });
+    fireEvent.change(within(form).getByLabelText("Title"), { target: { value: "too long" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    expect((await within(form).findByRole("alert")).textContent).toContain("longer than 200");
+    expect((within(form).getByLabelText("Title") as HTMLInputElement).value).toBe("too long");
+  });
+});
+
+describe("archive and reopen (ADR NNN)", () => {
+  it("archives an open thread with {status: archived}", async () => {
+    const fetch = serve([thread("main"), thread("t-1")]);
+    mount();
+    await waitFor(async () => expect(await selected()).toBe("main"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Thread" }), {
+      target: { value: "t-1" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(writes(fetch)).toHaveLength(1));
+    expect(writes(fetch)[0]).toEqual(["PATCH", "/api/threads/t-1", { status: "archived" }]);
+    // The record goes into the list: the thread stays listed, as archived, with Reopen.
+    expect(await screen.findByRole("button", { name: "Reopen" })).toBeTruthy();
+    expect(
+      within(screen.getByRole("combobox", { name: "Thread" }))
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toContain("Thread t-1 · ia-harness — cuenta1 · opus (archived)");
+  });
+
+  it("reopens an archived thread with {status: open}", async () => {
+    const fetch = serve([thread("t-old", { status: "archived" })]);
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Reopen" }));
+    await waitFor(() => expect(writes(fetch)).toHaveLength(1));
+    expect(writes(fetch)[0]).toEqual(["PATCH", "/api/threads/t-old", { status: "open" }]);
+  });
+
+  it("gives main no Archive", async () => {
+    serve([thread("main")]);
+    mount();
+    expect(await screen.findByRole("button", { name: "Edit thread" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Archive" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reopen" })).toBeNull();
+  });
+
+  it("shows a refused archive by the composer", async () => {
+    serve([thread("main"), thread("t-1")], LOG, { write: refusal(409, "the thread is busy") });
+    mount(60_000, { threadId: "t-1", n: 1 });
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("the thread is busy");
+  });
+});
+
+describe("select (ADR NNN)", () => {
+  it("opens on the thread a screen asked for, and follows a later ask", async () => {
+    serve([thread("main"), thread("t-1"), thread("t-2")]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (select: { threadId: string; n: number }) => (
+      <QueryClientProvider client={client}>
+        <ChatPanel onClose={() => {}} pollMs={60_000} select={select} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view({ threadId: "t-1", n: 1 }));
+    await waitFor(async () => expect(await selected()).toBe("t-1"));
+    rerender(view({ threadId: "t-2", n: 2 }));
+    await waitFor(async () => expect(await selected()).toBe("t-2"));
   });
 });

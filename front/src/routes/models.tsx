@@ -51,6 +51,7 @@ import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api/client";
 import { ApiError } from "@/lib/api/client";
 import { settingsQuery } from "@/lib/api/queries";
+import { EFFORT_LEVELS } from "@/lib/api/types";
 import type { SettingChange, SettingRow, Settings } from "@/lib/api/types";
 import { formatDateClock } from "@/lib/format";
 
@@ -82,13 +83,6 @@ export const Route = createFileRoute("/models")({
  */
 export const SETTINGS_NOTE =
   "A change applies to the next dispatcher run. A task already running keeps the settings it started with. The Pool screen's thresholds follow at the api's next restart.";
-
-/**
- * The five effort levels, in order. A copy of `dispatcher/config.py:EFFORT_LEVELS`,
- * which the writer validates against: a level added there and not here is one
- * the select cannot offer, never one the writer accepts by mistake.
- */
-const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 /** The string keys whose value is a model ID, and so take the model suggestions. */
 const MODEL_KEYS = new Set(["default_model", "mapping_model"]);

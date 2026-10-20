@@ -27,14 +27,17 @@
  * deliberately not entries of `FORWARDED`, whose fifteen routes, count and
  * rejection message describe the api alone.
  *
- * **Seven method and path pairs go to the board-service** (`docs/decisions.md`
- * ADR 136, ADR 157, ADR 190): `POST /api/backlog`, `PATCH /api/tasks/<id>`,
- * `POST /api/tasks/<id>/comments`, `POST /api/tasks/<id>/accept`, and the three
- * action routes `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel`
- * and `POST /api/threads/<id>/turns`, onto the same paths there; the last three
+ * **Nine method and path pairs go to the board-service** (`docs/decisions.md`
+ * ADR 136, ADR 157, ADR 190, and ADR NNN for the two thread records):
+ * `POST /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`,
+ * `POST /api/tasks/<id>/accept`, `POST /api/threads` and
+ * `PATCH /api/threads/<id>`, and the three action routes
+ * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
+ * `POST /api/threads/<id>/turns`, onto the same paths there; the last three
  * carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
+ * `GET /api/threads` is still the api's list, a
  * `POST /api/tasks` is still the 405, a `GET /api/backlog` still the 404. They
  * are the only writes that are not the settings', so they carry the console's
  * CSRF checks, written at `forwardBoard`.
@@ -87,8 +90,8 @@ const FORWARDED: Record<string, readonly string[]> = {
   // The thread list (`docs/decisions.md` ADR 177, ADR 184). Hive-wide like
   // `/api/actions`, and the api takes no parameter here at all, so nothing is
   // copied and no `?project=` is added. Only the `GET`: `POST /api/threads` is
-  // the board service's (ADR 170) and the console does not forward it yet, so it
-  // is the read-only 405 like every other write on an api path.
+  // the board service's (ADR 170), matched in `boardTarget` before this table
+  // is read (ADR NNN).
   "/api/threads": [],
 };
 
@@ -162,13 +165,26 @@ const THREAD_TURNS = /^\/api\/threads\/([^/]+)\/turns$/;
 
 /**
  * The thread ids the harness makes: `dispatcher/threads.py`'s `MAIN_ID` and
- * `_ORDINARY_ID`, written again here. A turn for any other id is the console's
- * 404 and never crosses (ADR 190 part 1).
+ * `_ORDINARY_ID`, written again here. A turn or a record `PATCH` for any other
+ * id is the console's 404 and never crosses (ADR 190 part 1, ADR NNN).
  */
 const THREAD_ID = /^(?:main|th-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})$/;
 
 /** Proposing a backlog item: a `POST` to the board-service, never a read. */
 const BACKLOG = "/api/backlog";
+
+/**
+ * Making a thread record (ADR 170, ADR NNN): a `POST` to the board-service with
+ * no bearer, since a record spends no quota. The `GET` is the api's list.
+ */
+const THREADS = "/api/threads";
+
+/**
+ * Changing one thread record (ADR 170, ADR NNN): a `PATCH` to the
+ * board-service with no bearer, the id checked against `THREAD_ID` as a turn's
+ * is. No other method on the path is forwarded.
+ */
+const THREAD_RECORD = /^\/api\/threads\/([^/]+)$/;
 
 /** The words every failure body uses for the board-service: never its address. */
 const BOARD = "the board-service";
@@ -227,7 +243,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the seven exact pairs: a method
+  // Also before the read-only check, and only for the nine exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -412,29 +428,37 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the seven writes goes, or `null` for any
+ * Where on the board-service one of the nine writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
  * The three action routes are `POST` only and carry `action` (ADR 157, ADR 190).
- * A thread id that is not one the harness makes is a 404 here too.
+ * A thread id that is not one the harness makes is a 404 here too, for a turn
+ * and for a record's `PATCH`.
  */
 function boardTarget(method: string, path: string): Resolution | null {
   if (method === "POST" && path === BACKLOG) {
     return { kind: "forward", target: `${BOARD_SERVICE_URL}${BACKLOG}` };
   }
+  if (method === "POST" && path === THREADS) {
+    return { kind: "forward", target: `${BOARD_SERVICE_URL}${THREADS}` };
+  }
+  if (method === "PATCH") {
+    const record = THREAD_RECORD.exec(path);
+    if (record) {
+      const id = threadId(path, record[1]!);
+      if (typeof id !== "string") return id;
+      return {
+        kind: "forward",
+        target: `${BOARD_SERVICE_URL}${THREADS}/${encodeURIComponent(id)}`,
+      };
+    }
+  }
   if (method === "POST") {
     const turns = THREAD_TURNS.exec(path);
     if (turns) {
-      let id: string;
-      try {
-        id = decodeURIComponent(turns[1]!);
-      } catch {
-        return { kind: "reject", status: 404, error: `${path} is not a readable thread id.` };
-      }
-      if (!THREAD_ID.test(id)) {
-        return { kind: "reject", status: 404, error: `${path} names no thread the harness makes.` };
-      }
+      const id = threadId(path, turns[1]!);
+      if (typeof id !== "string") return id;
       return {
         kind: "forward",
         target: `${BOARD_SERVICE_URL}/api/threads/${encodeURIComponent(id)}/turns`,
@@ -487,7 +511,24 @@ function boardTarget(method: string, path: string): Resolution | null {
 }
 
 /**
- * The board-service's answer to one of its seven writes (`docs/decisions.md`
+ * A thread id from a path segment, decoded and checked against `THREAD_ID`, or
+ * the 404 that names the path: one undecodable, or not an id the harness makes.
+ */
+function threadId(path: string, raw: string): string | Resolution {
+  let id: string;
+  try {
+    id = decodeURIComponent(raw);
+  } catch {
+    return { kind: "reject", status: 404, error: `${path} is not a readable thread id.` };
+  }
+  if (!THREAD_ID.test(id)) {
+    return { kind: "reject", status: 404, error: `${path} names no thread the harness makes.` };
+  }
+  return id;
+}
+
+/**
+ * The board-service's answer to one of its nine writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -509,7 +550,10 @@ function boardTarget(method: string, path: string): Resolution | null {
  * console's server half is not a browser. No query string: the board-service
  * refuses one.
  *
- * The four backlog writes carry no token: the board-service takes none there.
+ * The four backlog writes and the two thread-record writes carry no token: the
+ * board-service takes none there (ADR 170, 7). A record's body crosses
+ * unchanged, as a turn's does: the route refuses an unknown field or a wrong
+ * type itself.
  * The three action routes (ADR 157, on ADR 151; the turn is ADR 190) carry `Authorization: Bearer
  * BOARD_ACTIONS_TOKEN`, and after the CSRF checks above, in this order: 503 if
  * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
