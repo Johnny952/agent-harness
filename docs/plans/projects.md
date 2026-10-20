@@ -296,7 +296,9 @@ module; steps 2, 4 and 5 need its queue and worker.
    for the record's `push_task_branch`. The bootstrap (*Decisions*, 4, step 3)
    is not queued and needs no action: `bootstrap-project` only makes
    `<projects_root>/<slug>`, which clone and init already do, and run before
-   them it would make them refuse. Open: the write check does not see branch
+   them it would make them refuse. The write check was measured on the agent
+   image's git 2.39.5 too, with the same exit statuses (ADR 217). Open: the
+   write check does not see branch
    protection, which GitHub applies to a real update of a protected branch
    only; the worker writes the key at `cfg.project_keys_dir`, as the CLI does;
    the form finds an outcome only among the queue's newest twenty finished and

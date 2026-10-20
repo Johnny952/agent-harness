@@ -11970,3 +11970,53 @@ access*; the person learns it is off only when the first task's push fails.
 - A `bootstrap` action running `bootstrap-project`: it would only make the
   directory clone and init make, and building something more under that name
   would be a substitute for a bootstrap the harness does not have.
+
+## ADR 217 — The write probe is measured on the agent image's git 2.39.5, and reads the exit status alone
+
+**Status:** accepted (2026-10-20, T-117-S2).
+
+**Context.** The write check's probe, `_probe_push` in
+`dispatcher/docker_exec.py`, is the ADR headed *`check` tells write access;
+the bootstrap stays out of the form* (merged as ADR 214; its heading still
+reads `ADR NNN`). That ADR measured it with the host's git 2.43 only, and the
+agent image, where the worker runs it, carries 2.39.
+
+**Decision.**
+1. Measured on 2026-10-20 in the agent container, `git version 2.39.5`, with
+   the probe's own argv (`git push --dry-run --porcelain -- <remote>
+   HEAD:refs/heads/ia-harness/write-check-<12 hex>`) from a scratch repository
+   holding one empty commit:
+   - a local bare reached through a stand-in `ssh` that runs the remote
+     command, and the same bare as `file://`: exit 0, stdout `To <remote>`,
+     `*<TAB>HEAD:refs/heads/ia-harness/write-check-…<TAB>[new branch]`,
+     `Done`, stderr empty; the bare's refs unchanged.
+   - a stand-in `ssh` that writes GitHub's read-only refusal to stderr and
+     exits 1: exit 128, stdout empty, stderr `ERROR: The key you are
+     authenticating with has been marked as read only.`, `fatal: Could not
+     read from remote repository.`, then git's two-line *Please make sure you
+     have the correct access rights* hint.
+   - a remote that is not there: exit 128, stdout empty.
+   These are the exit statuses ADR 214 measured on 2.43, so `_probe_push`
+   reads 2.39 correctly as it is: no parsing changes.
+2. The probe keeps reading the exit status alone and does not parse the
+   porcelain lines. A ref-level rejection is the one case the porcelain would
+   add, and on 2.39.5 it exits 1 with a `!` line (measured as a
+   non-fast-forward dry-run onto an existing branch), so the exit status
+   already tells it as refused.
+3. The suite gains a test where real git meets the refusal: the push goes
+   over SSH to a stand-in `ssh` that refuses, instead of the pre-made
+   `CompletedProcess` the existing refusal test returns. The real-git tests run
+   on whatever git the suite runs on, which is the agent image's in a phase,
+   so both readings are covered on 2.39 by the suite itself.
+
+**Consequences.**
+- A pre-receive hook does not refuse a dry-run push: the measurement with one
+  that exits 1 on the bare got exit 0 and `[new branch]`, since a dry-run
+  sends no commands for a hook to see. So a hook cannot stand in for a
+  read-only key in a test; a refusing `ssh` (or receive-pack) can.
+- git's hint lines reach `detail` too: `_output_tail` keeps the last 500
+  characters of stderr, folded to one line.
+
+**Ruled out.**
+- Parsing the porcelain's `*`/`!` lines: it would add a second reading that
+  agrees with the exit status in every measured case.
