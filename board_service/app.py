@@ -359,6 +359,49 @@ def _ready_check(hive_dir: str):
     )
 
 
+def epic_start(
+    hive_dir: str, state_dir: str, epic_id: str, project=None, note=None,
+) -> dict:
+    """*Start epic*'s queue write (ADR NNN): a `start` per Ready task of the epic.
+
+    The epic covers the tasks its `split_into` lists now. Those in Ready are
+    queued in the board's order (`ready_order`), each with `params.epic`
+    naming the epic and the same note; the rest are answered in `not_ready`,
+    not queued. All or none: a covered task that already has a start queued,
+    or one that left Ready, refuses the call and nothing is written.
+    """
+    tasks = task_store.read_all_tasks(hive_dir)
+    epic = tasks.get(epic_id)
+    if epic is None:
+        raise actions.ActionRefused(404, f"no task {epic_id}")
+    if epic.status != "epic":
+        raise actions.ActionRefused(409, f"{epic_id} is not an epic")
+    covered = epic.split_into if isinstance(epic.split_into, list) else []
+    order = task_store.ready_order(tasks)
+    ready_now = set(order)
+    queue = [tid for tid in order if tid in covered]
+    if not queue:
+        raise actions.ActionRefused(409, f"epic {epic_id} has no task in Ready")
+    # The Ready check is made again under the queue's lock, from one read of
+    # the board for the whole batch.
+    read_once: list[set] = []
+
+    def ready(_project, tid):
+        if not read_once:
+            read_once.append(set(task_store.ready_order(task_store.read_all_tasks(hive_dir))))
+        return tid in read_once[0]
+
+    records = actions.create_starts(
+        state_dir, project, queue, params={"limit": None, "epic": epic_id},
+        actor="operator", note=note, ready=ready,
+    )
+    return {
+        "epic": epic_id,
+        "queued": records,
+        "not_ready": [tid for tid in covered if tid not in ready_now],
+    }
+
+
 def _names_task(text: str, task_id: str) -> bool:
     """Whether `text` has `task_id` as a whole token, in any case (ADR 187, 4).
 
@@ -799,6 +842,24 @@ def create_app(config_path: str) -> Flask:
             return actions.create(
                 state_dir, "start", project=body.get("project"), task_id=task_id,
                 note=body.get("note"), actor="operator", ready=_ready_check(hive_dir),
+            )
+
+        return _action(actions_token, make)
+
+    @app.post("/api/epics/<epic_id>/start")
+    def http_epic_start(epic_id: str):
+        # *Start epic* (ADR NNN): one `start` per Ready task of the epic, in the
+        # board's order, queued at once. The project's lock (ADR 200) makes
+        # each wait as `project` until the one before is awaiting review.
+        def make(body: dict):
+            unknown = sorted(set(body) - {"project", "note", "limit"})
+            if unknown:
+                raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+            if body.get("limit") is not None:
+                raise actions.ActionRefused(400, "the spending limit is not built yet")
+            return epic_start(
+                hive_dir, state_dir, epic_id, project=body.get("project"),
+                note=body.get("note"),
             )
 
         return _action(actions_token, make)

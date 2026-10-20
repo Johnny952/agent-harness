@@ -253,10 +253,11 @@ module; steps 2, 4 and 5 need its queue and worker.
    project, `dispatcher/project_lock.py`, taken in `open_cycle` so `run-task`,
    `run-phase`, the verdict commands, `run-queue` and a second worker all meet
    it. The worker's start waits as `project`; a CLI start exits 75. *Start
-   epic* (`board-service.md`) is what is still to be built on it: it is not
-   built, and when it is, it queues one start per task, each waiting as
-   `project` until the one before reaches *Awaiting review*, so it needs no
-   lock of its own.
+   epic* (`board-service.md`) is built on it 2026-10-20, backend only
+   (`docs/decisions.md` ADR NNN): `POST /api/epics/<id>/start` queues one
+   start per task of the epic in *Ready*, in the board's order, each waiting
+   as `project` until the one before reaches *Awaiting review*, so it needs
+   no lock of its own. The console's *Start epic* button is still to build.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build.

@@ -11337,3 +11337,78 @@ project saw none of it, so two of them ran two cycles on one clone.
   cadence, so no thread sleeps inside the kernel holding something else.
 - The lock per cycle under a parallel queue: two of the queue's own cycles
   would then exclude each other and the queue would run one at a time.
+
+## ADR NNN — Start epic: one start per task, queued at once in the board's order
+
+**Status:** accepted (2026-10-20).
+
+**Context.** `docs/plans/board-service.md`, *Starting development* and *Per
+epic*, and `docs/plans/projects.md` step 3: *Start epic* queues one start per
+task of the epic, each waiting as `project` until the one before reaches
+*Awaiting review*, so it needs no lock of its own (ADR 200, decision 9). The
+single-task start (`POST /api/tasks/<id>/start`, `dispatcher/actions.py`
+`create`) already existed; nothing queued an epic's tasks together.
+
+**Decision.**
+1. **The route.** `POST /api/epics/<epic_id>/start`, behind the
+   `BOARD_ACTIONS_TOKEN` bearer and the same refusals as the task start (no
+   token configured → 503, wrong bearer → 401, a browser `Origin` → 403, a
+   query string → 400, an unknown body field → 400). The body takes
+   `project`, `note` and `limit`. 201 returns `{"epic", "queued", "not_ready"}`:
+   the records written, and the epic's tasks that were not in *Ready* and so
+   were not queued.
+2. **What it covers.** The epic's `split_into`; nested epics are already
+   refused by the board's epic checks, so there is no recursion. A missing id
+   is 404, a task whose status is not `epic` is 409 `X is not an epic`, and an
+   epic with no task in *Ready* is 409 `epic X has no task in Ready`.
+3. **All or none.** `actions.create_starts` checks every start under one
+   `write.lock` before it writes any: one already queued for a task, or a task
+   no longer in *Ready*, refuses the whole press with the single-task start's
+   409 and writes nothing. A second press is therefore refused, not repeated.
+4. **The order is the board's.** The tasks are queued in `ready_order`, the
+   *Ready* column's order (priority, then rank), and their action ids are made
+   strictly increasing within the batch: the worker scans `pending/` by file
+   name, so the first start in the board's order is the first it takes. This
+   closes the one gap found: two ids drawn in the same instant could sort in
+   the wrong order, and `create_starts` draws again until each id is greater
+   than the one before.
+5. **No lock of its own.** Every start names the epic's project, so the
+   worker takes the first and leaves each later one pending as
+   `waiting: "project"` until the cycle before it releases the project lock in
+   `close_cycle`, which is when its task is *Awaiting review* (or blocked,
+   held, split). The earliest pending start is taken first, so the order
+   holds.
+6. **Each start says it is the epic's.** `params.epic` names the epic (the
+   validator accepts it on a `start` and requires a task id), so a later *Stop
+   epic* and the queue screen can find the epic's starts.
+7. **The limit and the note.** The spending limit is not built: `limit` must
+   be null (`params.limit` is null on every start), and a number is 400 `the
+   spending limit is not built yet`. The note, when given, is copied onto
+   every start.
+
+**Consequences.**
+- Only the tasks in *Ready* at the press are queued. A task that becomes
+  *Ready* later as its dependencies merge is not queued by this press: it is
+  named in `not_ready`, to be started on its own or by a later press. The
+  design's "each later task as its dependencies merge" is not built.
+- A task added to the epic after the press is not covered, by design.
+- Sub-tasks the arquitecto splits a covered task into are not queued here.
+- The worker does not re-check *Ready* when it claims a start; a task moved
+  out of *Ready* after the press still runs when its turn comes, as with the
+  single-task start.
+- A held outcome that is not a cancel or a stop ends the start done and frees
+  the project, so the epic's next task can start while the first is held
+  mid-cycle.
+- Another process (`run-task`, `run-queue`) can take the project between two
+  of the epic's cycles; the epic's next start then waits for it like any other.
+- *Stop epic*, the spending limit, the console's *Start epic* button and the
+  queue screen are not built.
+
+**Ruled out.**
+- A watcher that queues the next start when the previous task reaches
+  *Awaiting review*: ADR 200's lock already orders them, and a watcher would be
+  a second scheduler to keep in step with it.
+- A lock per epic: the project lock already serialises every cycle on the
+  project.
+- Queuing the tasks that are not in *Ready*: the worker would start them
+  before their dependencies merged.
