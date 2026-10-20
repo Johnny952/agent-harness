@@ -933,6 +933,56 @@ describe("Start epic and Stop epic (ADR 211)", () => {
     expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, limit: 5000 });
   });
 
+  it("sends the pool floor, and refuses one that is not a whole percent (ADR 227)", async () => {
+    const { sent } = await epicPage({
+      "POST /api/epics/T-101/start": {
+        bare: { epic: "T-101", queued: [action("T-109")], not_ready: [], limit: null, floor: 15 },
+        status: 201,
+      },
+    });
+    const dialog = await open("Start epic");
+    await within(dialog).findByText(/would be queued/);
+    expect(within(dialog).getByTestId("start-floor-help").textContent).toContain("the default 5%");
+    const field = within(dialog).getByLabelText("Pool floor");
+    const button = within(dialog).getByRole("button", { name: "Start" }) as HTMLButtonElement;
+    fireEvent.change(field, { target: { value: "101" } });
+    expect(within(dialog).getByText("101 is not a whole percent from 0 to 100.")).toBeTruthy();
+    expect(button.disabled).toBe(true);
+    fireEvent.change(field, { target: { value: "15" } });
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({
+      note: null,
+      limit: null,
+      floor: 15,
+    });
+  });
+
+  it("prefills the floor from the going run, and resumes with it", async () => {
+    const { sent } = await epicPage({
+      "/api/actions": queueOf({
+        epics: [epicRun({ limit: 1000, paused: "limit_reached", limit_reached: true, floor: 20 })],
+      }),
+      "POST /api/epics/T-101/start": {
+        bare: { epic: "T-101", queued: [], not_ready: [], limit: 3000, floor: 20 },
+        status: 201,
+      },
+    });
+    const dialog = await open("Resume epic");
+    expect((within(dialog).getByLabelText("Pool floor") as HTMLInputElement).value).toBe("20");
+    fireEvent.change(within(dialog).getByLabelText("Spending limit"), {
+      target: { value: "3000" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({
+      note: null,
+      limit: 3000,
+      floor: 20,
+    });
+  });
+
   it("shows a run's spend against its limit", async () => {
     await epicPage({ "/api/actions": queueOf({ epics: [epicRun({ limit: 9000 })] }) });
     expect((await screen.findByTestId("epic-run")).textContent).toBe(

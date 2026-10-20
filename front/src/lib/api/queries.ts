@@ -191,8 +191,15 @@ export const actionQueueQuery = queryOptions({
 export const startTaskMutation = (qc: QueryClient) =>
   mutationOptions({
     mutationKey: ["board", "start"],
-    mutationFn: ({ taskId, note }: { taskId: string; note: string | null }) =>
-      api.startTask(taskId, note),
+    mutationFn: ({
+      taskId,
+      note,
+      floor = null,
+    }: {
+      taskId: string;
+      note: string | null;
+      floor?: number | null;
+    }) => api.startTask(taskId, note, floor),
     onSettled: () =>
       Promise.all(
         [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),
@@ -207,11 +214,13 @@ export const startEpicMutation = (qc: QueryClient) =>
       epicId,
       note,
       limit = null,
+      floor = null,
     }: {
       epicId: string;
       note: string | null;
       limit?: number | null;
-    }) => api.startEpic(epicId, note, limit),
+      floor?: number | null;
+    }) => api.startEpic(epicId, note, limit, floor),
     onSettled: () =>
       Promise.all(
         [["action-queue"], ["tasks"]].map((queryKey) => qc.invalidateQueries({ queryKey })),

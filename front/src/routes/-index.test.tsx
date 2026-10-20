@@ -584,6 +584,44 @@ describe("Start development on a Ready card", () => {
     expect(within(dialog).getByText(/20,001 characters, over the 20,000/)).toBeTruthy();
   });
 
+  it("sends the pool floor typed in the dialog (ADR 227)", async () => {
+    const { sent } = await board(undefined, {
+      "POST /api/tasks/T-301/start": { data: action("T-301") },
+    });
+    const dialog = await open();
+    fireEvent.change(within(dialog).getByLabelText("Pool floor"), { target: { value: "20" } });
+    expect(within(dialog).getByTestId("start-floor-help").textContent).toContain("less than 20%");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null, floor: 20 });
+  });
+
+  it("leaves the floor out when blank, and names the default", async () => {
+    const { sent } = await board(undefined, {
+      "POST /api/tasks/T-301/start": { data: action("T-301") },
+    });
+    const dialog = await open();
+    expect(within(dialog).getByTestId("start-floor-help").textContent).toContain("the default 5%");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toEqual({ note: null });
+  });
+
+  it("refuses a floor that is not a whole percent before sending it", async () => {
+    const { sent } = await board();
+    const dialog = await open();
+    for (const value of ["101", "2.5"]) {
+      fireEvent.change(within(dialog).getByLabelText("Pool floor"), { target: { value } });
+      expect(
+        (within(dialog).getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled,
+      ).toBe(true);
+      expect(
+        within(dialog).getByText(`${value} is not a whole percent from 0 to 100.`),
+      ).toBeTruthy();
+    }
+    expect(sent.some((r) => r.method === "POST")).toBe(false);
+  });
+
   const acct = (name: string, state: string) => ({
     name,
     container: name,

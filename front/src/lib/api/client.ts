@@ -70,8 +70,9 @@
  * calls `createProject`.
  *
  * **Two writes for an epic** (`docs/decisions.md` ADR 207, ADR 211): `startEpic`
- * (`POST /api/epics/<id>/start`, body `{note, limit}`, ADR 218) and `stopEpic`
- * (`POST /api/epics/<id>/stop`, body `{}`), bare like the others, for the
+ * (`POST /api/epics/<id>/start`, body `{note, limit}` and an optional `floor`,
+ * ADR 218, ADR 226) and `stopEpic` (`POST /api/epics/<id>/stop`, body `{}`),
+ * bare like the others, for the
  * *Start epic* and *Stop epic* buttons on an epic's page.
  *
  * **Four writes for a new project's setup** (ADR 212): `cloneProject`,
@@ -569,11 +570,16 @@ export function cancelAction(actionId: string): Promise<ActionRecord> {
 
 /**
  * Queue a task's development cycle: `POST /api/tasks/<id>/start`. The body is
- * exactly `{note}` and the forward 400s any other key (ADR 157 part 1); a refusal
- * is an `ApiError` with the board-service's message.
+ * `{note}`, with `floor` (the start's pool floor in percent, ADR 226) only when
+ * one is given: null leaves it out, the worker's default. A refusal is an
+ * `ApiError` with the board-service's message.
  */
-export function startTask(taskId: string, note: string | null): Promise<ActionRecord> {
-  const body: StartTaskBody = { note };
+export function startTask(
+  taskId: string,
+  note: string | null,
+  floor: number | null = null,
+): Promise<ActionRecord> {
+  const body: StartTaskBody = floor === null ? { note } : { note, floor };
   return readBare<ActionRecord>(`/api/tasks/${encodeURIComponent(taskId)}/start`, {
     method: "POST",
     body,
@@ -583,17 +589,19 @@ export function startTask(taskId: string, note: string | null): Promise<ActionRe
 /**
  * *Start epic* (ADR 207): `POST /api/epics/<id>/start` with `{note, limit}`, as a
  * task's start. `limit` is the run's spending limit in measured tokens, or null
- * (ADR 218); on a run paused at its limit the press is *Resume*. The answer names
- * the starts queued and the tasks not in Ready; a refusal (404, 400 for a bad
- * limit, 409 for a task already started, nothing in Ready, or a limit already
- * spent) is an `ApiError`.
+ * (ADR 218); `floor`, the pool floor each of its starts carries, is sent only
+ * when given, as a task's (ADR 226). On a run paused at its limit the press is
+ * *Resume*. The answer names the starts queued and the tasks not in Ready; a
+ * refusal (404, 400 for a bad limit, 409 for a task already started, nothing in
+ * Ready, or a limit already spent) is an `ApiError`.
  */
 export function startEpic(
   epicId: string,
   note: string | null,
   limit: number | null = null,
+  floor: number | null = null,
 ): Promise<EpicStartResult> {
-  const body: StartEpicBody = { note, limit };
+  const body: StartEpicBody = floor === null ? { note, limit } : { note, limit, floor };
   return readBare<EpicStartResult>(`/api/epics/${encodeURIComponent(epicId)}/start`, {
     method: "POST",
     body,

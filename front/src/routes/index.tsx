@@ -14,6 +14,8 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { commentProblem } from "@/lib/comments";
+import { readFloor } from "@/lib/floor";
+import { FloorField } from "@/components/console/floor-field";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
   Absent,
@@ -561,8 +563,11 @@ function StartControl({
   const start = useMutation(startTaskMutation(qc));
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
+  const [floorText, setFloorText] = useState("");
   // A note is optional, so blank is not the comment rule's "needs some text".
   const problem = note.trim() ? commentProblem(note) : null;
+  // Blank is the worker's default floor (ADR 226).
+  const floor = readFloor(floorText);
   const chip = "mono rounded-sm border border-border-strong px-1 text-[10px] text-muted-foreground";
 
   if (loading) return null;
@@ -572,12 +577,13 @@ function StartControl({
   const taskId = task.task_id;
   const confirm = () =>
     start.mutate(
-      { taskId, note: note.trim() ? note : null },
+      { taskId, note: note.trim() ? note : null, floor: floor.ok ? floor.value : null },
       {
         onSuccess: () => {
           toast.success(`${taskId} queued to start`);
           setOpen(false);
           setNote("");
+          setFloorText("");
         },
         onError: (e) => toast.error(e instanceof Error ? e.message : `${taskId} was not started`),
       },
@@ -609,11 +615,16 @@ function StartControl({
             <Textarea value={note} onChange={(e) => setNote(e.target.value)} />
           </label>
           {problem && <p className="text-xs text-destructive">{problem}</p>}
+          <FloorField value={floorText} onChange={setFloorText} />
           <DialogFooter>
             <Button variant="outline" type="button" onClick={() => setOpen(false)}>
               Cancel
             </Button>
-            <Button type="button" disabled={problem !== null || start.isPending} onClick={confirm}>
+            <Button
+              type="button"
+              disabled={problem !== null || !floor.ok || start.isPending}
+              onClick={confirm}
+            >
               Start
             </Button>
           </DialogFooter>
