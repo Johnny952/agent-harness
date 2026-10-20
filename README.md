@@ -578,9 +578,9 @@ rotating it, restart both. The board service also mounts
 `dispatcher_state/actions` (never the whole state dir), the queue the `worker`
 below drains (`docs/decisions.md` ADR 142, ADR 166).
 
-Two services in those files are deliberately kept out of that default set,
-behind a Compose profile. Stage-0 verification found the first by running the
-two-liner above:
+Three services in those files are deliberately kept out of that default set,
+each behind a Compose profile. Stage-0 verification found the first by running
+the two-liner above:
 
 - `dispatcher` (`profiles: ["dispatcher"]`) is a template, not a service
   (`restart: "no"`, placeholder `--task-id`/`--project`). Ungated, a bare
@@ -591,6 +591,12 @@ two-liner above:
   It carries out the queue actions the console files, so Start and Cancel from
   the console need it running. `dispatcher_state/actions` does not exist until
   docker creates it, root-owned, on the first mount.
+- `playwright-install` (`profiles: ["playwright-install"]`) is a one-shot: the
+  agent image with its entrypoint replaced, filling `.data/ms-playwright/`
+  with the headless Chromium every agent mounts read-only at `/ms-playwright`
+  (`docs/decisions.md` ADR 43). Run it once after building the agent image,
+  and again whenever the Dockerfile's `PLAYWRIGHT_VERSION` moves:
+  `docker compose -f docker/compose/docker-compose.yml --profile playwright-install run --rm playwright-install`.
 
 There was a second, `vibe-kanban` behind a `kanban` profile. The service,
 its profile and its volume declaration were removed with the board

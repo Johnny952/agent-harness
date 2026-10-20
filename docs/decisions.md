@@ -12285,3 +12285,77 @@ approve, request-changes or resolve verdict.
   write.
 - A new comment route: the board-service already takes the anchor, all
   three fields or none.
+
+## ADR NNN — The browser's install service, read-only mounts and pinned client are written, not yet built
+
+**Status:** accepted (2026-10-20). Written by a subagent of the operator's
+session; steps 1 and 2 of `docs/plans/browser.md`, as far as they go without
+running docker. Builds on **ADR 43** and leaves it as written.
+
+**Context.** ADR 43 decided that every agent container drives a headless
+Chromium whose build lives in `.data/ms-playwright/`, filled by a one-shot
+install service, mounted read-only, with one Playwright version declared once
+for the image's client and the install. Nothing of it existed. This change was
+written without building an image, starting a container or downloading
+anything, so what a build or a run would show is still unknown.
+
+**Decision.**
+1. `docker/agent/Dockerfile` declares `ARG PLAYWRIGHT_VERSION=1.56.1`, the one
+   place the version lives, and installs `playwright@${PLAYWRIGHT_VERSION}`
+   globally with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` on that `RUN` line only,
+   then `playwright install-deps chromium` for the system libraries. No
+   browser goes into the image.
+2. `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` is image env, not per-service
+   environment as the plan sketched: `docker exec` sessions inherit image env
+   and nothing an entrypoint exports, the reason `CLAUDE_CONFIG_DIR` is image
+   env, and the install service then needs no environment of its own.
+   `NODE_PATH=/usr/local/lib/node_modules` lets a phase's CommonJS script
+   `require('playwright')` from the global install; an ES module imports
+   `/usr/local/lib/node_modules/playwright/index.mjs` by path.
+3. The install service, `playwright-install`, is the agent image itself with
+   its entrypoint replaced by `playwright install chromium-headless-shell`,
+   behind its own profile, `restart: "no"`, on `ia_harness_net`. It runs the
+   very client the phases run, so the revision it downloads is the one that
+   client asks for, and no second version string exists to drift. It is in
+   `docker-compose.yml` (by `image: ia-harness-agent`) and in
+   `docker-compose.coolify.yml` (built from the agent Dockerfile, as that
+   file's agents are). Its mount of `../../.data/ms-playwright` is the only
+   writable one.
+4. Every agent, in `docker-compose.agents.yml`, `docker-compose.coolify.yml`
+   and the pool `scripts/configure.sh` renders, mounts
+   `../../.data/ms-playwright:/ms-playwright:ro`.
+5. Tests hold it: `tests/integration/test_agent_dockerfile.py` checks the ARG
+   pin, the skip flag on the npm line and never as image env, that the image
+   runs no `playwright install` but `install-deps`, and the two ENV lines;
+   `tests/integration/test_compose_invariants.py` checks every agent's mount is
+   exactly `:ro` at the Dockerfile's `PLAYWRIGHT_BROWSERS_PATH`, the install
+   service's profile, entrypoint, image and single writable mount, and that no
+   compose file sets a Playwright version.
+
+**Consequences.**
+- Nothing here is build-verified. `1.56.1` was not checked against the npm
+  registry; the operator confirms or bumps it before the first build.
+- The operator's sequence: rebuild the agent image, run
+  `docker compose -f docker/compose/docker-compose.yml --profile
+  playwright-install run --rm playwright-install` once, recreate the agents,
+  then the smoke check (`about:blank`, a screenshot, `--no-sandbox` and
+  `--disable-dev-shm-usage`) and the memory measurement under the 4 GB
+  `mem_limit`, as D8 was measured. Until the service has run, the agents'
+  mount is an empty directory and a launch fails with "Executable doesn't
+  exist", which is the loud failure ADR 43 wants.
+- A version bump is a rebuild and one run of the service. The old revision
+  stays in `.data/ms-playwright/` until someone removes it.
+- `--no-sandbox`, `--disable-dev-shm-usage` and `CHOKIDAR_USEPOLLING=true` stay
+  the walk script's and the phase's, step 4 of the plan; no compose change for
+  them.
+- The allowlist entry (step 3), the first console task with a phase walk
+  (step 4) and option B's skills (step 5) are not started.
+
+**Ruled out.**
+- A separate install image or a `playwright@x.y.z` in the service's command:
+  two declarations of one version, the drift ADR 43 rules out.
+- `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` as image env: the install service runs
+  this image, and its explicit install would be told to skip.
+- Making the mount writable for the agents so a missing browser downloads
+  itself: a phase would then install browsers, and a version mismatch would
+  go silent.
