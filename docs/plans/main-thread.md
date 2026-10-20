@@ -13,8 +13,8 @@ as a whole; step 1 is built: the thread records and the model list by T-109
 T-110 (2026-10-19, ADR 173); step 4, the screen read-only, is built by T-111
 (2026-10-19, ADR 184); step 5's board-service route is built by T-112
 (2026-10-19, ADR 181) and its composer and stop button by T-114
-(2026-10-20, ADR 190), with *Talk about this task* and the session seeding
-still open; step 6 is built by T-113 (2026-10-20, ADR 187).
+(2026-10-20, ADR 190), and the session seeding on 2026-10-20 (ADR 194), with
+*Talk about this task* still open; step 6 is built by T-113 (2026-10-20, ADR 187).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
@@ -277,8 +277,11 @@ and worker.
    queues and stop is the cancel route. Built, both halves: the composer and
    the stop button by T-114 (2026-10-20, ADR 190), which draws a queued
    message from the action queue and stops a turn or cancels a queued one with
-   `cancelAction`. *Talk about this task* and what seeds a new session are not
-   built: both need a write that makes a thread or a session.
+   `cancelAction`. What seeds a new session is built (ADR 194): a fresh
+   session of a thread on a task gets its description, latest start note and
+   handoff trail in front of the first message, within `TURN_SEED_MAX_CHARS`,
+   logged as `turn_start.seed`. *Talk about this task* is not built: it needs
+   a write that makes a thread.
 6. The thread's MCP dispatch tool, writing to the queue (`balancer.md`). Built
    by T-113 (2026-10-20, ADR 187): the thread role's `task_start` queues a
    `start` inside a running turn whose message names the task, and the turn
@@ -299,9 +302,9 @@ and worker.
   (`board-service.md`, *Starting development*), so it is a person's act and
   the thread does not need to dispatch. Its charter ruling was given the same
 day (C-12, *Amended*).
-- **What seeds a new session.** Which durable state a fresh segment is given
-  at its start, and how big it may be (`token-economy.md`), is decided at
-  step 5.
+- **What seeds a new session.** Decided in ADR 194: a thread on a task is
+  seeded with its description, start note and handoffs; a thread on no task,
+  `main` included, with nothing; a resumed session never.
 - **Model per thread.** Settled on 2026-10-19 (ADR 169): the list is config,
   `thread_models` with an optional `models` per account, never probed.
 - **A message mid-turn.** Queued as the next turn is the default (*Decisions*,

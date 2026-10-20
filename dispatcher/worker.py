@@ -53,6 +53,11 @@ TURN_ALLOWED_TOOLS = (
 )
 TURN_DISALLOWED_TOOLS = ("Write", "Edit", "NotebookEdit")
 TURN_STOPPED_ERROR = "the worker stopped during the turn"
+# What a fresh session of a thread on a task is told before the person's first
+# message: the task's description, its start note and its handoffs so far, in
+# at most this many characters. A resumed session already has it in its history.
+TURN_SEED_MAX_CHARS = 12_000
+TURN_SEED_CUT = "[... cut: the seed is kept under {max} characters]"
 
 
 class WorkerLocked(Exception):
@@ -392,6 +397,85 @@ def _harness_line(event: str, **fields) -> dict:
     return {"type": "ia_harness", "event": event, "at": _utc_now().isoformat(), **fields}
 
 
+def _cut(text: str, room: int, *, keep_end: bool = False) -> tuple[str, bool]:
+    """`text` in at most `room` characters, the cut marked; `keep_end` keeps
+    the latest of it (a trail of handoffs) rather than the start."""
+    if len(text) <= room:
+        return text, False
+    marker = TURN_SEED_CUT.format(max=TURN_SEED_MAX_CHARS)
+    keep = room - len(marker) - 1
+    return (f"{marker}\n{text[-keep:]}" if keep_end else f"{text[:keep]}\n{marker}"), True
+
+
+def _start_note(cfg: Config, task_id: str) -> str | None:
+    """The note of the latest `start` of this task that had one."""
+    entries, _ = actions.read_all(cfg.state_dir)
+    notes = sorted(
+        (e.record.get("id") or "", e.record["note"]) for e in entries
+        if e.record.get("kind") == "start" and e.record.get("task_id") == task_id
+        and isinstance(e.record.get("note"), str) and e.record["note"].strip()
+    )
+    return notes[-1][1] if notes else None
+
+
+def _session_seed(cfg: Config, thread: dict) -> dict | None:
+    """What a fresh session is told before the person's message, or None.
+
+    A thread on a task gets the task's description, the note of its latest
+    start and the handoff trail the phases left in the task file, in that
+    order and within `TURN_SEED_MAX_CHARS`: the description and the note are
+    cut from the end, the trail from the start, so the latest phase stays; a
+    part with no room left after those before it is dropped. A thread on no
+    task gets nothing; its board tools describe themselves.
+
+    A part that cannot be read is left out with a warning, never failing the
+    turn: the seed is a convenience, and the person's message still runs.
+    Returns the text with what went into it, for the `turn_start` line.
+    """
+    task_id = thread.get("task")
+    if not task_id:
+        return None
+    readers = (
+        ("description", "Description",
+         lambda: tasks.read_description(cfg.hive_tasks_dir, task_id)),
+        ("note", "Start note", lambda: _start_note(cfg, task_id)),
+        ("handoffs", "Handoffs so far", lambda: context_transfer.read_task_file(
+            context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)).body),
+    )
+    found, unread = [], []
+    for name, heading, read in readers:
+        try:
+            value = read()
+        except Exception as exc:  # anything: an unreadable part never fails the turn
+            logger.warning("worker: the seed of thread %s left out %s's %s: %s: %s",
+                           thread["id"], task_id, name, type(exc).__name__, exc)
+            unread.append(name)
+            continue
+        if isinstance(value, str) and value.strip():
+            found.append((name, heading, value.strip()))
+    if not found:
+        return None
+    head = (f"[ia-harness: the start of a new session of thread {thread['id']}, on task "
+            f"{task_id}. This is the task as the board has it, given once.]")
+    tail = "[ia-harness: end of the seed; the person's message follows.]"
+    room = TURN_SEED_MAX_CHARS - len(head) - len(tail) - 2
+    sections, parts, truncated = [], [], False
+    for name, heading, value in found:
+        title = f"## {heading}\n"
+        if room - len(title) - 2 <= len(TURN_SEED_CUT) + 40:
+            truncated = True  # no room left for this part, not even its cut
+            continue
+        room -= len(title) + 2
+        body, cut = _cut(value, room, keep_end=name == "handoffs")
+        room -= len(body)
+        truncated = truncated or cut
+        sections.append(title + body)
+        parts.append(name)
+    text = "\n\n".join([head, *sections, tail])
+    return {"text": text, "chars": len(text), "truncated": truncated,
+            "parts": parts, "unread": unread}
+
+
 def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     """One conversation turn (ADR 173): a streamed `claude -p` on the thread's
     own account, no code written, every line of it appended to the thread's log
@@ -428,8 +512,12 @@ def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     if cfg.board_mcp_url:
         mcp_config = board_mcp.mcp_config(cfg.board_mcp_url, board_mcp.THREAD, turn=aid)
         allowed_tools = (*TURN_ALLOWED_TOOLS, *board_mcp.allowed_tools(board_mcp.THREAD))
+    # A fresh session is seeded in its first message, so the seed is in the
+    # history every `--resume` replays; the log keeps `text` as the person wrote it.
+    seed = None if resumed else _session_seed(cfg, thread)
+    prompt = f"{seed['text']}\n\n{text}" if seed else text
     command = docker_exec.turn_command(
-        text, resume_session_id=resumed, model=thread["model"], effort=thread["effort"],
+        prompt, resume_session_id=resumed, model=thread["model"], effort=thread["effort"],
         permission_mode=TURN_PERMISSION_MODE, allowed_tools=allowed_tools,
         disallowed_tools=TURN_DISALLOWED_TOOLS, timeout_seconds=TURN_TIMEOUT_SECONDS,
         mcp_config=mcp_config,
@@ -443,7 +531,7 @@ def _turn(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     log(_harness_line(
         "turn_start", action=aid, actor=record.get("actor"), text=text,
         account=account.name, model=thread["model"], effort=thread["effort"],
-        session_id=resumed,
+        session_id=resumed, seed=seed,
     ))
     with worker._lock:
         entry = next((r for r in worker.running.values() if r.action_id == aid), None)

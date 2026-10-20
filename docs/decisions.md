@@ -10668,3 +10668,53 @@ section (ADR 139), and the *where* cells carry backticked paths.
   would learn to ignore.
 - A backend field for the overlap: the screen has what it needs, and the
   board-service would compute it for one screen.
+
+## ADR 194 — What seeds a new session of a thread
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/main-thread.md` left open which durable state a fresh
+segment of a thread is given at its start, and how big it may be
+(`token-economy.md`). A session is fresh only on a thread's first turn, or
+when no session id was recorded; every later turn resumes it. The thread's
+board read tools reach the card and the board, not the handoff trail in the
+task file or the note the person gave when starting the task.
+
+**Decision.**
+1. A turn whose segment has no `session_id` builds a seed
+   (`worker._session_seed`); a resumed turn builds none.
+2. A thread on a task gets, in this order, the task's description, the note
+   of the latest `start` of that task that had one, and the `## <role>`
+   handoff trail of its task file. A missing or empty part is left out.
+3. A thread on no task, `main` included, gets no seed.
+4. The budget is `TURN_SEED_MAX_CHARS` (12,000 characters), header and footer
+   included. The description and the note are cut from the end, the trail
+   from the start so the latest phase stays; every cut is marked with
+   `TURN_SEED_CUT`, and a part with no room left is dropped.
+5. The seed goes in front of the first message, between an `[ia-harness: ...]`
+   header and footer, rather than as `--append-system-prompt`: in the message
+   it is part of the conversation the session resumes, and nothing depends on
+   whether the CLI keeps a system-prompt flag across `--resume` (not tested).
+6. `turn_start.seed` is null or `{text, chars, truncated, parts, unread}`;
+   `turn_start.text` stays the person's own text, so older lines still read.
+7. A part that cannot be read is logged with a warning and named in `unread`;
+   the turn still runs. When no part is left, the seed is null and the
+   warning is the only record.
+
+**Consequences.**
+- A seed costs about 3k tokens at most, once per session.
+- The log shows exactly what the model was told.
+- A new session after compaction gets a seed with no extra code.
+- On a long trail the oldest phases drop first.
+
+**Ruled out.**
+- `--append-system-prompt`: see 5.
+- Re-sending the seed on every turn: the resumed session already has it.
+- The `handoffs/<role>.json` payloads: the trail in the task file is what
+  the phases wrote for each other.
+- Reading the note from `comments.jsonl`: the `start` record is where it is
+  given.
+- A pointer to the board tools for a thread on no task: they describe
+  themselves.
+- Failing the turn on an unreadable part: the seed is a convenience.
+- Logging only a size or a hash: it would not show what the model was told.

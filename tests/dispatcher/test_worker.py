@@ -676,6 +676,132 @@ def test_a_turn_with_no_board_url_gets_no_server_and_no_tool_names(cfg, worker, 
     assert not any(part.startswith("mcp__") for part in command)
 
 
+# ---- the seed of a new session ----------------------------------------------
+
+
+def task_thread(cfg, task_id="T-1", note="mind the lock", trail="## arquitecto\n\nPlan it."):
+    """A thread on a task with a description, a start note in a finished
+    `start`, and a handoff trail."""
+    cfg.thread_models = ["opus"]
+    _task(cfg, task_id)
+    if trail:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, "pending", trail)
+    if note is not None:
+        rec = actions.create(cfg.state_dir, "start", project="proj", task_id=task_id,
+                             note=note)
+        actions.finish(cfg.state_dir, rec["id"], "done")
+    return threads.create(cfg.hive_tasks_dir, cfg, title="t", model="opus", task=task_id)
+
+
+def prompt_of(execs, n=0):
+    return execs.opened[n][2][-1]
+
+
+def test_a_fresh_task_thread_is_seeded_with_its_description_note_and_handoffs(
+    cfg, worker, execs
+):
+    th = task_thread(cfg)
+    turn(cfg, th["id"], "where are we")
+    worker.tick()
+    worker.join()
+    prompt = prompt_of(execs)
+    assert prompt.endswith("\n\nwhere are we")
+    seed = prompt[: -len("\n\nwhere are we")]
+    assert len(seed) <= worker_mod.TURN_SEED_MAX_CHARS
+    assert "Do T-1." in seed and "mind the lock" in seed and "Plan it." in seed
+    assert seed.index("Do T-1.") < seed.index("mind the lock") < seed.index("Plan it.")
+    start = log_of(cfg, th["id"])[0]
+    assert start["text"] == "where are we"
+    assert start["seed"]["text"] == seed and start["seed"]["chars"] == len(seed)
+    assert start["seed"]["parts"] == ["description", "note", "handoffs"]
+    assert start["seed"]["truncated"] is False and start["seed"]["unread"] == []
+
+
+def test_a_seed_over_its_budget_is_cut_and_says_so_and_keeps_the_latest_handoff(
+    cfg, worker, execs
+):
+    trail = "## arquitecto\n\n" + "old " * 5000 + "\n\n## auditor\n\nThe latest."
+    th = task_thread(cfg, trail=trail)
+    turn(cfg, th["id"])
+    worker.tick()
+    worker.join()
+    seed = log_of(cfg, th["id"])[0]["seed"]
+    assert seed["truncated"] is True
+    assert seed["chars"] == len(seed["text"]) <= worker_mod.TURN_SEED_MAX_CHARS
+    marker = worker_mod.TURN_SEED_CUT.format(max=worker_mod.TURN_SEED_MAX_CHARS)
+    assert marker in seed["text"]
+    assert "The latest." in seed["text"] and "Do T-1." in seed["text"]
+    assert prompt_of(execs) == seed["text"] + "\n\nhello"
+
+
+def test_a_description_over_the_whole_budget_is_cut_and_the_rest_dropped(cfg, worker, execs):
+    th = task_thread(cfg)
+    tasks.write_description(cfg.hive_tasks_dir, "T-1",
+                            "## Goal\n\n" + "x" * 20_000 + "\n\n## Done when\n\nok\n")
+    turn(cfg, th["id"])
+    worker.tick()
+    worker.join()
+    seed = log_of(cfg, th["id"])[0]["seed"]
+    assert seed["truncated"] is True and seed["parts"] == ["description"]
+    assert len(seed["text"]) <= worker_mod.TURN_SEED_MAX_CHARS
+
+
+@pytest.mark.parametrize("board", [None, "http://board-service:8792/mcp"])
+def test_a_thread_on_no_task_gets_no_seed(cfg, worker, thread, execs, board):
+    cfg.board_mcp_url = board
+    turn(cfg, thread["id"], "hi")
+    worker.tick()
+    worker.join()
+    assert execs.opened[0][2][-2:] == ["--", "hi"]
+    assert log_of(cfg, thread["id"])[0]["seed"] is None
+
+
+def test_a_resumed_session_gets_no_seed(cfg, worker, execs):
+    th = task_thread(cfg)
+    turn(cfg, th["id"])
+    worker.tick()
+    worker.join()
+    turn(cfg, th["id"], "again")
+    worker.tick()
+    worker.join()
+    command = execs.opened[1][2]
+    assert "--resume" in command and command[-2:] == ["--", "again"]
+    assert log_of(cfg, th["id"])[-1]["event"] == "turn_end"
+    second = [l for l in log_of(cfg, th["id"]) if l.get("event") == "turn_start"][1]
+    assert second["seed"] is None
+
+
+def test_an_unreadable_part_is_left_out_with_a_warning_and_the_turn_runs(
+    cfg, worker, execs, monkeypatch, caplog
+):
+    th = task_thread(cfg)
+
+    def broken(hive_dir, task_id):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(worker_mod.tasks, "read_description", broken)
+    t = turn(cfg, th["id"])
+    with caplog.at_level("WARNING", logger=worker_mod.__name__):
+        worker.tick()
+        worker.join()
+    assert where(cfg, t["id"])[1]["status"] == "done"
+    seed = log_of(cfg, th["id"])[0]["seed"]
+    assert seed["unread"] == ["description"] and seed["parts"] == ["note", "handoffs"]
+    assert "Plan it." in prompt_of(execs) and "Do T-1." not in prompt_of(execs)
+    assert any("disk says no" in r.getMessage() for r in caplog.records)
+
+
+def test_a_task_whose_card_is_gone_still_runs_the_turn(cfg, worker, execs):
+    th = task_thread(cfg, note=None, trail=None)
+    os.remove(worker_mod.context_transfer.task_file_path(cfg.hive_tasks_dir, "T-1"))
+    t = turn(cfg, th["id"])
+    worker.tick()
+    worker.join()
+    assert where(cfg, t["id"])[1]["status"] == "done"
+    seed = log_of(cfg, th["id"])[0]["seed"]
+    assert seed["unread"] == ["handoffs"] and seed["parts"] == ["description"]
+
+
 # ---- command_verdict --------------------------------------------------------
 
 
