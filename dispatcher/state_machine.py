@@ -201,14 +201,36 @@ def release(state_dir: str, account_name: str, task_id: str) -> bool:
         return True
 
 
-def park(state_dir: str, account_name: str, state: AccountState) -> None:
-    """Put the account in a quota or login state, keeping its holders."""
+def park(
+    state_dir: str, account_name: str, state: AccountState, *, pool: Iterable[str] = (),
+) -> bool:
+    """Put the account in a quota or login state, keeping its holders.
+
+    True when this park dried `pool` (`docs/decisions.md` ADR NNN): the account
+    was not parked before, and now every account named in `pool` is. Read
+    under the same lock as the write, so of two accounts parked at once only
+    the second sees the pool empty. A neighbour whose file cannot be read
+    counts as not parked: the park stands, and no dry is claimed on a guess.
+    """
     if state not in PARKED_STATES:
         raise ValueError(f"{state.value} is not an account-wide state")
+    names = list(pool)
     with _locked(state_dir):
         existing = _read_state(state_dir, account_name) or {}
+        was_parked = _parked_of(existing) is not None
         holders = _holders_of(existing) if existing else []
         _write_account(state_dir, account_name, existing, state, holders)
+        if was_parked or not names:
+            return False
+        for name in names:
+            if name == account_name:
+                continue
+            try:
+                if _parked_of(_read_state(state_dir, name) or {}) is None:
+                    return False
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
+        return True
 
 
 def unpark(state_dir: str, account_name: str, *, forget_rate_limit: bool = False) -> bool:
