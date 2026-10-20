@@ -233,7 +233,7 @@ function NewProjectPage() {
                 Clone
               </Button>
             </div>
-            <CheckLine step={of("check")} />
+            <CheckLine step={of("check")} pushes={record.settings.push_task_branch} />
             <SetupLine label="Clone" step={of("clone")} slug={record.slug} />
           </section>
         )}
@@ -359,13 +359,49 @@ function KeyStep({
   );
 }
 
-function CheckLine({ step }: { step: Step }) {
+/**
+ * The check's `{reachable, detail, writable}` (ADR NNN). `writable` is a
+ * dry-run push's answer, `null` or absent when it was not tried; a refused one
+ * is a warning only when the record may push, judged by the same override the
+ * deploy-key step reads.
+ */
+function CheckLine({ step, pushes }: { step: Step; pushes: boolean | undefined }) {
   const a = step?.action;
   if (a?.status !== "done") return <Progress label="Check" step={step} />;
   const r = resultOf(a);
   const detail = text(r?.["detail"]);
+  const tail = detail ? ` ${detail}` : "";
   if (r?.["reachable"] === true) {
-    return <Banner tone="info">The remote answers this key.{detail ? ` ${detail}` : ""}</Banner>;
+    const writable = r["writable"];
+    if (writable === true) {
+      return (
+        <Banner tone="info">
+          The remote answers this key and would take a push from it.
+          {pushes === false
+            ? " This project does not push its task branches, so the key does not need write access."
+            : ""}
+          {tail}
+        </Banner>
+      );
+    }
+    if (writable === false) {
+      return pushes === false ? (
+        <Banner tone="info">
+          The remote answers this key, read only: this project does not push.{tail}
+        </Banner>
+      ) : (
+        <Banner tone="warning">
+          The remote answers this key but refuses a push from it.{" "}
+          {pushes === true
+            ? "This project pushes its task branches: tick “Allow write access” on the deploy key, then check again."
+            : "If the harness's push_task_branch is on, tick “Allow write access” on the deploy key, then check again."}
+          {tail}
+        </Banner>
+      );
+    }
+    return (
+      <Banner tone="info">The remote answers this key; write access was not tested.{tail}</Banner>
+    );
   }
   return (
     <Banner tone="warning">

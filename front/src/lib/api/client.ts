@@ -648,7 +648,12 @@ export function keygenProject(slug: string, replace = false): Promise<ActionReco
   return queueSetup(slug, "keygen", replace ? { replace: true } : {});
 }
 
-/** Whether the record's remote answers the deploy key (ADR 212): `{reachable, detail}`. */
+/**
+ * Whether the record's remote answers the deploy key (ADR 212), and whether it
+ * would take a push from it (ADR NNN): `{reachable, detail, writable}`, with
+ * `writable` `null` when the write was not tried. A check a worker from before
+ * ADR NNN finished has no `writable` at all, which reads the same as `null`.
+ */
 export function checkProject(slug: string): Promise<ActionRecord> {
   return queueSetup(slug, "check");
 }

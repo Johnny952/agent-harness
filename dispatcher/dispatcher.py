@@ -2243,11 +2243,17 @@ def make_project_checkout(
 
 
 def check_project_remote(cfg: Config, slug: str, remote: str) -> docker_exec.SetupOutcome:
-    """Whether `remote` answers the project's deploy key (ADR 212); reads only."""
+    """Whether `remote` answers the project's deploy key (ADR 212), and whether
+    it would take a push from it (ADR NNN): a dry-run, so nothing lands there.
+
+    No lock: it touches no checkout, only a scratch repository of its own in
+    the container's /tmp, which it removes.
+    """
     return docker_exec.check_remote(
         _setup_container(cfg), cfg.projects_root, slug, remote,
         credentials_path=cfg.git_credentials_path,
         keys_dir=cfg.project_keys_dir,
+        author_name=INIT_AUTHOR_NAME, author_email=INIT_AUTHOR_EMAIL,
     )
 
 
