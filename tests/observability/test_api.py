@@ -2340,6 +2340,41 @@ def test_only_the_known_keys_of_a_comment_cross(tmp_path: Path) -> None:
     }
 
 
+def test_a_verdict_crosses_with_its_kind_and_commit_alone(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="done")
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    written = task_store.record_verdict(harness.tasks_dir, "T-1", "operator", "comment", "ok", commit)["comment"]
+    path = _comments_file(harness.tasks_dir, "T-1")
+    with path.open("a") as fh:
+        fh.write(json.dumps({"at": "y", "author": "operator", "text": "t",
+                             "verdict": {"kind": "comment", "commit": "abc1234", "extra": 1}}) + "\n")
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert body["data"]["comments"] == [
+        written,
+        {"at": "y", "author": "operator", "text": "t", "verdict": {"kind": "comment", "commit": "abc1234"}},
+    ]
+    assert body["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "verdict", ["comment", {"kind": "praise", "commit": "abc1234"}, {"kind": "comment"}, {"commit": "abc"}]
+)
+def test_a_broken_verdict_is_dropped_and_the_comment_still_served(tmp_path: Path, verdict) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1")
+    path = _comments_file(harness.tasks_dir, "T-1")
+    path.write_text(json.dumps({"at": "x", "author": "operator", "text": "t", "verdict": verdict}) + "\n")
+
+    body = _get(harness, "/api/tasks/T-1/comments").get_json()
+
+    assert body["data"]["comments"] == [{"at": "x", "author": "operator", "text": "t"}]
+    (warning,) = body["warnings"]
+    assert "a verdict that is not" in warning
+
+
 @pytest.mark.parametrize(
     "anchor",
     [

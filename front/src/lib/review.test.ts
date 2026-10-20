@@ -1,9 +1,11 @@
 /**
  * The review's pure half (ADR 219): the lane a task's status and `merged` put
- * it in, and the diff's files with their counts and new-side line numbers.
+ * it in, the diff's files with their counts and new-side line numbers, and
+ * the verdicts among the comments (ADR NNN).
  */
 import { describe, expect, it } from "vitest";
-import { parseDiff, reviewLane } from "./review";
+import type { TaskComment } from "@/lib/api/types";
+import { parseDiff, reviewLane, reviewVerdicts } from "./review";
 
 const DIFF_TEXT = [
   "diff --git a/src/app.py b/src/app.py",
@@ -53,5 +55,20 @@ describe("parseDiff", () => {
     ]);
     expect(readme.name).toBe("README.md");
     expect([readme.add, readme.del]).toEqual([1, 0]);
+  });
+});
+
+describe("reviewVerdicts", () => {
+  const plain: TaskComment = { at: "2026-10-20T10:00:00Z", author: "operator", text: "hi" };
+  const verdict: TaskComment = {
+    ...plain,
+    text: "looks right",
+    verdict: { kind: "comment", commit: "a".repeat(40) },
+  };
+  it("keeps only the comments that carry a whole verdict, in their order", () => {
+    const broken = { ...plain, verdict: { kind: "comment" } } as unknown as TaskComment;
+    const nulled = { ...plain, verdict: null } as unknown as TaskComment;
+    expect(reviewVerdicts([plain, verdict, broken, nulled, verdict])).toEqual([verdict, verdict]);
+    expect(reviewVerdicts([])).toEqual([]);
   });
 });

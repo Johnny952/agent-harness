@@ -27,11 +27,12 @@
  * deliberately not entries of `FORWARDED`, whose twenty routes, count and
  * rejection message describe the api alone.
  *
- * **Thirteen method and path pairs go to the board-service** (`docs/decisions.md`
+ * **Fourteen method and path pairs go to the board-service** (`docs/decisions.md`
  * ADR 136, ADR 157, ADR 190, ADR 195 for the two thread records, ADR 206
- * for the two project records, and ADR 211 for the two epic actions):
+ * for the two project records, ADR 211 for the two epic actions, and ADR NNN
+ * for the review verdict):
  * `POST /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`,
- * `POST /api/tasks/<id>/accept`, `POST /api/threads` and
+ * `POST /api/tasks/<id>/accept`, `POST /api/tasks/<id>/verdict`, `POST /api/threads` and
  * `PATCH /api/threads/<id>`, the three action routes
  * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
  * `POST /api/threads/<id>/turns`, and the two project-record writes
@@ -178,6 +179,13 @@ const TASK_DIFF = /^\/api\/tasks\/([^/]+)\/diff$/;
 /** Accepting a backlog item: a `POST` to the board-service, never a read. */
 const TASK_ACCEPT = /^\/api\/tasks\/([^/]+)\/accept$/;
 
+/**
+ * A person's verdict on a task under review (ADR NNN, `docs/plans/review.md`
+ * step 3): a `POST` to the board-service, never a read, with no bearer, as a
+ * comment has none. The api has no route here, so a `GET` is its 404.
+ */
+const TASK_VERDICT = /^\/api\/tasks\/([^/]+)\/verdict$/;
+
 /** Starting a task (ADR 142, ADR 157): a `POST` to the board-service, with the actions bearer. */
 const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
 
@@ -320,7 +328,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the seventeen exact pairs: a method
+  // Also before the read-only check, and only for the eighteen exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -505,7 +513,7 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the seventeen writes goes, or `null` for any
+ * Where on the board-service one of the eighteen writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
@@ -604,7 +612,9 @@ function boardTarget(method: string, path: string): Resolution | null {
           ? TASK_COMMENTS
           : TASK_ACCEPT.test(path)
             ? TASK_ACCEPT
-            : null
+            : TASK_VERDICT.test(path)
+              ? TASK_VERDICT
+              : null
         : null;
   const match = pattern?.exec(path);
   if (!match) return null;
@@ -614,7 +624,14 @@ function boardTarget(method: string, path: string): Resolution | null {
   } catch {
     return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
   }
-  const tail = pattern === TASK_COMMENTS ? "/comments" : pattern === TASK_ACCEPT ? "/accept" : "";
+  const tail =
+    pattern === TASK_COMMENTS
+      ? "/comments"
+      : pattern === TASK_ACCEPT
+        ? "/accept"
+        : pattern === TASK_VERDICT
+          ? "/verdict"
+          : "";
   return {
     kind: "forward",
     target: `${BOARD_SERVICE_URL}/api/tasks/${encodeURIComponent(id)}${tail}`,
@@ -661,7 +678,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its seventeen writes (`docs/decisions.md`
+ * The board-service's answer to one of its eighteen writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without

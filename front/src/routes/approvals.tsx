@@ -10,10 +10,15 @@
  * branch against its merge base, drawn by hand (review.md step 7 leaves the
  * diff library to its own ask). `/api/tasks/<id>/comments` gives the comments,
  * and one pinned to a line is drawn under that line while its commit is the
- * branch's tip, and listed as outdated once the branch has moved past it. The
- * one write is that pin: a new-side line number opens a form that posts
- * `{text, file, line, commit}` through the board-service's `task_comment`
- * (`commentTaskMutation`), the commit being the tip the diff was taken at.
+ * branch's tip, and listed as outdated once the branch has moved past it.
+ *
+ * It writes two things, each at the tip the diff was taken at. A new-side
+ * line number opens a form that pins a comment to that line, `{text, file,
+ * line, commit}` through the board-service's `task_comment`
+ * (`commentTaskMutation`). And the *comment* verdict (review.md step 3, ADR
+ * NNN) posts `{kind: "comment", text, commit}` to `review_verdict`
+ * (`verdictTaskMutation`); it is a comment line too, and the verdicts given
+ * are listed above the diff, marked when the branch has moved since.
  *
  * There is no approve, request-changes or resolve action in the api or the
  * action queue (`dispatcher/actions.py:KINDS`), so the verdict panel names the
@@ -36,10 +41,16 @@ import {
   WarningBanner,
 } from "@/components/console/primitives";
 import { Textarea } from "@/components/ui/textarea";
-import { commentTaskMutation, commentsQuery, taskDiffQuery, tasksQuery } from "@/lib/api/queries";
+import {
+  commentTaskMutation,
+  commentsQuery,
+  taskDiffQuery,
+  tasksQuery,
+  verdictTaskMutation,
+} from "@/lib/api/queries";
 import type { Task, TaskComment, TaskDiff } from "@/lib/api/types";
 import { MAX_COMMENT_CHARS, commentAnchor, commentLength, commentProblem } from "@/lib/comments";
-import { parseDiff, reviewLane, type ReviewLane as Tab } from "@/lib/review";
+import { parseDiff, reviewLane, reviewVerdicts, type ReviewLane as Tab } from "@/lib/review";
 import { formatDateClock } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -201,6 +212,7 @@ function Review({ task, lane }: { task: Task; lane: Tab }) {
         ) : (
           <>
             <BranchLine diff={diff} />
+            <Verdicts taskId={task.task_id} diff={diff} comments={comments} />
             <OutdatedComments comments={comments} diff={diff} />
             <DiffView taskId={task.task_id} diff={diff} comments={comments} />
           </>
@@ -211,9 +223,10 @@ function Review({ task, lane }: { task: Task; lane: Tab }) {
 }
 
 /**
- * The verdicts review.md plans have no route yet, so this says what does
+ * Approve and request changes have no route yet, so this says what does
  * exist: the CLI merge, and for a conflict the merge of the base into the
  * branch that comes first (never a rebase: a phase's history stays as it ran).
+ * The *comment* verdict is built, and is its own form under the branch line.
  */
 function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
   const project = task.project ? ` --project ${task.project}` : "";
@@ -227,8 +240,8 @@ function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
       </p>
       <Mono className="block select-all text-[11px]">{merge}</Mono>
       <p className="text-[11px] text-muted-foreground">
-        A line number in the diff pins a comment to that line at this tip; a comment on the whole
-        task is on the{" "}
+        A line number in the diff pins a comment to that line at this tip, and the comment verdict
+        below is on the change as a whole at this tip; a plain comment on the task is on the{" "}
         <Link to="/tasks/$taskId" params={{ taskId: task.task_id }} className="underline">
           task's page
         </Link>
@@ -252,6 +265,90 @@ function BranchLine({ diff }: { diff: TaskDiff }) {
   );
 }
 
+/**
+ * The *comment* verdict (review.md step 3, ADR NNN): the ones given, then a
+ * form for a new one at the tip. A verdict is a comment line, so it refetches
+ * with the comments and shows from what was stored. One given at another
+ * commit is marked: it was on a change the branch has moved past. It starts
+ * nothing; no dispatcher reads it yet.
+ */
+function Verdicts({
+  taskId,
+  diff,
+  comments,
+}: {
+  taskId: string;
+  diff: TaskDiff;
+  comments: TaskComment[];
+}) {
+  const qc = useQueryClient();
+  const post = useMutation(verdictTaskMutation(qc));
+  const [text, setText] = useState("");
+  const given = reviewVerdicts(comments);
+  const problem = commentProblem(text);
+  const over = commentLength(text) > MAX_COMMENT_CHARS;
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (problem || post.isPending) return;
+    post.mutate(
+      { taskId, body: { kind: "comment", text, commit: diff.commit } },
+      {
+        onSuccess: () => {
+          setText("");
+          toast.success(`comment verdict recorded on ${taskId}`);
+        },
+        onError: (err) =>
+          toast.error(
+            err instanceof Error ? err.message : `the verdict on ${taskId} was not recorded`,
+          ),
+      },
+    );
+  };
+
+  return (
+    <div className="panel space-y-2 px-3 py-2" data-testid="review-verdicts">
+      <p className="label-xs">verdicts · {given.length}</p>
+      {given.length > 0 && (
+        <ul className="space-y-1.5">
+          {given.map((c, i) => (
+            <CommentLine
+              key={i}
+              comment={c}
+              note={`${c.verdict?.kind} at ${c.verdict?.commit.slice(0, 12)}${
+                c.verdict?.commit === diff.commit ? "" : " · at an earlier tip"
+              }`}
+            />
+          ))}
+        </ul>
+      )}
+      <form onSubmit={submit} className="space-y-1.5" data-testid="verdict-form">
+        <Textarea
+          aria-label={`comment verdict on ${taskId}`}
+          placeholder="What you make of the change as a whole, at this tip"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          className="min-h-[56px] text-xs"
+        />
+        <div className="flex items-center justify-between gap-2 text-[11px]">
+          <span className={cn("text-muted-foreground", over && "text-destructive")}>
+            {over && problem
+              ? problem
+              : `${commentLength(text).toLocaleString("en-US")} / ${MAX_COMMENT_CHARS.toLocaleString("en-US")}`}
+          </span>
+          <button
+            type="submit"
+            disabled={problem !== null || post.isPending}
+            className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
+          >
+            {post.isPending ? "posting…" : "comment verdict"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /** A pinned comment taken at another commit than the tip: listed, not placed. */
 function OutdatedComments({ comments, diff }: { comments: TaskComment[]; diff: TaskDiff }) {
   const outdated = comments.filter((c) => commentAnchor(c) && c.commit !== diff.commit);
@@ -268,7 +365,16 @@ function OutdatedComments({ comments, diff }: { comments: TaskComment[]; diff: T
   );
 }
 
-function CommentLine({ comment, anchor = false }: { comment: TaskComment; anchor?: boolean }) {
+function CommentLine({
+  comment,
+  anchor = false,
+  note,
+}: {
+  comment: TaskComment;
+  anchor?: boolean;
+  /** What the line is past its author and time: a verdict's kind and tip. */
+  note?: string;
+}) {
   return (
     <li className="text-[11px]" data-testid="review-comment">
       <span className="text-muted-foreground">
@@ -276,6 +382,7 @@ function CommentLine({ comment, anchor = false }: { comment: TaskComment; anchor
         {formatDateClock(typeof comment.at === "string" ? comment.at : null)}
       </span>
       {anchor && <Mono className="ml-2 text-[10px]">{commentAnchor(comment)}</Mono>}
+      {note && <Mono className="ml-2 text-[10px]">{note}</Mono>}
       <p className="whitespace-pre-wrap break-words">
         {typeof comment.text === "string" ? comment.text : <Absent label="no text" />}
       </p>

@@ -5,7 +5,9 @@ board's write side and the agents' MCP server (section 5, `docs/decisions.md`
 ADR 124). It serves the two read tools, `board_list` and `board_get`, and the
 four write tools, `backlog_propose`, `task_edit`, `task_comment` and
 `backlog_accept` (ADR 129); the same four are under `/api/` for the console,
-as the operator. None moves a task once it is on the board, and none
+as the operator. A fifth, `review_verdict`, is under `/api/` alone: the
+person's verdict on a task under review (`docs/plans/review.md` step 3), which
+no phase is listed. None moves a task once it is on the board, and none
 dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 `start`, a `cancel` or a `command_verdict` in the dispatcher's action queue
 (ADR 142, ADR 151), and two behind the same bearer create a project record and
@@ -349,6 +351,17 @@ def task_comment(hive_dir: str, role: str, task_id: str, text: str, **anchor) ->
     return _writing(task_store.add_comment, hive_dir, task_id, role, text, **anchor)
 
 
+def review_verdict(
+    hive_dir: str, role: str, task_id: str, kind: str, text: str, commit: str
+) -> dict:
+    """`review.md`'s verdict, step 3: a comment line that names a kind and the tip reviewed.
+
+    Over HTTP only, as the operator: no role in `ROLE_TOOLS` lists it, since a
+    verdict is the person's, as accepting is (section 4).
+    """
+    return _writing(task_store.record_verdict, hive_dir, task_id, role, kind, text, commit)
+
+
 def backlog_accept(hive_dir: str, role: str, task_id: str, **arguments) -> dict:
     """Section 6's `backlog_accept`: the person's word, taking an item out of the backlog."""
     return _writing(task_store.accept, hive_dir, task_id, **arguments)
@@ -651,6 +664,25 @@ TOOLS: dict[str, dict] = {
         },
         "annotations": {**_WRITES, "idempotentHint": False},
     },
+    "review_verdict": {
+        "name": "review_verdict",
+        "description": (
+            "Record the person's verdict on a task under review, at the commit they "
+            "reviewed. Only the comment verdict is built. Over HTTP only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": _STRING,
+                "kind": {"type": "string", "enum": list(task_store.VERDICT_KINDS)},
+                "text": _STRING,
+                "commit": {**_STRING, "description": "the branch tip the person reviewed"},
+            },
+            "required": ["task_id", "kind", "text", "commit"],
+            "additionalProperties": False,
+        },
+        "annotations": {**_WRITES, "idempotentHint": False},
+    },
     "backlog_accept": {
         "name": "backlog_accept",
         "description": (
@@ -703,6 +735,7 @@ _WRITERS = {
     "backlog_propose": backlog_propose,
     "task_edit": task_edit,
     "task_comment": task_comment,
+    "review_verdict": review_verdict,
     "backlog_accept": backlog_accept,
 }
 
@@ -870,6 +903,10 @@ def create_app(config_path: str) -> Flask:
     @app.post("/api/tasks/<task_id>/comments")
     def http_comment(task_id: str):
         return _http(hive_dir, "task_comment", task_id, created_status=201)
+
+    @app.post("/api/tasks/<task_id>/verdict")
+    def http_review_verdict(task_id: str):
+        return _http(hive_dir, "review_verdict", task_id, created_status=201)
 
     @app.post("/api/tasks/<task_id>/accept")
     def http_accept(task_id: str):
@@ -1152,7 +1189,7 @@ def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 2
     """One console write as the operator: the tool's result, or `{"error"}` and 400 or 404.
 
     `created_status` answers a write that made something: a proposal with
-    `created: true`, every comment. The task id is the path's, never the body's.
+    `created: true`, every comment and verdict. The task id is the path's, never the body's.
     """
     if request.headers.get("Origin"):
         return jsonify({"error": "no browser origin may call this service"}), 403
@@ -1171,7 +1208,7 @@ def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 2
         return jsonify({"error": str(exc)}), 404
     except ToolError as exc:
         return jsonify({"error": str(exc)}), 400
-    made = name == "task_comment" or result.get("created") is True
+    made = name in ("task_comment", "review_verdict") or result.get("created") is True
     return jsonify(result), created_status if made else 200
 
 

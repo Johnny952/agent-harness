@@ -648,6 +648,7 @@ describe("the board-service writes", () => {
     ["PATCH", "/api/tasks/T-014", `${BOARD}/api/tasks/T-014`],
     ["POST", "/api/tasks/T-014/comments", `${BOARD}/api/tasks/T-014/comments`],
     ["POST", "/api/tasks/T-014/accept", `${BOARD}/api/tasks/T-014/accept`],
+    ["POST", "/api/tasks/T-014/verdict", `${BOARD}/api/tasks/T-014/verdict`],
   ])("%s %s reaches the board-service with the body and one header", async (method, path, url) => {
     const fetchMock = stubApi('{"id":"T-014"}');
     const answer = await forwardApiRequest(write(path, method));
@@ -682,6 +683,8 @@ describe("the board-service writes", () => {
     expect((await forwardApiRequest(write("/api/tasks", "POST")))?.status).toBe(405);
     expect((await forwardApiRequest(get("/api/backlog")))?.status).toBe(404);
     expect((await forwardApiRequest(get("/api/tasks/T-014/accept")))?.status).toBe(404);
+    expect((await forwardApiRequest(get("/api/tasks/T-014/verdict")))?.status).toBe(404);
+    expect((await forwardApiRequest(write("/api/tasks/T-014/verdict", "PATCH")))?.status).toBe(405);
     expect((await forwardApiRequest(write("/api/tasks/T-014/usage", "POST")))?.status).toBe(405);
     expect((await forwardApiRequest(write("/api/tasks/T-014", "PUT")))?.status).toBe(405);
     expect(fetchMock).not.toHaveBeenCalled();

@@ -165,6 +165,14 @@ DEBT_TAG = "debt"
 COMMENTS_FILE = "comments.jsonl"
 #: The keys that make a `comments.jsonl` line a comment: `add_comment`'s three.
 COMMENT_KEYS = ("at", "author", "text")
+#: The verdicts `docs/plans/review.md` names. Only *comment* is recorded yet
+#: (step 3): *approve* is step 4 and *request changes* step 6, so the writer
+#: refuses the other two rather than store a verdict nothing acts on.
+VERDICT_KINDS = ("comment", "approve", "request_changes")
+VERDICT_KINDS_BUILT = ("comment",)
+#: Where a review happens: a finished task whose work is not on main, or one
+#: whose merge stopped on a conflict, the Approvals screen's two lists.
+REVIEW_STATUSES = ("done", "conflict")
 
 _LEGACY_KEY = "description"
 #: A comment's `commit`: an abbreviated or full git object name.
@@ -2691,15 +2699,7 @@ def add_comment(
     two comments never interleave. Returns `{"id", "comment", "comment_count"}`.
     """
     task_id = _check_id(task_id)
-    problems = []
-    if not isinstance(author, str) or not author.strip() or len(author) > MAX_AUTHOR_CHARS or any(
-        ch.isspace() for ch in author
-    ):
-        problems.append(f"the author is {author!r}, not a role")
-    if not isinstance(text, str) or not text.strip():
-        problems.append("the text is blank")
-    elif len(text) > MAX_COMMENT_CHARS:
-        problems.append(f"the text is longer than {MAX_COMMENT_CHARS} characters")
+    problems = _comment_problems(author, text)
     anchor = (file, line, commit)
     if any(value is not None for value in anchor):
         if any(value is None for value in anchor):
@@ -2724,10 +2724,81 @@ def add_comment(
     }
     if file is not None:
         comment.update(file=file, line=line, commit=commit)
+    return _append_comment(hive_dir, task_id, comment)
+
+
+def record_verdict(
+    hive_dir: str, task_id: str, author: str, kind: str, text: str, commit: str
+) -> dict:
+    """A review verdict (`docs/plans/review.md` step 3): one `comments.jsonl` line.
+
+    The line is a comment, `{"at", "author", "text"}`, with `verdict: {"kind",
+    "commit"}` beside them: review.md's *Decisions* 3 keeps the review's record
+    in `comments.jsonl`, so every reader that counts or lists comments reads a
+    verdict too. It is its own key, not the `file`/`line`/`commit` anchor,
+    which says a line and comes all three or none. `commit` is the tip the
+    person reviewed (*Decisions* 4), as the console's diff named it; its shape
+    is checked and nothing more, since this side holds no clone.
+
+    Only `kind` "comment" is taken (`VERDICT_KINDS_BUILT`): it starts nothing
+    (*Decisions* 1), so recording it is the whole of it, and no dispatcher
+    reads it. The task must be under review, `done` and not merged or
+    `conflict`: a verdict on a task not finished, or already merged, reviewed
+    nothing. Returns `add_comment`'s `{"id", "comment", "comment_count"}`.
+    """
+    task_id = _check_id(task_id)
+    problems = []
+    if kind not in VERDICT_KINDS:
+        problems.append(f"the verdict is {kind!r}, not one of {', '.join(VERDICT_KINDS)}")
+    elif kind not in VERDICT_KINDS_BUILT:
+        problems.append(f"the {kind} verdict is not built yet; only comment is")
+    if not isinstance(commit, str) or not _COMMIT_RE.match(commit):
+        problems.append(f"commit is {commit!r}, not a commit hash")
+    problems += _comment_problems(author, text)
+    if problems:
+        raise BoardWriteError(f"task {task_id}", problems)
+
+    comment = {
+        "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "author": author,
+        "text": text,
+        "verdict": {"kind": kind, "commit": commit},
+    }
+
+    def under_review(task: context_transfer.TaskFile) -> None:
+        if task.status in REVIEW_STATUSES and not (task.status == "done" and task.merged):
+            return
+        state = "merged" if task.merged else task.status
+        raise BoardWriteError(
+            f"task {task_id}",
+            [f"it is {state}, not under review: a verdict is for a finished task not on main"],
+        )
+
+    return _append_comment(hive_dir, task_id, comment, under_review)
+
+
+def _comment_problems(author: object, text: object) -> list[str]:
+    """What is wrong with a comment's author and text, `add_comment`'s rule."""
+    problems = []
+    if not isinstance(author, str) or not author.strip() or len(author) > MAX_AUTHOR_CHARS or any(
+        ch.isspace() for ch in author
+    ):
+        problems.append(f"the author is {author!r}, not a role")
+    if not isinstance(text, str) or not text.strip():
+        problems.append("the text is blank")
+    elif len(text) > MAX_COMMENT_CHARS:
+        problems.append(f"the text is longer than {MAX_COMMENT_CHARS} characters")
+    return problems
+
+
+def _append_comment(hive_dir: str, task_id: str, comment: dict, check=None) -> dict:
+    """Append `comment` as one line under the task's lock; `check(task)` may refuse first."""
     data = (json.dumps(comment, ensure_ascii=False) + "\n").encode("utf-8")
     path = comments_path(hive_dir, task_id)
     with task_lock(hive_dir, task_id):
-        _board_task(hive_dir, task_id)
+        _, task = _board_task(hive_dir, task_id)
+        if check is not None:
+            check(task)
         context_transfer._makedirs_readable(
             context_transfer.hive_root(hive_dir), os.path.dirname(path)
         )

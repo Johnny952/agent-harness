@@ -5,9 +5,10 @@
  * and *Conflict* a `conflict` one, and no other; the diff is drawn by file with
  * its counts and the new side's line numbers; a pinned comment sits under its
  * line at the tip and is listed as outdated past it; a line number pins a new
- * comment to that line at the tip, and that post is the screen's one write; a
- * missing diff and a failed read each say so; and the verdict is the CLI line,
- * not a button.
+ * comment to that line at the tip; the *comment* verdict (ADR NNN) is listed
+ * with its tip, marked past it, and posted at the tip, and these two posts are
+ * the screen's only writes; a missing diff and a failed read each say so; and
+ * approve is the CLI line, not a button.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -97,6 +98,19 @@ const PAST: TaskComment = {
   file: "src/app.py",
   line: 3,
   commit: OLD,
+};
+
+const VERDICT_AT_TIP: TaskComment = {
+  at: "2026-10-20T09:00:00Z",
+  author: "operator",
+  text: "reads well so far",
+  verdict: { kind: "comment", commit: TIP },
+};
+const VERDICT_PAST: TaskComment = {
+  at: "2026-10-17T09:00:00Z",
+  author: "operator",
+  text: "the first cut",
+  verdict: { kind: "comment", commit: OLD },
 };
 
 function serve(tasks: Task[], extra: Served = {}) {
@@ -266,7 +280,77 @@ describe("the review", () => {
     expect(screen.getByTestId("line-comment-form")).toBeTruthy();
   });
 
-  it("reads only its routes, and writes nothing until a pin is posted", async () => {
+  it("lists the verdicts given, with their tip, and marks one past it", async () => {
+    await serve([task("T-1")], {
+      "/api/tasks/T-1/comments": {
+        data: { task_id: "T-1", comments: [AT_TIP, VERDICT_PAST, VERDICT_AT_TIP] },
+        warnings: [],
+      },
+    });
+    const box = await screen.findByTestId("review-verdicts");
+    expect(box.textContent).toContain("verdicts · 2");
+    const given = within(box).getAllByTestId("review-comment");
+    expect(given.map((g) => g.querySelector("p")?.textContent)).toEqual([
+      "the first cut",
+      "reads well so far",
+    ]);
+    expect(given[0]!.textContent).toContain(`comment at ${OLD.slice(0, 12)} · at an earlier tip`);
+    expect(given[1]!.textContent).toContain(`comment at ${TIP.slice(0, 12)}`);
+    expect(given[1]!.textContent).not.toContain("earlier tip");
+    // A verdict has no anchor: it is neither under a line nor outdated.
+    expect(screen.queryByTestId("outdated-comments")).toBeNull();
+    const files = screen.getAllByTestId("diff-file");
+    expect(within(files[0]!).queryByText("reads well so far")).toBeNull();
+  });
+
+  it("posts the comment verdict at the tip through the board-service", async () => {
+    const posted = { ...VERDICT_AT_TIP, text: "fine by me" };
+    const { sent } = await serve([task("T-1")], {
+      "POST /api/tasks/T-1/verdict": {
+        data: { id: "T-1", comment: posted, comment_count: 1 },
+      },
+    });
+    const form = await screen.findByTestId("verdict-form");
+    const button = within(form).getByRole("button", { name: "comment verdict" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(within(form).getByLabelText("comment verdict on T-1"), {
+      target: { value: "fine by me" },
+    });
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("comment verdict recorded on T-1"),
+    );
+    expect(sent.filter((x) => x.method !== "GET")).toEqual([
+      {
+        method: "POST",
+        path: "/api/tasks/T-1/verdict",
+        body: { kind: "comment", text: "fine by me", commit: TIP },
+      },
+    ]);
+    await waitFor(() =>
+      expect((within(form).getByRole("textbox") as HTMLTextAreaElement).value).toBe(""),
+    );
+  });
+
+  it("shows a refused verdict in a toast and keeps what was typed", async () => {
+    await serve([task("T-1")], {
+      "POST /api/tasks/T-1/verdict": {
+        status: 400,
+        error: "it is merged, not under review",
+      },
+    });
+    const box = await screen.findByLabelText("comment verdict on T-1");
+    fireEvent.change(box, { target: { value: "late" } });
+    fireEvent.click(screen.getByRole("button", { name: "comment verdict" }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringContaining("it is merged, not under review"),
+      ),
+    );
+    expect((box as HTMLTextAreaElement).value).toBe("late");
+  });
+
+  it("reads only its routes, and writes nothing until a pin or a verdict is posted", async () => {
     const { fetchMock } = await serve([task("T-1")]);
     await screen.findAllByTestId("diff-file");
     const paths = fetchMock.mock.calls.map((c) => new URL(String(c[0]), "http://x").pathname);
@@ -285,15 +369,17 @@ describe("the review", () => {
     for (const call of fetchMock.mock.calls) {
       expect((call[1]?.method ?? "GET").toUpperCase()).toBe("GET");
     }
-    // No verdict button: the review's buttons are the tabs, the rows and the
-    // diff's line numbers.
+    // No approve button: the review's buttons are the tabs, the rows, the
+    // diff's line numbers and the comment verdict.
     const review = screen.getByRole("region", { name: "Review" });
     const names = within(review)
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "");
     expect(
       names.every((n) =>
-        /^(Awaiting review|Conflict) · \d+$|^T-1|^comment on \S+ line \d+$/.test(n),
+        /^(Awaiting review|Conflict) · \d+$|^T-1|^comment on \S+ line \d+$|^comment verdict$/.test(
+          n,
+        ),
       ),
     ).toBe(true);
   });

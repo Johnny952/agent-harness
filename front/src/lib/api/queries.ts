@@ -10,6 +10,7 @@ import type {
   ProposeBacklogBody,
   Thread,
   UpdateThreadBody,
+  VerdictTaskBody,
 } from "./types";
 
 /** Nothing polls faster than 2s. */
@@ -144,6 +145,15 @@ export const commentTaskMutation = (qc: QueryClient) =>
     mutationKey: ["board", "comment"],
     mutationFn: ({ taskId, body }: { taskId: string; body: CommentTaskBody }) =>
       api.commentTask(taskId, body),
+    onSettled: (_data, _error, { taskId }) => invalidateBoard(qc, taskId),
+  });
+
+/** A review verdict is a comment, so the same reads refetch (ADR NNN). */
+export const verdictTaskMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "verdict"],
+    mutationFn: ({ taskId, body }: { taskId: string; body: VerdictTaskBody }) =>
+      api.verdictTask(taskId, body),
     onSettled: (_data, _error, { taskId }) => invalidateBoard(qc, taskId),
   });
 

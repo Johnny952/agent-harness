@@ -501,7 +501,15 @@ export interface TaskComment {
   file?: string;
   line?: number;
   commit?: string;
+  /**
+   * Present on a review verdict (ADR NNN): its kind, and the branch tip it was
+   * given at. Apart from the anchor, so a verdict is on the change, not a line.
+   */
+  verdict?: { kind: VerdictKind; commit: string };
 }
+
+/** The verdicts `dispatcher/tasks.py` knows; only `comment` is built (ADR NNN). */
+export type VerdictKind = "comment" | "approve" | "request_changes";
 
 /**
  * `data` of `GET /api/tasks/<id>/comments` (ADR 135), in the api's usual
@@ -577,6 +585,16 @@ export interface CommentTaskResult {
   id: string;
   comment: TaskComment;
   comment_count: number;
+}
+
+/**
+ * `review_verdict`'s body (ADR NNN): the kind, the person's words, and the
+ * branch tip the review read. The answer is `task_comment`'s.
+ */
+export interface VerdictTaskBody {
+  kind: VerdictKind;
+  text: string;
+  commit: string;
 }
 
 export interface AcceptTaskBody {
