@@ -2,16 +2,16 @@
  * The New project form (ADR 212): the record write, then the setup actions it
  * queues — keygen, the public key and its deploy-key instruction, Check and
  * Clone for a remote; Init for an empty repository — each outcome read back from
- * `GET /api/actions` by the id the queueing answered.
+ * `GET /api/actions/<id>` by the id the queueing answered (ADR NNN) — and the
+ * url that holds the slug and those ids, from which a reload resumes.
  *
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { Route } from "./projects.new";
-import { findAction } from "@/lib/project-setup";
-import { renderRoute, type Answer } from "@/test/render-route";
-import type { ActionQueue, ActionRecord, ProjectRecord } from "@/lib/api/types";
+import { renderRoute } from "@/test/render-route";
+import type { ActionRecord, ProjectRecord } from "@/lib/api/types";
 
 afterEach(cleanup);
 
@@ -54,19 +54,6 @@ function action(id: string, kind: string, over: Partial<ActionRecord> = {}): Act
   };
 }
 
-function queue(over: Partial<ActionQueue> = {}): Answer {
-  return {
-    data: {
-      pending: [],
-      claimed: [],
-      done: [],
-      done_total: 0,
-      worker: { heartbeat: null, stale: false, stale_after_seconds: 30 },
-      ...over,
-    },
-  };
-}
-
 const KEY_DONE = action("a-key", "keygen", {
   status: "done",
   result: { public: PUBLIC, fingerprint: "SHA256:abc", replaced: false },
@@ -79,28 +66,18 @@ async function fill(slug: string, remote: string | null) {
   fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 }
 
-describe("findAction", () => {
-  it("finds an action in any list, and nothing for an id not answered", () => {
-    const q = queue({ claimed: [action("a-1", "clone")], done: [KEY_DONE] }) as {
-      data: ActionQueue;
-    };
-    expect(findAction(q.data, "a-key")?.kind).toBe("keygen");
-    expect(findAction(q.data, "a-1")?.kind).toBe("clone");
-    expect(findAction(q.data, "a-none")).toBeUndefined();
-    expect(findAction(undefined, "a-1")).toBeUndefined();
-  });
-});
-
 describe("New project", () => {
   it("writes the record, queues a keygen, and shows only the public key with the deploy-key step", async () => {
     const { sent } = await renderRoute(Route, "/projects/new", {
       "POST /api/projects": { bare: project(), status: 201 },
       "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
-      "/api/actions": [queue(), queue({ done: [KEY_DONE] })],
+      "/api/actions/a-key": [{ data: action("a-key", "keygen") }, { data: KEY_DONE }],
     });
     await fill("shop", REMOTE);
 
     expect((await screen.findByTestId("public-key")).textContent).toBe(PUBLIC);
+    // Read by its id: the queue's list of the newest finished is never asked.
+    expect(sent.some((s) => s.path === "/api/actions")).toBe(false);
     expect(screen.getByText("SHA256:abc")).toBeTruthy();
     expect(screen.getByText(/Settings → Deploy keys/)).toBeTruthy();
     const writes = sent.filter((s) => s.method === "POST");
@@ -122,24 +99,19 @@ describe("New project", () => {
       "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
       "POST /api/projects/shop/check": { bare: action("a-chk", "check"), status: 201 },
       "POST /api/projects/shop/clone": { bare: action("a-cl", "clone"), status: 201 },
-      "/api/actions": [
-        queue(),
-        queue({ done: [KEY_DONE] }),
-        queue({
-          done: [
-            KEY_DONE,
-            action("a-chk", "check", {
-              status: "done",
-              result: { reachable: false, detail: "Permission denied (publickey)" },
-            }),
-          ],
-        }),
-        queue({
-          done: [
-            KEY_DONE,
-            action("a-cl", "clone", { status: "done", result: { detail: "cloned main" } }),
-          ],
-        }),
+      "/api/actions/a-key": [{ data: action("a-key", "keygen") }, { data: KEY_DONE }],
+      "/api/actions/a-chk": [
+        { data: action("a-chk", "check") },
+        {
+          data: action("a-chk", "check", {
+            status: "done",
+            result: { reachable: false, detail: "Permission denied (publickey)" },
+          }),
+        },
+      ],
+      "/api/actions/a-cl": [
+        { data: action("a-cl", "clone", { status: "claimed" }) },
+        { data: action("a-cl", "clone", { status: "done", result: { detail: "cloned main" } }) },
       ],
     });
     await fill("shop", REMOTE);
@@ -164,11 +136,8 @@ describe("New project", () => {
       "POST /api/projects": { bare: project({ settings }), status: 201 },
       "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
       "POST /api/projects/shop/check": { bare: action("a-chk", "check"), status: 201 },
-      "/api/actions": [
-        queue(),
-        queue({ done: [KEY_DONE] }),
-        queue({ done: [KEY_DONE, action("a-chk", "check", { status: "done", result })] }),
-      ],
+      "/api/actions/a-key": { data: KEY_DONE },
+      "/api/actions/a-chk": { data: action("a-chk", "check", { status: "done", result }) },
     });
     await fill("shop", REMOTE);
     fireEvent.click(await screen.findByRole("button", { name: "Check" }));
@@ -211,12 +180,9 @@ describe("New project", () => {
     const { sent } = await renderRoute(Route, "/projects/new", {
       "POST /api/projects": { bare: project({ remote: null }), status: 201 },
       "POST /api/projects/shop/init": { bare: action("a-in", "init"), status: 201 },
-      "/api/actions": [
-        queue(),
-        queue({
-          done: [action("a-in", "init", { status: "done", result: { detail: "empty main" } })],
-        }),
-      ],
+      "/api/actions/a-in": {
+        data: action("a-in", "init", { status: "done", result: { detail: "empty main" } }),
+      },
     });
     await fill("shop", null);
     expect(await screen.findByText(/Init done: empty main/)).toBeTruthy();
@@ -234,17 +200,13 @@ describe("New project", () => {
         { bare: action("a-key", "keygen"), status: 201 },
         { bare: action("a-key2", "keygen"), status: 201 },
       ],
-      "/api/actions": [
-        queue(),
-        queue({
-          done: [
-            action("a-key", "keygen", {
-              status: "failed",
-              error: "shop already has a deploy key; replacing it was not asked",
-            }),
-          ],
+      "/api/actions/a-key": {
+        data: action("a-key", "keygen", {
+          status: "failed",
+          error: "shop already has a deploy key; replacing it was not asked",
         }),
-      ],
+      },
+      "/api/actions/a-key2": { data: action("a-key2", "keygen") },
     });
     await fill("shop", REMOTE);
     expect(await screen.findByText(/already has a deploy key/)).toBeTruthy();
@@ -261,10 +223,89 @@ describe("New project", () => {
   it("a refused record shows the service's message and queues nothing", async () => {
     const { sent } = await renderRoute(Route, "/projects/new", {
       "POST /api/projects": { status: 409, error: "project 'shop' already has a record" },
-      "/api/actions": queue(),
     });
     await fill("shop", REMOTE);
     expect(await screen.findByText("project 'shop' already has a record")).toBeTruthy();
     expect(sent.filter((s) => s.method === "POST").map((s) => s.path)).toEqual(["/api/projects"]);
+  });
+
+  it("keeps the slug and the queued action's id in the url, in place of the entry", async () => {
+    const { router } = await renderRoute(Route, "/projects/new", {
+      "POST /api/projects": { bare: project(), status: 201 },
+      "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
+      "/api/actions/a-key": { data: KEY_DONE },
+    });
+    await fill("shop", REMOTE);
+    await screen.findByTestId("public-key");
+    expect(router.state.location.search).toEqual({ slug: "shop", keygen: "a-key" });
+    expect(router.history.length).toBe(1);
+  });
+
+  it("resumes from the url after a reload: the record by its slug, the key by its id", async () => {
+    const { sent } = await renderRoute(
+      Route,
+      "/projects/new",
+      {
+        "/api/projects/shop": { data: project({ settings: { push_task_branch: true } }) },
+        "/api/actions/a-key": { data: KEY_DONE },
+        "/api/actions/a-chk": {
+          data: action("a-chk", "check", {
+            status: "done",
+            result: { reachable: true, writable: true, detail: "answered" },
+          }),
+        },
+      },
+      "/projects/new?slug=shop&keygen=a-key&check=a-chk",
+    );
+    expect((await screen.findByTestId("public-key")).textContent).toBe(PUBLIC);
+    expect(await screen.findByText(/would take a push from it/)).toBeTruthy();
+    expect((screen.getByLabelText("Slug") as HTMLInputElement).value).toBe("shop");
+    expect((screen.getByLabelText("Slug") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Remote") as HTMLInputElement).value).toBe(REMOTE);
+    expect(screen.queryByRole("button", { name: "Create project" })).toBeNull();
+    expect(sent.filter((s) => s.method === "POST")).toEqual([]);
+  });
+
+  it("resumed with a record and no first action, offers to queue it", async () => {
+    const { sent, router } = await renderRoute(
+      Route,
+      "/projects/new",
+      {
+        "/api/projects/shop": { data: project() },
+        "POST /api/projects/shop/keygen": { bare: action("a-key", "keygen"), status: 201 },
+        "/api/actions/a-key": { data: KEY_DONE },
+      },
+      "/projects/new?slug=shop",
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Make the deploy key" }));
+    expect((await screen.findByTestId("public-key")).textContent).toBe(PUBLIC);
+    expect(screen.queryByRole("button", { name: "Make the deploy key" })).toBeNull();
+    expect(sent.filter((s) => s.method === "POST").map((s) => s.path)).toEqual([
+      "/api/projects/shop/keygen",
+    ]);
+    expect(router.state.location.search).toEqual({ slug: "shop", keygen: "a-key" });
+  });
+
+  it("a slug whose record cannot be read back says so and creates nothing", async () => {
+    const { sent } = await renderRoute(
+      Route,
+      "/projects/new",
+      { "/api/projects/shop": { status: 404, error: "no project 'shop'" } },
+      "/projects/new?slug=shop&keygen=a-key",
+    );
+    expect(await screen.findByText(/The record of shop could not be read back/)).toBeTruthy();
+    expect(screen.queryByTestId("public-key")).toBeNull();
+    expect(sent.filter((s) => s.method === "POST")).toEqual([]);
+  });
+
+  it("an action id the queue has no record of is named, not shown as waiting", async () => {
+    await renderRoute(
+      Route,
+      "/projects/new",
+      { "/api/projects/shop": { data: project() } },
+      "/projects/new?slug=shop&keygen=a-gone",
+    );
+    expect(await screen.findByText(/the queue has no record of it/)).toBeTruthy();
+    expect(screen.getByText("a-gone")).toBeTruthy();
   });
 });

@@ -297,13 +297,16 @@ module; steps 2, 4 and 5 need its queue and worker.
    is not queued and needs no action: `bootstrap-project` only makes
    `<projects_root>/<slug>`, which clone and init already do, and run before
    them it would make them refuse. The write check was measured on the agent
-   image's git 2.39.5 too, with the same exit statuses (ADR 215). Open: the
-   write check does not see branch
-   protection, which GitHub applies to a real update of a protected branch
-   only; the worker writes the key at `cfg.project_keys_dir`, as the CLI does;
-   the form finds an outcome only among the queue's newest twenty finished and
-   cannot be resumed after a reload. (A new project is in the sidebar as soon
-   as its record is, since the sidebar reads the records, ADR 209.)
+   image's git 2.39.5 too, with the same exit statuses (ADR 215). The form
+   reads each action back by its id, however many others finished since, and
+   resumes after a reload from `?slug=` and the queued ids in its url, the
+   record read back by its slug (ADR NNN). Open: the write check does not see
+   branch protection, which GitHub applies to a real update of a protected
+   branch only; the worker writes the key at `cfg.project_keys_dir`, as the
+   CLI does; the resume is the url's, so another tab or the form opened again
+   starts empty, and a `check` or `clone` id lost that way is not recovered
+   (only the first action is offered again). (A new project is in the sidebar
+   as soon as its record is, since the sidebar reads the records, ADR 209.)
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front
    task. Built by T-115 (2026-10-20, ADR 198): one derivation,
    `front/src/lib/slots.ts`, drawn in the dock and in the *Start development*

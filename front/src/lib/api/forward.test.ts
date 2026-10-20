@@ -233,6 +233,34 @@ describe("the action queue read", () => {
       Authorization: "Bearer test-token",
     });
   });
+
+  // One action by its id (ADR NNN), what *New project* reads its setup by.
+  const ACTION = "a-20261019T120001000000Z-0001";
+
+  it("forwards one action's record with no parameter, and the api's bearer", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(get(`/api/actions/${ACTION}?limit=1&project=x`));
+    expect(target(fetchMock)).toBe(`${BASE}/api/actions/${ACTION}`);
+    expect(fetchMock.mock.calls[0]![1]!.headers).toMatchObject({
+      Authorization: "Bearer test-token",
+    });
+  });
+
+  it("404s an id the queue does not make, without asking the api", async () => {
+    const fetchMock = stubApi();
+    for (const bad of ["worker", "a-1", `${ACTION}.json`, "..%2Fworker", "%zz"]) {
+      const answer = await forwardApiRequest(get(`/api/actions/${bad}`));
+      expect(answer?.status).toBe(404);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards no write of one action's record", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(get(`/api/actions/${ACTION}`, { method: "DELETE" }));
+    expect(answer?.status).toBe(405);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("the thread reads", () => {

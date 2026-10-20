@@ -12019,3 +12019,61 @@ host's git 2.43 only, and the agent image, where the worker runs it, carries
 **Ruled out.**
 - Parsing the porcelain's `*`/`!` lines: it would add a second reading that
   agrees with the exit status in every measured case.
+
+## ADR NNN — *New project* reads its actions by id and resumes from its url
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 212 left two things of `docs/plans/projects.md` step 5 open.
+The form found each setup action's outcome in `GET /api/actions`, which
+serves the newest twenty finished: a `keygen` that twenty other actions
+finished after was never seen as done, and the form waited on it for good.
+And the form's place (the record, the ids its queueing answered) lived only
+in the component's state, so a reload lost it: the record stayed, the form
+came back empty, and a second *Create project* was refused with a 409.
+
+**Decision.**
+1. `GET /api/actions/<action_id>` serves one action's record, looked for in
+   `pending/`, `claimed/` and `done/` in that order, the order the worker
+   moves a record in, so a record moved between two looks is found in the
+   later one. An id not of the queue's shape (`actions.ID_RE`), or one no
+   record names, is a 404 and is never made into a path; a file that does not
+   read is `data: null` with the reason, as `/api/projects/<slug>` answers a
+   broken record. It takes no parameter (a 400 otherwise) and reads through
+   `/state:ro`.
+2. The console forwards it: `GET /api/actions/<id>` with the id's own shape
+   checked in `forward.ts` before anything is sent, `client.getAction`, and
+   `actionQuery(id)` under `["action-queue"]`, so the invalidation every
+   queue write makes refetches it. It polls while the record is pending or
+   claimed and stops once it is finished.
+3. The form keeps its place in the url: `?slug=` as soon as the record is
+   written, then each queued action's id under its kind, `keygen`, `check`,
+   `clone` or `init`, each navigation replacing the entry it was on. A reload
+   reads the record back by that slug (`projectQuery`, `GET
+   /api/projects/<slug>`) and each action by its id, and draws the form where
+   it was: the inputs locked on the record's values, the public key, the
+   check's answer, the clone's. The record is the source of what was written
+   and the queue of what ran; nothing is kept in the browser.
+4. A record in the url with no first action (`keygen` for a remote, `init`
+   for none) is a page left between the two writes: the form says so and
+   offers the action's button. An id the queue has no record of says that,
+   named, instead of waiting; a slug whose record does not read back says
+   that and offers no *Create project*.
+
+**Consequences.**
+- `front/src/lib/project-setup.ts` and its `findAction` over the list are
+  gone: the list is no longer how the form reads.
+- The resume is the url's. Another tab, or the form opened again from the
+  sidebar, starts empty; a `check` or `clone` id lost that way is not
+  recovered, though it ran. Only the first action is offered again, and a
+  `keygen` queued again for a project whose key was made fails as ADR 212
+  says, with the replacing key offered.
+- The bootstrap is still not an action (ADR 214), so there is nothing of it
+  to resume.
+
+**Ruled out.**
+- Raising `/api/actions`' limit: an outcome would still fall out, later.
+- `localStorage`: a second source beside the record and the queue, which can
+  disagree with both and is not on another machine.
+- Deriving the actions from the record: a record names no action, and
+  listing the queue for a project's setup kinds has the same limit as 1.

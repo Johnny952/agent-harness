@@ -204,3 +204,79 @@ def test_route_is_read_only(tmp_path):
     before = {p: os.stat(p).st_mtime_ns for p in root.rglob("*")}
     _data(harness, PATH)
     assert {p: os.stat(p).st_mtime_ns for p in root.rglob("*")} == before
+
+
+# --- one action by its id (ADR NNN) -------------------------------------------
+
+
+def test_one_action_is_found_in_any_state(tmp_path):
+    harness = _harness(tmp_path)
+    pending = _record(harness.state_dir, actions.PENDING, 1, waiting="behind a start")
+    claimed = _record(harness.state_dir, actions.CLAIMED, 2)
+    done = _record(harness.state_dir, actions.DONE, 3, result={"detail": "cloned main"})
+    for record in (pending, claimed, done):
+        data, warnings = _data(harness, f"{PATH}/{record['id']}")
+        assert (data, warnings) == (record, [])
+
+
+def test_one_action_is_found_past_the_queues_finished_limit(tmp_path):
+    # The case the route is for: the setup action finished first, and more than
+    # the console's twenty newest finished have finished since.
+    harness = _harness(tmp_path)
+    first = _record(harness.state_dir, actions.DONE, 1, kind="keygen")
+    for n in range(2, 30):
+        _record(harness.state_dir, actions.DONE, n)
+    queue, _ = _data(harness, f"{PATH}?limit=20")
+    assert first["id"] not in [r["id"] for r in queue["done"]]
+    data, _ = _data(harness, f"{PATH}/{first['id']}")
+    assert data == first
+
+
+def test_one_action_moved_on_is_read_where_it_is_now(tmp_path):
+    harness = _harness(tmp_path)
+    record = _record(harness.state_dir, actions.PENDING, 1)
+    root = actions.actions_dir(harness.state_dir)
+    (root / actions.DONE).mkdir(parents=True)
+    moved = {**record, "status": "done"}
+    (root / actions.DONE / f"{record['id']}.json").write_text(json.dumps(moved))
+    (root / actions.PENDING / f"{record['id']}.json").unlink()
+    data, _ = _data(harness, f"{PATH}/{record['id']}")
+    assert data["status"] == "done"
+
+
+def test_one_action_with_no_record_or_no_id_is_a_404(tmp_path):
+    harness = _harness(tmp_path)
+    # No queue at all, then a queue without this id.
+    resp = _get(harness, f"{PATH}/{_id(1)}")
+    assert resp.status_code == 404 and _id(1) in resp.get_json()["error"]
+    _record(harness.state_dir, actions.DONE, 2)
+    assert _get(harness, f"{PATH}/{_id(1)}").status_code == 404
+    for bad in ("worker", "a-1", f"{_id(2)}.json", "..%2Fworker"):
+        assert _get(harness, f"{PATH}/{bad}").status_code == 404
+
+
+def test_one_unreadable_action_is_null_and_a_warning(tmp_path):
+    harness = _harness(tmp_path)
+    done = actions.actions_dir(harness.state_dir) / actions.DONE
+    done.mkdir(parents=True)
+    (done / f"{_id(1)}.json").write_text("{not json")
+    data, warnings = _data(harness, f"{PATH}/{_id(1)}")
+    assert data is None
+    assert len(warnings) == 1 and "unreadable action" in warnings[0]
+
+
+def test_one_action_takes_no_parameter_and_no_write(tmp_path):
+    harness = _harness(tmp_path)
+    record = _record(harness.state_dir, actions.PENDING, 1)
+    path = f"{PATH}/{record['id']}"
+    assert _get(harness, f"{path}?limit=1").status_code == 400
+    assert harness.client.get(path).status_code == 401
+    for method in (harness.client.post, harness.client.put, harness.client.delete):
+        assert method(path).status_code == 405
+
+
+def test_one_action_read_makes_nothing(tmp_path):
+    harness = _harness(tmp_path)
+    before = _tree(Path(harness.state_dir))
+    assert _get(harness, f"{PATH}/{_id(1)}").status_code == 404
+    assert _tree(Path(harness.state_dir)) == before
