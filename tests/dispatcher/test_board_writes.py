@@ -586,6 +586,77 @@ def test_concurrent_comments_never_interleave(tmp_path: Path) -> None:
     assert sorted(c["text"][0] for c in _comments(hive, "T-001")) == [str(i) for i in range(10)]
 
 
+# -- record_verdict (review.md step 3) -----------------------------------------
+
+
+@pytest.mark.parametrize("status", ["done", "conflict"])
+def test_a_comment_verdict_is_a_comment_line_with_its_kind_and_commit(tmp_path: Path, status) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status)
+    tasks.add_comment(hive, "T-001", "operator", "First.")
+
+    result = tasks.record_verdict(hive, "T-001", "operator", "comment", "Read it all.", _COMMIT)
+
+    assert result["comment_count"] == 2
+    assert result["comment"]["verdict"] == {"kind": "comment", "commit": _COMMIT}
+    assert (result["comment"]["author"], result["comment"]["text"]) == ("operator", "Read it all.")
+    assert "file" not in result["comment"]
+    assert _comments(hive, "T-001")[1] == result["comment"]
+    assert _read(hive, "T-001").status == status  # a comment verdict moves nothing
+
+
+@pytest.mark.parametrize(
+    "status, merged, needle",
+    [
+        ("pending", None, "it is pending, not under review"),
+        ("in_progress", None, "it is in_progress, not under review"),
+        ("merged", None, "it is merged, not under review"),
+        ("done", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged, not under review"),
+    ],
+)
+def test_a_verdict_on_a_task_not_under_review_is_refused(tmp_path: Path, status, merged, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status, merged=merged)
+    with pytest.raises(tasks.BoardWriteError, match=needle):
+        tasks.record_verdict(hive, "T-001", "operator", "comment", "x", _COMMIT)
+    assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+@pytest.mark.parametrize(
+    "kind, text, commit, needle",
+    [
+        ("approve", "x", _COMMIT, "the approve verdict is not built yet"),
+        ("request_changes", "x", _COMMIT, "the request_changes verdict is not built yet"),
+        ("praise", "x", _COMMIT, "not one of comment, approve, request_changes"),
+        ("comment", "x", "main", "not a commit hash"),
+        ("comment", "x", None, "not a commit hash"),
+        ("comment", " ", _COMMIT, "the text is blank"),
+    ],
+)
+def test_a_bad_verdict_is_refused_and_nothing_is_written(tmp_path: Path, kind, text, commit, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="done")
+    with pytest.raises(tasks.BoardWriteError, match=needle):
+        tasks.record_verdict(hive, "T-001", "operator", kind, text, commit)
+    assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+def test_a_verdict_on_no_task_is_no_task(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    with pytest.raises(tasks.NoTaskError):
+        tasks.record_verdict(hive, "T-404", "operator", "comment", "x", _COMMIT)
+    assert not (tmp_path / "hive" / "board" / "T-404").exists()
+
+
+def test_a_verdict_waits_for_the_task_lock(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="done")
+    _blocks_while_locked(
+        hive, "T-001", lambda: tasks.record_verdict(hive, "T-001", "operator", "comment", "x", _COMMIT)
+    )
+    assert len(_comments(hive, "T-001")) == 1
+
+
 # -- accept --------------------------------------------------------------------
 
 
@@ -821,6 +892,7 @@ _UNMIGRATED = {
     "edit_task": lambda hive: tasks.edit_task(hive, "task-1", priority="low"),
     "add_comment": lambda hive: tasks.add_comment(hive, "task-1", "operator", "hi"),
     "accept": lambda hive: tasks.accept(hive, "task-1"),
+    "record_verdict": lambda hive: tasks.record_verdict(hive, "task-1", "operator", "comment", "hi", _COMMIT),
 }
 
 

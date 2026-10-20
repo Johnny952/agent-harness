@@ -12410,3 +12410,65 @@ nothing recorded that a person was wanted.
   lock taken under a task's lock is a deadlock waiting for a writer order.
 - An `awaiting_review` status on the board: `review.md` step 1, its own
   task.
+## ADR 222 — The review records a comment verdict at the tip it was given at
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** `docs/plans/review.md` step 3 is the *comment* verdict and the
+line comments, both in `comments.jsonl`. ADR 219 built the line comments on
+the board-service's anchored `task_comment` and left the verdict open: the
+review had no way to say "I read this change, here is what I make of it"
+apart from a comment on one line, and nothing recorded which tip a word on
+the whole change was about. *Decisions*, 1 of the plan says the *comment*
+verdict starts nothing; *Decisions*, 3 keeps the review's record in
+`comments.jsonl`; *Decisions*, 4 ties a verdict to the commit reviewed.
+
+**Decision.**
+1. A verdict is a `comments.jsonl` line: the comment's `at`, `author` and
+   `text`, and `verdict: {"kind", "commit"}` beside them. It is its own key,
+   not the `file`/`line`/`commit` anchor, which names a line and comes all
+   three or none; so every reader that counts or lists comments reads a
+   verdict too, as a comment with no line. `commit` is the tip the diff
+   named, checked for a commit hash's shape and nothing more.
+2. `dispatcher/tasks.py:record_verdict` writes it, under the task's
+   lock and with `add_comment`'s author and text rules, and answers as
+   `add_comment` does (`{"id", "comment", "comment_count"}`). `kind` is one
+   of `VERDICT_KINDS` (`comment`, `approve`, `request_changes`); only
+   `comment` is taken (`VERDICT_KINDS_BUILT`), and the other two are refused
+   as not built rather than stored for nothing to act on. The task must be
+   under review: `done` and not merged, or `conflict`, the Approvals
+   screen's two lists. Anything else is a 400 with the reason.
+3. The board-service serves it as `review_verdict`, over HTTP only, as the
+   operator: `POST /api/tasks/<id>/verdict`, `{kind, text, commit}`, 201 as
+   a comment is. No role in `ROLE_TOOLS` lists it: a verdict is the
+   person's, as accepting is.
+4. The api's comments read passes a line's `verdict` through with only its
+   `kind` and `commit`, when it is an object of a known kind and a string
+   commit; otherwise the comment is served without it, with the problem, as
+   a broken anchor is.
+5. The console's forward whitelist gains `POST /api/tasks/<id>/verdict`, to
+   the board-service with no bearer (eighteen exact write pairs); a `GET`
+   of it is the api's 404. `verdictTask` and `verdictTaskMutation` post it
+   and refetch what a comment refetches.
+6. The review lists the verdicts given, above the diff, each with its kind
+   and tip, marked "at an earlier tip" when the branch has moved past it,
+   and below them a form that posts a *comment* verdict at the tip the diff
+   was taken at. The CLI merge line stays the only way to approve.
+
+**Consequences.**
+- A verdict shows on the task's page as an ordinary comment, and a phase
+  that reads the comments reads it as one; nothing reads `verdict` itself.
+  The dispatcher picking up verdicts is `review.md` step 4.
+- The other two kinds are named in the type and the tool's schema but
+  refused by the writer, so step 4 and step 6 widen `VERDICT_KINDS_BUILT`
+  and add what each starts, without a new storage shape.
+- The under-review check uses `done`-not-merged as ADR 219's stand-in for
+  *awaiting review*; when step 1 gives the status, the check follows it.
+
+**Ruled out.**
+- A file of its own for verdicts: *Decisions*, 3 keeps the review's record
+  with the comments, and the readers already there count it.
+- Reusing the anchor's `commit` for the tip: the anchor is all three keys
+  or none, and a verdict names no line.
+- Listing the tool for a phase: a model's verdict on its own work is not a
+  review.

@@ -1,9 +1,10 @@
 /**
  * The Approvals screen's review, its pure half (ADR 219): which list a task
  * belongs to, and a unified diff cut into files with the new side's line
- * numbers, which is what a comment pinned to `file` and `line` points at.
+ * numbers, which is what a comment pinned to `file` and `line` points at;
+ * and the verdicts among the task's comments (ADR 222).
  */
-import type { Task } from "@/lib/api/types";
+import type { Task, TaskComment } from "@/lib/api/types";
 
 /** The two lists of the Approvals screen's review. */
 export type ReviewLane = "review" | "conflict";
@@ -13,6 +14,21 @@ export function reviewLane(t: Pick<Task, "status" | "merged">): ReviewLane | nul
   if (t.status === "conflict") return "conflict";
   if (t.status === "done" && t.merged === false) return "review";
   return null;
+}
+
+/**
+ * The comments that are review verdicts, in the order stored. A comment line
+ * carries `verdict` only when the api found it whole (a known kind and a
+ * string commit), so this checks what the type says and nothing more.
+ */
+export function reviewVerdicts(comments: TaskComment[]): TaskComment[] {
+  return comments.filter(
+    (c) =>
+      typeof c.verdict === "object" &&
+      c.verdict !== null &&
+      typeof c.verdict.kind === "string" &&
+      typeof c.verdict.commit === "string",
+  );
 }
 
 export interface DiffLine {

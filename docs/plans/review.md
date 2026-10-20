@@ -8,10 +8,11 @@ supersedes: []
 # Review — a person approves a task's diff in the console before it merges
 
 **Status:** design, approved in outline by the user on 2026-10-11. The console
-review is built but for its verdicts (ADR 219): the api serves a task
-branch's diff, and `/approvals` draws it with the comments pinned to it and
-pins new ones to a line, but there is no *awaiting review* state and no
-verdict from the console. Two pieces landed on the CLI side through
+review is built but for two of its verdicts (ADR 219, ADR 222): the api
+serves a task branch's diff, and `/approvals` draws it with the comments
+pinned to it, pins new ones to a line, and records the *comment* verdict at
+the tip; but there is no *awaiting review* state, no *approve* or *request
+changes* from the console, and no dispatcher reads a verdict. Two pieces landed on the CLI side through
 `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -271,10 +272,14 @@ After `board-service.md`'s steps, each a single surface:
    `GET /api/tasks/<id>/diff?project=<slug>` runs `git` read-only on the
    project's clone, against the merge base with the base branch, capped in
    size; the api image installs git for it. The console forwards it.
-3. The *comment* verdict and line comments in `comments.jsonl`. **Partly
-   built 2026-10-20** (ADR 219): the line comments were already in the
-   board-service's anchored `task_comment`, and the review now writes them
-   at the tip. The *comment* verdict is open.
+3. The *comment* verdict and line comments in `comments.jsonl`. **Built
+   2026-10-20** (ADR 219, ADR 222): the line comments were already in the
+   board-service's anchored `task_comment`, and the review writes them at
+   the tip. The *comment* verdict is a `comments.jsonl` line with
+   `verdict: {kind, commit}`, written by the board-service's HTTP-only
+   `review_verdict` (`POST /api/tasks/<id>/verdict`) for a task `done` and
+   not merged or in `conflict`, and listed on the review with its tip. It is
+   recorded only: no dispatcher reads it, which is step 4's.
 4. The *approve* verdict: merge, push and the `merged` block, with the
    credential's ADR, and the dispatcher picking up verdicts.
 5. The task-branch push after each phase, per project, off by default.
@@ -287,7 +292,8 @@ After `board-service.md`'s steps, each a single surface:
    library, comments shown at their line on the tip and as outdated past
    it, a line number pinning a new one at the tip, and the *Conflict* list
    shown read-only. Still open: the library, the handoffs' summary beside
-   the diff, and every verdict button (they wait for steps 1, 3, 4 and 6).
+   the diff, and the *approve* and *request changes* buttons (they wait for
+   steps 1, 4 and 6); the *comment* verdict's form is in (step 3).
 8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
 9. The integrador role: its prompt, handoff schema, profile and write limit,

@@ -42,6 +42,8 @@
  * not in an envelope, so they go through `readBare`, and a refusal is an
  * `ApiError` with the service's own message and status. There is no mock for any
  * of the six: like the settings writes, they are real `fetch`es in every mode.
+ * `verdictTask` (ADR 222) is a fifth write of the same kind, the review's
+ * verdict, `POST /api/tasks/<id>/verdict`, answered as a comment is.
  *
  * **One more read and one more write for the Board's Ready card** (ADR 160):
  * `getActionQueue` reads `GET /api/actions` (the api's envelope) and `startTask`
@@ -117,6 +119,7 @@ import type {
   Thread,
   ThreadEventRow,
   UsageGroup,
+  VerdictTaskBody,
 } from "./types";
 
 export class ApiError extends Error {
@@ -488,6 +491,17 @@ export function editTask(taskId: string, body: EditTaskBody): Promise<EditTaskRe
 /** Add a comment to a task: `POST /api/tasks/<id>/comments`. */
 export function commentTask(taskId: string, body: CommentTaskBody): Promise<CommentTaskResult> {
   return readBare<CommentTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}/comments`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * Give a verdict on a task under review: `POST /api/tasks/<id>/verdict`
+ * (ADR 222). It is stored as one of the task's comments.
+ */
+export function verdictTask(taskId: string, body: VerdictTaskBody): Promise<CommentTaskResult> {
+  return readBare<CommentTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}/verdict`, {
     method: "POST",
     body,
   });

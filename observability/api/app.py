@@ -207,7 +207,8 @@ MAX_DIFF_BYTES = 1024 * 1024
 GIT_TIMEOUT_SECONDS = 20
 
 #: The keys a comment line may carry across this api: `tasks.add_comment`'s
-#: three, and the diff anchor's three. Anything else on a line is dropped.
+#: three, and the diff anchor's three; and `tasks.record_verdict`'s `verdict`,
+#: checked apart in `_comment`. Anything else on a line is dropped.
 _COMMENT_KEYS = task_store.COMMENT_KEYS
 _ANCHOR_KEYS = ("file", "line", "commit")
 
@@ -1806,28 +1807,44 @@ def _comment(line: bytes) -> tuple[dict | None, str | None]:
     object, or without a string `at`, `author` and `text`. A comment whose diff
     anchor is broken — not all three of `file`, `line` and `commit`, or one of
     the wrong type — is served without it, with the problem, because its text
-    is still readable. Only the six known keys cross; nothing is mended.
+    is still readable; so is one whose `verdict` (`tasks.record_verdict`) is
+    not an object of a known `kind` and a string `commit`. Only the seven known
+    keys cross, and of a verdict only its two; nothing is mended.
     """
     value, problem = task_store.parse_comment_line(line)
     if value is None:
         return None, problem
     comment = {key: value[key] for key in _COMMENT_KEYS}
+    problems = []
     present = [key for key in _ANCHOR_KEYS if key in value]
-    if not present:
-        return comment, None
-    anchor_ok = (
-        len(present) == len(_ANCHOR_KEYS)
-        and isinstance(value["file"], str)
-        and type(value["line"]) is int
-        and isinstance(value["commit"], str)
-    )
-    if not anchor_ok:
-        return comment, (
-            "a diff anchor that is not a string file, an integer line and a "
-            "string commit; the comment is served without it"
+    if present:
+        anchor_ok = (
+            len(present) == len(_ANCHOR_KEYS)
+            and isinstance(value["file"], str)
+            and type(value["line"]) is int
+            and isinstance(value["commit"], str)
         )
-    comment.update({key: value[key] for key in _ANCHOR_KEYS})
-    return comment, None
+        if anchor_ok:
+            comment.update({key: value[key] for key in _ANCHOR_KEYS})
+        else:
+            problems.append(
+                "a diff anchor that is not a string file, an integer line and a "
+                "string commit; the comment is served without it"
+            )
+    if "verdict" in value:
+        verdict = value["verdict"]
+        if (
+            isinstance(verdict, dict)
+            and verdict.get("kind") in task_store.VERDICT_KINDS
+            and isinstance(verdict.get("commit"), str)
+        ):
+            comment["verdict"] = {"kind": verdict["kind"], "commit": verdict["commit"]}
+        else:
+            problems.append(
+                "a verdict that is not an object of a known kind and a string "
+                "commit; the comment is served without it"
+            )
+    return comment, "; ".join(problems) or None
 
 
 class _GitFailed(Exception):

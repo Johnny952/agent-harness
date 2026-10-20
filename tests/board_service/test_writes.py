@@ -191,6 +191,58 @@ def test_a_comment_on_a_diff_line(client, hive):
     assert "all three" in error(client, "task_comment", {"task_id": "T-001", "text": "x", "file": "a.py"})
 
 
+# --- review_verdict (review.md step 3) --------------------------------------
+
+
+@pytest.mark.parametrize("role", ["operator", "arquitecto"])
+def test_no_role_is_listed_the_verdict_or_may_call_it(client, hive, role):
+    task(hive, "T-001", status="done")
+    tools = rpc(client, "tools/list", role=role).get_json()["result"]["tools"]
+    assert "review_verdict" not in [t["name"] for t in tools]
+
+    body = call(client, "review_verdict",
+                {"task_id": "T-001", "kind": "comment", "text": "x", "commit": COMMIT}, role)
+
+    assert body["error"]["code"] == -32602
+    assert not (hive.parent / "board" / "T-001" / "comments.jsonl").exists()
+
+
+def test_http_a_comment_verdict_is_201_and_a_comment(client, hive):
+    task(hive, "T-001", status="done")
+
+    res = client.post("/api/tasks/T-001/verdict", json={"kind": "comment", "text": "Fine.", "commit": COMMIT})
+
+    assert res.status_code == 201
+    body = res.get_json()
+    assert body["comment"]["verdict"] == {"kind": "comment", "commit": COMMIT}
+    assert body["comment"]["author"] == "operator"
+    assert ok(client, "board_get", {"task_id": "T-001"})["item"]["comment_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "status, body, needle",
+    [
+        ("done", {"kind": "approve", "text": "x", "commit": COMMIT}, "not built yet"),
+        ("done", {"kind": "praise", "text": "x", "commit": COMMIT}, "kind must be one of"),
+        ("done", {"kind": "comment", "text": "x"}, "needs 'commit'"),
+        ("done", {"kind": "comment", "text": "x", "commit": "main"}, "not a commit hash"),
+        ("done", {"kind": "comment", "text": "x", "commit": COMMIT, "author": "x"}, "no argument 'author'"),
+        ("pending", {"kind": "comment", "text": "x", "commit": COMMIT}, "not under review"),
+    ],
+)
+def test_http_a_verdict_refused_is_400_and_writes_nothing(client, hive, status, body, needle):
+    task(hive, "T-001", status=status)
+    res = client.post("/api/tasks/T-001/verdict", json=body)
+    assert res.status_code == 400
+    assert needle in res.get_json()["error"]
+    assert not (hive.parent / "board" / "T-001" / "comments.jsonl").exists()
+
+
+def test_http_a_verdict_on_no_task_is_404(client):
+    res = client.post("/api/tasks/T-404/verdict", json={"kind": "comment", "text": "x", "commit": COMMIT})
+    assert res.status_code == 404
+
+
 # --- backlog_accept ---------------------------------------------------------
 
 
