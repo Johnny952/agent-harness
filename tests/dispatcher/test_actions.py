@@ -381,3 +381,58 @@ def test_find_looks_in_every_state_and_only_for_an_action_id(tmp_path):
     assert found.state == "done" and found.record["id"] == aid
     assert actions.find(tmp_path, A_TURN) is None
     assert actions.find(tmp_path, "../x") is None
+
+
+# ---- create_starts: Start epic's batch (ADR 207) ------------------------------
+
+
+def test_create_starts_queues_in_the_given_order_with_increasing_ids(tmp_path, monkeypatch):
+    # The clock gives ids that do not increase; the batch still sorts in order.
+    ids = iter(["a-20260101T000000000000Z-ffff", "a-20260101T000000000000Z-0001",
+                "a-20260101T000000000000Z-ffff", "a-20260101T000000000001Z-0000",
+                "a-20260101T000000000000Z-0002", "a-20260101T000000000002Z-0000"])
+    monkeypatch.setattr(actions, "new_id", lambda: next(ids))
+    out = actions.create_starts(
+        tmp_path, "proj", ["T-3", "T-1", "T-2"], params={"limit": None, "epic": "T-9"},
+        note="go",
+    )
+    assert [r["task_id"] for r in out] == ["T-3", "T-1", "T-2"]
+    assert [r["id"] for r in out] == sorted({r["id"] for r in out})
+    on_disk = [json.loads((tmp_path / "actions" / "pending" / n).read_text())
+               for n in names(tmp_path, "pending")]
+    assert [r["task_id"] for r in on_disk] == ["T-3", "T-1", "T-2"]
+    assert all(r["note"] == "go" and r["params"] == {"limit": None, "epic": "T-9"}
+               for r in on_disk)
+    assert out[0]["params"] is not out[1]["params"]
+
+
+def test_create_starts_is_all_or_none(tmp_path):
+    create(tmp_path, "start", **{**START, "task_id": "T-2"})
+    with pytest.raises(ActionRefused) as refused:
+        actions.create_starts(tmp_path, "proj", ["T-1", "T-2", "T-3"])
+    assert refused.value.status == 409 and "T-2" in refused.value.reason
+    assert len(names(tmp_path, "pending")) == 1
+
+
+def test_create_starts_checks_ready_for_each_and_writes_none_on_a_miss(tmp_path):
+    with pytest.raises(ActionRefused) as refused:
+        actions.create_starts(tmp_path, "proj", ["T-1", "T-2"],
+                              ready=lambda _p, tid: tid == "T-1")
+    assert refused.value.status == 409 and refused.value.reason == "task T-2 is not in Ready"
+    assert names(tmp_path, "pending") == []
+
+
+def test_create_starts_refuses_an_empty_or_repeated_list(tmp_path):
+    with pytest.raises(ActionRefused) as empty:
+        actions.create_starts(tmp_path, "proj", [])
+    assert empty.value.status == 409
+    with pytest.raises(ActionRefused) as twice:
+        actions.create_starts(tmp_path, "proj", ["T-1", "T-1"])
+    assert twice.value.status == 400
+
+
+@pytest.mark.parametrize("epic", ["", " ", 7, None])
+def test_params_epic_must_be_a_task_id(tmp_path, epic):
+    with pytest.raises(ActionRefused) as refused:
+        create(tmp_path, "start", **START, params={"limit": None, "epic": epic})
+    assert refused.value.status == 400 and "params.epic" in refused.value.reason

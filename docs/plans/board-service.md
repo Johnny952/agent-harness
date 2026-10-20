@@ -329,6 +329,12 @@ ruling before it is built (*Open questions*).
   covered, because the person has not seen it. *Stop epic* drops what is
   queued and leaves running phases alone. The epic still moves only as fast
   as the person approves, since a dependency counts once it is merged.
+  **Built 2026-10-20, backend only** (`docs/decisions.md` ADR 207):
+  `POST /api/epics/<id>/start` queues one start per task in *Ready* at the
+  press, in the board's order, with the note copied and a null limit; the
+  next waits on the project lock (ADR 200). Not built: the console's *Start
+  epic* button, queuing each later task as its dependencies merge, the
+  arquitecto's sub-tasks, and *Stop epic*.
 - **Accepting is still not starting.** Accepting moves an item onto the
   board and spends nothing; starting is the separate act that spends quota.
   They stay two clicks, because a person may accept now and start later.
@@ -650,6 +656,8 @@ Each step is a single surface, built in this order:
 9. **Starting development.** The `start` action and its cancel in the
    worker, the button on the board and the epic, the spending limit, and the
    queue screen. It needs the queue and worker, and the charter ruling below.
+   *Start epic*'s route is built 2026-10-20 (ADR 207, backend only); its
+   console button, the spending limit and the queue screen are not.
 
 `review.md`'s diff screen and verdicts come after this, on the same service
 and the same comments file.

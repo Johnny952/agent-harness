@@ -248,6 +248,29 @@ def test_two_projects_run_at_once(cfg, worker, cycle):
     assert where(cfg, b["id"])[1]["result"]["outcome"] == "finished"
 
 
+def test_an_epics_starts_run_one_at_a_time_in_the_order_queued(cfg, worker, cycle):
+    # *Start epic* (ADR 207): queued at once, not in id order; each later one
+    # waits as `project` while the one before holds the project.
+    order = ["T-3", "T-1", "T-2"]
+    for task_id in order:
+        _task(cfg, task_id)
+        cycle.hold(task_id)
+    queued = actions.create_starts(
+        cfg.state_dir, "proj", order, params={"limit": None, "epic": "T-9"}, note="go"
+    )
+    for n, task_id in enumerate(order):
+        worker.tick()
+        cycle.wait_entered(task_id)
+        assert where(cfg, queued[n]["id"])[0] == "claimed"
+        for later in queued[n + 1:]:
+            state, rec = where(cfg, later["id"])
+            assert state == "pending" and rec["waiting"] == "project"
+        cycle.release(task_id)
+        worker.join()
+    assert [c[0] for c in cycle.calls] == order
+    assert all(where(cfg, r["id"])[1]["status"] == "done" for r in queued)
+
+
 def test_a_handler_that_raises_fails_the_start_and_frees_the_project(cfg, worker, cycle):
     cycle.raises["T-1"] = RuntimeError("boom\nsecond line")
     first = start(cfg, "T-1")

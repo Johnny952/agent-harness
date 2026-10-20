@@ -125,9 +125,12 @@ def _both_required(record: dict) -> list[str]:
 def _validate_start(record: dict) -> list[str]:
     problems = _both_required(record)
     params = record["params"]
-    problems += _extra_keys(params, ("limit", "thread", "turn"))
+    problems += _extra_keys(params, ("limit", "thread", "turn", "epic"))
     if params.get("limit") is not None:
         problems.append("params.limit must be null")
+    # A start queued by *Start epic* names the epic it was queued for (ADR 207).
+    if "epic" in params and not _is_text(params["epic"], whitespace_ok=False):
+        problems.append("params.epic must be a task id")
     # A start queued by the thread's tool carries the thread and the turn that
     # authorized it; any other actor carries neither (ADR 187, 6).
     if record.get("actor") == THREAD:
@@ -347,6 +350,42 @@ def create(
     ADR 142 decision 7 has it made while the creator holds the lock, so it is
     called here, inside `write.lock`; `None` skips it.
     """
+    record = _new_record(kind, project, task_id, params, actor, note)
+    return _write_all(state_dir, [record], ready)[0]
+
+
+def create_starts(
+    state_dir,
+    project,
+    task_ids: list[str],
+    *,
+    params=None,
+    actor: str = "operator",
+    note=None,
+    ready: Callable[[str, str], bool] | None = None,
+) -> list[dict]:
+    """One pending `start` per task in `task_ids`, in that order, or none (ADR 207).
+
+    *Start epic*'s creator. Each record is checked as `create` checks one, all
+    under one hold of `write.lock` and before any is written, so a refusal of
+    one task refuses the batch and nothing is queued. The ids are taken in the
+    list's order and each sorts after the one before, so the worker, which
+    scans `pending/` by name, considers them in that order. Every record gets
+    its own copy of `params` and the same `note`.
+    """
+    if not task_ids:
+        raise ActionRefused(409, "no task to start")
+    if len(set(task_ids)) != len(task_ids):
+        raise ActionRefused(400, "a task is named more than once")
+    records = [
+        _new_record("start", project, task_id, dict(params or {"limit": None}), actor, note)
+        for task_id in task_ids
+    ]
+    return _write_all(state_dir, records, ready)
+
+
+def _new_record(kind, project, task_id, params, actor, note) -> dict:
+    """A pending record with no id yet; raises ActionRefused(400) when it is not valid."""
     if kind not in KINDS:
         raise ActionRefused(400, f"unknown kind {kind!r}")
     if kind == "start" and not params:
@@ -361,29 +400,50 @@ def create(
     problems = validate(record)
     if problems:
         raise ActionRefused(400, "; ".join(problems))
+    return record
+
+
+def _refuse_locked(root: Path, record: dict, ready) -> None:
+    """The checks made under `write.lock`: one start (or verdict) per task, and Ready."""
+    kind, project, task_id = record["kind"], record["project"], record["task_id"]
+    if kind in _ONE_PER_TASK:
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        if any(
+            e.record.get("kind") == kind
+            and e.record.get("project") == project
+            and e.record.get("task_id") == task_id
+            for e in held
+        ):
+            raise ActionRefused(409, f"a {kind} for task {task_id} is already queued")
+    if kind == "start" and ready is not None and not ready(project, task_id):
+        raise ActionRefused(409, f"task {task_id} is not in Ready")
+
+
+def _write_all(state_dir, records: list[dict], ready) -> list[dict]:
+    """Check, then write `records` into `pending/` in their order: all, or none refused."""
     root = ensure_dirs(state_dir)
     with _write_locked(root):
-        if kind in _ONE_PER_TASK:
-            held, _ = _scan(root, (PENDING, CLAIMED))
-            if any(
-                e.record.get("kind") == kind
-                and e.record.get("project") == project
-                and e.record.get("task_id") == task_id
-                for e in held
-            ):
-                raise ActionRefused(409, f"a {kind} for task {task_id} is already queued")
-        if kind == "start" and ready is not None and not ready(project, task_id):
-            raise ActionRefused(409, f"task {task_id} is not in Ready")
-        # The id is taken under the lock, so ids sort in the order creates land.
-        record["id"] = new_id()
-        tmp = root / TMP / f"{record['id']}.json"
+        for record in records:
+            _refuse_locked(root, record, ready)
+        # The ids are taken under the lock, so ids sort in the order creates land;
+        # within one batch each is made to sort after the one before.
+        last = None
+        for record in records:
+            record["id"] = new_id()
+            while last is not None and record["id"] <= last:
+                record["id"] = new_id()
+            last = record["id"]
+        tmps = [root / TMP / f"{record['id']}.json" for record in records]
         try:
-            tmp.write_text(json.dumps(record))
-            os.rename(tmp, root / PENDING / tmp.name)
+            for tmp, record in zip(tmps, records):
+                tmp.write_text(json.dumps(record))
+            for tmp in tmps:
+                os.rename(tmp, root / PENDING / tmp.name)
         except BaseException:
-            tmp.unlink(missing_ok=True)
+            for tmp in tmps:
+                tmp.unlink(missing_ok=True)
             raise
-    return record
+    return records
 
 
 # ---- the worker -------------------------------------------------------------
