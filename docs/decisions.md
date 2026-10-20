@@ -10614,3 +10614,57 @@ which is code points.
   refetches: the refetch is awaited before the send settles, so there is
   no gap to fill.
 - Storing the draft in `localStorage`: allowed, but nothing asks for it.
+
+## ADR 193 — The Debt screen points an open entry at a task in play whose Surface its where falls on
+
+**Status:** accepted (2026-10-20). The two items T-096 (ADR 141) left
+pending on the Debt screen, built by a subagent of the operator's session
+under `CLAUDE.local.md`'s quota rule, not by a dispatched cycle, so there is
+no `docs/implementations/` record. Builds on ADR 139 and ADR 141; supersedes
+nothing.
+
+**Context.** `docs/plans/board-service.md` section 5 asks the Debt screen to
+say when an open entry's *where* falls on the surface of a task already in
+play, so the person can fold the debt into that task instead of opening a
+new one, and to let the filter find an entry by its backlog item and its
+state. ADR 141 linked each open entry to its item and left both out. The
+data is already on the screen: `Task.description` holds the *Surface*
+section (ADR 139), and the *where* cells carry backticked paths.
+
+**Decision.**
+1. `front/src/lib/debt.ts` mirrors `dispatcher/surface.py`: a literal entry
+   holds itself and what is under it, by path segment; a glob matches as
+   globs do, and a static prefix between globs holds what is under it.
+   `APPEND_ONLY`, the not-a-path rule and the extension rule are copies of
+   that module's.
+2. A task is in play when it is accepted and not merged. A task with an
+   unknown status, a description whose *Surface* will not parse, or a
+   surface with no path is left out.
+3. A *where* cell is read from its backticked tokens, each cut at the first
+   `:` (a line number). A cell with no backticks is one token, as
+   `_unwrap_code` reads it. Prose is not read.
+4. Two departures from `surface.py`: a surface with no path matches
+   nothing here (there it overlaps everything, which would point every
+   entry at it), and `APPEND_ONLY` paths are set aside on both sides, since
+   two tasks appending to the same log do not share a surface.
+5. The entry's own backlog item is not pointed at.
+6. The pointer sits under the item cell (`data-testid=in-play-<id>`) and
+   links each task.
+7. The filter matches the item id and the state words, *not imported*
+   included, once the tasks have loaded; before that it matches what it
+   matched under ADR 141.
+
+**Consequences.**
+- The screen still writes nothing; folding an entry into a task stays the
+  person's call.
+- A *where* written in prose is a false negative. The mock fixtures have
+  none.
+- The mirror has to follow any change to `surface.py`.
+
+**Ruled out.**
+- A surface with no path meaning the whole repo: every open entry would
+  point at it.
+- Reading paths out of prose: guesses, and false positives the person
+  would learn to ignore.
+- A backend field for the overlap: the screen has what it needs, and the
+  board-service would compute it for one screen.

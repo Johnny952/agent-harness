@@ -643,6 +643,9 @@ Each step is a single surface, built in this order:
    accepted (T-096). Not built: *Awaiting review* stays empty until
    `review.md` gives it a status, an integrador lane waits for that role in
    the dispatcher, and *Start development* and the Queue screen are step 9.
+   T-096's two pending items are built 2026-10-20 (ADR 193): the filter
+   finds an open entry by its item and its state, and an open entry whose
+   *where* falls on the *Surface* of a task in play points at that task.
 
 9. **Starting development.** The `start` action and its cancel in the
    worker, the button on the board and the epic, the spending limit, and the
