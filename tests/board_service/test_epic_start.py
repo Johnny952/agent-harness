@@ -137,6 +137,23 @@ def test_a_single_start_takes_a_floor(client, hive, state):
     assert "floor must be" in bad.get_json()["error"]
 
 
+def test_a_single_start_takes_a_spending_limit(client, hive, state):
+    # ADR 230: the task's limit, in measured tokens; the floor stays its own.
+    task(hive, "T-2")
+    res = client.post("/api/tasks/T-2/start", json={"project": "demo", "limit": 5000}, headers=AUTH)
+    assert res.status_code == 201, res.get_json()
+    assert pending(state)[0]["params"] == {"limit": 5000}
+
+
+@pytest.mark.parametrize("limit", [0, -1, "5", 2.5, True])
+def test_a_bad_spending_limit_is_refused(client, hive, state, limit):
+    task(hive, "T-2")
+    bad = client.post("/api/tasks/T-2/start", json={"project": "demo", "limit": limit}, headers=AUTH)
+    assert bad.status_code == 400
+    assert "limit must be" in bad.get_json()["error"]
+    assert pending(state) == []
+
+
 def test_a_second_press_is_refused_and_writes_nothing(client, hive, state):
     epic(hive)
     assert start_epic(client).status_code == 201

@@ -35,6 +35,7 @@ class Cycle:
         self.entered: dict[str, threading.Event] = {}
         self.gates: dict[str, threading.Event] = {}
         self.raises: dict[str, Exception] = {}
+        self.limits: list[tuple] = []  # (token_limit, usage_offset) per call
 
     def hold(self, task_id):
         self.gates[task_id] = threading.Event()
@@ -46,9 +47,11 @@ class Cycle:
         assert self.entered.setdefault(task_id, threading.Event()).wait(WAIT)
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
-                 on_approve=None, may_start_phase=None, scheduler=None, project_lock=None):
+                 on_approve=None, may_start_phase=None, scheduler=None, project_lock=None,
+                 token_limit=None, usage_offset=0):
         assert authorized is True
         self.locks.append(project_lock)
+        self.limits.append((token_limit, usage_offset))
         self.calls.append((task_id, slug))
         self.entered.setdefault(task_id, threading.Event()).set()
         if task_id in self.raises:
@@ -323,6 +326,30 @@ def test_the_note_is_commented_once_before_started_at(cfg, worker, cycle):
     done = where(cfg, rec["id"])[1]
     assert done["result"]["noted_at"] <= done["started_at"]
     assert done["result"]["outcome"] == "finished"
+
+
+def test_a_start_with_a_limit_counts_from_the_usage_log_it_found(cfg, worker, cycle):
+    """ADR 230: the offset is taken once, before started_at; the result says the spend."""
+    from dispatcher import context_transfer
+    _task(cfg, "T-1")
+    for _ in range(2):
+        context_transfer.append_usage(cfg.hive_tasks_dir, "T-1", {"input_tokens": 50})
+    rec = actions.create(cfg.state_dir, "start", project="proj", task_id="T-1",
+                         params={"limit": 500})
+    worker.tick()
+    worker.join()
+    assert cycle.limits == [(500, 2)]
+    result = where(cfg, rec["id"])[1]["result"]
+    assert result["usage_offset"] == 2
+    assert result["spent"] == {"limit": 500, "tokens": 0, "unmeasured": 0}
+
+
+def test_a_start_without_a_limit_runs_unlimited(cfg, worker, cycle):
+    rec = start(cfg, "T-1")
+    worker.tick()
+    worker.join()
+    assert cycle.limits == [(None, 0)]
+    assert "spent" not in where(cfg, rec["id"])[1]["result"]
 
 
 def test_a_rerun_after_a_crash_does_not_comment_again(cfg, worker, cycle):

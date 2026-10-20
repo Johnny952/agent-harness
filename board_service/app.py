@@ -929,13 +929,19 @@ def create_app(config_path: str) -> Flask:
     @app.post("/api/tasks/<task_id>/start")
     def http_start(task_id: str):
         def make(body: dict):
-            unknown = sorted(set(body) - {"project", "note", "floor"})
+            unknown = sorted(set(body) - {"project", "note", "floor", "limit"})
             if unknown:
                 raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
-            # The start's pool floor, in percent, or null for the default.
-            floor = body.get("floor")
+            # The start's pool floor, in percent, or null for the default, and
+            # its own spending limit, in measured tokens, or null (ADR 230).
+            floor, limit = body.get("floor"), body.get("limit")
             actions.check_floor(floor)
-            params = None if floor is None else {"limit": None, "floor": floor}
+            actions.check_limit(limit)
+            params = None
+            if floor is not None or limit is not None:
+                params = {"limit": limit}
+                if floor is not None:
+                    params["floor"] = floor
             return actions.create(
                 state_dir, "start", project=body.get("project"), task_id=task_id,
                 params=params, note=body.get("note"), actor="operator",

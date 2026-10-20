@@ -147,6 +147,19 @@ def test_mark_blocked_tells_the_kind_of_stop(tmp_path: Path, reason, failed, kin
     assert record["title"].startswith("task-1 ")
 
 
+def test_a_stop_at_the_spending_limit_is_a_blocked_that_says_what_it_spent(tmp_path: Path) -> None:
+    """ADR 230: reaching a task's limit is a *Blocked* notification, with the spend."""
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+
+    tasks.mark_blocked(hive, "task-1", reason=tasks.BUDGET_REACHED, spent="120 of 100 tokens")
+
+    [record] = _records(hive)
+    assert record["kind"] == "blocked"
+    assert record["title"] == "task-1 stopped: its spending limit is reached (120 of 100 tokens)"
+    assert read_task_file(task_file_path(hive, "task-1")).blocked_reason == tasks.BUDGET_REACHED
+
+
 def test_a_move_into_conflict_is_told_once(tmp_path: Path) -> None:
     hive = _hive(tmp_path)
     _legacy(hive, "")

@@ -279,8 +279,10 @@ module; steps 2, 4 and 5 need its queue and worker.
    session and week windows: a start waits as `pool` while it is under the
    start's floor, 5% by default. The console's start dialogs take the floor
    in an optional field, blank for the default (`docs/decisions.md` ADR
-   227). Still open: the limit's notification, which is
-   `notifications.md`'s.
+   227). The epic's pause notifies as *Blocked* (`docs/decisions.md` ADR
+   221), and a single start's own limit, `budget_reached` with its *Blocked*
+   notification, is built the same day (`docs/decisions.md` ADR 230),
+   backend only.
 4. **The sidebar and the routes**, read-only first: the project's screens
    filtered by slug, the harness's screens unchanged. A front task, behind its
    own ask for a build. Built 2026-10-20 (`docs/decisions.md` ADR 208): the

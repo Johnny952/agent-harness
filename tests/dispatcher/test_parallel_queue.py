@@ -313,6 +313,7 @@ def cycle(cfg, monkeypatch):
         return types.SimpleNamespace(
             cfg=cfg, task_id=task_id, slug=slug, held=False, foreign_lock=False,
             may_start_phase=None, completed=False, write_window=False,
+            budget_reached=False, budget_spent=None,
             description=tasks.read_description(cfg.hive_tasks_dir, task_id),
         )
 

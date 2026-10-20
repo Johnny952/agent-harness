@@ -56,6 +56,13 @@ def test_create_lands_in_pending_with_every_key(tmp_path):
     assert rec["status"] == "pending" and rec["params"] == {"limit": None}
 
 
+def test_a_start_takes_a_spending_limit_in_measured_tokens(tmp_path):
+    """ADR 230: a whole number of at least 1, read back by start_limit."""
+    rec = create(tmp_path, "start", **{**START, "params": {"limit": 5000}})
+    assert actions.start_limit(rec) == 5000
+    assert actions.start_limit(record_of()) is None
+
+
 def test_create_is_atomic(tmp_path, monkeypatch):
     def boom(*a):
         raise OSError("disk")
@@ -94,7 +101,9 @@ def test_unknown_kind_is_refused_400(tmp_path):
         ("start", dict(project="proj")),
         ("start", dict(project="../x", task_id="T-1")),
         ("start", dict(project=".hid", task_id="T-1")),
-        ("start", dict(**START, params={"limit": 3})),
+        ("start", dict(**START, params={"limit": 0})),
+        ("start", dict(**START, params={"limit": True})),
+        ("start", dict(**START, params={"limit": "3"})),
         ("start", dict(**START, params={"other": 1})),
         ("start", dict(**START, note="x" * 20_001)),
         ("start", dict(**START, actor="two words")),
