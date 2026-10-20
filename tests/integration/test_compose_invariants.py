@@ -1031,3 +1031,74 @@ def test_the_board_service_publishes_only_loopback_8792_on_both_networks(
     assert board["ports"] == ["127.0.0.1:8792:8792"]
     assert board["networks"] == ["ia_harness_net", "console_net"]
 
+
+
+# --- the browser (docs/decisions.md ADR 43, docs/plans/browser.md) ----------
+
+BROWSER_MOUNT_SOURCE = "../../.data/ms-playwright"
+
+
+def _browsers_path() -> str:
+    text = DOCKERFILE_PATH.read_text()
+    final_stage = text[text.rfind("\nFROM "):]
+    match = re.search(r"^ENV PLAYWRIGHT_BROWSERS_PATH=(\S+)\s*$", final_stage, re.MULTILINE)
+    assert match, "expected an ENV PLAYWRIGHT_BROWSERS_PATH=... line in the final stage"
+    return match.group(1)
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.agents.yml", "docker-compose.coolify.yml"]
+)
+def test_every_agent_mounts_the_browser_build_read_only(compose_file: str) -> None:
+    # An agent runs the browser and never installs one: read-only, a client
+    # and a browser out of step fail loudly instead of downloading a copy.
+    services = _load(compose_file)["services"]
+    agents = [name for name in services if name.startswith("agent-")]
+    assert agents
+    for name in agents:
+        mounts = [v for v in _short_volumes(services[name]) if v.startswith(BROWSER_MOUNT_SOURCE)]
+        assert mounts == [f"{BROWSER_MOUNT_SOURCE}:{_browsers_path()}:ro"], name
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_browser_install_is_the_agent_image_behind_its_own_profile(
+    compose_file: str,
+) -> None:
+    services = _load(compose_file)["services"]
+    install = services["playwright-install"]
+
+    assert install["profiles"] == ["playwright-install"]
+    assert install["restart"] == "no"
+    assert install["entrypoint"] == ["playwright", "install", "chromium-headless-shell"]
+    assert install["volumes"] == [f"{BROWSER_MOUNT_SOURCE}:{_browsers_path()}"]
+    assert install["networks"] == ["ia_harness_net"]
+    assert "environment" not in install
+    assert "ports" not in install
+    # The same image the agents run, so the client that downloads the browser
+    # is the one that will launch it.
+    agent = next(body for name, body in _deployment_services(
+        "split" if compose_file == "docker-compose.yml" else "coolify"
+    ).items() if name.startswith("agent-"))
+    if "image" in install:
+        assert install["image"] == agent["image"] == "ia-harness-agent"
+    else:
+        assert install["build"] == agent["build"]
+
+
+@pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
+def test_only_the_install_service_writes_the_browser_build(deployment: str) -> None:
+    for name, service in _deployment_services(deployment).items():
+        for mount in _short_volumes(service):
+            if mount.startswith(BROWSER_MOUNT_SOURCE) and name != "playwright-install":
+                assert mount.endswith(":ro"), name
+
+
+@pytest.mark.parametrize(
+    "compose_file", ["docker-compose.yml", "docker-compose.agents.yml", "docker-compose.coolify.yml"]
+)
+def test_no_compose_file_declares_a_playwright_version(compose_file: str) -> None:
+    # docker/agent/Dockerfile's PLAYWRIGHT_VERSION is the one declaration.
+    text = (COMPOSE_DIR / compose_file).read_text()
+    assert "playwright@" not in text
+    # Prose may name the ARG; nothing may set or substitute it.
+    assert not re.search(r"PLAYWRIGHT_VERSION\s*[:=]|\$\{?PLAYWRIGHT_VERSION", text)

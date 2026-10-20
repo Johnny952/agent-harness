@@ -96,6 +96,38 @@ RUN git config --system safe.directory '*' \
     && git config --system user.name 'ia-harness agent' \
     && git config --system user.email 'agent@ia-harness.invalid'
 
+# A headless Chromium for the phases' screen walks (docs/decisions.md ADR 43,
+# docs/plans/browser.md). The image carries only the Node Playwright client and
+# Chromium's system libraries; the browser build itself lives in
+# <repo-root>/.data/ms-playwright on the host, filled by the
+# `playwright-install` service in docker/compose/docker-compose.yml and mounted
+# read-only at /ms-playwright in every agent.
+#
+# PLAYWRIGHT_VERSION is the one place the version is declared. A client looks
+# for exactly the browser revision it was released with, so the install
+# service runs this image's own `playwright` rather than a client of its own:
+# the revision it downloads is the one this client asks for, by construction.
+# Bumping it is a rebuild of this image and one run of that service; read-only
+# in the agents, a mismatch fails loudly ("Executable doesn't exist at ...")
+# instead of downloading a second browser.
+#
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD on the npm line only, never as image env, so
+# the install service's explicit `playwright install` is not told to skip.
+# `install-deps chromium` is Playwright's own apt-get list for this Debian; the
+# libraries stay in the image because a volume cannot provide Debian packages.
+#
+# PLAYWRIGHT_BROWSERS_PATH is image env for the same `docker exec` reason as
+# CLAUDE_CONFIG_DIR below, and the compose mounts name the same path.
+# NODE_PATH lets a phase's CommonJS script `require('playwright')` from the
+# global install; an ES module ignores NODE_PATH and imports it by path,
+# /usr/local/lib/node_modules/playwright/index.mjs.
+ARG PLAYWRIGHT_VERSION=1.56.1
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright@${PLAYWRIGHT_VERSION} \
+    && playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV NODE_PATH=/usr/local/lib/node_modules
+
 # The dispatcher parses this CLI's --output-format json shape, /usage text,
 # and rate-limit messages, so bump this version deliberately and re-verify.
 ARG CLAUDE_CODE_VERSION=2.1.296

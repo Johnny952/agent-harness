@@ -264,6 +264,13 @@ EOF
       # apply: Docker creates it empty, and a project with no key in it falls
       # back to the https:// credential.
       - ../../.data/credentials/projects:/run/secrets/projects:ro
+      # The headless Chromium build the phases' screen walks launch
+      # (docs/plans/browser.md, ADR 43), filled once by docker-compose.yml's
+      # \`playwright-install\` service. Read-only here: an agent runs the browser,
+      # it never installs or replaces one, so a client/browser version mismatch
+      # fails loudly instead of downloading a second copy. The target is the
+      # image's PLAYWRIGHT_BROWSERS_PATH.
+      - ../../.data/ms-playwright:/ms-playwright:ro
     depends_on:
       - dind-$name
     networks:
@@ -293,6 +300,8 @@ EOF
       # See agent-$first: the same host file, shared, read-only.
       - ../../.data/credentials/git-credentials:/run/secrets/git-credentials:ro
       - ../../.data/credentials/projects:/run/secrets/projects:ro
+      # See agent-$first above: the browser build, read-only.
+      - ../../.data/ms-playwright:/ms-playwright:ro
     depends_on:
       - dind-$name
     networks:
@@ -396,6 +405,9 @@ render_coolify_compose() {
       # agent-cuenta1 comment. The https:// git-credentials file is not mounted
       # here (ADR 91).
       - ../../.data/credentials/projects:/run/secrets/projects:ro
+      # The headless Chromium build, read-only; see docker-compose.agents.yml's
+      # agent-cuenta1 comment and the playwright-install service above.
+      - ../../.data/ms-playwright:/ms-playwright:ro
     depends_on:
       - dind-$name
     networks:
@@ -425,6 +437,8 @@ EOF
       - ../../.hive:/data/.hive
       # See agent-$first above: the deploy keys, read-only.
       - ../../.data/credentials/projects:/run/secrets/projects:ro
+      # See agent-$first above: the browser build, read-only.
+      - ../../.data/ms-playwright:/ms-playwright:ro
     depends_on:
       - dind-$name
     networks:

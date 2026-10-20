@@ -295,6 +295,28 @@ services:
     networks:
       - ia_harness_net
 
+  # Fills <repo-root>/.data/ms-playwright with the headless Chromium every
+  # agent mounts read-only at /ms-playwright (docs/decisions.md ADR 43,
+  # docs/plans/browser.md). One-shot, behind its own profile so no `up` ever
+  # starts it: `docker compose -f docker/compose/docker-compose.yml --profile
+  # playwright-install run --rm playwright-install`, once after the agent
+  # image is built and again whenever its PLAYWRIGHT_VERSION moves.
+  #
+  # It is the agent image itself, entrypoint replaced, so the client that
+  # downloads the browser is the one the phases run and the version is
+  # declared only in docker/agent/Dockerfile. PLAYWRIGHT_BROWSERS_PATH comes
+  # from that image's env. The only writable mount of the browser directory
+  # is this one.
+  playwright-install:
+    profiles: ["playwright-install"]
+    image: ia-harness-agent
+    restart: "no"
+    entrypoint: ["playwright", "install", "chromium-headless-shell"]
+    volumes:
+      - ../../.data/ms-playwright:/ms-playwright
+    networks:
+      - ia_harness_net
+
 networks:
   # Created by this file, joined as `external: true` by
   # docker-compose.agents.yml so agents/sidecars resolve collector and

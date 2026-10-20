@@ -1,5 +1,5 @@
 ---
-status: approved
+status: building
 approved: 2026-10-09
 built: null
 supersedes: []
@@ -7,9 +7,12 @@ supersedes: []
 
 # Browser — giving the phases a headless Chromium, shared from one volume
 
-**Status:** decided, nothing built. `docs/decisions.md` **ADR 43** records the
+**Status:** decided, being built. `docs/decisions.md` **ADR 43** records the
 decision; this page is the plan for building it, and where the two differ the
-ADR wins. Written 2026-10-09 by the operator, after
+ADR wins. Written, not yet built or run (ADR 223): the install service, the
+read-only mounts and the image's client and libraries of steps 1 and 2 below.
+Nothing has been built, downloaded or launched yet, so the memory measurement
+of step 1 and the smoke check of step 2 are still open, and so are steps 3–5. Written 2026-10-09 by the operator, after
 walking `docs/ROADMAP.md` **V0.6e** with a Playwright script from the host
 (the Results log row of that date; scripts and screenshots in
 `.data/verify/v06e/`). That walk took about forty lines of Python and found a
@@ -48,7 +51,9 @@ What still needs a human or the operator after this change:
   again when the pinned Playwright version changes.
 - Each agent service mounts it read-only:
   `../../.data/ms-playwright:/ms-playwright:ro`, with
-  `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` in its environment.
+  `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` in its environment. *As built
+  (ADR 223), that variable is image env in `docker/agent/Dockerfile` rather
+  than per service, for the `docker exec` reason `CLAUDE_CONFIG_DIR` is.*
 - The image installs only the client, pinned, with
   `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, plus Chromium's system libraries
   (`playwright install-deps chromium`, or the equivalent `apt-get` list). The
@@ -81,7 +86,10 @@ saving is elsewhere:
 revision it was released with, and `PLAYWRIGHT_BROWSERS_PATH` only says where
 to look. The client version in `docker/agent/Dockerfile` and the one in the
 `playwright-install` service must be the same pinned string, declared once (a
-build arg read by both). Read-only is a feature here: a mismatch fails loudly
+build arg read by both). *As built (ADR 223), the install service is the agent
+image itself with its entrypoint replaced, so the one declaration is the
+Dockerfile's `ARG PLAYWRIGHT_VERSION` and there is no second client to keep in
+step.* Read-only is a feature here: a mismatch fails loudly
 ("Executable doesn't exist at …") instead of downloading a second browser
 into the volume.
 
@@ -183,8 +191,10 @@ beside it.
 
 1. The one-shot install service and the read-only mount, with the version
    declared once. Measure the agent's memory with Chromium running, as D8 did.
+   *Written (ADR 223); the measurement waits for a build.*
 2. The client and system libraries in `docker/agent/Dockerfile`; a smoke check
-   that a phase can screenshot `about:blank`.
+   that a phase can screenshot `about:blank`. *Written (ADR 223); the smoke
+   check waits for a build.*
 3. The allowlist entry, by the operator.
 4. One console task whose done-means includes a phase walk against route
    fixtures, to test the recording rules on a real row.

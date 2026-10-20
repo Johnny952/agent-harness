@@ -215,3 +215,39 @@ def test_the_pinned_host_keys_are_the_ones_github_publishes() -> None:
         digest = hashlib.sha256(base64.b64decode(blob)).digest()
         found[kind] = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
     assert found == GITHUB_FINGERPRINTS
+
+
+# --- the browser (docs/decisions.md ADR 43, docs/plans/browser.md) ----------
+
+
+def test_the_playwright_client_is_pinned_by_an_arg_in_the_final_stage() -> None:
+    # The client looks for exactly the browser revision it shipped with, and
+    # the install service runs this image's client, so this ARG is the one
+    # place the version is declared.
+    joined = _final_stage(_read()).replace("\\\n", " ")
+    specs = re.findall(r"\bplaywright@(\S*)", joined)
+    assert specs == ["${PLAYWRIGHT_VERSION}"]
+    assert re.search(rf"^ARG PLAYWRIGHT_VERSION={VERSION}\s*$", joined, re.MULTILINE)
+
+
+def test_the_image_installs_chromiums_libraries_but_never_the_browser() -> None:
+    # The build lives on the host mount; a browser baked in would be a second
+    # copy that drifts from the one the agents actually launch.
+    joined = _final_stage(_read()).replace("\\\n", " ")
+    assert re.search(
+        r"PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright@", joined
+    )
+    assert re.search(r"\bplaywright install-deps chromium\b", joined)
+    assert not re.search(r"\bplaywright install (?!-deps)", joined)
+
+
+def test_skip_browser_download_is_never_image_env() -> None:
+    # As image env it would reach the install service, which runs this image,
+    # and its explicit `playwright install` would be told to skip.
+    assert not re.search(r"^ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", _read(), re.MULTILINE)
+
+
+def test_final_stage_sets_the_browsers_path_and_node_path() -> None:
+    final_stage = _final_stage(_read())
+    assert re.search(r"^ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright\s*$", final_stage, re.MULTILINE)
+    assert re.search(r"^ENV NODE_PATH=/usr/local/lib/node_modules\s*$", final_stage, re.MULTILINE)
