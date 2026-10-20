@@ -14,6 +14,7 @@ import { InPhaseTable, LearningStatus } from "@/components/console/learnings";
 import { learningsQuery } from "@/lib/api/queries";
 import { useSearchHotkey } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
+import { useProjectScope } from "@/lib/projects";
 
 export const Route = createFileRoute("/learnings")({
   head: () => ({
@@ -31,8 +32,14 @@ export const Route = createFileRoute("/learnings")({
   component: LearningsPage,
 });
 
-function LearningsPage() {
-  const learnings = useQuery(learningsQuery);
+/**
+ * The learnings inbox: the console project's on the harness's own screen, and
+ * the hive's entries that apply to one project under `/p/$slug/learnings`
+ * (ADR 210).
+ */
+export function LearningsPage() {
+  const project = useProjectScope();
+  const learnings = useQuery(learningsQuery(project));
   const searchRef = useSearchHotkey();
   const [q, setQ] = useState("");
 
@@ -62,7 +69,7 @@ function LearningsPage() {
   return (
     <AppShell>
       <PageHeader
-        title="Learnings inbox"
+        title={project === null ? "Learnings inbox" : `Learnings inbox · ${project}`}
         subtitle={
           cap === undefined
             ? "Every trap this project's phases can be handed, in the order a phase sees them."

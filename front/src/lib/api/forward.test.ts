@@ -118,27 +118,31 @@ describe("the whitelist", () => {
     expect(target(fetchMock)).toBe(`${BASE}/api/phases`);
   });
 
-  it("takes ?project= from its own configuration and never from the browser", async () => {
-    const fetchMock = stubApi();
-    await forwardApiRequest(get("/api/debt?project=some-other-project"));
-    expect(target(fetchMock)).toBe(`${BASE}/api/debt?project=ia-harness`);
-  });
+  // The three project-scoped reads: the api takes `?project=` as optional with
+  // one checkout and required with several (`docs/decisions.md` ADR 41 part 2).
+  // A harness screen sends none and gets the console's own; a `/p/$slug/`
+  // screen sends its slug, which crosses when it is shaped like one (ADR 210).
+  describe.each(["/api/debt", "/api/learnings", "/api/roadmap"])("%s", (route) => {
+    it("sends the console's own ?project= when the browser names none", async () => {
+      const fetchMock = stubApi();
+      await forwardApiRequest(get(route));
+      expect(target(fetchMock)).toBe(`${BASE}${route}?project=ia-harness`);
+    });
 
-  // Both project-scoped reads, and the slug is the console's own configuration
-  // on each: the api takes `?project=` as optional with one checkout and
-  // required with several (`docs/decisions.md` ADR 41 part 2).
-  it("sends its own ?project= on the learnings route too", async () => {
-    const fetchMock = stubApi();
-    await forwardApiRequest(get("/api/learnings?project=some-other-project"));
-    expect(target(fetchMock)).toBe(`${BASE}/api/learnings?project=ia-harness`);
-  });
+    it("sends the project the browser names, in place of the console's", async () => {
+      const fetchMock = stubApi();
+      await forwardApiRequest(get(`${route}?project=scratch`));
+      expect(target(fetchMock)).toBe(`${BASE}${route}?project=scratch`);
+    });
 
-  // The third: the roadmap reads one project's `docs/plans/`, so the slug that
-  // picks it is the console's and not the browser's (T-075).
-  it("sends its own ?project= on the roadmap route too", async () => {
-    const fetchMock = stubApi();
-    await forwardApiRequest(get("/api/roadmap?project=some-other-project"));
-    expect(target(fetchMock)).toBe(`${BASE}/api/roadmap?project=ia-harness`);
+    it("400s a project that is not a slug, and never falls back to the console's", async () => {
+      for (const bad of ["../x", ".hidden", "a/b", "a b"]) {
+        const fetchMock = stubApi();
+        const answer = await forwardApiRequest(get(`${route}?project=${encodeURIComponent(bad)}`));
+        expect(answer?.status).toBe(400);
+        expect(fetchMock).not.toHaveBeenCalled();
+      }
+    });
   });
 
   // Not a fourth: command requests are read hive-wide and `?project=` only

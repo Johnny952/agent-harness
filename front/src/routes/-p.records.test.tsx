@@ -164,7 +164,15 @@ describe("ProjectGate, from the records", () => {
     expect(screen.queryByTestId("project-not-found")).toBeNull();
     // The open project lists its screens beneath it.
     const hrefs = (await projectLinks()).map((a) => a.getAttribute("href"));
-    expect(hrefs).toEqual(["/p/alpha", "/p/beta", "/p/beta", "/p/beta/backlog"]);
+    expect(hrefs).toEqual([
+      "/p/alpha",
+      "/p/beta",
+      "/p/beta",
+      "/p/beta/backlog",
+      "/p/beta/debt",
+      "/p/beta/learnings",
+      "/p/beta/roadmap",
+    ]);
   });
 
   it("knows an archived project, hidden from the sidebar but reachable by its URL", async () => {

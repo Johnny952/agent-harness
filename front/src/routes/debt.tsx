@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
 import {
@@ -25,6 +25,8 @@ import {
   type InPlay,
 } from "@/lib/debt";
 import { useSearchHotkey } from "@/hooks/use-console";
+import { scoped, useProjectScope } from "@/lib/projects";
+import { TaskLink } from "@/components/console/project-scope";
 
 export const Route = createFileRoute("/debt")({
   head: () => ({
@@ -56,8 +58,14 @@ type PairingRead =
   | { state: "broken" }
   | { state: "ready"; byId: Map<string, Task[]>; inPlay: InPlay[] };
 
-function DebtPage() {
-  const debt = useQuery(debtQuery);
+/**
+ * The debt index. On the harness's own screen it is the console project's; under
+ * `/p/$slug/debt` (ADR 210) it is the index in that project's clone, paired with
+ * that project's backlog items only.
+ */
+export function DebtPage() {
+  const project = useProjectScope();
+  const debt = useQuery(debtQuery(project));
   // The same read the Board and the Backlog make; this screen only reads it.
   const tasks = useQuery(tasksQuery);
   const searchRef = useSearchHotkey();
@@ -70,11 +78,11 @@ function DebtPage() {
         : tasks.data
           ? {
               state: "ready",
-              byId: itemsByDebtId(tasks.data.data),
-              inPlay: tasksInPlay(tasks.data.data),
+              byId: itemsByDebtId(scoped(tasks.data.data, project)),
+              inPlay: tasksInPlay(scoped(tasks.data.data, project)),
             }
           : { state: "loading" },
-    [tasks.isError, tasks.data],
+    [tasks.isError, tasks.data, project],
   );
 
   // An open entry's item id and state words are matched only once the pairing is
@@ -116,7 +124,7 @@ function DebtPage() {
   return (
     <AppShell>
       <PageHeader
-        title="Debt index"
+        title={project === null ? "Debt index" : `Debt index · ${project}`}
         subtitle="Open debt first, resolved below. A resolved row stays in the index — a fix can be reverted."
         right={<RefreshedAt at={debt.dataUpdatedAt} />}
       />
@@ -227,9 +235,9 @@ function Partition({
                 not attributable to a task id
               </span>
             ) : (
-              <Link to="/tasks/$taskId" params={{ taskId }}>
+              <TaskLink taskId={taskId}>
                 <Mono className="text-[11px] font-semibold hover:underline">{taskId}</Mono>
-              </Link>
+              </TaskLink>
             )}
             <span className="text-[10px] text-muted-foreground">{entries.length} entries</span>
           </h3>
@@ -304,9 +312,9 @@ function ItemCell({ debtId, pairing }: { debtId: string; pairing: PairingRead })
       )}
       {p.items.map(({ task, state }) => (
         <div key={task.task_id} className="flex items-center gap-2">
-          <Link to="/tasks/$taskId" params={{ taskId: task.task_id }}>
+          <TaskLink taskId={task.task_id}>
             <Mono className="font-semibold hover:underline">{task.task_id}</Mono>
-          </Link>
+          </TaskLink>
           <span className={state.kind === "accepted" ? "text-foreground" : "text-muted-foreground"}>
             {stateLabel(state)}
           </span>
@@ -331,9 +339,9 @@ function InPlayNote({ entry, inPlay }: { entry: DebtEntry; inPlay: InPlay[] }) {
       <p className="text-muted-foreground">where falls on the surface of</p>
       {tasks.map((task) => (
         <div key={task.task_id} className="flex items-center gap-2">
-          <Link to="/tasks/$taskId" params={{ taskId: task.task_id }}>
+          <TaskLink taskId={task.task_id}>
             <Mono className="font-semibold hover:underline">{task.task_id}</Mono>
-          </Link>
+          </TaskLink>
           <span className="text-muted-foreground">{stateLabel(itemState(task))}</span>
         </div>
       ))}

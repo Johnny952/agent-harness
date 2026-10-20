@@ -24,6 +24,9 @@ import { Route as TokensRouteImport } from './routes/tokens'
 import { Route as TasksTaskIdRouteImport } from './routes/tasks.$taskId'
 import { Route as PSlugIndexRouteImport } from './routes/p.$slug.index'
 import { Route as PSlugBacklogRouteImport } from './routes/p.$slug.backlog'
+import { Route as PSlugDebtRouteImport } from './routes/p.$slug.debt'
+import { Route as PSlugLearningsRouteImport } from './routes/p.$slug.learnings'
+import { Route as PSlugRoadmapRouteImport } from './routes/p.$slug.roadmap'
 import { Route as PSlugTasksTaskIdRouteImport } from './routes/p.$slug.tasks.$taskId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -101,6 +104,21 @@ const PSlugBacklogRoute = PSlugBacklogRouteImport.update({
   path: '/p/$slug/backlog',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PSlugDebtRoute = PSlugDebtRouteImport.update({
+  id: '/p/$slug/debt',
+  path: '/p/$slug/debt',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PSlugLearningsRoute = PSlugLearningsRouteImport.update({
+  id: '/p/$slug/learnings',
+  path: '/p/$slug/learnings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PSlugRoadmapRoute = PSlugRoadmapRouteImport.update({
+  id: '/p/$slug/roadmap',
+  path: '/p/$slug/roadmap',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PSlugTasksTaskIdRoute = PSlugTasksTaskIdRouteImport.update({
   id: '/p/$slug/tasks/$taskId',
   path: '/p/$slug/tasks/$taskId',
@@ -122,6 +140,9 @@ export interface FileRoutesByFullPath {
   '/tokens': typeof TokensRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/p/$slug/backlog': typeof PSlugBacklogRoute
+  '/p/$slug/debt': typeof PSlugDebtRoute
+  '/p/$slug/learnings': typeof PSlugLearningsRoute
+  '/p/$slug/roadmap': typeof PSlugRoadmapRoute
   '/p/$slug/': typeof PSlugIndexRoute
   '/p/$slug/tasks/$taskId': typeof PSlugTasksTaskIdRoute
 }
@@ -140,6 +161,9 @@ export interface FileRoutesByTo {
   '/tokens': typeof TokensRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/p/$slug/backlog': typeof PSlugBacklogRoute
+  '/p/$slug/debt': typeof PSlugDebtRoute
+  '/p/$slug/learnings': typeof PSlugLearningsRoute
+  '/p/$slug/roadmap': typeof PSlugRoadmapRoute
   '/p/$slug': typeof PSlugIndexRoute
   '/p/$slug/tasks/$taskId': typeof PSlugTasksTaskIdRoute
 }
@@ -159,6 +183,9 @@ export interface FileRoutesById {
   '/tokens': typeof TokensRoute
   '/tasks/$taskId': typeof TasksTaskIdRoute
   '/p/$slug/backlog': typeof PSlugBacklogRoute
+  '/p/$slug/debt': typeof PSlugDebtRoute
+  '/p/$slug/learnings': typeof PSlugLearningsRoute
+  '/p/$slug/roadmap': typeof PSlugRoadmapRoute
   '/p/$slug/': typeof PSlugIndexRoute
   '/p/$slug/tasks/$taskId': typeof PSlugTasksTaskIdRoute
 }
@@ -179,6 +206,9 @@ export interface FileRouteTypes {
     | '/tokens'
     | '/tasks/$taskId'
     | '/p/$slug/backlog'
+    | '/p/$slug/debt'
+    | '/p/$slug/learnings'
+    | '/p/$slug/roadmap'
     | '/p/$slug/'
     | '/p/$slug/tasks/$taskId'
   fileRoutesByTo: FileRoutesByTo
@@ -197,6 +227,9 @@ export interface FileRouteTypes {
     | '/tokens'
     | '/tasks/$taskId'
     | '/p/$slug/backlog'
+    | '/p/$slug/debt'
+    | '/p/$slug/learnings'
+    | '/p/$slug/roadmap'
     | '/p/$slug'
     | '/p/$slug/tasks/$taskId'
   id:
@@ -215,6 +248,9 @@ export interface FileRouteTypes {
     | '/tokens'
     | '/tasks/$taskId'
     | '/p/$slug/backlog'
+    | '/p/$slug/debt'
+    | '/p/$slug/learnings'
+    | '/p/$slug/roadmap'
     | '/p/$slug/'
     | '/p/$slug/tasks/$taskId'
   fileRoutesById: FileRoutesById
@@ -234,6 +270,9 @@ export interface RootRouteChildren {
   TokensRoute: typeof TokensRoute
   TasksTaskIdRoute: typeof TasksTaskIdRoute
   PSlugBacklogRoute: typeof PSlugBacklogRoute
+  PSlugDebtRoute: typeof PSlugDebtRoute
+  PSlugLearningsRoute: typeof PSlugLearningsRoute
+  PSlugRoadmapRoute: typeof PSlugRoadmapRoute
   PSlugIndexRoute: typeof PSlugIndexRoute
   PSlugTasksTaskIdRoute: typeof PSlugTasksTaskIdRoute
 }
@@ -345,6 +384,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PSlugBacklogRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/p/$slug/debt': {
+      id: '/p/$slug/debt'
+      path: '/p/$slug/debt'
+      fullPath: '/p/$slug/debt'
+      preLoaderRoute: typeof PSlugDebtRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/p/$slug/learnings': {
+      id: '/p/$slug/learnings'
+      path: '/p/$slug/learnings'
+      fullPath: '/p/$slug/learnings'
+      preLoaderRoute: typeof PSlugLearningsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/p/$slug/roadmap': {
+      id: '/p/$slug/roadmap'
+      path: '/p/$slug/roadmap'
+      fullPath: '/p/$slug/roadmap'
+      preLoaderRoute: typeof PSlugRoadmapRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/p/$slug/tasks/$taskId': {
       id: '/p/$slug/tasks/$taskId'
       path: '/p/$slug/tasks/$taskId'
@@ -370,6 +430,9 @@ const rootRouteChildren: RootRouteChildren = {
   TokensRoute: TokensRoute,
   TasksTaskIdRoute: TasksTaskIdRoute,
   PSlugBacklogRoute: PSlugBacklogRoute,
+  PSlugDebtRoute: PSlugDebtRoute,
+  PSlugLearningsRoute: PSlugLearningsRoute,
+  PSlugRoadmapRoute: PSlugRoadmapRoute,
   PSlugIndexRoute: PSlugIndexRoute,
   PSlugTasksTaskIdRoute: PSlugTasksTaskIdRoute,
 }

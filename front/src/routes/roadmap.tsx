@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { AppShell, RefreshedAt } from "@/components/console/app-shell";
@@ -13,6 +13,8 @@ import {
   WarningBanner,
 } from "@/components/console/primitives";
 import { cn } from "@/lib/utils";
+import { useProjectScope } from "@/lib/projects";
+import { TaskLink } from "@/components/console/project-scope";
 import { roadmapQuery } from "@/lib/api/queries";
 import type { Roadmap, RoadmapMonth, RoadmapPlan, RoadmapTask, TaskStatus } from "@/lib/api/types";
 
@@ -28,6 +30,7 @@ function readView(search: unknown): RoadmapView {
   return (search as { view?: unknown } | null)?.view === "current" ? "current" : "full";
 }
 
+/** `?view=` as the route keeps it; `/p/$slug/roadmap` takes this one (ADR 210). */
 export const Route = createFileRoute("/roadmap")({
   validateSearch: (search: Record<string, unknown>): { view?: "current" } =>
     readView(search) === "current" ? { view: "current" } : {},
@@ -62,14 +65,22 @@ function isHistory(task: RoadmapTask): boolean {
 const NO_PLAN_NOW = "no_plan:now";
 const NO_PLAN_PAST = "no_plan:past";
 
-function RoadmapPage() {
-  const roadmap = useQuery(roadmapQuery);
+/**
+ * The roadmap: the console project's plans on the harness's own screen, and
+ * under `/p/$slug/roadmap` (ADR 210) the plans in that project's clone with the
+ * tasks that name the project.
+ */
+export function RoadmapPage() {
+  const project = useProjectScope();
+  const roadmap = useQuery(roadmapQuery(project));
   // `strict: false` and a parse of its own, rather than `Route.useSearch()`: the
   // route test mounts this component on a route of its own building
   // (`src/test/render-route.tsx`), which has no `validateSearch`, and the screen
   // must read the same value under both.
   const view = readView(useSearch({ strict: false }));
-  const navigate = useNavigate({ from: Route.fullPath });
+  // No `from`: the screen is drawn at `/roadmap` and at `/p/$slug/roadmap`, and
+  // the filter moves the search of whichever one it is on.
+  const navigate = useNavigate();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
   const toggle = (key: string) =>
@@ -81,14 +92,14 @@ function RoadmapPage() {
     });
 
   const setView = (next: RoadmapView) =>
-    void navigate({ search: next === "current" ? { view: "current" } : {} });
+    void navigate({ to: ".", search: next === "current" ? { view: "current" } : {} });
 
   const data = roadmap.data?.data;
 
   return (
     <AppShell>
       <PageHeader
-        title="Roadmap"
+        title={project === null ? "Roadmap" : `Roadmap · ${project}`}
         subtitle="Future, now and past, newest first. A plan opens to the tasks that name it."
         right={<RefreshedAt at={roadmap.dataUpdatedAt} />}
       />
@@ -433,9 +444,9 @@ function TaskTable({ tasks }: { tasks: RoadmapTask[] }) {
         {tasks.map((t) => (
           <tr key={t.id} className="border-b border-border/50 last:border-0 hover:bg-surface-2/50">
             <td className="w-24 px-3 py-1.5">
-              <Link to="/tasks/$taskId" params={{ taskId: t.id }}>
+              <TaskLink taskId={t.id}>
                 <Mono className="font-semibold hover:underline">{t.id}</Mono>
-              </Link>
+              </TaskLink>
             </td>
             <td className="px-3 py-1.5">{t.title ?? <Absent label="no title" />}</td>
             <td className="w-28 px-3 py-1.5">

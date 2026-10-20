@@ -62,19 +62,20 @@ const FORWARDED: Record<string, readonly string[]> = {
   "/api/tasks": [],
   "/api/accounts": [],
   "/api/events": ["limit", "source_app", "since"],
-  // `project` is deliberately absent: it comes from CONSOLE_PROJECT below.
+  // `project` is not copied by name: it is checked as a slug, and falls back to
+  // CONSOLE_PROJECT when absent (`PROJECT_SCOPED` below, ADR 210).
   "/api/debt": [],
   // `task_id` is copied by name like `since`, and an empty value reads as absent
   // on both sides. The api takes it as optional and the console always sends it:
   // nothing here polls the unfiltered form (`docs/decisions.md` ADR 27, ADR 28).
   "/api/phases": ["task_id"],
-  // `project` is absent here too, and for the same reason as `/api/debt`'s: the
-  // slug is the console's own configuration and the search box on the Learnings
-  // screen filters rows the api already sent (`docs/decisions.md` ADR 41, ADR 42).
+  // `project` is `/api/debt`'s: checked as a slug, the console's own when absent.
+  // The search box on the Learnings screen filters rows the api already sent
+  // (`docs/decisions.md` ADR 41, ADR 42, ADR 210).
   "/api/learnings": [],
-  // The Roadmap screen's one read. `project` is absent for the same reason again:
-  // the api resolves the project's `docs/plans/` from the slug, and the slug is
-  // the console's (`docs/plans/roadmap-view.md` item 4, T-072).
+  // The Roadmap screen's one read. `project` is `/api/debt`'s again: the api
+  // resolves the project's `docs/plans/` from the slug
+  // (`docs/plans/roadmap-view.md` item 4, T-072, ADR 210).
   "/api/roadmap": [],
   // The Approvals screen's command-request card (`docs/decisions.md` ADR 123).
   // Here `project` *is* the browser's: the api reads requests hive-wide, the way
@@ -103,12 +104,13 @@ const FORWARDED: Record<string, readonly string[]> = {
 };
 
 /**
- * The routes whose `?project=` comes from `CONSOLE_PROJECT` and never from the
- * browser. All three are project-scoped reads on an api that may hold several
- * checkouts, where the parameter is optional with one checkout and required with
- * several —
- * `docs/decisions.md` ADR 24 for why it is set here, ADR 41 part 2 for the rule
- * the api applies to it.
+ * The project-scoped reads, on an api that may hold several checkouts, where
+ * `?project=` is optional with one checkout and required with several —
+ * `docs/decisions.md` ADR 24 for why the console sets it, ADR 41 part 2 for the
+ * rule the api applies to it. The harness's own screens send none and get
+ * `CONSOLE_PROJECT`; a project's screen under `/p/$slug/` sends its slug, which
+ * crosses only when it is shaped like one (ADR 210, narrowing ADR 24's "never
+ * from the browser" for these three).
  */
 const PROJECT_SCOPED = new Set(["/api/debt", "/api/learnings", "/api/roadmap"]);
 
@@ -906,8 +908,21 @@ function resolveTarget(url: URL): Resolution {
     // legal and sending nothing is clearer.
     if (value) target.searchParams.set(name, value);
   }
-  if (PROJECT_SCOPED.has(path) && CONSOLE_PROJECT) {
-    target.searchParams.set("project", CONSOLE_PROJECT);
+  if (PROJECT_SCOPED.has(path)) {
+    // A screen under `/p/$slug/` names its project; every other screen names
+    // none and reads the console's own. A slug that is not one the harness
+    // makes never crosses: it is the console's 400, not a fall-back to
+    // `CONSOLE_PROJECT`, which would answer another project's rows under this
+    // one's name. Whether the slug has a clone is the api's 404. ADR 210.
+    const asked = url.searchParams.get("project");
+    if (asked) {
+      if (!PROJECT_SLUG.test(asked)) {
+        return { kind: "reject", status: 400, error: `${asked} is not a project slug.` };
+      }
+      target.searchParams.set("project", asked);
+    } else if (CONSOLE_PROJECT) {
+      target.searchParams.set("project", CONSOLE_PROJECT);
+    }
   }
   return { kind: "forward", target: target.toString() };
 }

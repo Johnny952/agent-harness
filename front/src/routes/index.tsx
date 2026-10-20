@@ -95,7 +95,7 @@ export function BoardPage() {
   const accounts = useQuery(accountsQuery);
   // The debt chip is a filter over /api/debt by the task prefix of a debt id, not
   // a field /api/tasks serves. `docs/decisions.md` ADR 17.
-  const debt = useQuery(debtQuery);
+  const debt = useQuery(debtQuery(project));
   // What the worker holds, to hide *Start development* on a card already started.
   const actionQueue = useQuery(actionQueueQuery);
 
