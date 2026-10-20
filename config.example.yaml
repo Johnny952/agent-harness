@@ -348,6 +348,20 @@ git_credentials_path: /run/secrets/git-credentials
 # to /run/secrets/projects.
 project_keys_dir: /run/secrets/projects
 
+# Web Push (ADR NNN): the board service signs every push with this VAPID
+# private key, a PEM EC P-256 key, inside its container. On the host it is
+# .data/credentials/vapid-private.pem, mounted read-only into the board
+# service, and never backed up. Make one with
+#   openssl ecparam -name prime256v1 -genkey -noout -out .data/credentials/vapid-private.pem
+# With no key at this path push is off: the board service logs it once and
+# the inbox works as before. Optional; defaults to /run/secrets/vapid-private.pem.
+push_vapid_key_path: /run/secrets/vapid-private.pem
+
+# The contact the push services see in each push's VAPID claim: a mailto: or
+# https: URL of whoever runs this harness. Some services refuse a placeholder.
+# Optional; defaults to mailto:admin@localhost.
+push_subject: mailto:admin@localhost
+
 # A project with no docs index (docs/README.md) gets one mapping phase before
 # the arquitecto: a read-only role that walks the checkout and writes the
 # index, docs/architecture.md and docs/business.md, so later tasks read the

@@ -7,7 +7,7 @@ import threading
 
 import yaml
 
-from dispatcher import board_mcp, docker_exec, project_docs, role_skills
+from dispatcher import board_mcp, docker_exec, project_docs, push, role_skills
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,14 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
     "project_keys_dir": _credential(
         "A path to the deploy keys (ADR 56). It is the same as above."
     ),
+    "push_vapid_key_path": _credential(
+        "A path to the VAPID private key that signs Web Push (ADR NNN). The key "
+        "itself is never edited."
+    ),
+    "push_subject": _read_only(
+        "The contact the push services see in every push's VAPID claim (ADR NNN). "
+        "It is read by the board service at its start."
+    ),
     **{key: _read_only(_BOARD_REASON) for key in REMOVED_BOARD_KEYS},
     "auto_approve": _read_only(
         "It turns on merges no person looks at (ADR 77). It moves into the project "
@@ -261,6 +269,10 @@ class Config:
     #: directory per slug, made by `project-keygen`. A project with a key there
     #: fetches over SSH and the credential above is not consulted.
     project_keys_dir: str = docker_exec.PROJECT_KEYS_DIR
+    # Web Push (ADR NNN): the VAPID key's path in the board service's
+    # container, and the `sub` claim. A missing key turns push off.
+    push_vapid_key_path: str = push.VAPID_KEY_PATH
+    push_subject: str = push.DEFAULT_SUBJECT
     #: Which account the conversational thread runs under, or None for a flat
     #: pool. None is the shape every config had before this existed, and it
     #: keeps the picker's old behaviour exactly: no account is ranked last, no
@@ -972,6 +984,8 @@ def _build_config(raw: dict) -> Config:
             "git_credentials_path", docker_exec.GIT_CREDENTIALS_PATH
         ),
         project_keys_dir=raw.get("project_keys_dir", docker_exec.PROJECT_KEYS_DIR),
+        push_vapid_key_path=raw.get("push_vapid_key_path", push.VAPID_KEY_PATH),
+        push_subject=raw.get("push_subject", push.DEFAULT_SUBJECT),
         primary_account=primary_account,
         reserve_pct=reserve_pct,
         fallback_roles=_load_fallback_roles(raw),

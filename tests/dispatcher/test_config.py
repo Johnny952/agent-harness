@@ -1050,6 +1050,8 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "update_project_before_task": True,
         "git_credentials_path": "/g",
         "project_keys_dir": "/k",
+        "push_vapid_key_path": "/v",
+        "push_subject": "mailto:x@y",
         "auto_approve": {"p": True},
         "protected_paths": {"p": ["docs/"]},
     }
@@ -1066,8 +1068,8 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         23,
-        17,
-        2,
+        18,
+        3,
     )
     for spec in CONFIG_KEYS.values():
         assert (spec.kind is not None) == (spec.key_class == EDITABLE)
