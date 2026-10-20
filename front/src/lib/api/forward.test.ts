@@ -1528,6 +1528,27 @@ describe("the action routes without their configuration", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("503s the push-subscription writes without the token, but still reads the key", async () => {
+    const without = await configured({ BOARD_ACTIONS_TOKEN: null, CONSOLE_PROJECT: null });
+    const fetchMock = stubApi('{"publicKey":"BAAA"}');
+    for (const method of ["POST", "DELETE"]) {
+      const answer = await without(
+        get("/api/push/subscriptions", {
+          method,
+          body: "{}",
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(answer?.status).toBe(503);
+      const error = (await answer!.json()).error;
+      expect(error).toContain("BOARD_ACTIONS_TOKEN is not set");
+      expect(error).toContain("push routes");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await without(get("/api/push/key")))?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/push/key`);
+  });
+
   it("503s a start without CONSOLE_PROJECT, but still forwards a cancel", async () => {
     const forward = await configured({ CONSOLE_PROJECT: null });
     const fetchMock = stubApi();
@@ -1596,5 +1617,92 @@ describe("the settings forward without CONFIG_WRITER_TOKEN", () => {
     const fetchMock = stubApi();
     expect((await forward(get("/api/tasks")))?.status).toBe(200);
     expect(target(fetchMock)).toBe(`${BASE}/api/tasks`);
+  });
+});
+
+describe("the board-service push routes", () => {
+  const SUBSCRIPTION = JSON.stringify({
+    endpoint: "https://push.example/abc",
+    keys: { p256dh: "p", auth: "a" },
+  });
+
+  function write(method: string, body: string, headers = {}): Request {
+    return get("/api/push/subscriptions", {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  it("forwards the key read to the board-service, with nothing of the browser's", async () => {
+    const fetchMock = stubApi('{"publicKey":"BAAA"}');
+    const answer = await forwardApiRequest(
+      get("/api/push/key?x=1", { headers: { authorization: "Bearer from-the-browser" } }),
+    );
+    expect(answer?.status).toBe(200);
+    expect(await answer?.json()).toEqual({ publicKey: "BAAA" });
+    expect(target(fetchMock)).toBe(`${BOARD}/api/push/key`);
+    expect(fetchMock.mock.calls[0]![1]!.headers).toEqual({ Accept: "application/json" });
+  });
+
+  it("passes the board-service's 404 back when push is off there", async () => {
+    stubApi('{"error":"push is off: there is no VAPID key"}', 404);
+    const answer = await forwardApiRequest(get("/api/push/key"));
+    expect(answer?.status).toBe(404);
+    expect((await answer!.json()).error).toContain("push is off");
+  });
+
+  it("502s a key read the board-service does not answer, without its address", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const answer = await forwardApiRequest(get("/api/push/key"));
+    expect(answer?.status).toBe(502);
+    expect(JSON.stringify(await answer!.json())).not.toContain("board.test");
+  });
+
+  it.each(["POST", "DELETE"])(
+    "forwards a %s of a subscription with the bearer, the body unchanged",
+    async (method) => {
+      const fetchMock = stubApi('{"endpoint":"https://push.example/abc"}', 201);
+      const answer = await forwardApiRequest(write(method, SUBSCRIPTION));
+      expect(answer?.status).toBe(201);
+      expect(target(fetchMock)).toBe(`${BOARD}/api/push/subscriptions`);
+      const init = fetchMock.mock.calls[0]![1]!;
+      expect(init.method).toBe(method);
+      expect(init.headers).toEqual({
+        "Content-Type": "application/json",
+        Authorization: "Bearer actions-token",
+      });
+      expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe(SUBSCRIPTION);
+    },
+  );
+
+  it("refuses a subscription write from another site or as a form, sending nothing", async () => {
+    const fetchMock = stubApi();
+    const cross = await forwardApiRequest(
+      write("POST", SUBSCRIPTION, { "sec-fetch-site": "cross-site" }),
+    );
+    expect(cross?.status).toBe(403);
+    const form = await forwardApiRequest(
+      write("DELETE", SUBSCRIPTION, { "content-type": "text/plain" }),
+    );
+    expect(form?.status).toBe(415);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the answers the other methods had on the push paths", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/push/key", { method: "POST" })))?.status).toBe(405);
+    expect((await forwardApiRequest(get("/api/push/subscriptions")))?.status).toBe(404);
+    expect(
+      (await forwardApiRequest(get("/api/push/subscriptions", { method: "PUT" })))?.status,
+    ).toBe(405);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

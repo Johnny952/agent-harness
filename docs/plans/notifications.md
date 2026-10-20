@@ -10,8 +10,9 @@ supersedes: []
 **Status:** building, accepted in outline by the user on 2026-10-11. The
 record and its writers are built (ADR 221), and so are the read route and the
 polled inbox, with read state per browser (ADR 225), and the notifier with its
-subscription store on the server (ADR 229); the service worker and the
-settings are not.
+subscription store on the server (ADR 229), and the service worker, the
+installable console and its push control (ADR NNN); the per-kind settings
+are not.
 It records a gap the user named that day: push notifications for an awaited
 approval, a finished development and the like. It fills a weakness the main
 thread's analysis of the same day found: in a near-automatic workflow, the
@@ -146,7 +147,13 @@ Each step is a single surface:
    `push_vapid_key_path` (default `/run/secrets/vapid-private.pem`); without
    it push is off and the inbox is unchanged. Quiet hours wait for step 5.
 4. The service worker and the installable console. A front task, behind its
-   own ask for a build.
+   own ask for a build. **Built 2026-10-20** (ADR NNN): the console forwards
+   the three push routes to the board service, the two writes with the
+   bearer. `front/public/sw.js`, hand-written, shows each push with its tag
+   and opens its url on a click; `front/public/manifest.webmanifest` makes
+   the console installable. The inbox has a control that turns push on or
+   off for this browser, asking permission only on its click, and says when
+   the browser cannot, has blocked it, or the server has push off.
 5. The per-kind settings and quiet hours.
 
 ## Open questions

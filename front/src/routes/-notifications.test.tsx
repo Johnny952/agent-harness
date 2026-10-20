@@ -4,15 +4,16 @@
  * than this browser's last-seen marker marked as new, and the marker moved on
  * by opening it; and the sidebar's unread count on every other screen. And the
  * `?thread=<id>` a turn's record links, which opens the dock on any screen
- * (ADR 228).
+ * (ADR 228). And the control that turns Web Push on or off for this browser
+ * (step 4, ADR NNN), against a fake service worker, Push API and Notification.
  *
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route } from "./notifications";
 import { Route as QueueRoute } from "./queue";
-import { renderRoute } from "@/test/render-route";
+import { renderRoute, type Served } from "@/test/render-route";
 import { LAST_SEEN_KEY, readLastSeen } from "@/lib/notifications";
 import { OPEN_THREAD_EVENT } from "@/hooks/use-console";
 import type { ActionQueue, Notification } from "@/lib/api/types";
@@ -209,5 +210,192 @@ describe("a thread's url, ?thread=<id>", () => {
     } finally {
       stop();
     }
+  });
+});
+
+/**
+ * A browser with push: `navigator.serviceWorker`, `PushManager` and a
+ * `Notification` whose permission starts at `permission` and becomes `ask` when
+ * asked. `subscribed` starts it holding a subscription under the key `AQID`.
+ */
+function fakePush({
+  permission = "default",
+  ask = "granted",
+  subscribed = false,
+}: {
+  permission?: NotificationPermission;
+  ask?: NotificationPermission;
+  subscribed?: boolean;
+} = {}) {
+  let perm = permission;
+  let registered = subscribed;
+  const unsubscribe = vi.fn(async () => {
+    sub = null;
+    return true;
+  });
+  function makeSub(key: Uint8Array) {
+    return {
+      endpoint: "https://push.example/send/abc",
+      options: { applicationServerKey: key.slice().buffer },
+      unsubscribe,
+      toJSON: () => ({
+        endpoint: "https://push.example/send/abc",
+        expirationTime: null,
+        keys: { p256dh: "p256", auth: "auth" },
+      }),
+    };
+  }
+  let sub: ReturnType<typeof makeSub> | null = subscribed
+    ? makeSub(new Uint8Array([1, 2, 3]))
+    : null;
+  const subscribe = vi.fn(async (opts: PushSubscriptionOptionsInit) => {
+    sub = makeSub(opts.applicationServerKey as Uint8Array);
+    return sub;
+  });
+  const reg = { pushManager: { getSubscription: async () => sub, subscribe } };
+  const register = vi.fn(async () => {
+    registered = true;
+    return reg;
+  });
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: {
+      register,
+      ready: Promise.resolve(reg),
+      getRegistration: async () => (registered ? reg : undefined),
+    },
+  });
+  const requestPermission = vi.fn(async () => {
+    perm = ask;
+    return ask;
+  });
+  vi.stubGlobal("PushManager", function PushManager() {});
+  vi.stubGlobal(
+    "Notification",
+    class {
+      static get permission() {
+        return perm;
+      }
+      static requestPermission = requestPermission;
+    },
+  );
+  return { register, requestPermission, subscribe, unsubscribe };
+}
+
+describe("push for this browser", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(navigator, "serviceWorker");
+  });
+
+  const KEY: Served = {
+    "/api/notifications": { data: [] },
+    "/api/push/key": { bare: { publicKey: "AQID" }, status: 200 },
+  };
+
+  function control(): HTMLElement {
+    return screen.getByRole("region", { name: "Push notifications" });
+  }
+
+  async function settled(state: string): Promise<void> {
+    await waitFor(() => expect(control().getAttribute("data-push-state")).toBe(state));
+  }
+
+  it("says so in a browser without push, and reads nothing for it", async () => {
+    const { sent } = await renderRoute(Route, "/notifications", KEY);
+    await settled("unsupported");
+    expect(within(control()).getByText(/cannot receive push notifications/)).toBeTruthy();
+    expect(within(control()).queryByRole("button")).toBeNull();
+    expect(sent.some((r) => r.path === "/api/push/key")).toBe(false);
+  });
+
+  it("asks permission only on the click, then subscribes with the key and stores it", async () => {
+    const fake = fakePush();
+    const { sent } = await renderRoute(Route, "/notifications", {
+      ...KEY,
+      "POST /api/push/subscriptions": { bare: { endpoint: "x" }, status: 201 },
+    });
+    await settled("off");
+    expect(fake.requestPermission).not.toHaveBeenCalled();
+    fireEvent.click(within(control()).getByRole("button", { name: "Turn push on" }));
+    await settled("on");
+    expect(fake.requestPermission).toHaveBeenCalledTimes(1);
+    expect(fake.register).toHaveBeenCalledWith("/sw.js", { scope: "/" });
+    const opts = fake.subscribe.mock.calls[0]?.[0];
+    expect(opts?.userVisibleOnly).toBe(true);
+    expect(Array.from((opts?.applicationServerKey as Uint8Array | undefined) ?? [])).toEqual([
+      1, 2, 3,
+    ]);
+    const post = sent.find((r) => r.method === "POST");
+    expect(post).toEqual({
+      method: "POST",
+      path: "/api/push/subscriptions",
+      body: {
+        endpoint: "https://push.example/send/abc",
+        expirationTime: null,
+        keys: { p256dh: "p256", auth: "auth" },
+      },
+    });
+    expect(within(control()).getByRole("button", { name: "Turn push off" })).toBeTruthy();
+  });
+
+  it("turns off: the server forgets the endpoint, then the browser unsubscribes", async () => {
+    const fake = fakePush({ permission: "granted", subscribed: true });
+    const { sent } = await renderRoute(Route, "/notifications", {
+      ...KEY,
+      "DELETE /api/push/subscriptions": { bare: { removed: true }, status: 200 },
+    });
+    await settled("on");
+    fireEvent.click(within(control()).getByRole("button", { name: "Turn push off" }));
+    await settled("off");
+    expect(sent.find((r) => r.method === "DELETE")).toEqual({
+      method: "DELETE",
+      path: "/api/push/subscriptions",
+      body: { endpoint: "https://push.example/send/abc" },
+    });
+    expect(fake.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("is denied when the browser blocks it, with no button and no key read", async () => {
+    fakePush({ permission: "denied" });
+    const { sent } = await renderRoute(Route, "/notifications", KEY);
+    await settled("denied");
+    expect(within(control()).getByText(/blocked for this console/)).toBeTruthy();
+    expect(within(control()).queryByRole("button")).toBeNull();
+    expect(sent.some((r) => r.path === "/api/push/key")).toBe(false);
+  });
+
+  it("is denied when the person refuses on the click, and subscribes nothing", async () => {
+    const fake = fakePush({ ask: "denied" });
+    const { sent } = await renderRoute(Route, "/notifications", KEY);
+    await settled("off");
+    fireEvent.click(within(control()).getByRole("button", { name: "Turn push on" }));
+    await settled("denied");
+    expect(fake.subscribe).not.toHaveBeenCalled();
+    expect(sent.some((r) => r.method === "POST")).toBe(false);
+  });
+
+  it("is off on the server when the key route answers no key", async () => {
+    fakePush();
+    await renderRoute(Route, "/notifications", {
+      "/api/notifications": { data: [] },
+      "/api/push/key": { status: 404, error: "push is not configured" },
+    });
+    await settled("server-off");
+    expect(within(control()).getByText(/Push is off on the server/)).toBeTruthy();
+    expect(within(control()).queryByRole("button")).toBeNull();
+  });
+
+  it("shows the server's refusal and stays off when the subscription is not stored", async () => {
+    const fake = fakePush();
+    await renderRoute(Route, "/notifications", {
+      ...KEY,
+      "POST /api/push/subscriptions": { status: 409, error: "the subscription store is full" },
+    });
+    await settled("off");
+    fireEvent.click(within(control()).getByRole("button", { name: "Turn push on" }));
+    expect(await within(control()).findByText(/the subscription store is full/)).toBeTruthy();
+    await settled("off");
+    expect(fake.unsubscribe).toHaveBeenCalledTimes(1);
   });
 });

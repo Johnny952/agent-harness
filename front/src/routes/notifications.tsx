@@ -9,10 +9,12 @@ import {
   PageHeader,
   WarningBanner,
 } from "@/components/console/primitives";
+import { Button } from "@/components/ui/button";
 import { notificationsQuery } from "@/lib/api/queries";
 import type { Notification } from "@/lib/api/types";
 import { formatDateClock } from "@/lib/format";
 import { isUnread, markSeen, readLastSeen } from "@/lib/notifications";
+import { readState, turnOff, turnOn, type PushState } from "@/lib/push";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/notifications")({
@@ -69,6 +71,8 @@ function NotificationsPage() {
         right={<RefreshedAt at={query.dataUpdatedAt} />}
       />
 
+      <PushControl />
+
       <WarningBanner warnings={query.data?.warnings ?? []} />
 
       {query.isError || (query.data && !list) ? (
@@ -91,6 +95,77 @@ function NotificationsPage() {
         </ul>
       )}
     </AppShell>
+  );
+}
+
+/** What each state says, in the browser's words and the server's. */
+const PUSH_TEXT: Record<PushState, string> = {
+  unsupported:
+    "This browser cannot receive push notifications: it has no service worker, Push API or Notification API.",
+  denied:
+    "Notifications are blocked for this console in this browser. Allow them in the browser's site settings, then come back.",
+  "server-off":
+    "Push is off on the server: the board service has no VAPID key configured, or cannot be reached.",
+  on: "Push is on for this browser: a new notification shows here even with the console closed.",
+  off: "Push is off for this browser. Turning it on asks the browser for permission.",
+};
+
+/**
+ * Push for this browser, on or off (ADR NNN). Permission is asked on the
+ * click, not on load; every other state is read from the browser and the key
+ * route each time the inbox opens (`lib/push.ts`).
+ */
+function PushControl() {
+  const [state, setState] = useState<PushState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    readState().then(
+      (s) => live && setState(s),
+      () => live && setState("off"),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  async function toggle(to: "on" | "off") {
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await (to === "on" ? turnOn() : turnOff()));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setState(await readState().catch((): PushState => "off"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section
+      aria-label="Push notifications"
+      data-push-state={state ?? "reading"}
+      className="mx-4 mt-3 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-xs"
+    >
+      <p className="min-w-0 flex-1 text-muted-foreground">
+        {state === null ? "Reading push for this browser…" : PUSH_TEXT[state]}
+        {error && <span className="mt-1 block text-destructive">{error}</span>}
+      </p>
+      {(state === "off" || state === "on") && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+          onClick={() => void toggle(state === "on" ? "off" : "on")}
+        >
+          {state === "on" ? "Turn push off" : "Turn push on"}
+        </Button>
+      )}
+    </section>
   );
 }
 
