@@ -11116,3 +11116,79 @@ question left where the record lives to this step.
   project's settings differ.
 - Ignoring unknown keys in the record: a typo would be a setting that silently
   does nothing.
+
+## ADR 203 — The board service writes the project record
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** ADR 199 left a gap: its decision 2 names the board service as the
+record's writer "once its routes exist", and its consequences say settings
+differ per project "only by editing a record by hand until the console writes
+them". Until now a record was made by `dispatch migrate` and changed by hand.
+`docs/plans/projects.md` step 1 asks for the record; its *Decisions* 2 makes
+the deploy key `project-keygen`'s, and *Decisions* 4 puts archived projects
+behind a toggle, which is the record's `status`.
+
+**Decision.**
+1. Two routes on the board service. `POST /api/projects` creates a record and
+   answers 201 with it. `PATCH /api/projects/<slug>` changes one and answers
+   200 with the record as written. There is no read route: reads are the api's
+   side, and no delete: a project leaves the console by being archived.
+2. A create takes `slug` (required), `title` (default the slug, as `migrate`
+   writes it), `remote` (SSH form or null), `base_branch` (default null) and
+   `settings` (default none, so `config.yaml` decides each). `created` is the
+   writer's clock, `status` is `active` and `key` is null. A slug with a record
+   file, readable or not, is refused 409: the writer links the record into
+   place, so two creates of one slug cannot both win.
+3. A change takes `title`, `remote`, `base_branch`, `settings` and `status`
+   (`active` or `archived`). `settings` merges into the record's: a setting
+   named with a value is set, one named with null is dropped, so it is
+   `config.yaml`'s again, and one not named is kept. A slug with no record is
+   404; a record on disk that does not read is 409 and is not rewritten, since
+   rewriting it would mean guessing what it said. An empty body is 400. The
+   read, the merge and the write are under an `flock` on
+   `.hive/projects/.<slug>.lock`, so two changes cannot lose one; the lock file
+   is dotted and not `.json`, so `slugs()` never lists it.
+4. `slug`, `key` and `created` are not settable: the slug is the record's file
+   name (a project is not renamed), the key is `project-keygen`'s and the
+   record only ever holds its fingerprint (*Decisions* 2), and `created` is when
+   the record was written. Each is refused 400 with its reason, so no secret
+   and no key reaches the record through these routes.
+5. One check. `dispatcher/projects.py` gains `create` and `change`, additive
+   beside `migrate`; both build the record's whole JSON object and hold it to
+   `parse`, the check `read` uses, then write through `write` (a temporary file
+   linked or renamed into place). What the route accepts is what the
+   dispatcher reads, and a refusal is the reader's own words: "its remote
+   'https://…' is not in SSH form (git@host:owner/repo.git)", "it has fields no
+   record has: owner", "its merge_on_done is 'yes', not true or false".
+6. Behind the `BOARD_ACTIONS_TOKEN` bearer, with the action routes' guards in
+   order (ADR 151): a browser `Origin` is 403, no token configured is 503 ("the
+   project routes are off"), a missing or wrong bearer is 401, a query
+   parameter or a body that is not an object is 400. A record decides a
+   project's `allowed_tools` and `merge_on_done`, so a phase on the network
+   must not be able to write one, which the CSRF checks alone of the task
+   writes would allow. The guards are one helper the action routes now share.
+7. No MCP tool. No role in the plan writes a record: these are a person's
+   writes, from the console or a shell with the token.
+
+**Consequences.**
+- ADR 199's gap is closed on the board service's side: a record is created and
+  its settings changed without `dispatch migrate` or a hand edit.
+- The console cannot call them yet: its proxy adds the bearer only to the
+  method and path pairs it names, and these are not among them. Wiring them
+  and the form is a front task (step 5 of the plan).
+- A record is written whether or not its clone exists. The board service does
+  not mount the clones; the `clone` action of step 5 is the worker's.
+- The record's `remote` check is the reader's, unchanged: it is not loosened
+  to accept an HTTPS URL, and not tightened here either.
+
+**Ruled out.**
+- A second validator in the route: two checks drift, and a record the route
+  accepted could then stop its project at the dispatcher.
+- Turning an HTTPS remote into SSH form on the way in: `migrate` does that for
+  what it reads from a clone, but a person's input that is wrong is refused
+  with the reason, not rewritten.
+- A `PUT` of the whole record: it would make the client send `key` and
+  `created`, which it does not own.
+- Setting `status` on create: a new project is active; archiving one that never
+  ran is a change like any other.

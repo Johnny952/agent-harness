@@ -457,3 +457,52 @@ def test_the_project_config_is_the_record_over_the_config(tmp_path) -> None:
 
     assert core.project_config(cfg, "task-1", "shop").gates_enabled is False
     assert core.project_config(cfg, "task-1", "blog") is cfg
+
+
+# -- the board service's writes (ADR 203) --
+
+
+def test_create_writes_a_new_record_and_refuses_a_second(tmp_path) -> None:
+    root = str(tmp_path / ".hive")
+    record = projects.create(root, {"slug": "shop", "remote": "git@github.com:me/shop.git"}, now=_NOW)
+    assert record.title == "shop" and record.status == "active" and record.key is None
+    assert record.created == projects._now_iso(_NOW)
+    assert projects.read(root, "shop") == record
+    with pytest.raises(projects.RecordExists):
+        projects.create(root, {"slug": "shop"}, now=_NOW)
+
+
+def test_create_refuses_in_the_readers_words(tmp_path) -> None:
+    root = str(tmp_path / ".hive")
+    with pytest.raises(projects.RecordError, match="not in SSH form"):
+        projects.create(root, {"slug": "shop", "remote": "https://github.com/me/shop.git"})
+    with pytest.raises(projects.RecordError, match="project-keygen"):
+        projects.create(root, {"slug": "shop", "key": None})
+    assert projects.slugs(root) == []
+
+
+def test_change_merges_settings_and_keeps_the_rest(tmp_path) -> None:
+    root = str(tmp_path / ".hive")
+    projects.create(root, {"slug": "shop", "settings": {"gates_enabled": False}}, now=_NOW)
+    record = projects.change(
+        root, "shop",
+        {"settings": {"gates_enabled": None, "merge_on_done": True}, "status": "archived"},
+    )
+    assert record.settings == {"merge_on_done": True}
+    assert record.status == "archived" and record.created == projects._now_iso(_NOW)
+    assert projects.read(root, "shop") == record
+    # The lock file sits beside the record and is no record.
+    assert projects.slugs(root) == ["shop"]
+
+
+def test_change_refuses_a_missing_or_broken_record(tmp_path) -> None:
+    root = str(tmp_path / ".hive")
+    with pytest.raises(projects.NoRecord):
+        projects.change(root, "shop", {"title": "Shop"})
+    path = Path(projects.record_path(root, "shop"))
+    path.write_text("{}")
+    with pytest.raises(projects.BrokenRecord):
+        projects.change(root, "shop", {"title": "Shop"})
+    assert path.read_text() == "{}"
+    with pytest.raises(projects.RecordError, match="renamed"):
+        projects.change(root, "shop", {"slug": "blog"})

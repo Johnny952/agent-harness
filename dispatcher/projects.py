@@ -24,8 +24,10 @@ nobody chose for it.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -480,3 +482,141 @@ def migrate(
         sorted(written), sorted(existing), skipped, stamp.stamped, stamp.refused,
         stamp.already, default,
     )
+
+
+# -- the board service's writes (ADR 203) ----------------------------------------
+
+
+class NoRecord(LookupError):
+    """A change names a project that has no record."""
+
+
+class BrokenRecord(RecordError):
+    """A change names a record that is on disk but does not read: a person's to fix."""
+
+
+#: What a person sets on a new record. `key` is `project-keygen`'s (Decisions
+#: 2), `created` is the writer's clock and a new record is `active`: none of
+#: the three is the body's. Any other name falls to `parse`, which names it.
+CREATE_FIELDS = ("slug", "title", "remote", "base_branch", "settings")
+#: What a person changes on a record. `slug` is the file's name, so changing it
+#: would be another project; `key` and `created` as above.
+CHANGE_FIELDS = ("title", "remote", "base_branch", "settings", "status")
+_NOT_SETTABLE = {
+    "key": "key is project-keygen's: the record holds its fingerprint and never takes one from a request",
+    "created": "created is the time the record was written, not a field to set",
+}
+
+
+def _settable(fields: object, allowed: tuple[str, ...], refused: dict[str, str]) -> dict:
+    """`fields` as a dict, or `RecordError` for a field this write never takes.
+
+    A name that is neither allowed nor refused here is left in, for `parse` to
+    name in the reader's words ("it has fields no record has").
+    """
+    if not isinstance(fields, dict):
+        raise RecordError("it is not a JSON object")
+    for name in fields:
+        if name in allowed:
+            continue
+        reason = refused.get(name) or _NOT_SETTABLE.get(name)
+        if reason is not None:
+            raise RecordError(reason)
+    return dict(fields)
+
+
+def create(hive_root: str, fields: dict, *, now: dt.datetime | None = None) -> ProjectRecord:
+    """A new record from a person's `fields`, written, or the reason it is not.
+
+    `slug` is required; `title` defaults to the slug, as `migrate` writes it;
+    `remote` and `base_branch` default to none and `settings` to none of them,
+    so `config.yaml` decides everything a new record leaves out. The record is
+    held to `parse`, the reader's own check, so what this accepts the
+    dispatcher reads, and a refusal is in the reader's words. `RecordExists`
+    when the slug has a record file, readable or not: `write` links it into
+    place, so two creates of one slug cannot both win.
+    """
+    fields = _settable(fields, CREATE_FIELDS, {
+        "status": "a new record is active; status is changed once the record exists",
+    })
+    slug = fields.get("slug")
+    data = {
+        "slug": slug,
+        "title": slug,
+        "remote": None,
+        "base_branch": None,
+        "key": None,
+        "settings": {},
+        "created": _now_iso(now),
+        "status": "active",
+        **fields,
+    }
+    record = parse(data)
+    write(hive_root, record)
+    return record
+
+
+@contextlib.contextmanager
+def _record_lock(hive_root: str, slug: str):
+    """An exclusive `flock` on `<projects>/.<slug>.lock` for one read-modify-write.
+
+    Dotted and not `.json`, so `slugs` never lists it. Never removed, for the
+    reason `tasks.task_lock` gives; 0644 so a reader of another uid can take it.
+    """
+    directory = projects_dir(hive_root)
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+    path = os.path.join(directory, f".{slug}.lock")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY)
+    else:
+        os.fchmod(fd, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def change(hive_root: str, slug: str, fields: dict) -> ProjectRecord:
+    """`slug`'s record with `fields` laid over it, written in its place.
+
+    `settings` merges into the record's: a setting named with a value is set,
+    one named with null is dropped, so it falls back to `config.yaml` again,
+    and one not named is kept. Every other field replaces the record's,
+    `status` included (`archived` and back). `NoRecord` when there is none;
+    `BrokenRecord` when the record on disk does not read (it is not rewritten
+    from a guess); `RecordError` when the result fails `parse`. Read and written under the record's
+    lock, so two changes cannot lose one.
+    """
+    fields = _settable(fields, CHANGE_FIELDS, {
+        "slug": "slug is the record's file name; a project is not renamed",
+    })
+    if not fields:
+        raise RecordError("nothing to change")
+    if not is_slug(slug):
+        raise NoRecord(f"no project record {slug!r}")
+    with _record_lock(hive_root, slug):
+        try:
+            current = read(hive_root, slug)
+        except RecordError as exc:
+            raise BrokenRecord(str(exc)) from exc
+        if current is None:
+            raise NoRecord(f"no project record {slug!r}")
+        data = current.to_dict()
+        if "settings" in fields:
+            settings = fields.pop("settings")
+            if isinstance(settings, dict):
+                merged = dict(current.settings)
+                for name, value in settings.items():
+                    if value is None:
+                        merged.pop(name, None)
+                    else:
+                        merged[name] = value
+                settings = merged
+            data["settings"] = settings  # not a dict: `parse` names it
+        data.update(fields)
+        record = parse(data)
+        write(hive_root, record, replace=True)
+    return record
