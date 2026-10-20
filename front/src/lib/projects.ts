@@ -58,6 +58,26 @@ export function listedProjects(entries: readonly ProjectEntry[]): ProjectEntry[]
   return entries.filter((e) => e.status === "active");
 }
 
+/** Where the sidebar's *Show archived* choice is kept, per viewer (ADR 217), as the thread view is. */
+export const SHOW_ARCHIVED_KEY = "ia-harness.show-archived";
+
+/** The stored choice, or hidden when there is none or storage cannot be read. */
+export function readShowArchived(): boolean {
+  try {
+    return window.localStorage.getItem(SHOW_ARCHIVED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function storeShowArchived(show: boolean): void {
+  try {
+    window.localStorage.setItem(SHOW_ARCHIVED_KEY, show ? "true" : "false");
+  } catch {
+    // A private window or blocked storage: the toggle still works, unremembered.
+  }
+}
+
 /**
  * The project list and where it came from. `entries` is `null` while nothing
  * has answered, and when neither read did (`failed`). `source` is `"tasks"` only
@@ -124,6 +144,12 @@ export function useProjectList(): ProjectList {
 export interface ProjectCounts {
   running: number;
   waiting: number | null;
+  /**
+   * Of `waiting`, the pending starts the worker marked as waiting for an
+   * account or for the project (the record's `waiting`, ADR 204); the rest
+   * carry no reason. Both zero when the queue was not read.
+   */
+  waitingFor: { account: number; project: number };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -147,7 +173,9 @@ function slugOf(v: unknown): string | null {
  *   phase yet (*Decisions*, 6, *What waits*). Its project is the start record's
  *   `project`, or the task row's when the record names none.
  *
- * A project with nothing is absent from the map; a task counts once.
+ * A project with nothing is absent from the map; a task counts once. A waiting
+ * start's reason is the worker's word on its pending record, counted as served
+ * and never re-derived from two starts sharing a project.
  */
 export function projectCounts(tasks: readonly Task[], queue: unknown): Map<string, ProjectCounts> {
   const counted = isObject(queue);
@@ -155,7 +183,7 @@ export function projectCounts(tasks: readonly Task[], queue: unknown): Map<strin
   const entry = (slug: string): ProjectCounts => {
     let c = counts.get(slug);
     if (!c) {
-      c = { running: 0, waiting: counted ? 0 : null };
+      c = { running: 0, waiting: counted ? 0 : null, waitingFor: { account: 0, project: 0 } };
       counts.set(slug, c);
     }
     return c;
@@ -174,7 +202,7 @@ export function projectCounts(tasks: readonly Task[], queue: unknown): Map<strin
   }
   if (!counted) return counts;
   const seen = new Set<string>();
-  for (const state of ["claimed", "pending"]) {
+  for (const state of ["claimed", "pending"] as const) {
     const list = queue[state];
     if (!Array.isArray(list)) continue;
     for (const r of list) {
@@ -188,9 +216,29 @@ export function projectCounts(tasks: readonly Task[], queue: unknown): Map<strin
       if (slug === null) continue;
       const c = entry(slug);
       c.waiting = (c.waiting ?? 0) + 1;
+      // The worker's word, read on a pending record only, as `deriveSlots` reads it.
+      const why = state === "pending" ? r["waiting"] : null;
+      if (why === "account" || why === "project") c.waitingFor[why] += 1;
     }
   }
   return counts;
+}
+
+/**
+ * The waiting mark's words: the count, then each served reason above zero,
+ * worded as the dock's waiting list words it (`slots.ts:waitingText`), and the
+ * starts with none as "other". "2 waiting: 1 for an account, 1 for the project".
+ */
+export function waitingTitle(c: ProjectCounts): string {
+  const n = c.waiting ?? 0;
+  const { account, project } = c.waitingFor;
+  const other = n - account - project;
+  const parts = [
+    account > 0 ? `${account} for an account` : null,
+    project > 0 ? `${project} for the project` : null,
+    other > 0 && other < n ? `${other} other` : null,
+  ].filter((p): p is string => p !== null);
+  return parts.length === 0 ? `${n} waiting` : `${n} waiting: ${parts.join(", ")}`;
 }
 
 /**
