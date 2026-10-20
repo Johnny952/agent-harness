@@ -6,7 +6,15 @@
  */
 import { describe, expect, it } from "vitest";
 import type { Thread } from "./api/types";
-import { mapThread, orderThreads, summarizeInput, threadMeter, type ThreadItem } from "./thread";
+import {
+  mapThread,
+  orderThreads,
+  queuedTurns,
+  stoppingIds,
+  summarizeInput,
+  threadMeter,
+  type ThreadItem,
+} from "./thread";
 
 type Event = Record<string, unknown> | null;
 
@@ -144,6 +152,110 @@ describe("the commands view", () => {
       assistant({ type: "tool_use", id: "tu-1", name: "Grep", input: { pattern: "TODO" } }),
     );
     expect(mapThread(log, "commands")[1]).toMatchObject({ summary: "TODO", result: null });
+  });
+});
+
+describe("the turn's action (ADR 190)", () => {
+  it("is carried from turn_start onto the turn, open or closed", () => {
+    expect(mapThread(oneTurn, "text").at(-1)).toMatchObject({ kind: "turn", action: "a-1" });
+    expect(mapThread(rows(start("x")), "text").at(-1)).toMatchObject({
+      status: "running",
+      action: "a-1",
+    });
+  });
+
+  it("is null for a log older than the action field", () => {
+    const log = rows(start("x", { action: undefined }));
+    expect(mapThread(log, "text").at(-1)).toMatchObject({ status: "running", action: null });
+  });
+});
+
+describe("a dispatch line (ADR 190)", () => {
+  const record = JSON.stringify({ id: "A-9", task_id: "T-114", kind: "start" });
+  function dispatch(name: string, content: unknown, isError = false) {
+    const log = rows(
+      start("x"),
+      assistant({ type: "tool_use", id: "tu-1", name, input: { task_id: "T-114" } }),
+      toolResult("tu-1", content, isError),
+    );
+    return (mapThread(log, "commands")[1] as Extract<ThreadItem, { kind: "tool" }>).dispatch;
+  }
+
+  it("reads the created record from a string result", () => {
+    expect(dispatch("mcp__board__task_start", record)).toEqual({
+      actionId: "A-9",
+      taskId: "T-114",
+    });
+  });
+
+  it("reads it from a list of text blocks", () => {
+    expect(dispatch("mcp__board__task_start", [{ type: "text", text: record }])).toEqual({
+      actionId: "A-9",
+      taskId: "T-114",
+    });
+  });
+
+  it.each([
+    ["an error result", "mcp__board__task_start", record, true],
+    ["unparseable JSON", "mcp__board__task_start", "queued ok", false],
+    ["an array", "mcp__board__task_start", "[1]", false],
+    ["a record with no task_id", "mcp__board__task_start", '{"id":"A-9"}', false],
+    ["a numeric id", "mcp__board__task_start", '{"id":9,"task_id":"T-1"}', false],
+    ["another tool", "Bash", record, false],
+  ])("is null for %s", (_label, name, content, isError) => {
+    expect(dispatch(name, content, isError)).toBeNull();
+  });
+
+  it("is null while the call has no result", () => {
+    const log = rows(
+      start("x"),
+      assistant({ type: "tool_use", id: "tu-1", name: "mcp__board__task_start", input: {} }),
+    );
+    expect(mapThread(log, "commands")[1]).toMatchObject({ dispatch: null });
+  });
+});
+
+describe("queuedTurns and stoppingIds (ADR 190)", () => {
+  function action(id: string, kind: string, params: unknown, created = "2026-10-20T10:00:00Z") {
+    return { id, kind, params, created_at: created };
+  }
+  const queue = {
+    pending: [
+      action("A-3", "turn", { thread: "main", text: "third" }, "2026-10-20T10:03:00Z"),
+      action("A-x", "turn", { thread: "th-other", text: "elsewhere" }),
+      action("A-s", "start", { thread: "main", text: "not a turn" }),
+      action("C-1", "cancel", { target: "A-2" }),
+    ],
+    claimed: [
+      action("A-2", "turn", { thread: "main", text: "second" }, "2026-10-20T10:02:00Z"),
+      action("A-1", "turn", { thread: "main", text: "in the log" }, "2026-10-20T10:01:00Z"),
+    ],
+  };
+
+  it("keeps this thread's turns not yet in the log, oldest first, with their state", () => {
+    expect(queuedTurns(queue, "main", rows(start("in the log", { action: "A-1" })))).toEqual([
+      { id: "A-2", text: "second", state: "starting", stopping: true },
+      { id: "A-3", text: "third", state: "queued", stopping: false },
+    ]);
+  });
+
+  it("names the targets of pending and claimed cancels", () => {
+    expect([...stoppingIds(queue)]).toEqual(["A-2"]);
+  });
+
+  it("survives a queue that is not the shape it should be", () => {
+    for (const bad of [
+      undefined,
+      null,
+      "x",
+      3,
+      [],
+      { pending: "x", claimed: [null, 4, { id: 1 }] },
+    ]) {
+      expect(queuedTurns(bad, "main", [])).toEqual([]);
+      expect(stoppingIds(bad).size).toBe(0);
+    }
+    expect(queuedTurns({ pending: [action("A-1", "turn", null)] }, "main", [])).toEqual([]);
   });
 });
 

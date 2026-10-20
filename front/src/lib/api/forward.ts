@@ -27,11 +27,12 @@
  * deliberately not entries of `FORWARDED`, whose fifteen routes, count and
  * rejection message describe the api alone.
  *
- * **Six method and path pairs go to the board-service** (`docs/decisions.md`
- * ADR 136, ADR 157): `POST /api/backlog`, `PATCH /api/tasks/<id>`,
- * `POST /api/tasks/<id>/comments`, `POST /api/tasks/<id>/accept`, and the two
- * action routes `POST /api/tasks/<id>/start` and `POST /api/actions/<id>/cancel`,
- * onto the same paths there; the last two carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
+ * **Seven method and path pairs go to the board-service** (`docs/decisions.md`
+ * ADR 136, ADR 157, ADR 190): `POST /api/backlog`, `PATCH /api/tasks/<id>`,
+ * `POST /api/tasks/<id>/comments`, `POST /api/tasks/<id>/accept`, and the three
+ * action routes `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel`
+ * and `POST /api/threads/<id>/turns`, onto the same paths there; the last three
+ * carry a bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
  * of `/api/tasks/<id>` and of `/api/tasks/<id>/comments` is still the api's, a
  * `POST /api/tasks` is still the 405, a `GET /api/backlog` still the 404. They
@@ -153,6 +154,19 @@ const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
 /** Cancelling an action: a `POST` to the board-service, with the actions bearer. */
 const ACTION_CANCEL = /^\/api\/actions\/([^/]+)\/cancel$/;
 
+/**
+ * Sending a turn to a thread (ADR 181, ADR 190): a `POST` to the board-service,
+ * with the actions bearer. The path is shared with nothing else.
+ */
+const THREAD_TURNS = /^\/api\/threads\/([^/]+)\/turns$/;
+
+/**
+ * The thread ids the harness makes: `dispatcher/threads.py`'s `MAIN_ID` and
+ * `_ORDINARY_ID`, written again here. A turn for any other id is the console's
+ * 404 and never crosses (ADR 190 part 1).
+ */
+const THREAD_ID = /^(?:main|th-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6})$/;
+
 /** Proposing a backlog item: a `POST` to the board-service, never a read. */
 const BACKLOG = "/api/backlog";
 
@@ -165,6 +179,15 @@ const BOARD = "the board-service";
  * body over it is the console's 413 and never reaches the board-service.
  */
 const MAX_BOARD_BODY_BYTES = 64 * 1024;
+
+/**
+ * The turn pair's cap (ADR 190 part 2). The route takes up to 20,000 characters
+ * (`MAX_TURN_TEXT_CHARS`, code points), and `JSON.stringify` writes one code
+ * point in at most six bytes (`\u0001`, a lone surrogate), so the largest text
+ * the route accepts is 120,011 bytes with `{"text":""}`: over 64 KiB, under this.
+ * The console never answers 413 for a text the route would take.
+ */
+const MAX_TURN_BODY_BYTES = 128 * 1024;
 
 /**
  * The settings collection: `GET` only, onto the writer's `GET /settings`
@@ -185,7 +208,7 @@ const SETTINGS_KEY = /^\/api\/settings\/([^/]+)$/;
 const WRITER = "the config-writer service";
 
 type Resolution =
-  | { kind: "forward"; target: string; action?: "start" | "cancel" }
+  | { kind: "forward"; target: string; action?: "start" | "cancel" | "turn" }
   | { kind: "reject"; status: number; error: string };
 
 /**
@@ -204,7 +227,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardSettings(request, url);
   }
 
-  // Also before the read-only check, and only for the six exact pairs: a method
+  // Also before the read-only check, and only for the seven exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -389,17 +412,35 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the six writes goes, or `null` for any
+ * Where on the board-service one of the seven writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
- * The two action routes are `POST` only and carry `action` (ADR 157).
+ * The three action routes are `POST` only and carry `action` (ADR 157, ADR 190).
+ * A thread id that is not one the harness makes is a 404 here too.
  */
 function boardTarget(method: string, path: string): Resolution | null {
   if (method === "POST" && path === BACKLOG) {
     return { kind: "forward", target: `${BOARD_SERVICE_URL}${BACKLOG}` };
   }
   if (method === "POST") {
+    const turns = THREAD_TURNS.exec(path);
+    if (turns) {
+      let id: string;
+      try {
+        id = decodeURIComponent(turns[1]!);
+      } catch {
+        return { kind: "reject", status: 404, error: `${path} is not a readable thread id.` };
+      }
+      if (!THREAD_ID.test(id)) {
+        return { kind: "reject", status: 404, error: `${path} names no thread the harness makes.` };
+      }
+      return {
+        kind: "forward",
+        target: `${BOARD_SERVICE_URL}/api/threads/${encodeURIComponent(id)}/turns`,
+        action: "turn",
+      };
+    }
     const start = TASK_START.exec(path);
     const cancel = start ? null : ACTION_CANCEL.exec(path);
     const hit = start ?? cancel;
@@ -446,7 +487,7 @@ function boardTarget(method: string, path: string): Resolution | null {
 }
 
 /**
- * The board-service's answer to one of its four writes (`docs/decisions.md`
+ * The board-service's answer to one of its seven writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -462,18 +503,19 @@ function boardTarget(method: string, path: string): Resolution | null {
  * says another site is the refusal.
  *
  * Nothing of the browser's request crosses but the body, bounded to
- * `MAX_BOARD_BODY_BYTES` (413), under the console's own
+ * `MAX_BOARD_BODY_BYTES` (413; `MAX_TURN_BODY_BYTES` for a turn), under the console's own
  * `Content-Type: application/json`. `Origin` above all: the board-service
  * refuses any request that carries one (its guard against a browser), and the
  * console's server half is not a browser. No query string: the board-service
  * refuses one.
  *
  * The four backlog writes carry no token: the board-service takes none there.
- * The two action routes (ADR 157, on ADR 151) carry `Authorization: Bearer
+ * The three action routes (ADR 157, on ADR 151; the turn is ADR 190) carry `Authorization: Bearer
  * BOARD_ACTIONS_TOKEN`, and after the CSRF checks above, in this order: 503 if
  * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
  * body may hold only `note` (else 400, `project` included: the project is the
  * console's, set here); the upstream body is rebuilt from it. A cancel sends `{}`.
+ * A turn's body crosses unchanged: the route validates `text` itself.
  * The token is in no response and no log.
  */
 async function forwardBoard(request: Request, url: URL, resolved: Resolution): Promise<Response> {
@@ -522,12 +564,10 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     );
   }
 
-  const read = await readBounded(request, MAX_BOARD_BODY_BYTES);
+  const cap = action === "turn" ? MAX_TURN_BODY_BYTES : MAX_BOARD_BODY_BYTES;
+  const read = await readBounded(request, cap);
   if (read === null) {
-    return jsonResponse(
-      { error: `A write to ${BOARD} takes at most ${MAX_BOARD_BODY_BYTES} bytes.` },
-      413,
-    );
+    return jsonResponse({ error: `A write to ${BOARD} takes at most ${cap} bytes.` }, 413);
   }
 
   let body: ArrayBuffer | string = read;
@@ -536,7 +576,7 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     headers["Authorization"] = `Bearer ${BOARD_ACTIONS_TOKEN}`;
     if (action === "cancel") {
       body = "{}";
-    } else {
+    } else if (action === "start") {
       const note = startNote(read);
       if (typeof note === "object" && note !== null) return jsonResponse(note, 400);
       body = JSON.stringify({ project: CONSOLE_PROJECT, note: note ?? null });

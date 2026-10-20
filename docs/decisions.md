@@ -10454,3 +10454,163 @@ credential (ADR 125).
   cancel path would each need it, and the record is a `start`.
 - A parallel creator in the board service: it would skip
   `_validate_start`, `_ONE_PER_TASK` and the lock.
+
+## ADR 190 — The dock's composer and *stop*: a seventh board pair with its own body cap, queued turns read from the action queue, and the dispatch line's links
+
+**Status:** accepted (T-114, 2026-10-20). The console half of
+`docs/plans/main-thread.md` step 5, on ADR 181's route and ADR 184's dock;
+the dispatch link `main-thread.md` *Decisions*, 5 and ADR 187 decision 7
+leave to a front task. Builds on ADR 136, ADR 157, ADR 163, ADR 173, ADR
+181, ADR 184 and ADR 187; supersedes nothing. ADR 184 decision 9 (no
+composer) is what this one ends.
+
+**Context.** The dock reads a thread's log and says it is read-only. The
+board service queues a turn at `POST /api/threads/<id>/turns` (ADR 181)
+behind the actions bearer, and a turn is stopped by the cancel route with
+its action id. The log has no line for a turn until the worker claims it
+and writes `turn_start` (ADR 173, 4), so a queued message is not in the
+log at all; it is in the action queue, which `GET /api/actions` serves
+whole for `pending` and `claimed`, `params` included. The forward caps a
+board write at `MAX_BOARD_BODY_BYTES = 64 KiB`, and the route takes up to
+`MAX_TURN_TEXT_CHARS = 20_000` characters, counted by Python's `len`,
+which is code points.
+
+**Decision.**
+
+1. *The forward's seventh pair.* `POST /api/threads/<id>/turns` goes to the
+   board service's same path, matched in `boardTarget` before the read-only
+   check like the six of ADR 136 and ADR 157, with `forwardBoard`'s CSRF
+   checks (415, then 403 for `Sec-Fetch-Site`, then 403 for `Origin`) and
+   the actions bearer: 503 naming `BOARD_ACTIONS_TOKEN` when it is unset.
+   No `CONSOLE_PROJECT` is needed: a turn's project is the thread's (ADR
+   181, 1). The id is decoded (an undecodable one is a 404, as for the
+   others) and must then be `main` or match
+   `th-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}` — `dispatcher/threads.py`'s
+   `MAIN_ID` and `_ORDINARY_ID`, written again in TypeScript — or the
+   console answers 404 naming the path, and nothing crosses. It is
+   re-encoded into the target as the task ids are. Every other method on
+   the path keeps its answer: a `GET` is the whitelist's 404, any other
+   write the read-only 405. A `POST` with an id the harness does not make,
+   which was the read-only 405, is now that 404. The body crosses
+   unchanged under the console's `Content-Type`, because the route already
+   refuses an unknown key, a missing or blank `text` and a long one with
+   its own 400 (ADR 181, 3), and the forward checking them again would be
+   a second copy of the route's rules.
+2. *The body cap.* The pair is read against `MAX_TURN_BODY_BYTES = 128 *
+   1024`, not `MAX_BOARD_BODY_BYTES`, because the largest text the route
+   takes does not fit 64 KiB once encoded. The composer sends
+   `JSON.stringify({text})`: one code point is at most six bytes there —
+   `\u0001`-style escapes for the control characters JSON has no short
+   escape for, and a lone surrogate, which `JSON.stringify` writes as
+   `\udXXX` and Python decodes as one code point; a quote or a backslash
+   is two bytes, any other BMP character at most three, an astral one four
+   bytes for one code point. So 20,000 characters is at most 120,000
+   bytes, plus the 11 of `{"text":""}`, which is 120,011, under 131,072.
+   The other six pairs keep 64 KiB. The console never answers 413 for a
+   text the route would take; a text the route would refuse for length is
+   its 400, shown in the dock (5). The composer does not count characters
+   itself: the route is the one place the limit is enforced, and the dock
+   shows its refusal.
+3. *What the dock reads.* Besides `/api/threads` and the log (ADR 184), the
+   dock reads `actionQueueQuery`, the Board's `["action-queue"]` query
+   (`limit=1`, polled every `POLL_MS`), and takes from `pending` and
+   `claimed` the records with `kind` `turn` and `params.thread` equal to
+   the selected thread's id, oldest `created_at` first.
+   - *Queued.* Each such record whose `id` no `turn_start` in the log
+     carries as `action` is drawn after the history, as the person's
+     message (`params.text`) marked *queued* (pending) or *starting*
+     (claimed), each with its own *Cancel*. A record the log already
+     shows is not drawn twice; once the worker writes `turn_start`, the
+     history draws it as ADR 184 does.
+   - *Running.* `mapThread` keeps the `turn_start`'s `action` on the
+     turn it opens; a turn still open (*running…*) with an `action` gets a
+     *Stop* button on its status line. An open turn without one (a log
+     older than ADR 173's format) gets none.
+   - *Stopping.* While a `cancel` record in `pending` or `claimed` has
+     `params.target` equal to a turn's id, that turn's button reads
+     *stopping…* and is disabled. The worker's `turn_end` (`cancelled`) or
+     the record leaving the queue ends it; nothing is held in the dock's
+     own state.
+   - *The worker.* When the queue's `worker.stale` is true, one line above
+     the composer says the worker is not running, so a queued message
+     waits. A failed queue read is one line saying so, and the composer
+     still sends.
+4. *Stop is `cancelAction`.* *Stop* and *Cancel* call
+   `cancelActionMutation` with the turn's action id: the same
+   `POST /api/actions/<id>/cancel` the Queue screen uses (ADR 163), which
+   kills a claimed turn and cancels a pending one (ADR 173, 8). No dialog:
+   the Queue screen's dialog guards a start, a whole cycle; a turn the
+   person is watching is stopped with one click, and the turn above it
+   is kept. Both turns can be stopped: each has its own button. A cancel
+   the board service refuses (no token, the 503; an unreachable service)
+   shows in the dock beside the composer's error, by the same rule as 5. A
+   turn that finished before the cancel reached it is not a refusal: the
+   cancel is queued and the worker ends it with the target's status (ADR
+   142, 7), and the history already shows how the turn ended.
+5. *The composer.* Under the history: a textarea and a *Send* button.
+   `Ctrl`+`Enter` or `⌘`+`Enter` sends; `Enter` is a new line. *Send* is
+   disabled while the text is blank or only whitespace and while a send is
+   in flight. It calls a new `sendTurn(threadId, text)` in `client.ts`
+   (`readBare`, `POST /api/threads/<id>/turns`, body `{text}`, answering
+   the created `ActionRecord`), through a `sendTurnMutation` in
+   `queries.ts` whose `onSettled` refetches `["action-queue"]`, so the
+   queued message is drawn by 3 as soon as the send settles. On success the
+   text is cleared. On a refusal the text stays, and the error is one line
+   above the composer: the `ApiError`'s message, which for a board-service
+   refusal is the route's own (`text is longer than 20000 characters`,
+   `thread … is archived`, the 503 naming `BOARD_ACTIONS_TOKEN`), until
+   the next send or a change of thread. A message mid-turn is sent the
+   same way and queues (ADR 181, 5); the composer is never disabled
+   because a turn runs.
+6. *The draft.* The unsent text is kept per thread id in the dock's own
+   state, so switching the selector neither loses a draft nor sends it to
+   the other thread. It is not written to browser storage: the dock
+   closing loses it, which is what closing a box does.
+7. *Archived threads.* A thread whose `status` is `archived` gets no
+   textarea and no *Send*: one line says the thread is archived and takes
+   no new turn. Its queued records, if any, still show with *Cancel*. With
+   no thread at all there is no composer either; the no-`main` notice
+   says that opening a thread is the board service's `POST /api/threads`
+   (ADR 170), which the console does not forward yet.
+8. *The dispatch line.* In *Text and commands*, a `tool_use` whose name
+   ends in `__task_start` (`mcp__board__task_start`, ADR 187) and whose
+   `tool_result` is not an error and parses as a JSON object with string
+   `id` and `task_id` is a dispatch: `mapThread` gives the tool item a
+   `dispatch: {actionId, taskId}`, and the line shows two links, the task
+   (`/tasks/$taskId`) and the action id (`/queue`, which lists it; the
+   Queue screen has no per-action anchor). Both are TanStack `Link`s, so
+   following one keeps the dock open; a result that does not parse, or an
+   error, is the plain tool line ADR 184 draws.
+9. *The notice.* ADR 184's read-only banner is removed, and the dock's
+   module comment, `client.ts`'s and `forward.ts`'s say what this ADR adds:
+   seven board pairs, the turn pair's cap, and the turn's bearer.
+
+**Consequences.**
+- A queued message shows only while the action queue answers; a turn the
+  worker has started shows from the log either way.
+- Two people on two consoles see each other's queued messages: the queue
+  is hive-wide, and so is the thread.
+- Stopping a turn throws away the text the model was writing; the
+  history keeps what the log already has, ended *cancelled*.
+- The dock's tests mount `ChatPanel` under a router where a dispatch line
+  is drawn, because a `Link` needs one.
+- *What seeds a new session* and *Talk about this task*, which the plan
+  also puts at step 5, are not built here: both need a write that makes a
+  thread or a session, which no route offers to the console. Step 5 is
+  marked built for the composer and *stop*, with those two named open.
+
+**Ruled out.**
+- Counting characters in the composer against a copy of
+  `MAX_TURN_TEXT_CHARS`: a second copy of a limit the route enforces, and
+  the cap above is what keeps the console from refusing first.
+- Raising `MAX_BOARD_BODY_BYTES` for every pair: the six other writes
+  have no text that large.
+- Rebuilding the body in the forward, as the start's is (ADR 157): the
+  start's body is rebuilt because the project is the console's; a turn's
+  body has nothing of the console's to add.
+- A new api route for a thread's queued turns: the action queue already
+  serves them.
+- Drawing a sent message from the mutation's answer until the queue
+  refetches: the refetch is awaited before the send settles, so there is
+  no gap to fill.
+- Storing the draft in `localStorage`: allowed, but nothing asks for it.

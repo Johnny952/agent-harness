@@ -1,30 +1,41 @@
 /**
- * The chat dock: the harness's threads, read-only (`docs/decisions.md` ADR 184,
- * step 4 of `docs/plans/main-thread.md`).
+ * The chat dock: the harness's threads (`docs/decisions.md` ADR 184, step 4 of
+ * `docs/plans/main-thread.md`), with the composer and *stop* (ADR 190, step 5).
  *
  * The selector lists `GET /api/threads` with `main` first; the history is the
  * selected thread's log, every segment of it in one scroll, read by
  * `useThreadEvents` and mapped by `lib/thread.ts`. The switch picks the *Text* or
  * the *Text and commands* view and is remembered in this browser.
  *
- * There is no composer and no stop button on purpose: sending a turn and
- * stopping one are step 5's, through the board service, and the dock says so
- * rather than drawing a box that sends nowhere (`docs/ui.md` *A region with no
- * route says which route, and when*).
+ * The composer sends `POST /api/threads/<id>/turns`; a message sent mid-turn
+ * queues. A queued turn is not in the log until the worker claims it, so the dock
+ * draws it from the action queue (`["action-queue"]`, shared with the Board)
+ * after the history. *Stop* on a running turn and *Cancel* on a queued one are
+ * both `cancelAction`. An archived thread has no composer. The unsent text is
+ * kept per thread in this component's state only.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { ChevronRight, Wrench, X } from "lucide-react";
-import { threadsQuery } from "@/lib/api/queries";
+import {
+  actionQueueQuery,
+  cancelActionMutation,
+  sendTurnMutation,
+  threadsQuery,
+} from "@/lib/api/queries";
 import type { Thread } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 import { formatClock } from "@/lib/format";
 import {
   mapThread,
   orderThreads,
+  queuedTurns,
   readStoredView,
+  stoppingIds,
   storeView,
   threadMeter,
+  type QueuedTurn,
   type ThreadItem,
   type ThreadMeter,
   type ThreadView,
@@ -49,14 +60,62 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
   const meter = useMemo(() => threadMeter(events.rows), [events.rows]);
   const hasMain = threads.some((t) => t.id === "main");
 
+  const qc = useQueryClient();
+  const queue = useQuery(actionQueueQuery);
+  const queueData: unknown = queue.data?.data;
+  const queued = useMemo(
+    () => (thread ? queuedTurns(queueData, thread.id, events.rows) : []),
+    [queueData, thread, events.rows],
+  );
+  const stopping = useMemo(() => stoppingIds(queueData), [queueData]);
+  const workerStale =
+    typeof queueData === "object" &&
+    queueData !== null &&
+    (queueData as { worker?: { stale?: unknown } }).worker?.stale === true;
+
+  const send = useMutation(sendTurnMutation(qc));
+  const cancel = useMutation(cancelActionMutation(qc));
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // The last refusal, with the thread it was for: shown until the next send or a
+  // change of thread (ADR 190, 5).
+  const [problem, setProblem] = useState<{ threadId: string; message: string } | null>(null);
+  const draft = thread ? (drafts[thread.id] ?? "") : "";
+  const shownProblem = problem && thread && problem.threadId === thread.id ? problem.message : null;
+  const archived = thread?.status === "archived";
+
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     scrollRef.current?.scrollTo?.({ top: scrollRef.current.scrollHeight });
-  }, [items.length]);
+  }, [items.length, queued.length]);
 
   function choose(next: ThreadView) {
     setView(next);
     storeView(next);
+  }
+
+  function submit() {
+    if (!thread || send.isPending || !draft.trim()) return;
+    const id = thread.id;
+    const text = draft;
+    setProblem(null);
+    send.mutate(
+      { threadId: id, text },
+      {
+        // Cleared only if the person has not typed on since the send began.
+        onSuccess: () => setDrafts((d) => (d[id] === text ? { ...d, [id]: "" } : d)),
+        onError: (e) =>
+          setProblem({ threadId: id, message: e instanceof Error ? e.message : String(e) }),
+      },
+    );
+  }
+
+  function stop(actionId: string) {
+    if (!thread) return;
+    const id = thread.id;
+    cancel.mutate(actionId, {
+      onError: (e) =>
+        setProblem({ threadId: id, message: e instanceof Error ? e.message : String(e) }),
+    });
   }
 
   return (
@@ -66,7 +125,10 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
           aria-label="Thread"
           value={thread?.id ?? ""}
           disabled={threads.length === 0}
-          onChange={(e) => setChosen(e.target.value)}
+          onChange={(e) => {
+            setChosen(e.target.value);
+            setProblem(null);
+          }}
           className="mono min-w-0 flex-1 rounded-sm border border-border bg-surface-2 px-2 py-1 text-[11px]"
         >
           {threads.map((t) => (
@@ -86,15 +148,10 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
 
       {thread && <Header thread={thread} meter={meter} view={view} onView={choose} />}
 
-      <Banner tone="info">
-        Read-only. Sending a turn and stopping one land with step 5 of{" "}
-        <Mono>docs/plans/main-thread.md</Mono>, through the board service; this dock reads{" "}
-        <Mono>/api/threads</Mono> and the thread's log.
-      </Banner>
       {data && !hasMain && (
         <Banner tone="info">
-          No <Mono>main</Mono> thread yet. The board service opens it on the first request for it,
-          which this dock cannot make until step 5.
+          No <Mono>main</Mono> thread yet. The board service opens it with{" "}
+          <Mono>POST /api/threads</Mono>, which the console does not forward yet.
         </Banner>
       )}
       <WarningBanner warnings={[...(data?.warnings ?? []), ...events.warnings]} />
@@ -117,8 +174,62 @@ export function ChatPanel({ onClose, pollMs }: { onClose: () => void; pollMs?: n
           <p className="text-xs text-muted-foreground">No turn in this thread yet.</p>
         )}
         {items.map((item) => (
-          <Item key={item.key} item={item} />
+          <Item key={item.key} item={item} stopping={stopping} onStop={stop} />
         ))}
+        {queued.map((turn) => (
+          <QueuedItem key={turn.id} turn={turn} onCancel={stop} />
+        ))}
+      </div>
+
+      <div className="space-y-1.5 border-t border-border px-3 py-2">
+        {queue.isError && (
+          <p className="text-[11px] text-destructive">
+            The action queue did not answer, so queued messages are not shown.
+          </p>
+        )}
+        {workerStale && (
+          <p className="text-[11px] text-warning">
+            The worker is not running: a message you send waits in the queue until it is.
+          </p>
+        )}
+        {shownProblem && (
+          <p role="alert" className="whitespace-pre-wrap text-[11px] text-destructive">
+            {shownProblem}
+          </p>
+        )}
+        {thread && archived && (
+          <p className="text-[11px] text-muted-foreground">
+            This thread is archived and takes no new turn.
+          </p>
+        )}
+        {thread && !archived && (
+          <div className="flex items-end gap-2">
+            <textarea
+              aria-label="Message"
+              value={draft}
+              rows={3}
+              placeholder="Message this thread — Ctrl+Enter sends"
+              onChange={(e) => {
+                const next = e.target.value;
+                setDrafts((d) => ({ ...d, [thread.id]: next }));
+              }}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              className="min-w-0 flex-1 resize-none rounded-sm border border-border bg-surface-2 px-2 py-1 text-xs"
+            />
+            <button
+              onClick={submit}
+              disabled={!draft.trim() || send.isPending}
+              className="rounded-sm border border-border px-3 py-1 text-xs hover:bg-surface-2 disabled:opacity-50"
+            >
+              {send.isPending ? "Sending…" : "Send"}
+            </button>
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -184,7 +295,35 @@ function Header({
 
 const CHANGE_NAMES = { account: "account", model: "model", effort: "effort" } as const;
 
-function Item({ item }: { item: ThreadItem }) {
+/** A message sent and not yet in the log: pending or claimed in the action queue (ADR 190, 3). */
+function QueuedItem({ turn, onCancel }: { turn: QueuedTurn; onCancel: (id: string) => void }) {
+  return (
+    <div data-kind="queued" data-state={turn.state} className="text-xs leading-relaxed">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="label-xs">operator</span>
+        <span className="text-[10px] italic text-muted-foreground">{turn.state}</span>
+        <button
+          onClick={() => onCancel(turn.id)}
+          disabled={turn.stopping}
+          className="ml-auto rounded-sm border border-border px-1.5 py-0.5 text-[10px] hover:bg-surface-2 disabled:opacity-50"
+        >
+          {turn.stopping ? "stopping…" : "Cancel"}
+        </button>
+      </div>
+      <p className="whitespace-pre-wrap text-foreground/80">{turn.text}</p>
+    </div>
+  );
+}
+
+function Item({
+  item,
+  stopping,
+  onStop,
+}: {
+  item: ThreadItem;
+  stopping: Set<string>;
+  onStop: (actionId: string) => void;
+}) {
   switch (item.kind) {
     case "session":
       return (
@@ -234,7 +373,7 @@ function Item({ item }: { item: ThreadItem }) {
     case "tool":
       return <ToolCall item={item} />;
     case "turn":
-      return <TurnEnd item={item} />;
+      return <TurnEnd item={item} stopping={stopping} onStop={onStop} />;
     case "bad":
       return (
         <p data-kind="bad" className="text-[11px]">
@@ -258,7 +397,16 @@ const TURN_LABEL = {
   unclosed: "ended without a turn_end",
 } as const;
 
-function TurnEnd({ item }: { item: Extract<ThreadItem, { kind: "turn" }> }) {
+function TurnEnd({
+  item,
+  stopping,
+  onStop,
+}: {
+  item: Extract<ThreadItem, { kind: "turn" }>;
+  stopping: Set<string>;
+  onStop: (actionId: string) => void;
+}) {
+  const stoppable = item.status === "running" ? item.action : null;
   const bad =
     item.status === "failed" || item.status === "interrupted" || item.status === "unclosed";
   return (
@@ -276,6 +424,15 @@ function TurnEnd({ item }: { item: Extract<ThreadItem, { kind: "turn" }> }) {
         {item.at ? ` · ${formatClock(item.at)}` : ""}
         {item.costUsd !== null ? ` · $${item.costUsd.toFixed(2)}` : ""}
       </Mono>
+      {stoppable && (
+        <button
+          onClick={() => onStop(stoppable)}
+          disabled={stopping.has(stoppable)}
+          className="ml-2 rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-foreground hover:bg-surface-2 disabled:opacity-50"
+        >
+          {stopping.has(stoppable) ? "stopping…" : "Stop"}
+        </button>
+      )}
       {item.error && <p className="mt-0.5 whitespace-pre-wrap">{item.error}</p>}
     </div>
   );
@@ -303,6 +460,21 @@ function ToolCall({ item }: { item: Extract<ThreadItem, { kind: "tool" }> }) {
           <span className="ml-auto shrink-0 text-[10px] uppercase text-destructive">error</span>
         )}
       </button>
+      {item.dispatch && (
+        <p className="flex flex-wrap items-center gap-x-2 border-t border-border px-2 py-1 text-[10px] text-muted-foreground">
+          <span>queued</span>
+          <Link
+            to="/tasks/$taskId"
+            params={{ taskId: item.dispatch.taskId }}
+            className="mono underline hover:text-foreground"
+          >
+            {item.dispatch.taskId}
+          </Link>
+          <Link to="/queue" className="mono underline hover:text-foreground">
+            {item.dispatch.actionId}
+          </Link>
+        </p>
+      )}
       {open && (
         <pre className="mono max-h-64 overflow-auto whitespace-pre-wrap border-t border-border px-2 py-1.5 text-[10px] text-muted-foreground">
           {item.result ?? "no result recorded"}

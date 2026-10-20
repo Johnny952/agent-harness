@@ -187,6 +187,15 @@ export const threadsQuery = queryOptions({
   refetchInterval: POLL_MS,
 });
 
+/** `POST /api/threads/<id>/turns` (ADR 190). The queue refetches, settled either way, so the queued turn is drawn at once. */
+export const sendTurnMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["threads", "turn"],
+    mutationFn: ({ threadId, text }: { threadId: string; text: string }) =>
+      api.sendTurn(threadId, text),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["action-queue"] }),
+  });
+
 export const actionBackendQuery = queryOptions({
   queryKey: ["action-backend"],
   queryFn: () => api.pingActionBackend(),
