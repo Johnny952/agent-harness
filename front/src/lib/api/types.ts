@@ -585,6 +585,11 @@ export interface ActionQueue {
   };
 }
 
+/** `POST /api/threads/<id>/turns`: exactly `{text}`; the route refuses any other key (ADR 181, ADR 190). */
+export interface SendTurnBody {
+  text: string;
+}
+
 /** `POST /api/tasks/<id>/start`: exactly `{note}`, the forward refuses any other key (ADR 157). */
 export interface StartTaskBody {
   note: string | null;

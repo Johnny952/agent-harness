@@ -53,7 +53,9 @@
  * `docs/plans/main-thread.md`): `listThreads` reads `GET /api/threads` (ADR 177)
  * and `listThreadEvents` one thread's log, `GET /api/threads/<id>/events` (ADR
  * 180), both the api's envelope. They replaced the mock thread the dock drew
- * before; the writes that open a thread and send a turn are step 5's.
+ * before. `sendTurn` is the dock's one write, `POST /api/threads/<id>/turns`
+ * (ADR 190), bare like the others; the dock stops a turn with `cancelAction`. The
+ * writes that open a thread are not the console's yet.
  */
 import type {
   AcceptTaskBody,
@@ -62,6 +64,7 @@ import type {
   ActionQueue,
   ActionRecord,
   ApiResult,
+  SendTurnBody,
   CommandRequestState,
   CommandRequests,
   CommentTaskBody,
@@ -480,6 +483,19 @@ export function cancelAction(actionId: string): Promise<ActionRecord> {
 export function startTask(taskId: string, note: string | null): Promise<ActionRecord> {
   const body: StartTaskBody = { note };
   return readBare<ActionRecord>(`/api/tasks/${encodeURIComponent(taskId)}/start`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
+ * Queue a turn for a thread: `POST /api/threads/<id>/turns` with `{text}` (ADR 181,
+ * ADR 190). The answer is the queued `turn` action; a refusal (400, 404, 409, the
+ * 503 for an unset token) is an `ApiError` with the route's own message.
+ */
+export function sendTurn(threadId: string, text: string): Promise<ActionRecord> {
+  const body: SendTurnBody = { text };
+  return readBare<ActionRecord>(`/api/threads/${encodeURIComponent(threadId)}/turns`, {
     method: "POST",
     body,
   });

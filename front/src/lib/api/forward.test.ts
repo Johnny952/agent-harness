@@ -861,6 +861,111 @@ describe("the board-service action routes", () => {
   });
 });
 
+/** The seventh board pair (ADR 190): a turn for a thread. */
+describe("the board-service turn route", () => {
+  function post(path: string, body: string, headers = {}, method = "POST"): Request {
+    return get(path, {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  const HEADERS = { "Content-Type": "application/json", Authorization: "Bearer actions-token" };
+  const ORDINARY = "th-20261019T100000Z-abcdef";
+
+  it.each(["main", ORDINARY])(
+    "forwards a turn for %s with the bearer, body unchanged",
+    async (id) => {
+      const fetchMock = stubApi('{"id":"A-1"}', 201);
+      const body = '{"text":"hello"}';
+      const answer = await forwardApiRequest(post(`/api/threads/${id}/turns`, body));
+      expect(answer?.status).toBe(201);
+      expect(await answer!.text()).toBe('{"id":"A-1"}');
+      expect(target(fetchMock)).toBe(`${BOARD}/api/threads/${id}/turns`);
+      const init = fetchMock.mock.calls[0]![1]!;
+      expect(init.method).toBe("POST");
+      expect(init.headers).toEqual(HEADERS);
+      expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe(body);
+    },
+  );
+
+  it.each([400, 404, 409])("passes the route's %s and its message back", async (status) => {
+    stubApi('{"error":"nope"}', status);
+    const answer = await forwardApiRequest(post("/api/threads/main/turns", '{"text":"x"}'));
+    expect(answer?.status).toBe(status);
+    expect(await answer!.json()).toEqual({ error: "nope" });
+  });
+
+  it("answers the CSRF refusals first", async () => {
+    const fetchMock = stubApi();
+    const path = "/api/threads/main/turns";
+    expect(
+      (await forwardApiRequest(post(path, "{}", { "content-type": "text/plain" })))?.status,
+    ).toBe(415);
+    expect(
+      (await forwardApiRequest(post(path, "{}", { "sec-fetch-site": "cross-site" })))?.status,
+    ).toBe(403);
+    expect(
+      (await forwardApiRequest(post(path, "{}", { origin: "http://evil.test" })))?.status,
+    ).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["th-bogus", "main2", "MAIN", "%zz", "a%2Fb", "th-20261019T100000Z-ABCDEF"])(
+    "404s the id %s, sending nothing",
+    async (id) => {
+      const fetchMock = stubApi();
+      const answer = await forwardApiRequest(post(`/api/threads/${id}/turns`, '{"text":"x"}'));
+      expect(answer?.status).toBe(404);
+      expect(typeof (await answer!.json()).error).toBe("string");
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("leaves every other method on the path as it was", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/threads/main/turns")))?.status).toBe(404);
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      const answer = await forwardApiRequest(post("/api/threads/main/turns", "{}", {}, method));
+      expect(answer?.status).toBe(405);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards the largest text the route takes, and 413s a body over its cap", async () => {
+    // 20,000 code points that JSON writes in six bytes each: 120,011 bytes.
+    const largest = JSON.stringify({ text: "\u0001".repeat(20000) });
+    expect(new TextEncoder().encode(largest).byteLength).toBe(120011);
+    const fetchMock = stubApi('{"id":"A-1"}', 201);
+    expect((await forwardApiRequest(post("/api/threads/main/turns", largest)))?.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+
+    const none = stubApi();
+    const over = JSON.stringify({ text: "x".repeat(128 * 1024) });
+    const answer = await forwardApiRequest(post("/api/threads/main/turns", over));
+    expect(answer?.status).toBe(413);
+    expect((await answer!.json()).error).toContain("131072");
+    expect(none).not.toHaveBeenCalled();
+  });
+
+  it("keeps the other pairs at 64 KiB", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(
+      post("/api/actions/A-1/cancel", JSON.stringify({ x: "y".repeat(70 * 1024) })),
+    );
+    expect(answer?.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 /** ADR 157's two 503s, each under a second mock of `server-env.ts`. */
 describe("the action routes without their configuration", () => {
   async function configured(overrides: Record<string, unknown>) {
@@ -910,6 +1015,19 @@ describe("the action routes without their configuration", () => {
     expect(answer?.status).toBe(415);
     expect((await forward(post("/api/tasks/T-014/accept")))?.status).toBe(200);
     expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/T-014/accept`);
+  });
+
+  it("503s a turn without the token, and needs no CONSOLE_PROJECT", async () => {
+    const without = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    const answer = await without(post("/api/threads/main/turns"));
+    expect(answer?.status).toBe(503);
+    expect((await answer!.json()).error).toContain("BOARD_ACTIONS_TOKEN is not set");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const noProject = await configured({ CONSOLE_PROJECT: null });
+    expect((await noProject(post("/api/threads/main/turns")))?.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("503s a start without CONSOLE_PROJECT, but still forwards a cancel", async () => {

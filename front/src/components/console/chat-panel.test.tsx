@@ -1,11 +1,19 @@
 /**
  * The chat dock over a stubbed `/api/threads` and thread log (`docs/decisions.md`
- * ADR 184): the selector's order, the switch and its memory, the meter, the
- * read-only notice, and the cursor the log is polled from.
+ * ADR 184): the selector's order, the switch and its memory, the meter, and the
+ * cursor the log is polled from; and the composer, *stop* and the dispatch
+ * line's links (ADR 190).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  RouterContextProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import type { Thread } from "@/lib/api/types";
 import { VIEW_KEY, readStoredView, storeView } from "@/lib/thread";
 import { ChatPanel } from "./chat-panel";
@@ -82,17 +90,66 @@ function json(data: unknown) {
   });
 }
 
+const EMPTY_QUEUE = {
+  pending: [],
+  claimed: [],
+  done: [],
+  done_total: 0,
+  worker: { heartbeat: null, stale: false, stale_after_seconds: 30 },
+};
+
+function record(id: string, kind: string, params: unknown, created = "2026-10-20T10:00:00Z") {
+  return { id, kind, params, created_at: created, status: "pending" };
+}
+
+interface Extras {
+  queue?: unknown;
+  /** The answer to a `POST /api/threads/<id>/turns`; the default is a 201 record. */
+  turn?: () => Response;
+}
+
 /** Serves the thread list, and the log's rows past each request's `since`. */
-function serve(threads: Thread[], log: { n: number; event: unknown }[] = LOG) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+function serve(threads: Thread[], log: { n: number; event: unknown }[] = LOG, extras: Extras = {}) {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://console");
     if (url.pathname === "/api/threads") return json(threads);
     if (url.pathname.endsWith("/events")) {
       const since = Number(url.searchParams.get("since") ?? "0");
       return json(log.filter((r) => r.n > since));
     }
+    if (url.pathname === "/api/actions") return json(extras.queue ?? EMPTY_QUEUE);
+    if (init?.method === "POST" && url.pathname.endsWith("/turns")) {
+      return (
+        extras.turn?.() ??
+        new Response(JSON.stringify(record("A-new", "turn", {})), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    }
+    if (init?.method === "POST" && url.pathname.endsWith("/cancel")) {
+      return new Response(JSON.stringify(record("C-1", "cancel", {})), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    }
     return new Response("not found", { status: 404, headers: { "content-type": "text/html" } });
   });
+}
+
+function refusal(status: number, error: string) {
+  return () =>
+    new Response(JSON.stringify({ error }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+}
+
+/** The POSTs the dock made: `[path, parsed body]`. */
+function posts(fetch: ReturnType<typeof serve>) {
+  return fetch.mock.calls
+    .filter(([, init]) => init?.method === "POST")
+    .map(([u, init]) => [String(u), JSON.parse(String(init?.body))] as const);
 }
 
 function mount(pollMs = 60_000) {
@@ -103,6 +160,25 @@ function mount(pollMs = 60_000) {
     </QueryClientProvider>,
   );
 }
+
+/** The log of a turn the worker has claimed and not ended: `turn_start` with its action. */
+const RUNNING = [
+  {
+    n: 1,
+    event: {
+      type: "ia_harness",
+      event: "turn_start",
+      at: "2026-10-20T10:00:00+00:00",
+      action: "A-1",
+      actor: "operator",
+      text: "first",
+      account: "cuenta1",
+      model: "opus",
+      effort: "high",
+      session_id: null,
+    },
+  },
+];
 
 describe("the selector", () => {
   it("lists main first with account and model, and marks an archived thread", async () => {
@@ -136,14 +212,13 @@ describe("the selector", () => {
 });
 
 describe("the dock", () => {
-  it("is read-only and says which step brings the composer", async () => {
+  it("has a composer, and no Stop on a turn whose log line carries no action", async () => {
     serve([thread("main")]);
-    const { container } = mount();
-    expect(
-      await screen.findByText(/Read-only\. Sending a turn and stopping one land/),
-    ).toBeTruthy();
-    expect(container.querySelector("textarea")).toBeNull();
-    expect(screen.queryByRole("button", { name: /send|stop/i })).toBeNull();
+    mount();
+    expect(await screen.findByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(screen.queryByText(/Read-only/)).toBeNull();
+    await screen.findByText("Listing.");
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
   it("shows the context and cost from the result events", async () => {
@@ -200,6 +275,204 @@ describe("the switch", () => {
     });
     expect(readStoredView()).toBe("text");
     expect(() => storeView("commands")).not.toThrow();
+  });
+});
+
+describe("the composer (ADR 190)", () => {
+  async function type(text: string) {
+    const box = (await screen.findByRole("textbox", { name: "Message" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: text } });
+    return box;
+  }
+
+  it("keeps Send disabled while the text is blank", async () => {
+    serve([thread("main")]);
+    mount();
+    await type("   ");
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("sends {text} to the thread's turns route and clears on success", async () => {
+    const fetch = serve([thread("main")]);
+    mount();
+    const box = await type("hello there");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(posts(fetch)).toEqual([["/api/threads/main/turns", { text: "hello there" }]]),
+    );
+    await waitFor(() => expect(box.value).toBe(""));
+  });
+
+  it("sends on Ctrl+Enter and not on Enter", async () => {
+    const fetch = serve([thread("main")]);
+    mount();
+    const box = await type("go");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(posts(fetch)).toEqual([]);
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(posts(fetch)).toHaveLength(1));
+  });
+
+  it("sends while a turn runs, and draws the queued message from the queue", async () => {
+    const queue = {
+      ...EMPTY_QUEUE,
+      pending: [record("A-2", "turn", { thread: "main", text: "second message" })],
+    };
+    const fetch = serve([thread("main")], RUNNING, { queue });
+    mount();
+    await screen.findByText("first");
+    await type("second message");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(posts(fetch)).toHaveLength(1));
+    const queued = (await screen.findByText("second message", { selector: "p" })).closest(
+      '[data-kind="queued"]',
+    );
+    expect(queued?.getAttribute("data-state")).toBe("queued");
+  });
+
+  it("does not draw a queued record the log already shows", async () => {
+    const queue = {
+      ...EMPTY_QUEUE,
+      claimed: [record("A-1", "turn", { thread: "main", text: "first" })],
+    };
+    const { container } = (serve([thread("main")], RUNNING, { queue }), mount());
+    await screen.findByText("first");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(container.querySelector('[data-kind="queued"]')).toBeNull();
+  });
+
+  it.each([
+    [400, "text is longer than 20000 characters"],
+    [404, "no such thread"],
+    [409, "thread main is archived"],
+    [503, "BOARD_ACTIONS_TOKEN is not set"],
+  ])("shows a %s and keeps the text", async (status, message) => {
+    serve([thread("main")], LOG, { turn: refusal(status, message) });
+    mount();
+    const box = await type("do not lose me");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(message);
+    expect(box.value).toBe("do not lose me");
+  });
+
+  it("keeps a draft per thread and does not send it to the other one", async () => {
+    const fetch = serve([thread("main"), thread("t-1")]);
+    mount();
+    const box = await type("for main");
+    fireEvent.change(screen.getByRole("combobox", { name: "Thread" }), {
+      target: { value: "t-1" },
+    });
+    await waitFor(() => expect(box.value).toBe(""));
+    fireEvent.change(screen.getByRole("combobox", { name: "Thread" }), {
+      target: { value: "main" },
+    });
+    await waitFor(() => expect(box.value).toBe("for main"));
+    expect(posts(fetch)).toEqual([]);
+  });
+
+  it("gives an archived thread no composer", async () => {
+    serve([thread("main", { status: "archived" })]);
+    mount();
+    expect(await screen.findByText(/archived and takes no new turn/)).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+  });
+
+  it("says when the worker is not running", async () => {
+    const queue = { ...EMPTY_QUEUE, worker: { ...EMPTY_QUEUE.worker, stale: true } };
+    serve([thread("main")], LOG, { queue });
+    mount();
+    expect(await screen.findByText(/worker is not running/)).toBeTruthy();
+  });
+});
+
+describe("stop (ADR 190)", () => {
+  it("cancels the running turn by its action id", async () => {
+    const fetch = serve([thread("main")], RUNNING);
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(posts(fetch)).toEqual([["/api/actions/A-1/cancel", {}]]));
+  });
+
+  it("shows stopping… while a cancel for the turn is in the queue", async () => {
+    const queue = { ...EMPTY_QUEUE, pending: [record("C-1", "cancel", { target: "A-1" })] };
+    serve([thread("main")], RUNNING, { queue });
+    mount();
+    const button = (await screen.findByRole("button", {
+      name: "stopping…",
+    })) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+  });
+
+  it("cancels a queued turn by its own id, leaving the running one", async () => {
+    const queue = {
+      ...EMPTY_QUEUE,
+      pending: [record("A-2", "turn", { thread: "main", text: "wait for me" })],
+    };
+    const fetch = serve([thread("main")], RUNNING, { queue });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(posts(fetch)).toEqual([["/api/actions/A-2/cancel", {}]]));
+  });
+});
+
+describe("a dispatch line (ADR 190)", () => {
+  it("links to the task and to the queue", async () => {
+    window.localStorage.setItem(VIEW_KEY, "commands");
+    const log = [
+      LOG[0]!,
+      {
+        n: 2,
+        event: {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tu-9",
+                name: "mcp__board__task_start",
+                input: { task_id: "T-114" },
+              },
+            ],
+          },
+        },
+      },
+      {
+        n: 3,
+        event: {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tu-9",
+                content: JSON.stringify({ id: "A-9", task_id: "T-114" }),
+              },
+            ],
+          },
+        },
+      },
+    ];
+    serve([thread("main")], log);
+    const root = createRootRoute();
+    const router = createRouter({
+      routeTree: root.addChildren([
+        createRoute({ getParentRoute: () => root, path: "/tasks/$taskId" }),
+        createRoute({ getParentRoute: () => root, path: "/queue" }),
+      ]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <RouterContextProvider router={router}>
+          <ChatPanel onClose={() => {}} pollMs={60_000} />
+        </RouterContextProvider>
+      </QueryClientProvider>,
+    );
+    const task = await screen.findByRole("link", { name: "T-114" });
+    expect(task.getAttribute("href")).toBe("/tasks/T-114");
+    expect(screen.getByRole("link", { name: "A-9" }).getAttribute("href")).toBe("/queue");
   });
 });
 

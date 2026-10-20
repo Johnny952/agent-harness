@@ -89,6 +89,8 @@ export type ThreadItem =
       result: string | null;
       isError: boolean;
       denied: boolean;
+      /** The queued action and task when this is a `task_start` that succeeded (ADR 190, 8). */
+      dispatch: { actionId: string; taskId: string } | null;
     }
   | {
       kind: "turn";
@@ -97,6 +99,8 @@ export type ThreadItem =
       at: string | null;
       error: string | null;
       costUsd: number | null;
+      /** The action that ran this turn, from `turn_start.action` (ADR 173); what *Stop* cancels. */
+      action: string | null;
     }
   /** A row that could not be read. `got` is what arrived, for `Malformed`. */
   | { kind: "bad"; key: string; n: number; reason: string; got: unknown; line: string | null };
@@ -148,6 +152,15 @@ interface Json {
   cache_read_input_tokens?: unknown;
   cache_creation_input_tokens?: unknown;
   contextWindow?: unknown;
+  action?: unknown;
+  task_id?: unknown;
+  pending?: unknown;
+  claimed?: unknown;
+  kind?: unknown;
+  params?: unknown;
+  target?: unknown;
+  thread?: unknown;
+  created_at?: unknown;
 }
 
 const TURN_STATUSES = new Set(["done", "failed", "cancelled", "interrupted"]);
@@ -197,6 +210,27 @@ function resultText(content: unknown): string {
     .join("\n");
 }
 
+/**
+ * The record a `…__task_start` call created, when its result says so (ADR 187,
+ * ADR 190 part 8): not an error, a JSON object with string `id` and `task_id`.
+ * Anything else is `null` and the tool draws as a plain line.
+ */
+function dispatchOf(
+  name: string,
+  result: { text: string; isError: boolean } | undefined,
+): { actionId: string; taskId: string } | null {
+  if (!name.endsWith("__task_start") || !result || result.isError) return null;
+  try {
+    const record: unknown = JSON.parse(result.text);
+    if (!isObject(record)) return null;
+    const actionId = str(record.id);
+    const taskId = str(record.task_id);
+    return actionId && taskId ? { actionId, taskId } : null;
+  } catch {
+    return null;
+  }
+}
+
 function runtimeOf(event: Json): ThreadRuntime {
   return {
     account: str(event.account) ?? "",
@@ -241,15 +275,28 @@ export function mapThread(rows: Row[], view: ThreadView): ThreadItem[] {
   const items: ThreadItem[] = [];
 
   let turns = 0;
-  let open: { n: number; at: string | null; error: string | null; cost: number | null } | null =
-    null;
+  let open: {
+    n: number;
+    at: string | null;
+    error: string | null;
+    cost: number | null;
+    action: string | null;
+  } | null = null;
   let runtime: ThreadRuntime | null = null;
   // The session the turn above ended on, which the next turn resumes or does not.
   let session: string | null = null;
 
   const close = (status: TurnStatus, key: string, at: string | null, error: string | null) => {
     if (!open) return;
-    items.push({ kind: "turn", key, status, at, error: error ?? open.error, costUsd: open.cost });
+    items.push({
+      kind: "turn",
+      key,
+      status,
+      at,
+      error: error ?? open.error,
+      costUsd: open.cost,
+      action: open.action,
+    });
     open = null;
   };
 
@@ -287,7 +334,7 @@ export function mapThread(rows: Row[], view: ThreadView): ThreadItem[] {
         runtime = next;
         session = resumed;
         turns += 1;
-        open = { n, at, error: null, cost: null };
+        open = { n, at, error: null, cost: null, action: str(event.action) };
         items.push({
           kind: "user",
           key: `${n}`,
@@ -364,10 +411,12 @@ export function mapThread(rows: Row[], view: ThreadView): ThreadItem[] {
         } else if (block.type === "tool_use" && view === "commands") {
           const id = str(block.id);
           const result = id ? results.get(id) : undefined;
+          const name = str(block.name) ?? "tool";
           items.push({
             kind: "tool",
             key: `${n}-${i}`,
-            name: str(block.name) ?? "tool",
+            name,
+            dispatch: dispatchOf(name, result),
             summary: summarizeInput(block.input),
             input: block.input,
             result: result?.text ?? null,
@@ -383,6 +432,73 @@ export function mapThread(rows: Row[], view: ThreadView): ThreadItem[] {
 
   if (open) close("running", `${(open as { n: number }).n}-running`, null, null);
   return items;
+}
+
+/** A turn the worker has not yet written to the log: a `turn` action in the queue (ADR 190, 3). */
+export interface QueuedTurn {
+  id: string;
+  text: string;
+  /** `queued` while pending, `starting` once the worker has claimed it. */
+  state: "queued" | "starting";
+  /** A cancel for it is already in the queue. */
+  stopping: boolean;
+}
+
+function recordsOf(list: unknown): Json[] {
+  return Array.isArray(list) ? list.filter(isObject) : [];
+}
+
+/**
+ * The action ids a pending or claimed `cancel` targets: what the dock shows as
+ * *stopping…*. Every served field is guarded, since the queue's shape is the
+ * api's and not this module's.
+ */
+export function stoppingIds(queue: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (!isObject(queue)) return ids;
+  for (const record of [...recordsOf(queue.pending), ...recordsOf(queue.claimed)]) {
+    if (record.kind !== "cancel" || !isObject(record.params)) continue;
+    const target = str(record.params.target);
+    if (target) ids.add(target);
+  }
+  return ids;
+}
+
+/**
+ * The thread's `turn` actions that are pending or claimed and that no
+ * `turn_start` in the log carries yet, oldest first. Once the worker writes
+ * `turn_start` the history draws the turn and this drops it.
+ */
+export function queuedTurns(queue: unknown, threadId: string, rows: Row[]): QueuedTurn[] {
+  if (!isObject(queue)) return [];
+  const inLog = new Set<string>();
+  for (const { event } of rows) {
+    if (isObject(event) && event.type === "ia_harness" && event.event === "turn_start") {
+      const action = str(event.action);
+      if (action) inLog.add(action);
+    }
+  }
+  const stopping = stoppingIds(queue);
+  const out: (QueuedTurn & { createdAt: string })[] = [];
+  for (const [state, list] of [
+    ["queued", queue.pending],
+    ["starting", queue.claimed],
+  ] as const) {
+    for (const record of recordsOf(list)) {
+      const id = str(record.id);
+      if (!id || record.kind !== "turn" || inLog.has(id) || !isObject(record.params)) continue;
+      if (record.params.thread !== threadId) continue;
+      out.push({
+        id,
+        text: str(record.params.text) ?? "",
+        state,
+        stopping: stopping.has(id),
+        createdAt: str(record.created_at) ?? "",
+      });
+    }
+  }
+  out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return out.map((t) => ({ id: t.id, text: t.text, state: t.state, stopping: t.stopping }));
 }
 
 /**
