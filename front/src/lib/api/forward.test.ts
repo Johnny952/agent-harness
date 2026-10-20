@@ -1113,6 +1113,146 @@ describe("the board-service thread records", () => {
   });
 });
 
+/** The tenth and eleventh board pairs (ADR 203, ADR NNN): making and changing a project record. */
+describe("the board-service project records", () => {
+  function write(path: string, body: string, method = "POST", headers = {}): Request {
+    return get(path, {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  const HEADERS = { "Content-Type": "application/json", Authorization: "Bearer actions-token" };
+
+  function sent(fetchMock: ReturnType<typeof stubApi>) {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0]![1]!;
+    return {
+      method: init.method,
+      headers: init.headers,
+      body: new TextDecoder().decode(init.body as ArrayBuffer),
+    };
+  }
+
+  it("forwards a create with the bearer, not the browser's, body unchanged", async () => {
+    const record = '{"slug":"demo","status":"active"}';
+    const fetchMock = stubApi(record, 201);
+    const body = '{"slug":"demo","title":"Demo","settings":{"merge_on_done":false}}';
+    const answer = await forwardApiRequest(write("/api/projects", body));
+    expect(answer?.status).toBe(201);
+    expect(await answer!.text()).toBe(record);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/projects`);
+    expect(sent(fetchMock)).toEqual({ method: "POST", headers: HEADERS, body });
+  });
+
+  it.each(["demo", "ia-harness", "a.b_c-1", "X9"])(
+    "forwards a PATCH of %s with the bearer, body unchanged",
+    async (slug) => {
+      const fetchMock = stubApi('{"slug":"x"}', 200);
+      const body = '{"status":"archived"}';
+      const answer = await forwardApiRequest(write(`/api/projects/${slug}`, body, "PATCH"));
+      expect(answer?.status).toBe(200);
+      expect(target(fetchMock)).toBe(`${BOARD}/api/projects/${slug}`);
+      expect(sent(fetchMock)).toEqual({ method: "PATCH", headers: HEADERS, body });
+    },
+  );
+
+  it.each([".hidden", "-x", "_x", "a%20b", "%zz", "a%2Fb", "..%2Fx", "a%00", "a%3Fb"])(
+    "404s a PATCH of the slug %s, sending nothing",
+    async (slug) => {
+      const fetchMock = stubApi();
+      const answer = await forwardApiRequest(write(`/api/projects/${slug}`, "{}", "PATCH"));
+      expect(answer?.status).toBe(404);
+      expect(typeof (await answer!.json()).error).toBe("string");
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([400, 401, 404, 409, 503])(
+    "passes the route's %s and its message back",
+    async (status) => {
+      for (const request of [
+        write("/api/projects", '{"slug":"demo"}'),
+        write("/api/projects/demo", '{"title":"x"}', "PATCH"),
+      ]) {
+        stubApi('{"error":"nope"}', status);
+        const answer = await forwardApiRequest(request);
+        expect(answer?.status).toBe(status);
+        expect(await answer!.json()).toEqual({ error: "nope" });
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it.each([
+    ["POST", "/api/projects"],
+    ["PATCH", "/api/projects/demo"],
+  ])("answers the CSRF refusals on %s %s first", async (method, path) => {
+    const fetchMock = stubApi();
+    expect(
+      (await forwardApiRequest(write(path, "{}", method, { "content-type": "text/plain" })))
+        ?.status,
+    ).toBe(415);
+    expect(
+      (await forwardApiRequest(write(path, "{}", method, { "sec-fetch-site": "cross-site" })))
+        ?.status,
+    ).toBe(403);
+    expect(
+      (await forwardApiRequest(write(path, "{}", method, { origin: "http://evil.test" })))?.status,
+    ).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves every other method on the paths as it was", async () => {
+    const fetchMock = stubApi();
+    expect((await forwardApiRequest(get("/api/projects")))?.status).toBe(404);
+    expect((await forwardApiRequest(get("/api/projects/demo")))?.status).toBe(404);
+    for (const [method, path] of [
+      ["PUT", "/api/projects/demo"],
+      ["DELETE", "/api/projects/demo"],
+      ["POST", "/api/projects/demo"],
+      ["PATCH", "/api/projects"],
+      ["DELETE", "/api/projects"],
+    ] as const) {
+      const answer = await forwardApiRequest(write(path, "{}", method));
+      expect(answer?.status, `${method} ${path}`).toBe(405);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("413s a record body over 64 KiB", async () => {
+    const fetchMock = stubApi();
+    const answer = await forwardApiRequest(
+      write("/api/projects", JSON.stringify({ slug: "demo", title: "y".repeat(70 * 1024) })),
+    );
+    expect(answer?.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("puts the token in no response", async () => {
+    const answers: Response[] = [];
+    stubApi('{"slug":"demo"}', 201);
+    answers.push((await forwardApiRequest(write("/api/projects", '{"slug":"demo"}')))!);
+    answers.push((await forwardApiRequest(write("/api/projects/.x", "{}", "PATCH")))!);
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    answers.push((await forwardApiRequest(write("/api/projects/demo", "{}", "PATCH")))!);
+    expect(answers.map((a) => a.status)).toEqual([201, 404, 502]);
+    for (const answer of answers) {
+      for (const [, value] of answer.headers) expect(value).not.toContain("actions-token");
+      expect(await answer.text()).not.toContain("actions-token");
+    }
+  });
+});
+
 /** ADR 157's two 503s, each under a second mock of `server-env.ts`. */
 describe("the action routes without their configuration", () => {
   async function configured(overrides: Record<string, unknown>) {
@@ -1191,6 +1331,30 @@ describe("the action routes without their configuration", () => {
     const noProject = await configured({ CONSOLE_PROJECT: null });
     expect((await noProject(post("/api/threads/main/turns")))?.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("503s the project-record writes without the token, and needs no CONSOLE_PROJECT", async () => {
+    const without = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    const patch = () =>
+      get("/api/projects/demo", {
+        method: "PATCH",
+        body: "{}",
+        headers: { "content-type": "application/json" },
+      });
+    for (const request of [post("/api/projects"), patch()]) {
+      const answer = await without(request);
+      expect(answer?.status).toBe(503);
+      const error = (await answer!.json()).error;
+      expect(error).toContain("BOARD_ACTIONS_TOKEN is not set");
+      expect(error).toContain("project routes");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const noProject = await configured({ CONSOLE_PROJECT: null });
+    expect((await noProject(post("/api/projects")))?.status).toBe(200);
+    expect((await noProject(patch()))?.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("503s a start without CONSOLE_PROJECT, but still forwards a cancel", async () => {

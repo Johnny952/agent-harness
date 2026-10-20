@@ -60,6 +60,12 @@
  * too. `listTaskEvents` reads a task's hook events, `GET /api/tasks/<id>/events`
  * (ADR 197), for the dock's execution view: the api's envelope, read from a
  * cursor like the thread log.
+ *
+ * **Two writes for the project records** (`docs/decisions.md` ADR 203, ADR NNN):
+ * `createProject` (`POST /api/projects`) and `changeProject` (`PATCH
+ * /api/projects/<slug>`), bare like the others. The forward adds the board
+ * service's bearer on the server; nothing here carries it. No screen calls them
+ * yet.
  */
 import type {
   AcceptTaskBody,
@@ -70,6 +76,9 @@ import type {
   ApiResult,
   SendTurnBody,
   CreateThreadBody,
+  ChangeProjectBody,
+  CreateProjectBody,
+  ProjectRecord,
   UpdateThreadBody,
   CommandRequestState,
   CommandRequests,
@@ -519,6 +528,27 @@ export function createThread(body: CreateThreadBody): Promise<Thread> {
 /** Change a thread: `PATCH /api/threads/<id>` (ADR 195). The answer is the changed record. */
 export function updateThread(threadId: string, body: UpdateThreadBody): Promise<Thread> {
   return readBare<Thread>(`/api/threads/${encodeURIComponent(threadId)}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+/**
+ * Make a project record: `POST /api/projects` (ADR 203, ADR NNN). The answer is
+ * the new record (201); a refusal (400 for a bad value, 409 for a slug already
+ * recorded, 503) is an `ApiError` with the service's own message.
+ */
+export function createProject(body: CreateProjectBody): Promise<ProjectRecord> {
+  return readBare<ProjectRecord>("/api/projects", { method: "POST", body });
+}
+
+/**
+ * Change a project record: `PATCH /api/projects/<slug>` (ADR 203, ADR NNN). The
+ * answer is the changed record; a refusal (400 for a bad value, 404 for a slug
+ * with no record, 409 for a record that does not read, 503) is an `ApiError`.
+ */
+export function changeProject(slug: string, body: ChangeProjectBody): Promise<ProjectRecord> {
+  return readBare<ProjectRecord>(`/api/projects/${encodeURIComponent(slug)}`, {
     method: "PATCH",
     body,
   });
