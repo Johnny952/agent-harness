@@ -10,6 +10,9 @@ dependencies = [
     "pyyaml>=6.0",
     "flask>=3.0",
     "requests>=2.31",
+    # Web Push for the board service's notifier (ADR 229). Imported in the
+    # send alone, so a host without it only has push off.
+    "pywebpush>=2.0",
     # MarkupSafe is not pinned here any more: the retired Jinja board was the one
     # service that imported `escape` directly, and nothing left in this project
     # renders a template (`docs/decisions.md` ADR 32). Flask still brings it in

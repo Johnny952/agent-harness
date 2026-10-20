@@ -12825,3 +12825,76 @@ notify every end except a cancel.
   for the dock means `routeTree.gen.ts` and a second way to show one thread.
 - Keeping `?thread=` in the url: it would reopen a dock the person closed.
 - Notifying a cancel: the person who cancelled it already knows.
+
+## ADR 229 — The board service pushes each notification over Web Push, with its key from a path
+
+**Status:** accepted (2026-10-20). Built by a subagent of the operator's session.
+
+**Context.** Step 3 of `docs/plans/notifications.md`: the notifier, and the
+endpoint that stores a browser's push subscription. The record (ADR 221) and
+the polled inbox (ADR 225) exist; nothing reaches a locked phone. The plan
+left open where the notifier runs, and asked for the server's Web Push
+library and the VAPID key's location as their own decisions. The operator
+chose pywebpush, a key read from a config path like the git credential, and
+push off rather than an error when the key is missing.
+
+**Decision.**
+1. `dispatcher/push.py` holds the store, the key and the notifier.
+   pywebpush is declared in `pyproject.toml` and imported only inside
+   `webpush_send`; `cryptography` derives the public key. A host without
+   either has push off, nothing else.
+2. The VAPID private key is a PEM file at `push_vapid_key_path` (default
+   `/run/secrets/vapid-private.pem`, a read-only mount of the host's
+   `.data/credentials/vapid-private.pem`). The contact is `push_subject`
+   (default `mailto:admin@localhost`). A missing key logs once and turns
+   push off; it never raises.
+3. `GET /api/push/key` serves the public key, base64url, open because it is
+   public: 404 with no key or a bad one, 400 to a query.
+4. `POST /api/push/subscriptions` and `DELETE /api/push/subscriptions` take
+   the bearer and the guards of every other write (`_bearer_guards`, 403 /
+   503 / 401 / 400). A subscription is checked whole: an https endpoint with
+   a host and no credentials, at most 2048 chars; `keys.p256dh` a 65-byte
+   uncompressed point; `keys.auth` 16 bytes; only `expirationTime` beside.
+   Anything else is 400. The same endpoint replaces its entry (200, else
+   201); past 50 entries a new one is 409. A delete names the endpoint: 404
+   when it is not stored.
+5. The store is `<hive root>/push-subscriptions.json`, beside
+   `notifications.jsonl`, written whole (temp file and rename, mode 0600)
+   under a flock for each read-modify-write.
+6. The notifier is a daemon thread the board service's `serve` starts, the
+   periodic idiom, every five seconds; `create_app` only builds it, so a
+   test's app runs no thread. A pass never raises. It reads
+   `notifications.jsonl` past a cursor in `<hive root>/push-cursor.json`, up
+   to the last newline. The first run, or a file shorter than the cursor,
+   starts at the end: no history is pushed.
+7. Kinds off by default (`phase_failed`, `turn_finished`) are not pushed
+   until step 5's settings exist. A record is its own push, tagged
+   `task:`, `thread:` or `account:<id>`, so a newer state replaces the older
+   one on the device. When records of one kind were pushed within the last
+   five minutes, or several arrive at once, they go as one push, "3 tasks
+   awaiting review", tagged `kind:<kind>` and opening `/notifications`.
+8. The payload is `{id, kind, title, url, tag}`, the record's own title and
+   url, nothing more. The `Topic` header is a hash of the tag; `Urgency` is
+   high for kinds that need the person, normal otherwise; the TTL is a day.
+9. A subscription its push service answers 404 or 410 is dropped from the
+   store. Any other failure is logged and the subscription kept. Delivery is
+   best effort: the cursor moves on, and the inbox stays the record.
+
+**Consequences.**
+- The board-service image gets pywebpush through its `pip install .` on the
+  next build; no Dockerfile change.
+- Push needs the key mounted into the board service, a compose line this
+  change does not write: `docker/compose/**` is the operator's.
+- Without a subscribed browser nothing is sent; step 4 (the service worker
+  and the console's forwarding routes) is what subscribes one.
+- One person, one store: subscriptions per person come with the users store.
+
+**Ruled out.**
+- A notifier service of its own, or the worker: the worker sits behind a
+  profile and holds the docker socket; the board service is always up and
+  already owns the hive's writes.
+- Quiet hours now: step 5, with the per-kind settings.
+- Pushing the history on a first run: a phone would light up with every
+  record ever written.
+- Retrying a failed send: the inbox already holds the record, and a retry
+  queue is a second store to keep.

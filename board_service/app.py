@@ -14,6 +14,10 @@ dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 change its settings (ADR 203), through `dispatcher/projects.py`'s one writer.
 Four more queue a new project's `clone`, `init`, `keygen` and `check` for the
 worker (ADR 212); none carries a remote, the worker reads it from the record.
+Two more behind the bearer store and drop a browser's Web Push subscription,
+and an open `GET /api/push/key` serves the VAPID public key; `serve` also runs
+`dispatcher/push.py`'s notifier on a thread, which pushes each new line of
+`notifications.jsonl` (ADR 229).
 
 Everything here reads and writes through `dispatcher/tasks.py` and
 `dispatcher/context_transfer.py`, so there is no second copy of the task file
@@ -42,7 +46,7 @@ import sys
 import yaml
 from flask import Flask, jsonify, request
 
-from dispatcher import actions, context_transfer, epic_runs
+from dispatcher import actions, context_transfer, epic_runs, push
 from dispatcher import projects as project_store
 from dispatcher import tasks as task_store
 from dispatcher import threads as thread_store
@@ -1077,6 +1081,59 @@ def create_app(config_path: str) -> Flask:
     for kind in ("clone", "init", "keygen", "check"):
         app.post(f"/api/projects/<slug>/{kind}")(_setup_route(kind))
 
+    # Web Push (ADR 229): the store of subscriptions, behind the same bearer
+    # as every other write, and the public key, open because it is public.
+
+    @app.post("/api/push/subscriptions")
+    def http_push_subscribe():
+        body, refused = _bearer_guards(actions_token, "push")
+        if refused is not None:
+            return refused
+        try:
+            stored, created = push.add(hive_dir, body)
+        except push.StoreFull as exc:
+            return jsonify({"error": str(exc)}), 409
+        except push.SubscriptionRefused as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"endpoint": stored["endpoint"], "at": stored["at"]}), (
+            201 if created else 200
+        )
+
+    @app.delete("/api/push/subscriptions")
+    def http_push_unsubscribe():
+        body, refused = _bearer_guards(actions_token, "push")
+        if refused is not None:
+            return refused
+        unknown = sorted(set(body) - {"endpoint"})
+        if unknown:
+            return jsonify({"error": f"unknown field {unknown[0]!r}"}), 400
+        try:
+            endpoint = push.endpoint_of(body)
+        except push.SubscriptionRefused as exc:
+            return jsonify({"error": str(exc)}), 400
+        if not push.remove(hive_dir, endpoint):
+            return jsonify({"error": "no subscription at that endpoint"}), 404
+        return jsonify({"endpoint": endpoint, "removed": True})
+
+    @app.get("/api/push/key")
+    def http_push_key():
+        if request.args:
+            return jsonify(
+                {"error": f"unknown query parameter {sorted(request.args)[0]!r}"}
+            ), 400
+        try:
+            key = push.public_key(cfg.push_vapid_key_path)
+        except ImportError:
+            return jsonify({"error": "push is off: cryptography is not installed"}), 503
+        except (OSError, ValueError):
+            return jsonify({"error": "push is off: there is no VAPID key"}), 404
+        return jsonify({"publicKey": key})
+
+    # Built here, started by `serve` alone: a test's app runs no thread.
+    app.config["PUSH_NOTIFIER"] = push.Notifier(
+        hive_dir, key_path=cfg.push_vapid_key_path, subject=cfg.push_subject
+    )
+
     return app
 
 
@@ -1295,5 +1352,12 @@ def main(environ=None) -> Flask:
     return create_app(config_path)
 
 
+def serve(environ=None) -> None:
+    """The service as its container runs it: the app, and the push notifier's thread."""
+    app = main(environ)
+    push.start(app.config["PUSH_NOTIFIER"])
+    app.run(host="0.0.0.0", port=PORT)
+
+
 if __name__ == "__main__":
-    main().run(host="0.0.0.0", port=PORT)
+    serve()

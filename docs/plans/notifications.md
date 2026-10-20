@@ -9,8 +9,9 @@ supersedes: []
 
 **Status:** building, accepted in outline by the user on 2026-10-11. The
 record and its writers are built (ADR 221), and so are the read route and the
-polled inbox, with read state per browser (ADR 225); the push and the settings
-are not.
+polled inbox, with read state per browser (ADR 225), and the notifier with its
+subscription store on the server (ADR 229); the service worker and the
+settings are not.
 It records a gap the user named that day: push notifications for an awaited
 approval, a finished development and the like. It fills a weakness the main
 thread's analysis of the same day found: in a near-automatic workflow, the
@@ -131,7 +132,17 @@ Each step is a single surface:
    storage counts everything as unread, and the api knows nothing of it.
 3. The notifier, and the endpoint that stores a subscription (a write, so in
    the board service). The server's Web Push library is its own ask, and the
-   VAPID key's location gets an ADR, like the git credential.
+   VAPID key's location gets an ADR, like the git credential. **Built
+   2026-10-20** (ADR 229): `dispatcher/push.py`, with pywebpush imported only
+   in the send. The board service stores subscriptions at `POST` and
+   `DELETE /api/push/subscriptions`, behind the bearer, in `<hive
+   root>/push-subscriptions.json`, and serves the public key at `GET
+   /api/push/key`. Its notifier thread reads `notifications.jsonl` past a
+   stored cursor, tags each push by its task, thread or account, groups one
+   kind's records within five minutes, and drops a subscription its push
+   service answers 404 or 410. The key is
+   `push_vapid_key_path` (default `/run/secrets/vapid-private.pem`); without
+   it push is off and the inbox is unchanged. Quiet hours wait for step 5.
 4. The service worker and the installable console. A front task, behind its
    own ask for a build.
 5. The per-kind settings and quiet hours.
@@ -141,8 +152,9 @@ Each step is a single surface:
 - **More than one person.** There is one user today. Subscriptions and read
   state per person come with the users store and roles in
   `server-deployment.md` (*Decisions*, 1 and 2).
-- **Where the notifier runs.** In the board service or on its own
-  (*Decisions*, 3).
+- **Where the notifier runs.** Answered 2026-10-20 (ADR 229): on a thread of
+  the board service, which is always up, owns the subscription store and
+  needs no docker socket.
 - **Whether "informs" kinds default on.** Set after the first weeks of use.
 
 ## What it is not
