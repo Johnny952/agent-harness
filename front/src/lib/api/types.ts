@@ -424,8 +424,8 @@ export interface UsageGroup {
 }
 
 /**
- * The eighteen keys `/api/tasks` answers, as `observability/api/app.py:_task`
- * shapes them (ADR 133, ADR 137). `body` is not one of them — it is the detail
+ * The nineteen keys `/api/tasks` answers, as `observability/api/app.py:_task`
+ * shapes them (ADR 133, ADR 137, ADR 199). `body` is not one of them — it is the detail
  * route's alone (`docs/decisions.md` ADR 21) — and neither is a debt list: that is
  * a filter over `/api/debt` by the task prefix of a debt id (ADR 17). Nor is a
  * card: the task file is the board's data and nothing mirrors it (ADR 59).
@@ -464,6 +464,12 @@ export interface Task {
   debt_id: string | null;
   /** The epic this task belongs to, as its id, else `null` (ADR 137). */
   epic: string | null;
+  /**
+   * The project slug the card belongs to, as its task file names it, else
+   * `null`: a card not yet stamped by `dispatch migrate`, which belongs to the
+   * harness's one pre-existing project (ADR 199). Never guessed from the run.
+   */
+  project: string | null;
   /**
    * The ids an epic was split into, served as written (ADR 137): `[]` on a
    * plain task, and possibly not a list of strings on a hand-edited file. Typed
@@ -638,7 +644,7 @@ export interface AcceptTaskResult {
   epic_closed?: string;
 }
 
-/** `/api/tasks/<task_id>`: the list's eighteen keys plus the running record. ADR 21. */
+/** `/api/tasks/<task_id>`: the list's nineteen keys plus the running record. ADR 21. */
 export interface TaskDetail extends Task {
   body: string;
 }

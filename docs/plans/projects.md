@@ -253,9 +253,13 @@ module; steps 2, 4 and 5 need its queue and worker.
 6. **The slots** (*Decisions*, 6), on the pool's api and the queue's. A front
    task. Built by T-115 (2026-10-20, ADR 198): one derivation,
    `front/src/lib/slots.ts`, drawn in the dock and in the *Start development*
-   confirmation. *Waiting for the project* is open: it needs step 3 (and the
-   `project` on the task row of step 1), and ADR 198, decision 4, says how it
-   is added. Until then such a start reads *Queued — project*.
+   confirmation. *Waiting for the project* is built (2026-10-20, ADR NNN), as
+   ADR 198, decision 4, said: a pending start the worker held with `waiting:
+   "project"` reads *Waiting for the project*, behind the claimed start of the
+   same project when the queue shows one, and the confirmation counts the
+   starts of the task's own project. The console reads the `project` on the
+   task row of step 1 and shows it on every card. It does not build step 3:
+   the one-cycle-per-project rule stays the worker's.
 
 ## Open questions
 

@@ -10,6 +10,12 @@
  * here and never re-decided from `last_probe`. Nothing here guesses a time: a
  * reset is either an epoch the api served plus the cooldown it served, or the
  * CLI's own clause shown verbatim.
+ *
+ * *Waiting for the project* (ADR NNN) is the worker's word `waiting: "project"`
+ * on a pending `start`: one project runs one start at a time, so the start waits
+ * while another start of its project is claimed. The holder is named only when
+ * the queue shows that claimed start; the reason itself is never re-derived from
+ * two records sharing a project.
  */
 
 import type { Account, Task } from "./api/types";
@@ -36,7 +42,7 @@ export interface Slot {
   project: string | null;
 }
 
-export type WaitingReason = "account" | "between" | "queued" | "no-account" | "unknown";
+export type WaitingReason = "account" | "project" | "between" | "queued" | "no-account" | "unknown";
 
 export interface Waiting {
   taskId: string;
@@ -54,6 +60,16 @@ export interface SlotsView {
   waiting: Waiting[] | null;
   /** Tasks with a pending or claimed `start`; `null` with the queue. */
   started: number | null;
+  /** Those starts, one per task, claimed first; `null` with the queue. */
+  starts: StartRecord[] | null;
+}
+
+/** A task's `start` record as the queue served it. */
+export interface StartRecord {
+  taskId: string;
+  state: "pending" | "claimed";
+  /** The record's `project`; `null` when not recorded. */
+  project: string | null;
 }
 
 /** A queue record: anything, with the keys read here named so they read as properties. */
@@ -124,10 +140,7 @@ export function resetText(reset: SlotReset): string {
     : reset.text;
 }
 
-interface Start {
-  taskId: string;
-  state: "pending" | "claimed";
-  project: string | null;
+interface Start extends StartRecord {
   waiting: string | null;
 }
 
@@ -177,7 +190,8 @@ export function deriveSlots(accounts: Account[], tasks: Task[] | null, queue: un
   });
   const free = slots.filter((s) => s.empty).length;
   const tasksKnown = tasks !== null;
-  if (starts === null) return { slots, free, tasksKnown, waiting: null, started: null };
+  if (starts === null)
+    return { slots, free, tasksKnown, waiting: null, started: null, starts: null };
 
   const onSlot = new Set(slots.map((s) => s.taskId).filter((id): id is string => id !== null));
   const resets = slots
@@ -202,6 +216,19 @@ export function deriveSlots(accounts: Account[], tasks: Task[] | null, queue: un
                 ? "no reset time to compare"
                 : "every slot is full",
         });
+      } else if (s.waiting === "project") {
+        // The worker's word; the holder is named only when the queue shows it.
+        const holder =
+          s.project === null
+            ? undefined
+            : starts.find(
+                (o) => o.state === "claimed" && o.project === s.project && o.taskId !== s.taskId,
+              );
+        waiting.push({
+          taskId: s.taskId,
+          reason: "project",
+          detail: holder ? `behind ${holder.taskId}` : null,
+        });
       } else {
         waiting.push({ taskId: s.taskId, reason: "queued", detail: s.waiting });
       }
@@ -216,7 +243,14 @@ export function deriveSlots(accounts: Account[], tasks: Task[] | null, queue: un
       waiting.push({ taskId: s.taskId, reason: "no-account", detail: phase });
     }
   }
-  return { slots, free, tasksKnown, waiting, started: starts.length };
+  return {
+    slots,
+    free,
+    tasksKnown,
+    waiting,
+    started: starts.length,
+    starts: starts.map(({ taskId, state, project }) => ({ taskId, state, project })),
+  };
 }
 
 /** The reason as the waiting list words it. */
@@ -224,6 +258,8 @@ export function waitingText(w: Waiting): string {
   switch (w.reason) {
     case "account":
       return `Waiting for an account — ${w.detail}`;
+    case "project":
+      return w.detail ? `Waiting for the project — ${w.detail}` : "Waiting for the project";
     case "between":
       return "Between phases";
     case "queued":
@@ -238,9 +274,15 @@ export function waitingText(w: Waiting): string {
 /**
  * The confirmation's sentence: how many slots are free now and where a new start
  * would stand. The caller says which arm of the accounts read it is in; it never
- * names a time.
+ * names a time. Given the task's `project`, a start already in the queue for that
+ * project is what this one would queue behind, named "of this project" (one
+ * project runs one start at a time, ADR NNN); with no project, or none of its
+ * starts in the queue, the line counts every start as before.
  */
-export function standingLine(view: SlotsView | "loading" | "accounts-failed"): string {
+export function standingLine(
+  view: SlotsView | "loading" | "accounts-failed",
+  project: string | null = null,
+): string {
   if (view === "loading") return "Reading the slots…";
   if (view === "accounts-failed")
     return "/api/accounts did not answer, so the free slots are not known";
@@ -250,6 +292,11 @@ export function standingLine(view: SlotsView | "loading" | "accounts-failed"): s
   const head = `${n} account${n === 1 ? "" : "s"}, ${view.free} free${primaryFree ? ", the primary among them" : ""}`;
   if (view.started === null) {
     return `${head}; /api/actions did not answer, so where this task would stand is not known`;
+  }
+  const ofProject =
+    project === null ? 0 : (view.starts ?? []).filter((s) => s.project === project).length;
+  if (ofProject > 0) {
+    return `${head}; this task would queue behind ${ofProject} task${ofProject === 1 ? "" : "s"} of this project`;
   }
   if (view.started > 0) {
     return `${head}; this task would queue behind ${view.started} started task${view.started === 1 ? "" : "s"}`;

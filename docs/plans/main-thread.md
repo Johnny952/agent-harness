@@ -16,7 +16,7 @@ T-110 (2026-10-19, ADR 173); step 4, the screen read-only, is built by T-111
 (2026-10-20, ADR 190), the session seeding on 2026-10-20 (ADR 194), and the
 thread writes with *Talk about this task* on 2026-10-20 (ADR 195); step 6 is built by T-113 (2026-10-20, ADR 187); step 7's execution threads are built on
 2026-10-20 (ADR 197) and its slots by T-115 (2026-10-20, ADR 198); *Waiting
-for the project* is open.
+for the project* is built on 2026-10-20 (ADR NNN).
 It records the user's correction to the main thread's first analysis of that
 day, which had a read-only mirror of the host session as its first step. It
 builds on `docs/plans/balancer.md` (*Which account the conversational thread
