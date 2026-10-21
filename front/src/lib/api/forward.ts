@@ -27,18 +27,19 @@
  * deliberately not entries of `FORWARDED`, whose twenty-one routes, count and
  * rejection message describe the api alone.
  *
- * **Fourteen method and path pairs go to the board-service** (`docs/decisions.md`
+ * **Fifteen method and path pairs go to the board-service** (`docs/decisions.md`
  * ADR 136, ADR 157, ADR 190, ADR 195 for the two thread records, ADR 206
- * for the two project records, ADR 211 for the two epic actions, and ADR 222
- * for the review verdict):
+ * for the two project records, ADR 211 for the two epic actions, ADR 222
+ * for the review verdict, and ADR 270 for the approve):
  * `POST /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`,
- * `POST /api/tasks/<id>/accept`, `POST /api/tasks/<id>/verdict`, `POST /api/threads` and
+ * `POST /api/tasks/<id>/accept`, `POST /api/tasks/<id>/verdict`,
+ * `POST /api/tasks/<id>/approve`, `POST /api/threads` and
  * `PATCH /api/threads/<id>`, the three action routes
  * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
  * `POST /api/threads/<id>/turns`, and the two project-record writes
  * `POST /api/projects` and `PATCH /api/projects/<slug>`, and the two epic actions
  * `POST /api/epics/<id>/start` and `POST /api/epics/<id>/stop`, onto the same paths
- * there; the last seven carry a bearer. Four more, a new project's setup actions
+ * there; the last eight carry a bearer. Four more, a new project's setup actions
  * `POST /api/projects/<slug>/{clone,init,keygen,check}` (ADR 212), go there
  * too with the same bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
@@ -53,7 +54,7 @@
  * drop this browser's subscription, carry the same bearer and the same CSRF
  * checks as the action routes, the body unchanged, and so does
  * `PUT /api/push/settings` (ADR 237, ADR 246), which saves which kinds are
- * pushed and the quiet hours; with the eighteen above they make twenty-one
+ * pushed and the quiet hours; with the nineteen above they make twenty-two
  * writes. `GET /api/push/key`, the VAPID public key, and
  * `GET /api/push/settings` are reads of the board-service and not of the api:
  * no token, no query parameter, no header of the browser's
@@ -205,6 +206,12 @@ const TASK_VERDICT = /^\/api\/tasks\/([^/]+)\/verdict$/;
 /** Starting a task (ADR 142, ADR 157): a `POST` to the board-service, with the actions bearer. */
 const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
 
+/**
+ * A person's approve of a task under review (ADR 267, ADR 270): a `POST` to the
+ * board-service with the actions bearer and a rebuilt body. A `GET` is the api's 404.
+ */
+const TASK_APPROVE = /^\/api\/tasks\/([^/]+)\/approve$/;
+
 /** Cancelling an action: a `POST` to the board-service, with the actions bearer. */
 const ACTION_CANCEL = /^\/api\/actions\/([^/]+)\/cancel$/;
 
@@ -342,7 +349,7 @@ type Resolution =
   | {
       kind: "forward";
       target: string;
-      action?: "start" | "cancel" | "turn" | "project" | "push";
+      action?: "start" | "cancel" | "turn" | "project" | "push" | "approve";
     }
   | { kind: "reject"; status: number; error: string };
 
@@ -368,7 +375,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardBoardRead(PUSH_SETTINGS);
   }
 
-  // Also before the read-only check, and only for the twenty-one exact pairs: a method
+  // Also before the read-only check, and only for the twenty-two exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -553,7 +560,7 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the twenty-one writes goes, or `null` for any
+ * Where on the board-service one of the twenty-two writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
@@ -625,6 +632,13 @@ function boardTarget(method: string, path: string): Resolution | null {
     }
     const actionRoutes = [
       { pattern: TASK_START, route: "tasks", tail: "start", what: "task", action: "start" },
+      {
+        pattern: TASK_APPROVE,
+        route: "tasks",
+        tail: "approve",
+        what: "task",
+        action: "approve",
+      },
       {
         pattern: ACTION_CANCEL,
         route: "actions",
@@ -725,7 +739,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its twenty-one writes (`docs/decisions.md`
+ * The board-service's answer to one of its twenty-two writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -757,6 +771,9 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * body may hold only `note`, `floor` and `limit` (else 400, `project` included:
  * the project is the console's, set here); the upstream body is rebuilt from
  * them, the route checking the floor's and the limit's values. A cancel sends `{}`.
+ * An approve (ADR 270) takes the token's 503, then the 413 cap, then its body: only
+ * `project`, `commit` and `text` (else 400), `project` shaped like a slug (400) and
+ * absent meaning `CONSOLE_PROJECT`, with neither a 503 naming it.
  * *Start epic* and *Stop epic* (ADR 211) are a start and a cancel here: the same
  * checks, the same rebuilt body and the same `{}`.
  * A turn's body crosses unchanged: the route validates `text` itself.
@@ -833,6 +850,23 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
       if ("error" in start) return jsonResponse(start, 400);
       body = JSON.stringify({ project: CONSOLE_PROJECT, ...start });
     }
+  }
+
+  if (action === "approve") {
+    const approve = approveBody(read);
+    if ("error" in approve) return jsonResponse(approve, 400);
+    const project = approve.project ?? CONSOLE_PROJECT;
+    if (!project) {
+      return jsonResponse(
+        {
+          error:
+            "CONSOLE_PROJECT is not set, so the console cannot say which project an approve is for. " +
+            "Set it and restart the console.",
+        },
+        503,
+      );
+    }
+    body = JSON.stringify({ project, commit: approve.commit, text: approve.text });
   }
 
   let upstream: Response;
@@ -941,6 +975,46 @@ function startBody(bytes: ArrayBuffer): StartFields | { error: string } {
   if (fields["floor"] !== undefined) start.floor = fields["floor"];
   if (fields["limit"] !== undefined) start.limit = fields["limit"];
   return start;
+}
+
+/**
+ * An approve's fields from the browser's body, or `{ error }` for a 400 (ADR
+ * 270): `project`, `commit` and `text` and nothing else. `project`, when
+ * present, must be a string shaped like a slug; `commit` and `text` cross as
+ * given, the route checking them.
+ */
+const APPROVE_FIELDS = new Set(["project", "commit", "text"]);
+
+type ApproveFields = { project?: string; commit?: unknown; text?: unknown };
+
+function approveBody(bytes: ArrayBuffer): ApproveFields | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return { error: "An approve's body must be a JSON object." };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { error: "An approve's body must be a JSON object." };
+  }
+  const fields = parsed as Record<string, unknown>;
+  for (const key of Object.keys(fields)) {
+    if (APPROVE_FIELDS.has(key)) continue;
+    return {
+      error: `An approve's body may hold only a project, a commit and a text, not ${JSON.stringify(key)}.`,
+    };
+  }
+  const approve: ApproveFields = {};
+  const project = fields["project"];
+  if (project !== undefined) {
+    if (typeof project !== "string" || !PROJECT_SLUG.test(project)) {
+      return { error: "An approve's project must be a slug the harness takes." };
+    }
+    approve.project = project;
+  }
+  if (fields["commit"] !== undefined) approve.commit = fields["commit"];
+  if (fields["text"] !== undefined) approve.text = fields["text"];
+  return approve;
 }
 
 /**

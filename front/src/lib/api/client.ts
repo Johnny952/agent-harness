@@ -43,7 +43,8 @@
  * `ApiError` with the service's own message and status. There is no mock for any
  * of the six: like the settings writes, they are real `fetch`es in every mode.
  * `verdictTask` (ADR 222) is a fifth write of the same kind, the review's
- * verdict, `POST /api/tasks/<id>/verdict`, answered as a comment is.
+ * verdict, `POST /api/tasks/<id>/verdict`, answered as a comment is; `approveTask`
+ * (ADR 270) is `POST /api/tasks/<id>/approve`, whose refusal keeps its body on `ApiError`.
  *
  * **One more read and one more write for the Board's Ready card** (ADR 160):
  * `getActionQueue` reads `GET /api/actions` (the api's envelope) and `startTask`
@@ -92,6 +93,8 @@ import type {
   Account,
   ActionQueue,
   ActionRecord,
+  ApproveTaskBody,
+  ApproveTaskResult,
   EpicStartResult,
   EpicStopResult,
   ApiResult,
@@ -133,6 +136,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** A refusal's parsed JSON body, when it had one: the approve reads `verdict` from it. */
+    readonly body?: unknown,
   ) {
     super(message);
   }
@@ -513,6 +518,19 @@ export function commentTask(taskId: string, body: CommentTaskBody): Promise<Comm
 }
 
 /**
+ * Approve a task under review at the tip the diff shows: `POST
+ * /api/tasks/<id>/approve` (ADR 267, ADR 270). The route stores the verdict and
+ * queues the merge; a refusal after the verdict is an `ApiError` whose `body`
+ * carries `verdict`.
+ */
+export function approveTask(taskId: string, body: ApproveTaskBody): Promise<ApproveTaskResult> {
+  return readBare<ApproveTaskResult>(`/api/tasks/${encodeURIComponent(taskId)}/approve`, {
+    method: "POST",
+    body,
+  });
+}
+
+/**
  * Give a verdict on a task under review: `POST /api/tasks/<id>/verdict`
  * (ADR 222). It is stored as one of the task's comments.
  */
@@ -777,6 +795,7 @@ async function readBare<T>(path: string, write?: BoardWrite): Promise<T> {
     throw new ApiError(
       typeof reported === "string" ? reported : `${path} answered ${res.status}`,
       res.status,
+      body,
     );
   }
   return body as T;

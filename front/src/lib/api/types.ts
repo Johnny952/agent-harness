@@ -552,7 +552,7 @@ export interface TaskComment {
   verdict?: { kind: VerdictKind; commit: string };
 }
 
-/** The verdicts `dispatcher/tasks.py` knows; only `comment` is built (ADR 222). */
+/** The verdicts `dispatcher/tasks.py` knows; `comment` and `approve` are built (ADR 222, ADR 270). */
 export type VerdictKind = "comment" | "approve" | "request_changes";
 
 /**
@@ -639,6 +639,23 @@ export interface VerdictTaskBody {
   kind: VerdictKind;
   text: string;
   commit: string;
+}
+
+/**
+ * `POST /api/tasks/<id>/approve`'s body (ADR 267, ADR 270). `project` is the
+ * task's own, left out when the task names none, and the forward then sends
+ * the console's. `text` is the verdict's words, non-blank.
+ */
+export interface ApproveTaskBody {
+  project?: string;
+  commit: string;
+  text: string;
+}
+
+/** The approve route's 201: the verdict stored, and the action it queued. */
+export interface ApproveTaskResult {
+  verdict: CommentTaskResult;
+  action: ActionRecord;
 }
 
 export interface AcceptTaskBody {

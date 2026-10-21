@@ -37,6 +37,17 @@ export function reviewVerdicts(comments: TaskComment[]): TaskComment[] {
   );
 }
 
+/**
+ * The dispatcher's answers to an approve (ADR 264, ADR 270): comments it wrote
+ * whose text opens `approve at `, in the order stored.
+ */
+export function approveOutcomes(comments: TaskComment[]): TaskComment[] {
+  return comments.filter(
+    (c) =>
+      c.author === "dispatcher" && typeof c.text === "string" && c.text.startsWith("approve at "),
+  );
+}
+
 export interface DiffLine {
   text: string;
   /** The line's number in the branch's file, for a context or added line. */

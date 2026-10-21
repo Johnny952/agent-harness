@@ -8,13 +8,13 @@ supersedes: []
 # Review — a person approves a task's diff in the console before it merges
 
 **Status:** design, approved in outline by the user on 2026-10-11. The console
-review is built but for two of its verdicts (ADR 219, ADR 222): the api
-serves a task branch's diff, and `/approvals` draws it with the comments
-pinned to it, pins new ones to a line, and records the *comment* verdict at
-the tip. The dispatcher writes the `awaiting_review` status (step 1, ADR 240);
-*approve* is served by the board service's bearer route and drained by the
-worker (step 4), but the console has no button for it yet, nor for *request
-changes*, and no dispatcher reads any other verdict. Two pieces landed on
+review is built but for one of its verdicts (ADR 219, ADR 222, ADR 270): the
+api serves a task branch's diff, and `/approvals` draws it with the comments
+pinned to it, pins new ones to a line, records the *comment* verdict at
+the tip, and has an *approve* button. The dispatcher writes the
+`awaiting_review` status (step 1, ADR 240); *approve* is served by the board
+service's bearer route and drained by the worker (step 4); the console has no
+button for *request changes*, and no dispatcher reads any other verdict. Two pieces landed on
 the CLI side through `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -311,9 +311,12 @@ After `board-service.md`'s steps, each a single surface:
    screen reads and draws, with a hand-written diff view instead of a
    library, comments shown at their line on the tip and as outdated past
    it, a line number pinning a new one at the tip, and the *Conflict* list
-   shown read-only. Still open: the library, the handoffs' summary beside
-   the diff, and the *approve* and *request changes* buttons (they wait for
-   steps 1, 4 and 6); the *comment* verdict's form is in (step 3).
+   shown read-only. The *approve* button is in too (**built 2026-10-21**,
+   ADR 270, T-125-S3): in the verdict form, at the tip on screen, off on
+   *Conflict* and merged tasks, with the dispatcher's outcome comment listed.
+   Still open: the library, the handoffs' summary beside the diff, and the
+   *request changes* button (it waits for step 6); the *comment* verdict's
+   form is in (step 3).
 8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
 9. The integrador role: its prompt, handoff schema, profile and write limit,
