@@ -13619,3 +13619,73 @@ drained by the worker, which alone reaches the Docker socket (ADR 142).
   person approved a diff, not a branch name (*Decisions*, 6, 3).
 - Taking ADR 200's project lock: an approve would then wait an hour behind
   another task's cycle for a base operation of seconds.
+
+## ADR 264 — The `approve` handler's outcomes, its stale reads and its result, as T-125-S1 builds ADR 258
+
+**Status:** accepted (2026-10-21), T-125-S1's arquitecto. Narrows ADR 258
+decisions 2, 4, 6 and 7 for the dispatcher side; the route (decision 1) and
+the console are T-125-S2 and S3.
+
+**Context.** ADR 258 fixes what an approve does and says, row by row, but
+leaves the handler's vocabulary open: what `result.outcome` holds on each
+row, how the stale check reads the branch with no new `docker_exec`
+function, what an `UP_TO_DATE` merge counts as, and what a busy base key
+waits as.
+
+**Decision.**
+
+1. *One function, beside `_merge_task_branch`:* `approve_reviewed(cfg,
+   task_id, slug, commit) -> ApprovalOutcome` in `dispatcher/dispatcher.py`,
+   never raising. `ApprovalOutcome` is a frozen dataclass of `outcome`,
+   `commit`, `merge_commit`, `push` (a `docker_exec.PushOutcome` or None)
+   and `comment` (the outcome comment's whole text). It writes no comment
+   and touches no action: `worker._approve` writes the comment
+   (`tasks.add_comment`, author `dispatcher`) and finishes the action.
+2. *`result.outcome`*, one per row of ADR 258's table:
+
+   | Row | `outcome` | Action status |
+   |---|---|---|
+   | merged and pushed; merged, no upstream | `merged` | `done` |
+   | the push is refused | `merged_not_pushed` | `done` |
+   | stale | `stale` | `failed` |
+   | pre-merge conflict; the gate goes red | `conflict` | `failed` |
+   | check or gate cannot run; base lock held; no agent container | `not_run` | `failed` |
+   | the merge is refused by git, or raises | `merge_refused` | `failed` |
+
+   The two `conflict` rows are told apart by the comment, which carries the
+   pre-merge verdict's own detail (the files, or the gate and its log). A
+   failed pre-merge verdict is `conflict` when the task reads `conflict`
+   afterwards and `not_run` otherwise. `push` is `{status, target, detail}`
+   of the `PushOutcome` (status `pushed`, `no-upstream` or `push-refused`),
+   null when no push was due. `merge_commit` is `head_commit` of the base
+   after a merge that landed, null otherwise. `commit` is `params.commit`
+   as queued.
+3. *A merge git calls up to date* (`UP_TO_DATE`: the base already holds the
+   branch, though the task was not recorded merged) is landed, as both merge
+   paths treat it: it is pushed, `record_merge` writes the block, and the
+   outcome is `merged` or `merged_not_pushed`.
+4. *The stale reads*, under the base lock and inside the owner window,
+   before `pre_merge_check`, with `docker_exec._rev_parse` on the project
+   checkout: the tip is `refs/heads/agent/task/<id>` (None is *the branch is
+   gone*), the verdict is `params.commit` (None is *the reviewed commit is
+   not in the clone*, also stale). The task file is read through
+   `context_transfer`; a missing file is stale. The reasons, in this order:
+   no task file, merged, status not `awaiting_review`/`done`, branch gone,
+   commit unknown, tip moved.
+5. *The comment* is one or more lines; the first is `approve at <commit
+   [:7]>: <what happened>`, and it is the action's `error` on a `failed`
+   row. Git's or the gate's detail follows on later lines.
+6. *A busy `base:` key waits as `project`*, by `_consider`'s existing rule
+   for every kind but `turn`; no `waiting` value is added, so the Queue
+   screen needs nothing new.
+7. `learnings.drop_promoted` runs after `record_merge` on both `merged`
+   outcomes, as `merge-task` does; never on a refusal.
+
+**Consequences.**
+- The console (S3) can switch on six `outcome` strings and need not parse
+  a comment; the comment is for the person.
+- An approve whose verdict commit was garbage-collected or never fetched
+  reads as stale, and the person approves again at the tip they see.
+- Telling `conflict` from `not_run` reads the task status after the check,
+  so a `conflict` whose handoff write failed reads `not_run`; the comment
+  still carries the check's words.

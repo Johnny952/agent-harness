@@ -246,6 +246,68 @@ def test_recover_turn_is_interrupted(tmp_path):
     assert read(tmp_path, "done", aid)["status"] == "interrupted"
 
 
+APPROVE = dict(project="proj", task_id="T-1", params={"commit": "a" * 40})
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"params": {}},
+        {"params": {"commit": "nothex"}},
+        {"params": {"commit": 123}},
+        {"params": {"commit": "a" * 40, "text": "x"}},
+        {"task_id": None},
+        {"project": None},
+        {"project": "../x"},
+    ],
+)
+def test_an_invalid_approve_is_refused_400(tmp_path, over):
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, "approve", **{**APPROVE, **over})
+    assert err.value.status == 400
+
+
+def test_an_approve_serialises_on_the_base_and_spends_no_quota(tmp_path):
+    rec = create(tmp_path, "approve", **APPROVE)
+    assert actions.serial_key(rec) == "base:proj"
+    assert not actions.KINDS["approve"].spends_quota
+    assert actions.KINDS["approve"].recovery == "interrupt"
+
+
+def test_a_second_approve_for_the_task_is_refused_409_while_one_is_queued(tmp_path):
+    first = create(tmp_path, "approve", **APPROVE)
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, "approve", **APPROVE)
+    assert err.value.status == 409
+    # claimed counts too; another task or project does not
+    actions.claim(tmp_path, first["id"])
+    with pytest.raises(ActionRefused):
+        create(tmp_path, "approve", **APPROVE)
+    create(tmp_path, "approve", **{**APPROVE, "task_id": "T-2"})
+    create(tmp_path, "approve", **{**APPROVE, "project": "other"})
+    # a start or a verdict on the task is no duplicate
+    create(tmp_path, "start", **START)
+    create(tmp_path, "command_verdict", **VERDICT)
+
+
+def test_a_finished_approve_does_not_refuse_a_new_one(tmp_path):
+    aid = create(tmp_path, "approve", **APPROVE)["id"]
+    actions.claim(tmp_path, aid)
+    actions.finish(tmp_path, aid, "failed", error="stale")
+    create(tmp_path, "approve", **APPROVE)
+
+
+def test_recover_approve_is_interrupted_with_adr_258s_text(tmp_path):
+    aid = claimed(tmp_path, "approve", params=APPROVE["params"])
+    actions.recover(tmp_path)
+    rec = read(tmp_path, "done", aid)
+    assert rec["status"] == "interrupted"
+    assert rec["error"] == (
+        "interrupted during the approve; read the task's comments and the base "
+        "before approving again"
+    )
+
+
 def test_recover_cancel_runs_again(tmp_path):
     aid = claimed(tmp_path, "cancel", project=None, task_id=None,
                   params={"target": "a-20260101T000000000000Z-abcd"})

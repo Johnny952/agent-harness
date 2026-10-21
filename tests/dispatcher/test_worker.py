@@ -1129,6 +1129,188 @@ def test_a_cancel_on_a_pending_verdict_cancels_it(cfg, worker, verdicts, account
     assert verdicts.calls == []
 
 
+# ---- approve ----------------------------------------------------------------
+
+TIP = "a" * 40
+
+
+class Approve:
+    """A fake `core.approve_reviewed`, held and answering the way `Verdict` is."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.entered = threading.Event()
+        self.gate: threading.Event | None = None
+        self.outcome = "merged"
+        self.comment = "approve at aaaaaaa: merged into main as ccccccc, pushed to main"
+        self.push = None
+        self.merge_commit = "c" * 40
+
+    def __call__(self, cfg, task_id, slug, commit):
+        self.calls.append((task_id, slug, commit))
+        self.entered.set()
+        if self.gate is not None:
+            assert self.gate.wait(WAIT)
+        return core.ApprovalOutcome(
+            self.outcome, commit, self.merge_commit, self.push, self.comment
+        )
+
+
+@pytest.fixture
+def approves(monkeypatch):
+    fake = Approve()
+    monkeypatch.setattr(core, "approve_reviewed", fake)
+    yield fake
+    if fake.gate is not None:
+        fake.gate.set()
+
+
+def approve(cfg, task_id="T-1", project="proj", commit=TIP):
+    _task(cfg, task_id)
+    return actions.create(cfg.state_dir, "approve", project=project, task_id=task_id,
+                          params={"commit": commit})
+
+
+def test_an_approve_comments_once_and_ends_done_with_its_result(cfg, worker, approves):
+    approves.push = core.docker_exec.PushOutcome(core.docker_exec.PUSHED, "main", "pushed main")
+    rec = approve(cfg)
+    worker.tick()
+    worker.join()
+    assert approves.calls == [("T-1", "proj", TIP)]
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "done" and got["error"] is None
+    assert got["started_at"] is not None
+    assert got["result"] == {
+        "outcome": "merged", "commit": TIP, "merge_commit": "c" * 40,
+        "push": {"status": "pushed", "target": "main", "detail": "pushed main"},
+    }
+    [comment] = comments(cfg, "T-1")
+    assert comment["author"] == "dispatcher"
+    assert comment["text"].startswith("approve at aaaaaaa:")
+
+
+@pytest.mark.parametrize("outcome", ["stale", "conflict", "not_run", "merge_refused"])
+def test_a_refused_approve_fails_with_the_comments_first_line(cfg, worker, approves, outcome):
+    approves.outcome = outcome
+    approves.merge_commit = None
+    approves.comment = "approve at aaaaaaa: not merged: the reason\n  second   line"
+    rec = approve(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed"
+    assert got["error"] == "approve at aaaaaaa: not merged: the reason"
+    assert got["result"] == {"outcome": outcome, "commit": TIP, "merge_commit": None, "push": None}
+    assert [c["text"] for c in comments(cfg, "T-1")] == [approves.comment]
+
+
+def test_a_merged_but_unpushed_approve_is_done(cfg, worker, approves):
+    approves.outcome = "merged_not_pushed"
+    approves.push = core.docker_exec.PushOutcome(core.docker_exec.PUSH_REFUSED, "main", "no")
+    approves.comment = "approve at aaaaaaa: merged locally into main as ccccccc\nno"
+    rec = approve(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "done" and got["error"] is None
+    assert got["result"]["outcome"] == "merged_not_pushed"
+    assert got["result"]["push"]["status"] == "push-refused"
+
+
+def test_an_approve_whose_comment_cannot_be_written_still_ends_with_its_result(
+    cfg, worker, approves, monkeypatch,
+):
+    def refuse(*args, **kwargs):
+        raise tasks.BoardWriteError("task T-1", ["no such task"])
+
+    monkeypatch.setattr(tasks, "add_comment", refuse)
+    rec = approve(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "done" and got["result"]["outcome"] == "merged"
+
+
+def test_an_approve_waits_on_no_account_and_takes_no_project_lock(
+    cfg, worker, approves, accounts,
+):
+    accounts["open"] = False
+    held = ProjectLock.take(cfg.state_dir, "proj", "T-9", "run-task")
+    try:
+        rec = approve(cfg)
+        worker.tick()
+        worker.join()
+    finally:
+        held.release()
+    assert where(cfg, rec["id"])[1]["status"] == "done"
+    assert accounts["probes"] == 0
+
+
+def test_an_approve_runs_beside_a_running_start_of_its_project(cfg, worker, cycle, approves):
+    cycle.hold("T-1")
+    s = start(cfg, "T-1")
+    a = approve(cfg, "T-2")
+    worker.tick()
+    cycle.wait_entered("T-1")
+    assert approves.entered.wait(WAIT)
+    cycle.release("T-1")
+    worker.join()
+    assert where(cfg, s["id"])[1]["status"] == "done"
+    assert where(cfg, a["id"])[1]["status"] == "done"
+
+
+def test_a_second_approve_on_a_project_waits_as_project_while_the_first_runs(
+    cfg, worker, approves,
+):
+    approves.gate = threading.Event()
+    first = approve(cfg, "T-1")
+    second = approve(cfg, "T-2")
+    other = approve(cfg, "T-3", project="beta")
+    worker.tick()
+    assert approves.entered.wait(WAIT)
+    state, got = where(cfg, second["id"])
+    assert state == "pending" and got["waiting"] == "project"
+    approves.gate.set()
+    worker.join()
+    assert where(cfg, first["id"])[1]["status"] == "done"
+    assert where(cfg, other["id"])[1]["status"] == "done"
+    worker.tick()
+    worker.join()
+    assert where(cfg, second["id"])[1]["status"] == "done"
+    assert sorted(c[0] for c in approves.calls) == ["T-1", "T-2", "T-3"]
+
+
+def test_a_cancel_on_a_pending_approve_cancels_it_and_a_running_one_is_left(
+    cfg, worker, approves,
+):
+    approves.gate = threading.Event()
+    running = approve(cfg, "T-1")
+    waiting = approve(cfg, "T-2")
+    worker.tick()
+    assert approves.entered.wait(WAIT)
+    c1, c2 = cancel(cfg, waiting["id"]), cancel(cfg, running["id"])
+    worker.tick()
+    assert where(cfg, waiting["id"])[1]["status"] == "cancelled"
+    assert where(cfg, c1["id"])[1]["status"] == "done"
+    got = where(cfg, c2["id"])[1]
+    assert got["status"] == "failed" and "cannot be cancelled" in got["error"]
+    approves.gate.set()
+    worker.join()
+    assert where(cfg, running["id"])[1]["status"] == "done"
+
+
+def test_a_claimed_approve_is_interrupted_on_recovery_and_never_run_again(cfg, worker, approves):
+    rec = approve(cfg)
+    assert actions.claim(cfg.state_dir, rec["id"]) is not None
+    assert worker.recover() == [(rec["id"], "interrupted")]
+    worker.tick()
+    worker.join()
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "interrupted"
+    assert "read the task's comments and the base" in got["error"]
+    assert approves.calls == [] and comments(cfg, "T-1") == []
+
+
 # ---- heartbeat, shutdown ----------------------------------------------------
 
 

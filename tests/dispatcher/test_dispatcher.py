@@ -8688,3 +8688,311 @@ def test_auto_approve_is_refused_while_the_base_is_locked(tmp_path, monkeypatch,
     assert dispatcher_mod.auto_approve.HEADING in task.body
     assert "- `pre-merge`:" in task.body
     assert "the base is locked by elsewhere:1:feedface" in task.body
+
+
+# --- approve_reviewed: ADR 258 decisions 4, 6, 7; ADR 264 --------------------
+
+_TIP = "a" * 40
+_MERGE_COMMIT = "c" * 40
+
+
+@pytest.fixture
+def ap(tmp_path, monkeypatch, fake_git):
+    """A task `awaiting_review` whose branch tip is the reviewed commit, plus the
+    reads only the approve makes (`_rev_parse`, `head_commit`) faked."""
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", "awaiting_review", "## auditor")
+    refs = {"refs/heads/agent/task/task-1": _TIP, _TIP: _TIP}
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "_rev_parse", lambda container, workdir, rev: refs.get(rev)
+    )
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "head_commit", lambda container, path: _MERGE_COMMIT)
+    dropped = []
+    monkeypatch.setattr(
+        dispatcher_mod.learnings, "drop_promoted",
+        lambda hive, task_id: dropped.append(task_id) or [],
+    )
+    fake_git.refs, fake_git.dropped, fake_git.cfg = refs, dropped, cfg
+    return fake_git
+
+
+def _approve(ap, commit=_TIP):
+    return dispatcher_mod.approve_reviewed(ap.cfg, "task-1", "myproj", commit)
+
+
+def _nothing_merged(ap, status="awaiting_review"):
+    assert ap.merges == [] and getattr(ap, "pushes", []) == [] and ap.dropped == []
+    assert _task(ap.cfg).status == status and _task(ap.cfg).merged is None
+
+
+def test_approve_merges_and_pushes_the_reviewed_tip(ap) -> None:
+    out = _approve(ap)
+
+    assert out.outcome == "merged" and out.landed
+    assert out.commit == _TIP and out.merge_commit == _MERGE_COMMIT
+    assert out.push.status == dispatcher_mod.docker_exec.PUSHED
+    assert out.comment.splitlines()[0] == (
+        "approve at aaaaaaa: merged into main as ccccccc, pushed to main"
+    )
+    assert "pushed main to origin/main" in out.comment
+    assert ap.merges == [("agent-cuenta1", ap.cfg.projects_root, "myproj", "task-1")]
+    assert len(ap.pushes) == 1
+    task = _task(ap.cfg)
+    assert task.status == "done" and task.merged["into"] == "main"
+    assert ap.dropped == ["task-1"]
+    assert _base_lock_record(ap.cfg) is None
+
+
+def test_approve_with_no_upstream_is_merged_and_says_nothing_to_push_to(ap, monkeypatch) -> None:
+    docker_exec = dispatcher_mod.docker_exec
+    monkeypatch.setattr(
+        _FakeGit, "push_outcome", docker_exec.PushOutcome(docker_exec.NO_UPSTREAM, None, "main tracks no remote")
+    )
+
+    out = _approve(ap)
+
+    assert out.outcome == "merged" and out.push.status == docker_exec.NO_UPSTREAM
+    assert out.comment == "approve at aaaaaaa: merged into main as ccccccc; nothing to push to: main tracks no remote"
+    assert _task(ap.cfg).status == "done"
+
+
+def test_approve_whose_push_is_refused_leaves_the_task_done_and_merged(ap, monkeypatch) -> None:
+    docker_exec = dispatcher_mod.docker_exec
+    monkeypatch.setattr(
+        _FakeGit, "push_outcome", docker_exec.PushOutcome(docker_exec.PUSH_REFUSED, "main", "not a fast-forward")
+    )
+
+    out = _approve(ap)
+
+    assert out.outcome == "merged_not_pushed" and out.landed
+    assert out.merge_commit == _MERGE_COMMIT and out.push.refused
+    first, detail = out.comment.splitlines()
+    assert first.startswith("approve at aaaaaaa: merged locally into main as ccccccc; the push did not land")
+    assert "dispatch merge-task --push" in first and detail == "not a fast-forward"
+    task = _task(ap.cfg)
+    assert task.status == "done" and task.merged["into"] == "main"
+    assert ap.dropped == ["task-1"]
+
+
+def test_approve_whose_push_raises_is_a_refused_push(ap) -> None:
+    ap.push_error = RuntimeError("socket gone")
+
+    out = _approve(ap)
+
+    assert out.outcome == "merged_not_pushed" and "the push could not run: socket gone" in out.comment
+    assert _task(ap.cfg).status == "done"
+
+
+def test_approve_counts_a_branch_the_base_already_holds_as_merged(ap, monkeypatch) -> None:
+    docker_exec = dispatcher_mod.docker_exec
+    monkeypatch.setattr(
+        _FakeGit, "outcome", docker_exec.MergeOutcome(docker_exec.UP_TO_DATE, "main", "main already contains it")
+    )
+
+    out = _approve(ap)
+
+    assert out.outcome == "merged" and len(ap.pushes) == 1
+    assert _task(ap.cfg).merged["into"] == "main" and ap.dropped == ["task-1"]
+
+
+def test_approve_on_a_done_task_not_yet_merged_goes_ahead(ap) -> None:
+    tasks.handoff(ap.cfg.hive_tasks_dir, "task-1", "done", "## auditor")
+
+    assert _approve(ap).outcome == "merged"
+
+
+def _stale(ap, reason, tip):
+    out = _approve(ap)
+    assert out.outcome == "stale" and not out.landed
+    assert out.merge_commit is None and out.push is None
+    now = f"; the branch's tip is now {tip}" if tip else ""
+    assert out.comment == f"approve at aaaaaaa: not acted on: {reason}{now}"
+    return out
+
+
+def test_approve_is_stale_when_the_task_is_already_merged(ap) -> None:
+    tasks.mark_merged(ap.cfg.hive_tasks_dir, "task-1", "main")
+    _stale(ap, "the task is already merged", None)
+    assert ap.merges == [] and ap.dropped == []
+
+
+def test_approve_is_stale_when_the_task_is_back_in_a_cycle(ap) -> None:
+    tasks.handoff(ap.cfg.hive_tasks_dir, "task-1", "in_progress", "## arquitecto")
+    _stale(ap, "the task is in_progress, not awaiting review", None)
+    _nothing_merged(ap, "in_progress")
+
+
+def test_approve_is_stale_when_the_task_is_in_conflict(ap) -> None:
+    tasks.handoff(ap.cfg.hive_tasks_dir, "task-1", dispatcher_mod.CONFLICT_STATUS, "## pre-merge check")
+    _stale(ap, f"the task is {dispatcher_mod.CONFLICT_STATUS}, not awaiting review", None)
+    _nothing_merged(ap, dispatcher_mod.CONFLICT_STATUS)
+
+
+def test_approve_is_stale_when_there_is_no_task_file(ap) -> None:
+    os.remove(task_file_path(ap.cfg.hive_tasks_dir, "task-1"))
+    _stale(ap, "the task has no task file", None)
+    assert ap.merges == [] and getattr(ap, "pushes", []) == []
+
+
+def test_approve_is_stale_when_the_branch_is_gone(ap) -> None:
+    del ap.refs["refs/heads/agent/task/task-1"]
+    _stale(ap, "the branch is gone", None)
+    _nothing_merged(ap)
+
+
+def test_approve_is_stale_when_the_reviewed_commit_is_not_in_the_clone(ap) -> None:
+    out = _approve(ap, commit="d" * 40)
+    assert out.outcome == "stale"
+    assert out.comment == (
+        "approve at ddddddd: not acted on: the reviewed commit is not in the clone; "
+        "the branch's tip is now aaaaaaa"
+    )
+    _nothing_merged(ap)
+
+
+def test_approve_is_stale_when_the_tip_moved_after_the_review(ap) -> None:
+    ap.refs["refs/heads/agent/task/task-1"] = "e" * 40
+    _stale(ap, "the branch moved after the review", "eeeeeee")
+    _nothing_merged(ap)
+
+
+def test_approve_is_stale_when_the_stale_check_cannot_read_the_branch(ap, monkeypatch) -> None:
+    def boom(container, workdir, rev):
+        raise RuntimeError("docker exec died")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "_rev_parse", boom)
+    out = _approve(ap)
+    assert out.outcome == "stale" and "docker exec died" in out.comment
+    _nothing_merged(ap)
+
+
+def test_approve_whose_premerge_conflicts_is_conflict_and_merges_nothing(ap, monkeypatch) -> None:
+    def conflicting(cfg, container, task_id, slug):
+        tasks.handoff(cfg.hive_tasks_dir, task_id, dispatcher_mod.CONFLICT_STATUS, "## pre-merge check")
+        return dispatcher_mod.PreMergeVerdict(False, "task-1: conflicts in src/a.py")
+
+    monkeypatch.setattr(dispatcher_mod, "pre_merge_check", conflicting)
+
+    out = _approve(ap)
+
+    assert out.outcome == "conflict" and not out.landed
+    assert out.comment == (
+        "approve at aaaaaaa: not merged: task-1: conflicts in src/a.py; "
+        "it waits on resolve conflict, then a new approve"
+    )
+    _nothing_merged(ap, dispatcher_mod.CONFLICT_STATUS)
+
+
+def test_approve_whose_gate_goes_red_is_conflict_with_the_gates_words(ap, monkeypatch) -> None:
+    def red(cfg, container, task_id, slug):
+        tasks.handoff(cfg.hive_tasks_dir, task_id, dispatcher_mod.CONFLICT_STATUS, "## pre-merge check")
+        return dispatcher_mod.PreMergeVerdict(False, "the test gate went red on the base merged in")
+
+    monkeypatch.setattr(dispatcher_mod, "pre_merge_check", red)
+
+    out = _approve(ap)
+
+    assert out.outcome == "conflict" and "the test gate went red on the base merged in" in out.comment
+    _nothing_merged(ap, dispatcher_mod.CONFLICT_STATUS)
+
+
+@pytest.mark.parametrize("how", ["refused", "raises"])
+def test_approve_whose_premerge_cannot_run_is_not_run_and_changes_nothing(ap, monkeypatch, how) -> None:
+    def cannot(cfg, container, task_id, slug):
+        if how == "raises":
+            raise OSError("no worktree")
+        return dispatcher_mod.PreMergeVerdict(False, "the test gate did not finish")
+
+    monkeypatch.setattr(dispatcher_mod, "pre_merge_check", cannot)
+
+    out = _approve(ap)
+
+    assert out.outcome == "not_run"
+    assert out.comment.startswith("approve at aaaaaaa: not merged: ")
+    assert out.comment.endswith("; nothing changed, approve again")
+    _nothing_merged(ap)
+
+
+def test_approve_while_the_base_is_locked_is_not_run(ap, monkeypatch) -> None:
+    monkeypatch.setattr(dispatcher_mod, "BASE_LOCK_WAIT_SECONDS", 0)
+    _hold_the_base(ap.cfg)
+
+    out = _approve(ap)
+
+    assert out.outcome == "not_run"
+    assert "the base is locked by elsewhere:1:feedface" in out.comment
+    assert out.comment.endswith("nothing changed, approve again")
+    _nothing_merged(ap)
+    assert _base_lock_record(ap.cfg)["owner"] == "elsewhere:1:feedface"
+
+
+def test_approve_with_no_agent_container_is_not_run(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path, accounts=[])
+
+    out = dispatcher_mod.approve_reviewed(cfg, "task-1", "myproj", _TIP)
+
+    assert out.outcome == "not_run" and "no agent container" in out.comment
+    assert fake_git.merges == []
+
+
+def test_approve_whose_merge_is_refused_by_git_is_merge_refused(ap, monkeypatch) -> None:
+    docker_exec = dispatcher_mod.docker_exec
+    monkeypatch.setattr(
+        _FakeGit, "outcome", docker_exec.MergeOutcome(docker_exec.REFUSED, "main", "main is dirty")
+    )
+
+    out = _approve(ap)
+
+    assert out.outcome == "merge_refused"
+    assert out.comment == "approve at aaaaaaa: not merged: git refused the merge\nmain is dirty"
+    assert out.merge_commit is None
+    assert getattr(ap, "pushes", []) == [] and ap.dropped == []
+    assert _task(ap.cfg).status == "awaiting_review" and _task(ap.cfg).merged is None
+
+
+def test_approve_whose_merge_raises_is_merge_refused(ap, monkeypatch) -> None:
+    def boom(*args, **kwargs):
+        raise RuntimeError("docker exec died")
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "merge_task_branch", boom)
+
+    out = _approve(ap)
+
+    assert out.outcome == "merge_refused" and "the merge could not run: docker exec died" in out.comment
+    assert getattr(ap, "pushes", []) == [] and _task(ap.cfg).merged is None
+    assert _base_lock_record(ap.cfg) is None
+    assert ap.restored == [(f"{ap.cfg.projects_root}/myproj", _FakeGit.owner)]
+
+
+def test_approve_checks_merges_and_pushes_inside_one_base_lock_and_owner_window(ap, monkeypatch) -> None:
+    docker_exec = dispatcher_mod.docker_exec
+    seen = []
+
+    def spy(name, real):
+        monkeypatch.setattr(
+            docker_exec, name, _recording_under_the_lock(ap.cfg, seen, name, real)
+        )
+
+    spy("read_owner", ap.read_owner)
+    spy("_rev_parse", lambda container, workdir, rev: ap.refs.get(rev))
+    spy("merge_task_branch", ap.merge_task_branch)
+    spy("push_base", ap.push_base)
+    spy("restore_owner", ap.restore_owner)
+
+    assert _approve(ap).outcome == "merged"
+
+    names = [name for name, _ in seen]
+    assert names[0] == "read_owner" and names[-1] == "restore_owner"
+    assert names.index("merge_task_branch") < names.index("push_base")
+    assert names.index("_rev_parse") < names.index("merge_task_branch")
+    assert all(record is not None and record["operation"] == "approve" for _, record in seen)
+    assert len({record["owner"] for _, record in seen}) == 1
+    assert _base_lock_record(ap.cfg) is None
+
+
+def test_approve_does_not_hold_the_project_lock_or_ask_for_an_account(ap, monkeypatch) -> None:
+    monkeypatch.setattr(
+        dispatcher_mod, "pick_idle_account",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("an approve waits on no account")),
+    )
+    assert _approve(ap).outcome == "merged"

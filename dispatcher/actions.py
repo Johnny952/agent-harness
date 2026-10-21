@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from dispatcher.board_mcp import THREAD
-from dispatcher.tasks import MAX_COMMENT_CHARS
+from dispatcher.tasks import _COMMIT_RE, MAX_COMMENT_CHARS
 
 ACTIONS_DIR = "actions"
 TMP, PENDING, CLAIMED, DONE = "tmp", "pending", "claimed", "done"
@@ -200,6 +200,17 @@ def _validate_verdict(record: dict) -> list[str]:
     return problems
 
 
+def _validate_approve(record: dict) -> list[str]:
+    """An approve names the task and the commit the person's diff showed (ADR 258)."""
+    problems = _both_required(record)
+    params = record["params"]
+    problems += _extra_keys(params, ("commit",))
+    commit = params.get("commit")
+    if not isinstance(commit, str) or not _COMMIT_RE.match(commit):
+        problems.append("params.commit must be a commit hash")
+    return problems
+
+
 def _validate_turn(record: dict) -> list[str]:
     problems = []
     if record.get("task_id") is not None:
@@ -286,11 +297,20 @@ KINDS: dict[str, Kind] = {
             "interrupted during the keygen; look at the project's key before another",
         ),
         Kind("check", _validate_project_setup, lambda r: None, False, "rerun", None),
+        # An approve merges and pushes the base (ADR 258). It serialises on the
+        # project's base, takes no project flock and waits on no account; a
+        # half-run merge is a person's to look at, so it is not rerun.
+        Kind(
+            "approve", _validate_approve, lambda r: f"base:{r['project']}",
+            False, "interrupt",
+            "interrupted during the approve; read the task's comments and the "
+            "base before approving again",
+        ),
     )
 }
 
 #: Kinds a second pending or claimed action for the same task is refused.
-_ONE_PER_TASK = ("start", "command_verdict")
+_ONE_PER_TASK = ("start", "command_verdict", "approve")
 #: Kinds a second pending or claimed action for the same project is refused.
 _ONE_PER_PROJECT = ("clone", "init", "keygen", "check")
 
@@ -522,7 +542,7 @@ def _new_record(kind, project, task_id, params, actor, note) -> dict:
 
 
 def _refuse_locked(root: Path, record: dict, ready) -> None:
-    """The checks made under `write.lock`: one start (or verdict) per task,
+    """The checks made under `write.lock`: one start (verdict, approve) per task,
     one setup action of each kind per project, and Ready."""
     kind, project, task_id = record["kind"], record["project"], record["task_id"]
     if kind in _ONE_PER_TASK:

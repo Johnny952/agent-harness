@@ -275,7 +275,8 @@ def test_the_fingerprints_of_the_projects_own_index_did_not_move(monkeypatch) ->
 
     rows = debt.index_rows(text)
     assert rows, "expected the project's own debt index to hold rows"
-    assert all(re.fullmatch(r"T-\d+-D\d+", row["id"]) for row in rows), [
+    # A split task's id carries its subtask, as in `T-125-S1-D1`.
+    assert all(re.fullmatch(r"T-\d+(-S\d+)?-D\d+", row["id"]) for row in rows), [
         row["id"] for row in rows
     ]
     after = debt.index_fingerprints(text)
