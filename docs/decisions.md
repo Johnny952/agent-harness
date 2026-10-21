@@ -13970,3 +13970,70 @@ holds an account.
 - Accepting it on `conflict`: the branch first has to merge with the base,
   which *resolve conflict* owns.
 - No account, as approve: the rerun is phases, and phases spend quota (C-12).
+
+## ADR 276 — The console's *Request changes*: approve's forward and button with the kind swapped, typed words required, `awaiting_review` only
+
+**Status:** accepted (2026-10-21), T-129's arquitecto. Builds
+`docs/plans/review.md` step 7's last button over ADR 272's route, on ADR
+270's shape.
+
+**Context.** ADR 272 serves `POST /api/tasks/<id>/request-changes`, approve's
+route with the kind swapped: bearer, body `{project, commit, text}`, `text`
+non-blank, taken on `awaiting_review` not merged only, refusals after the
+verdict line (409 when an approve or another request is queued for the task,
+503) carrying `verdict`. The worker writes no outcome comment for it: the task
+moves to `pending`, runs a cycle and comes back to `awaiting_review` at a new
+tip. Left open: what the button sends with nothing typed, which states turn it
+off, and what the screen shows as its outcome.
+
+**Decision.**
+
+1. *The forward* is approve's (ADR 270, 1) for a second path,
+   `TASK_REQUEST_CHANGES`, `action: "request_changes"` in `boardTarget`'s
+   `actionRoutes`: the actions bearer, the same order of answers and the same
+   rebuilt body. `approveBody` becomes one body reader for both, its 400s
+   naming the verb (*An approve's*, *A request for changes'*). A `GET` keeps
+   the api's 404. The board-write count moves from twenty-two to twenty-three;
+   the api read count does not move.
+2. *The client* mirrors approve: `requestChanges(taskId, body)` over `readBare`,
+   `RequestChangesBody`/`RequestChangesResult` shaped as approve's, and
+   `requestChangesMutation` refetching what approve's does.
+3. *The button* sits in the verdict form beside *approve*, posting
+   `{project: task.project (omitted when null), commit: diff.commit, text}`.
+   It needs typed words: `text` is the form's, sent only when
+   `commentProblem(text)` is null; there is no default text, since the words
+   are what the arquitecto is asked to act on, and the route refuses a blank.
+   Comments already pinned at this tip travel with it on the server's side
+   (ADR 272, 4) and need nothing from the screen. It is off unless
+   `requestChangesRefusal(task)` (`front/src/lib/review.ts`) is `null` —
+   `awaiting_review` and `merged === false` — whose string is the button's
+   title otherwise (*Conflict*: waits on *resolve conflict*; `done`: finished
+   before review, a fresh start reruns it; merged: already on main); off
+   while any of the three posts is pending; and off, with *approve*, once
+   either was queued at this tip from this screen, reading *changes
+   requested*. A 201 clears the form.
+4. *Its answers* are approve's: a 201 toast names the queued action and says
+   the task leaves the list while its cycle reruns; a refusal carrying
+   `verdict` says the verdict was recorded and nothing was queued, with the
+   route's words (the 409 names the other queued verdict); any other refusal
+   is its words alone. Nothing is swallowed.
+5. *The outcome* is the task's status, not a comment: the board refetch moves
+   it out of the review lane when the worker reopens it, and it returns at a
+   new tip. The panel's CLI line drops *Request changes is not in the console
+   yet*.
+
+**Consequences.**
+- A person who only pinned line comments types a line before the button
+  turns on; the comments still travel.
+- The *queued* memory is the screen's and lost on reload; the route's 409
+  stops a second review-ending verdict then.
+- A legacy `done` unmerged task can be approved or commented on but not sent
+  back from the console.
+
+**Ruled out.**
+- A default text such as `Changes requested.`: it would send the arquitecto
+  a request with nothing to act on when no comment was pinned.
+- Reading the action's `result.outcome` for a rerun's end: the status the
+  board already polls says it, as ADR 270 ruled for approve.
+- A separate route helper in the forward: one body reader keeps the two
+  verbs' fields from drifting.
