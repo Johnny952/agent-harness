@@ -254,6 +254,10 @@ work that is mostly mechanical. Three steps instead, decided by the user on
 `merge-task` or an automatic approve. It does not run when a task enters
 `awaiting_review` (ADR 240 adds the status, not the check), and it does not
 re-run on the other tasks after a merge, since the queue does not exist.
+*Extended* 2026-10-21 (step 8, ADR 274): with `review_conflict_check` on,
+the same check runs when a task enters `awaiting_review` and, after each
+merge, on every task of that project still waiting, keeping no pre-merge;
+off, the paragraph above still holds.
 
 - The base is merged into the task branch in a detached pre-merge checkout.
 - If the base is already in the branch, nothing new came in, and the gate is

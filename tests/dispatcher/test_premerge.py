@@ -413,13 +413,16 @@ def test_entering_review_runs_no_check_when_it_is_off(
     assert cfg.review_conflict_check is False
     handoff(cfg.hive_tasks_dir, "task-1", "done", "## auditor\n\napproved")
     _diverge(repo, conflict=True)
+    # Recorded, not raised: the check swallows what it raises, so a throwing
+    # stub would pass with the switch ignored.
+    checked = []
     monkeypatch.setattr(
-        docker_exec_mod, "premerge_base",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("the check ran while off")),
+        docker_exec_mod, "premerge_base", lambda *a, **k: checked.append(a),
     )
 
     dispatcher_mod._await_review(cfg, "task-1", "myproj")
 
+    assert checked == []
     assert _status(cfg) == "awaiting_review"
 
 
@@ -465,6 +468,24 @@ def test_a_merge_rechecks_every_task_still_waiting_for_review(
     assert _sha(repo["project"], _BRANCH) == tip
     assert _status(cfg, "task-2") == "in_progress"
     assert _status(cfg, "task-3") == "awaiting_review"
+
+
+def test_the_recheck_skips_the_task_that_just_merged(tmp_path, repo, monkeypatch) -> None:
+    import dataclasses
+
+    cfg = dataclasses.replace(_config(tmp_path, repo["projects"]), review_conflict_check=True)
+    # An approved task can still read awaiting_review, unmerged, when its
+    # merge's sweep runs: only its name keeps it out.
+    _awaiting(cfg, "task-0")
+    _awaiting(cfg, "task-1")
+    checked = []
+    monkeypatch.setattr(
+        dispatcher_mod, "_review_check_locked",
+        lambda cfg, task_id, slug, *, merged_task: checked.append(task_id),
+    )
+
+    assert dispatcher_mod.recheck_awaiting_review(cfg, "myproj", "task-0") == []
+    assert checked == ["task-1"]
 
 
 def test_a_merge_rechecks_nothing_when_the_check_is_off(
