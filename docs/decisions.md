@@ -13812,3 +13812,74 @@ verdicts and pinned comments, and the dispatcher's outcome is a plain comment.
   the words on the change as a whole at this tip.
 - Polling `GET /api/actions/<id>` for the outcome: the comment says it, and
   ADR 264's outcome strings are there for a later screen that needs them.
+
+## ADR 271 — The task-branch push after a committing phase: per project, off by default, to the base's remote, never forced
+
+**Status:** accepted (2026-10-21), T-127. Builds `docs/plans/review.md`
+step 5 and the task-branch half of *Decisions*, 4, over ADR 78's credential
+(the one ADR 258 named for both pushes).
+
+**Context.** *Decisions*, 4 has the dispatcher push `agent/task/<id>` after
+each phase that commits, when the project turns that on, so the remote keeps
+the record of each role's work; never forced, never a pull request, and the
+base only on *approve* (C-5 as amended, C-12). ADR 78 holds the credential
+and pushes the base (`docker_exec.push_base`, `PushOutcome`); ADR 77 set the
+shape of a per-project switch (`auto_approve`). Nothing pushed the task
+branch, and step 5 left open where the push sits and what a refused one does.
+
+**Decision.**
+
+1. *The switch.* `push_task_branch` is a mapping of project slug to a real
+   boolean, parsed as `auto_approve` is (anything else refuses the config,
+   naming the key); `Config.pushes_task_branch(slug)` is `False` for an
+   unlisted project. It is a read-only key in `CONFIG_KEYS`, since it writes
+   to the remote with the dispatcher's credential. Off, `dispatch_phase`
+   reads nothing and pushes nothing.
+2. *When.* On, `dispatch_phase` reads the tip of `refs/heads/agent/task/<id>`
+   on the project clone after the worktree is made and again after the
+   phase's commit and `_record_left_behind`, and pushes only when the second
+   read names a commit the first did not. A phase run at the base
+   (`at_base`) has no task branch and is skipped. A tip that cannot be read
+   is logged and treated as unknown: unknown before still pushes a branch
+   that exists after, which a non-forced push makes harmless.
+3. *Where it sits.* Inside the phase's `read_owner`/`restore_owner` window,
+   since the push writes the remote-tracking ref under `.git/` as root, and
+   right after the commit, before the phase's result is judged: whatever
+   `_should_commit` let land is pushed, and a phase that committed nothing
+   pushes nothing.
+4. *The push.* `docker_exec.push_task_branch` pushes
+   `refs/heads/agent/task/<id>:refs/heads/agent/task/<id>` to the remote the
+   base tracks (`branch.<base>.remote`), with `_remote_access`'s credential
+   as `push_base` uses it: no `--force`, no `+` refspec, no other ref. It
+   returns a `PushOutcome` whose target is the task branch: `pushed`,
+   `no_upstream` (a detached clone, a base tracking no remote or `.`, a remote
+   that does not resolve), or `push_refused` (the credential missing, or the
+   remote refusing, such as a branch someone else moved).
+5. *A push that did not land* never fails the phase or the cycle. It is
+   logged as a warning, and `DispatchResult.branch_push` carries one line
+   naming the branch and the reason; `run_phase` appends it to the handoff
+   under `## Task-branch push`. An exception from the push is the same
+   `push_refused`, worded "the push could not run". The branch stays as the
+   phase left it, and the next committing phase tries again.
+
+**Consequences.**
+- A project with the key on gets one push per committing phase, so an
+  implementador round and an auditor's fix each show on the remote under the
+  task's branch name.
+- A refused push is visible only in the handoff and the log; the task's
+  status does not change, and a person reconciles the remote by hand.
+- A fatal phase failure returns before the handoff body is built, so its
+  push note is only logged.
+- The base's push on *approve* (ADR 78) is unchanged and still the only
+  push of the base.
+
+**Ruled out.**
+- `--force-with-lease` to overwrite a branch the remote moved: C-5 says never
+  forced, and the remote's copy may be a person's.
+- A push from the role inside the container: roles never push (C-5).
+- `origin` by name: the base's tracking remote is the one ADR 78 pushes, so
+  both pushes go to the same place.
+- Failing the phase on a refused push: the push is a record, not part of the
+  work, and the phase's commit is already safe locally.
+- One shared loader for `auto_approve` and `push_task_branch`: the same
+  twelve lines twice, kept apart so each key's message names itself.

@@ -144,6 +144,10 @@ class DispatchResult:
     #: `(accepted, refused)`, so the cycle blocks on the same lists the
     #: envelope holds. None for a role that cannot file one (ADR 118).
     command_requests: tuple[list[dict], list[dict]] | None = None
+    #: Why the task branch was not pushed after this phase, for the handoff
+    #: note: empty when it was pushed, when there was nothing new to push, or
+    #: when the project does not push its task branch at all (ADR 271).
+    branch_push: str = ""
 
 
 class CycleOutcome(enum.Enum):
@@ -1966,6 +1970,12 @@ def dispatch_phase(
                 container, cfg.projects_root, slug, task_id, role,
                 **({"at_base": True} if at_base else {}),
             )
+            # Read before the phase runs, so the push below can tell a phase
+            # that committed from one that did not (ADR 271).
+            branch_tip = (
+                _task_branch_tip(container, project_dir, task_id)
+                if not at_base and cfg.pushes_task_branch(slug) else None
+            )
             with _HeartbeatLoop(cfg.hive_tasks_dir, task_id, cfg.heartbeat_interval_seconds):
                 # `prompt` itself is never rewritten: the note is recomputed
                 # from whichever session this attempt resumes, so a phase that
@@ -2036,6 +2046,12 @@ def dispatch_phase(
                         excludes=project_docs.commit_excludes(),
                     )
                 _record_left_behind(cfg, container, workdir, task_id, role, round_num)
+            # Inside the owner window: a push writes the remote-tracking ref
+            # under .git/ as root.
+            branch_push = (
+                _push_task_branch(cfg, container, project_dir, slug, task_id, role, branch_tip)
+                if not at_base and cfg.pushes_task_branch(slug) else ""
+            )
         except Exception:
             # Never leave an account stuck BUSY (disk-persisted, survives
             # restart) because of an exception between claiming it and
@@ -2087,6 +2103,7 @@ def dispatch_phase(
                 success=False, session_id=result.session_id, result_text=result.result_text,
                 account=account, handoff=_phase_handoff(container, result), gates=gate_report,
                 permission_denials=_handoff_denials(task_id, role, result),
+                branch_push=branch_push,
             )
 
         # A turn the service actually served is proof the refusal is over —
@@ -2098,6 +2115,7 @@ def dispatch_phase(
             success=True, session_id=result.session_id, result_text=result.result_text,
             account=account, handoff=_phase_handoff(container, result), gates=gate_report,
             permission_denials=_handoff_denials(task_id, role, result),
+            branch_push=branch_push,
         )
 
 
@@ -2426,6 +2444,63 @@ def _record_left_behind(
         return
     for line in left_behind_report(cfg, task_id, role):
         logger.warning("%s", line)
+
+
+def _task_branch_tip(container: str, project_dir: str, task_id: str) -> str | None:
+    """The task branch's commit in the project clone, or None, never raising."""
+    try:
+        return docker_exec.resolve_commit(
+            container, project_dir, f"refs/heads/{docker_exec.task_branch(task_id)}"
+        )
+    except Exception as exc:
+        logger.warning("task %s: could not read the task branch's tip: %s", task_id, exc)
+        return None
+
+
+def _push_task_branch(
+    cfg: Config,
+    container: str,
+    project_dir: str,
+    slug: str,
+    task_id: str,
+    role: str,
+    before: str | None,
+) -> str:
+    """Push the task branch when the phase left a new commit on it, never failing it.
+
+    Only for a project with `push_task_branch` on (ADR 271). The tip is read
+    again and compared with `before`, the tip the phase started from: the
+    same commit means the phase committed nothing and nothing is pushed.
+    Returns a note for the handoff when a push was due and did not land, and
+    an empty string otherwise; a failed push is logged and never fails the
+    phase or the cycle.
+    """
+    branch = docker_exec.task_branch(task_id)
+    after = _task_branch_tip(container, project_dir, task_id)
+    if after is None or after == before:
+        logger.info(
+            "task %s: the %s phase left no new commit on %s; nothing pushed",
+            task_id, role, branch,
+        )
+        return ""
+    try:
+        outcome = docker_exec.push_task_branch(
+            container, cfg.projects_root, slug, task_id,
+            credentials_path=cfg.git_credentials_path,
+            keys_dir=cfg.project_keys_dir,
+        )
+    except Exception as exc:
+        outcome = docker_exec.PushOutcome(
+            docker_exec.PUSH_REFUSED, branch, f"the push could not run: {exc}"
+        )
+    if outcome.pushed:
+        logger.info("task %s: %s", task_id, outcome.detail)
+        return ""
+    logger.warning(
+        "task %s: %s was not pushed after the %s phase: %s; the phase carries on",
+        task_id, branch, role, outcome.detail,
+    )
+    return f"{branch} was not pushed after this phase: {outcome.detail}"
 
 
 def left_behind_report(cfg: Config, task_id: str, role: str | None = None) -> list[str]:
@@ -3431,6 +3506,10 @@ def run_phase(
     gate_section = result.gates.render() if result.gates is not None else ""
     if gate_section:
         body = f"{body}\n\n{gate_section}"
+    # Noted the same way: a task branch that should be on the remote and is
+    # not is the dispatcher's finding, and never the phase's failure (ADR 271).
+    if result.branch_push:
+        body = f"{body}\n\n## Task-branch push\n\n{result.branch_push}"
     tasks.handoff(
         cfg.hive_tasks_dir, ctx.task_id,
         new_status="done" if final else "pending",

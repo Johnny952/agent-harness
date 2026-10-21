@@ -1584,6 +1584,75 @@ def push_base(
     return PushOutcome(PUSHED, branch, f"pushed {branch} to {upstream} at {head}")
 
 
+def push_task_branch(
+    container: str,
+    projects_root: str,
+    slug: str,
+    task_id: str,
+    credentials_path: str = GIT_CREDENTIALS_PATH,
+    timeout: float | None = None,
+    keys_dir: str = PROJECT_KEYS_DIR,
+) -> PushOutcome:
+    """Push `agent/task/<task_id>` to the project's remote, or say why not.
+
+    Called after a phase that left a new commit on the task branch, for a
+    project that turns it on (docs/plans/review.md *Decisions*, 4; ADR 271).
+    The remote is the one the base tracks, `branch.<base>.remote`, the same
+    remote push_base writes to; the task branch lands under its own name
+    there. Never the base: the refspec names the task branch on both sides.
+
+    Never forced, like push_base: no `+` in the refspec and no `--force` or
+    `--force-with-lease`, so a remote branch someone else moved refuses the
+    push and the refusal is returned as it is. No PR is opened. The
+    credential is the base push's (_remote_access).
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
+    project_dir = f"{projects_root}/{slug}"
+    task = task_branch(task_id)
+
+    base = current_branch(container, project_dir)
+    if base is None:
+        return PushOutcome(
+            NO_UPSTREAM, task, f"{project_dir} is not on a branch; {task} not pushed"
+        )
+    remote = _git_config(container, project_dir, f"branch.{base}.remote")
+    if remote is None or remote == ".":
+        return PushOutcome(NO_UPSTREAM, task, f"{base} tracks no remote; {task} not pushed")
+    url = run_docker_exec(
+        container, project_dir,
+        ["git", "remote", "get-url", "--push", remote],
+        env=_GIT_ENV,
+    )
+    if url.returncode != 0:
+        return PushOutcome(
+            NO_UPSTREAM, task,
+            f"{base} tracks {remote}, and {project_dir} has no remote by that name; "
+            f"{task} not pushed",
+        )
+    access = _remote_access(
+        container, slug, remote, url.stdout.strip(), credentials_path, keys_dir
+    )
+    if isinstance(access, str):
+        return PushOutcome(PUSH_REFUSED, task, f"{access}; {task} not pushed to {remote}")
+    pushed = run_docker_exec(
+        container, project_dir,
+        [
+            "git", *access.git_args, "push", "--quiet", remote,
+            f"refs/heads/{task}:refs/heads/{task}",
+        ],
+        env=access.env,
+        timeout=timeout,
+    )
+    if pushed.returncode != 0:
+        return PushOutcome(
+            PUSH_REFUSED, task,
+            f"pushing {task} to {remote} was refused; the branch is kept locally "
+            f"as it is: {_output_tail(pushed)}{access.missing}",
+        )
+    head = _rev_parse_short(container, project_dir, f"refs/heads/{task}")
+    return PushOutcome(PUSHED, task, f"pushed {task} to {remote} at {head}")
+
+
 def _branch_exists(container: str, project_dir: str, branch: str) -> bool:
     proc = run_docker_exec(
         container, project_dir,

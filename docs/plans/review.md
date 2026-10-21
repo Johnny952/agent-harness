@@ -12,7 +12,8 @@ review is built but for one of its verdicts (ADR 219, ADR 222, ADR 270): the
 api serves a task branch's diff, and `/approvals` draws it with the comments
 pinned to it, pins new ones to a line, records the *comment* verdict at
 the tip, and has an *approve* button. The dispatcher writes the
-`awaiting_review` status (step 1, ADR 240); *approve* is served by the board
+`awaiting_review` status (step 1, ADR 240), and pushes the task branch after
+each committing phase for a project that turns it on (step 5, ADR 271); *approve* is served by the board
 service's bearer route and drained by the worker (step 4); the console has no
 button for *request changes*, and no dispatcher reads any other verdict. Two pieces landed on
 the CLI side through `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
@@ -58,7 +59,9 @@ becomes a person's decision, taken over a diff, in the console.
   the dispatcher push task branches, and C-12 the base on *approve*.
   (Since 2026-10-17 the dispatcher pushes the base after an automatic
   approve or `merge-task --push`, per ADRs 77 and 78, and every merge runs
-  the pre-merge check first. The task branch is still never pushed.)
+  the pre-merge check first. Since 2026-10-21 it also pushes the task
+  branch after each committing phase, for a project with `push_task_branch`
+  on, per ADR 271.)
 - **A screen without verdicts.** `front/src/routes/approvals.tsx` was a Lovable
   draft over mock data until ADR 219. It now lists the tasks that are `done`
   and not merged, as the stand-in for *Awaiting review* (until the console
@@ -175,7 +178,9 @@ the action queue (an `approve` action the worker drains), neither of the two.
 - *A conflict is caught at the merge.* The `awaiting_review` status exists
   (step 1, ADR 240), but the pre-merge check (*Decisions*, 6, step 1) still
   runs before every merge, not when a task enters review.
-- *Pushing the task branch after each phase* (step 5 below) is not built.
+- *Pushing the task branch after each phase* (step 5 below) is built (ADR
+  271, T-127): per project, off by default, never forced, and a push that
+  does not land is a note in the phase's handoff, never a failed phase.
 
 ### 5. *Request changes* goes back to the arquitecto
 
@@ -305,6 +310,12 @@ After `board-service.md`'s steps, each a single surface:
 5. The task-branch push after each phase, per project, off by default.
    Independent of the console, so it may be built first; it needs the same
    credential, and the ADR goes with whichever of 4 and 5 lands first.
+   **Built 2026-10-21** (ADR 271, T-127): `push_task_branch`, a per-project
+   boolean parsed like `auto_approve`, turns it on; `dispatch_phase` reads
+   the branch's tip before and after the phase and, when it moved, pushes
+   `agent/task/<id>` alone to the base's remote with ADR 78's credential,
+   never forced. A push that does not land is logged and noted in the
+   handoff under `## Task-branch push`; the phase carries on.
 6. The *request changes* verdict: the cycle reopened at the arquitecto.
 7. The screen, with the diff library. A front task, behind its own ask for a
    build and for the package. **Partly built 2026-10-20** (ADR 219): the

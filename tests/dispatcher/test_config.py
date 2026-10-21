@@ -821,6 +821,46 @@ def test_load_config_refuses_a_bad_auto_approve(tmp_path: Path, extra: str) -> N
         load_config(str(config_path))
 
 
+def test_push_task_branch_defaults_to_off(tmp_path: Path) -> None:
+    """ADR 271: a project without the key never has its task branch pushed."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.push_task_branch == {}
+    assert cfg.pushes_task_branch("myproj") is False
+
+
+def test_load_config_reads_push_task_branch_per_project(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "push_task_branch:\n  myproj: true\n  other: false\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.pushes_task_branch("myproj") is True
+    assert cfg.pushes_task_branch("other") is False
+    assert cfg.pushes_task_branch("unlisted") is False
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "push_task_branch: true\n",
+        "push_task_branch:\n  myproj: maybe\n",
+        "push_task_branch:\n  myproj: 1\n",
+        "push_task_branch:\n  myproj: 'true'\n",
+    ],
+)
+def test_load_config_refuses_a_bad_push_task_branch(tmp_path: Path, extra: str) -> None:
+    """Only a real boolean turns writing to the project's remote on."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + extra)
+
+    with pytest.raises(ValueError, match="push_task_branch"):
+        load_config(str(config_path))
+
+
 @pytest.mark.parametrize(
     "extra",
     [
@@ -1054,6 +1094,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "push_subject": "mailto:x@y",
         "auto_approve": {"p": True},
         "protected_paths": {"p": ["docs/"]},
+        "push_task_branch": {"p": True},
     }
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(values))
@@ -1068,7 +1109,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         23,
-        18,
+        19,
         3,
     )
     for spec in CONFIG_KEYS.values():

@@ -227,6 +227,11 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "Loosening it widens what merges unattended (ADR 77), and it lives wherever "
         "auto_approve lives (ADR 106)."
     ),
+    "push_task_branch": _read_only(
+        "It writes to the project's remote with the dispatcher's credential after "
+        "every committing phase (ADR 78, ADR 271), and it lives wherever "
+        "auto_approve lives (ADR 106)."
+    ),
 }
 
 
@@ -340,6 +345,11 @@ class Config:
     #: Per project, more repo paths or globs the automatic approve never
     #: merges a change to, over the fixed list in `dispatcher/auto_approve.py`.
     protected_paths: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    #: Per project, whether the dispatcher pushes `agent/task/<id>` to the
+    #: project's remote after each phase that left a new commit on it
+    #: (`docs/plans/review.md` *Decisions*, 4; ADR 271). A project not named,
+    #: or named `false`, never has its task branch pushed, as before.
+    push_task_branch: dict[str, bool] = dataclasses.field(default_factory=dict)
     #: Where a phase reaches the board service's MCP endpoint, without the
     #: `?role=` the dispatcher adds per phase (`docs/decisions.md` ADR 128).
     #: None sends no `--mcp-config` and no board tool names to any phase,
@@ -369,6 +379,10 @@ class Config:
     def auto_approves(self, slug: str) -> bool:
         """Whether a finished task of `slug` goes through the automatic approve."""
         return self.auto_approve.get(slug, False)
+
+    def pushes_task_branch(self, slug: str) -> bool:
+        """Whether `slug`'s task branch is pushed after each committing phase."""
+        return self.push_task_branch.get(slug, False)
 
     def effort_for(
         self, role: str, round_num: int | None = None, repeated_finding: bool = False,
@@ -666,6 +680,23 @@ def _load_auto_approve(raw: dict) -> dict[str, bool]:
             raise ValueError("auto_approve keys must be project slugs")
         if not isinstance(value, bool):
             raise ValueError(f"auto_approve.{slug} must be true or false")
+    return dict(block)
+
+
+def _load_push_task_branch(raw: dict) -> dict[str, bool]:
+    """`push_task_branch`, a map of project slug to boolean (ADR 271).
+
+    Strictly booleans, like `auto_approve`: a typo must not start writing to
+    a remote.
+    """
+    block = raw.get("push_task_branch") or {}
+    if not isinstance(block, dict):
+        raise ValueError("push_task_branch must be a mapping of project slug to true or false")
+    for slug, value in block.items():
+        if not isinstance(slug, str) or not slug.strip():
+            raise ValueError("push_task_branch keys must be project slugs")
+        if not isinstance(value, bool):
+            raise ValueError(f"push_task_branch.{slug} must be true or false")
     return dict(block)
 
 
@@ -997,5 +1028,6 @@ def _build_config(raw: dict) -> Config:
         pace_primary_week=bool(raw.get("pace_primary_week", True)),
         auto_approve=_load_auto_approve(raw),
         protected_paths=_load_protected_paths(raw),
+        push_task_branch=_load_push_task_branch(raw),
         board_mcp_url=_load_board_mcp_url(raw),
     )
