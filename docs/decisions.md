@@ -13741,3 +13741,74 @@ still taking it for a *comment*, and how `/verdict` refuses `approve` once
   and answers 409; the review reads two verdicts and one action.
 - `record_verdict` callers other than the two routes (none today) get the
   approve status rule too.
+
+## ADR 270 — The console's *Approve*: the forward rebuilds `{project, commit, text}`, the button sits in the verdict form, and the review lists the dispatcher's outcome
+
+**Status:** accepted (2026-10-21), T-125-S3's arquitecto. Builds ADR 258's
+last consequence (the console's forward pair and button), `docs/plans/review.md`
+step 7's approve half, over ADR 267's route and ADR 264's outcomes.
+
+**Context.** ADR 267 serves `POST /api/tasks/<id>/approve` behind the
+`BOARD_ACTIONS_TOKEN` bearer, body `{project, commit, text}` and nothing else,
+`text` non-blank (`_comment_problems`). Its refusals after the verdict line
+(409, 503) carry `verdict` beside `error`. ADR 258 leaves to step 7 where the
+project comes from, what the button sends when nothing was typed, which
+states disable it, and where the outcome comment shows: the review lists only
+verdicts and pinned comments, and the dispatcher's outcome is a plain comment.
+
+**Decision.**
+
+1. *The forward.* `POST /api/tasks/<id>/approve` is a board-service pair with
+   the actions bearer and the CSRF checks of every board write, `action`
+   `"approve"`. The body is rebuilt, as a start's is: only `project`, `commit`
+   and `text` may be present (else the console's 400); `project`, when
+   present, must be shaped like a slug (`PROJECT_SLUG`, else 400) and is
+   sent as given, since the task names the clone whose diff was reviewed, as
+   the diff read's `?project=` does (ADR 210); absent, it is
+   `CONSOLE_PROJECT`, and with neither the console answers 503 naming
+   `CONSOLE_PROJECT`. `commit` and `text` cross as given; the route checks
+   them. Unset `BOARD_ACTIONS_TOKEN` is the 503 every action route answers.
+   No other method on the path is forwarded: a `GET` keeps the api's 404.
+2. *The button* is in the verdict form, beside *comment verdict*, and posts
+   `{project: task.project (omitted when null), commit: diff.commit, text}` —
+   the tip the diff on screen was read at, never a newer one. `text` is the
+   form's when it holds words, else `Approved.`; the form is cleared on a
+   201. It is disabled on the *Conflict* lane (its title says the conflict
+   waits on *resolve conflict*), on a task whose `merged` is not `false`,
+   while either post is pending, when the text is over the comment limit,
+   and once an approve was queued at this tip from this screen (it then reads
+   *approve queued*), until the diff's tip moves. It is not drawn when the
+   diff did not load: there is no tip to send.
+3. *Its answers.* A 201 is a toast naming the queued action and saying the
+   outcome comes as a comment. A refusal whose body carries `verdict` (the
+   409 and 503 after the line) says the verdict was recorded and nothing was
+   queued, with the route's words; any other refusal is its words alone. So
+   `client.ts`'s `ApiError` carries the refusal's parsed body, and
+   `approveTask` reads `verdict` from it. The comments, the board and the
+   action queue refetch on settle.
+4. *The outcome.* The verdict panel lists, after the verdicts, the comments
+   whose author is `dispatcher` and whose text opens `approve at ` (ADR 264,
+   5), oldest first, under *outcomes*. Nothing parses them further, and the
+   action's `result.outcome` is not read: the comment is the person's answer,
+   and the comments poll already brings it.
+5. The verdict panel's CLI line stays, for a refused push (`merge-task
+   --push`) and for the conflict lane; its sentence no longer says approve is
+   missing from the console.
+
+**Consequences.**
+- The approve goes to the project of the task the person reviewed, so a
+  console scoped to one project can approve another's task from `/approvals`;
+  a slug the harness would not take never crosses.
+- An approve with nothing typed stores `Approved.` as its verdict text.
+- The button's *queued* state is the screen's memory, lost on reload; the
+  route's 409 is what stops a second approve then.
+- A refused push is shown only as the outcome comment's words; the review
+  does not read the action.
+
+**Ruled out.**
+- `CONSOLE_PROJECT` always, as a start does: the diff was read from the task's
+  own clone, and the worker merges in the project the action names.
+- A separate approve form with its own text: the verdict form already holds
+  the words on the change as a whole at this tip.
+- Polling `GET /api/actions/<id>` for the outcome: the comment says it, and
+  ADR 264's outcome strings are there for a later screen that needs them.
