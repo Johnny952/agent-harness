@@ -83,14 +83,14 @@ next entry. A task that is `pending` is `muted` too: nothing has happened to it
 yet, which is not the same news as something that finished.
 
 The six task states are the six the harness writes — `pending`,
-`in_progress`, `blocked`, `conflict`, `awaiting_review`, `done` — and not the four a fixture
-imagined; `docs/decisions.md` ADR 26 says why there is no `queued` and why
-`in_progress` carries no role. `conflict` is the pre-merge check stopping a
-merge (`docs/plans/autonomy.md` *Decisions*, 2) and is `destructive` like
-`blocked`: it already happened, and the operator resolves it. `awaiting_review` is `warning`: the cycle passed and the
-task waits on the person, so it is not terminal like `done` and not failed like
-`blocked` (ADR 243). A status outside
-those six is possible, because
+`in_progress`, `blocked`, `conflict`, `awaiting_review`, `done` — and not the
+four a fixture imagined; `docs/decisions.md` ADR 26 says why there is no
+`queued` and why `in_progress` carries no role. `conflict` is the pre-merge
+check stopping a merge (`docs/plans/autonomy.md` *Decisions*, 2) and is
+`destructive` like `blocked`: it already happened, and the operator resolves
+it. `awaiting_review` is `warning`: the cycle passed and the task waits on the
+person, so it is not terminal like `done` and not failed like `blocked`
+(`docs/decisions.md` ADR 243). A status outside those six is possible, because
 the api serves what the task file says: it renders `muted` with the string
 verbatim rather than unstyled.
 
@@ -112,8 +112,8 @@ re-learn what amber means per screen is reading three products.
 **Set by:** the `front/` import; amended by T-012 for the served state
 vocabulary and the tone of `pending`, and by T-013 for a phase's own status and
 verdict, which `/api/phases` serves inside the handoff payload
-(`docs/decisions.md` ADR 27), and by T-118-S2 for `awaiting_review`. Source of truth:
-`front/src/components/console/primitives.tsx` (`StatusPill`) and
+(`docs/decisions.md` ADR 27), and by T-118-S2 for `awaiting_review`. Source of
+truth: `front/src/components/console/primitives.tsx` (`StatusPill`) and
 `front/src/lib/format.ts` (`gateTone`, moved out of `primitives.tsx` by
 `docs/debt/T-015-D1.md`),
 `dispatcher/handoff.py` (`_STATUS_VALUES`, `APPROVED`, `CHANGES_REQUESTED`).
