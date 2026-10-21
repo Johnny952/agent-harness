@@ -4,7 +4,7 @@
  * the verdicts among the comments (ADR 222).
  */
 import { describe, expect, it } from "vitest";
-import type { TaskComment } from "@/lib/api/types";
+import type { Task, TaskComment } from "@/lib/api/types";
 import {
   approveOutcomes,
   parseDiff,
@@ -58,6 +58,14 @@ describe("requestChangesRefusal", () => {
     );
     expect(requestChangesRefusal({ status: "awaiting_review", merged: true })).toMatch(/merged/);
     expect(requestChangesRefusal({ status: "pending", merged: false })).toMatch(/pending/);
+  });
+
+  it("refuses an awaiting_review task whose merged state is unknown", () => {
+    const unknown = { status: "awaiting_review", merged: undefined } as unknown as Pick<
+      Task,
+      "status" | "merged"
+    >;
+    expect(requestChangesRefusal(unknown)).toMatch(/Not yet known/);
   });
 });
 

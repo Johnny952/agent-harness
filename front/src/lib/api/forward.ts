@@ -41,7 +41,9 @@
  * `POST /api/threads/<id>/turns`, and the two project-record writes
  * `POST /api/projects` and `PATCH /api/projects/<slug>`, and the two epic actions
  * `POST /api/epics/<id>/start` and `POST /api/epics/<id>/stop`, onto the same paths
- * there; the last nine carry a bearer. Four more, a new project's setup actions
+ * there; nine carry the actions bearer (approve, request-changes, the three
+ * action routes, the two project-record writes and the two epic actions) and
+ * the other seven carry none. Four more, a new project's setup actions
  * `POST /api/projects/<slug>/{clone,init,keygen,check}` (ADR 212), go there
  * too with the same bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`

@@ -51,7 +51,8 @@ export function approveOutcomes(comments: TaskComment[]): TaskComment[] {
 /**
  * Why a task cannot be sent back from the console, or `null` when it can (ADR
  * 272, ADR 276): only an `awaiting_review` task whose work is not on main. The
- * sentence is the button's title.
+ * sentence is the button's title. `merged` must be `false`, not just absent:
+ * an unknown merged state refuses, as `approveOff` does.
  */
 export function requestChangesRefusal(t: Pick<Task, "status" | "merged">): string | null {
   if (t.status === "conflict") {
@@ -62,6 +63,7 @@ export function requestChangesRefusal(t: Pick<Task, "status" | "merged">): strin
     return "Finished before review: start it again to rerun it";
   }
   if (t.status !== "awaiting_review") return `A task in ${t.status} is not under review`;
+  if (t.merged !== false) return "Not yet known whether it is on main";
   return null;
 }
 
