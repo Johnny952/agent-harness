@@ -14078,3 +14078,95 @@ off, and what the screen shows as its outcome.
   board already polls says it, as ADR 270 ruled for approve.
 - A separate route helper in the forward: one body reader keeps the two
   verbs' fields from drifting.
+
+## ADR 274 — The check at review: the base merged in and gated, tested and never kept
+
+**Status:** accepted (2026-10-21). Builds `docs/plans/review.md` step 8 and
+the first half of its *Decisions* 6.1, which the *Narrowed* 2026-10-17 note
+on step 1 left out: the pre-merge check ran at each merge only, not when a
+task entered `awaiting_review` and not on the other tasks after a merge.
+
+**Context.** A task can wait in review for days. Meanwhile other tasks merge
+into the base, and a branch that was clean when reviewed may no longer merge,
+or may merge and fail its tests. Before this, the person learned of that only
+when the approve's pre-merge check stopped the merge, after the review had
+been spent on a branch that could not land as it was. The check it needs
+exists: `pre_merge_check` merges the base into the branch in a detached
+scratch checkout of the project clone (`docker_exec.premerge_base`), runs
+the decisions-log gate and the test gate on the result, and moves the task
+to `conflict` with a note. It also keeps the merge, moving the branch onto
+the merge commit (`adopt_premerge`), because at merge time that commit is
+what lands.
+
+**Decision.**
+
+1. *One check, two callers.* `pre_merge_check`'s body becomes
+   `_merge_base_and_gate`, taking `keep`, the name it reports under, its
+   gate log's file name and the function that writes the stop note.
+   `pre_merge_check` calls it with `keep=True` and `gates-premerge.log`, and
+   is unchanged in behaviour. The new `review_check(cfg, container, task_id,
+   slug, *, merged_task=None)` calls it with `keep=False` and
+   `gates-review.log`.
+2. *Tested, never kept.* The review check never calls `adopt_premerge`. It
+   always drops the scratch checkout, so the branch stays at the reviewed
+   tip whatever the result. A textual conflict, a duplicated ADR number, or
+   a blocking finding of the test gate moves the task to `conflict`. The note
+   under `## review check` says which of them happened, the files or the
+   failing gate and its log, the base and its commit, when the check ran (on
+   entry to review, or after which task merged), and that nothing moved:
+   the branch is still at its tip, the base is unchanged, and the task waits
+   on *resolve conflict*. Clean and green, or a branch that already holds the
+   base, leaves the task `awaiting_review` and writes nothing. A check that
+   cannot run, or a gate that does not finish, leaves the status alone, as
+   at merge time.
+3. *When it runs.*
+   - *On entry to review.* `_await_review` takes the cycle's slug. When
+     `tasks.mark_awaiting_review` has just moved the task, it runs the check.
+   - *After every merge.* `recheck_awaiting_review(cfg, slug, merged_task)`
+     runs after `record_merge` on all four merge paths: `merge_on_done`'s
+     `_merge_task_branch`, the automatic approve, `approve_reviewed` and
+     `dispatch merge-task`. It covers every task of that project
+     (`TaskFile.project == slug`) that is `awaiting_review` and not merged.
+     A task in its cycle is checked when it reaches review, and one already
+     in `conflict` waits on *resolve conflict* (*Decisions* 6.1).
+   - Each check holds the project's base lock (`review check`) and restores
+     the tree's owner, as every operation on the clone does. A held lock
+     skips that task with a log line. Neither caller raises, because the
+     merge or the cycle before it stands.
+4. *Off by default.* A top-level `review_conflict_check: false` turns it on.
+   It is read-only in the console, because it costs one test-gate run per
+   waiting task per merge, and that cost is the operator's call in
+   `config.yaml`. Off, everything runs as before.
+
+**Consequences.**
+- The *Conflict* column fills when a branch stops merging, not when the
+  person approves it. The note says which merge did it.
+- The task's diff and tip do not change, so comments anchored to the
+  reviewed tip stay current. The approve's own check is unchanged: it builds
+  the merge again and keeps it at merge time.
+- A task the review check moved to `conflict` cannot be approved
+  (`_stale_reason`). It returns to `awaiting_review` when a later
+  `pre_merge_check` passes (`_passed`). Until step 9's integrador exists,
+  that means the operator merges the base into the branch by hand and runs
+  `dispatch merge-task`. A later review check never clears it, because the
+  sweep looks only at `awaiting_review`.
+- A merge with many tasks in review runs the gate once per task, in series,
+  under the base lock. Turning the key on is a choice about that cost.
+
+**Ruled out.**
+- *Committing the merge onto the branch.* That would move the tip past the
+  reviewed commit. Every comment on it would go outdated, the approve's
+  stale check would refuse ("the branch moved after the review"), and under
+  `push_task_branch` the branch would need another push. The plan's
+  *Decisions* 6.1 says the diff is unchanged when the check passes. The
+  merge commit is rebuilt at approve time, which costs one more merge and
+  gate run.
+- *Rechecking `conflict` tasks or tasks in their cycle.* The first wait on
+  *resolve conflict*. The second have no reviewed tip yet and get the check
+  when they reach review.
+- *A per-project setting.* The other per-project keys live in
+  `projects.py`'s record, a separate surface. The key can move there when a
+  pool needs it per project.
+- *Running the sweep inside `record_merge`.* It has neither the slug nor a
+  container, and it also runs for merges recorded by hand.
+- *A model call.* Git and the test gate decide it.

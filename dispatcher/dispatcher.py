@@ -2573,6 +2573,38 @@ def _stop_on_conflict(
     return f"task {task_id}: moved to {CONFLICT_STATUS}: {why} (base {outcome.base} at {(outcome.base_commit or '')[:7]})"
 
 
+#: The heading of the note the review check appends to the task file (ADR 274).
+REVIEW_CHECK_HEADING = "## review check"
+
+
+def _stop_at_review(
+    cfg: Config,
+    task_id: str,
+    outcome: docker_exec.PreMergeOutcome,
+    why: str,
+    merged_task: str | None,
+) -> str:
+    """Move a task waiting for review to `conflict`, saying which check failed and why."""
+    branch = docker_exec.task_branch(task_id)
+    tip = (outcome.tip or "")[:7]
+    after = f" after {merged_task} merged" if merged_task else " as the task entered review"
+    note = (
+        f"{REVIEW_CHECK_HEADING}\n\n"
+        f"Checked{after}: {why}. The base was {outcome.base} at {outcome.base_commit}. "
+        f"Nothing was kept: {branch} is still at {tip} and {outcome.base} is "
+        f"unchanged. Resolve it on the branch (merge {outcome.base} in, never "
+        "rebase); the task waits on resolve conflict."
+    )
+    try:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, CONFLICT_STATUS, note)
+    except Exception as exc:
+        logger.warning("task %s: could not record the conflict on the task: %s", task_id, exc)
+    return (
+        f"task {task_id}: moved to {CONFLICT_STATUS} by the review check{after}: {why} "
+        f"(base {outcome.base} at {(outcome.base_commit or '')[:7]})"
+    )
+
+
 def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> PreMergeVerdict:
     """Merge the base into the task branch and gate the result, before any merge.
 
@@ -2595,6 +2627,51 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
     without touching the task's status: there is nothing to resolve, only
     something to run again.
     """
+    return _merge_base_and_gate(
+        cfg, container, task_id, slug,
+        keep=True, what="pre-merge check", log_name="gates-premerge.log",
+        stop=lambda c, o, why: _stop_on_conflict(c, task_id, o, why),
+    )
+
+
+def review_check(
+    cfg: Config, container: str, task_id: str, slug: str, *, merged_task: str | None = None,
+) -> PreMergeVerdict:
+    """Merge the base into a task waiting for review and gate it, keeping nothing.
+
+    `docs/plans/review.md` step 8 and ADR 274: the same merge and the same
+    gate as `pre_merge_check`, run when a task enters review and, after
+    another task merges (`merged_task`), on every task still there. A
+    conflict or a red gate moves the task to `conflict` with a note saying
+    which; clean and green leaves it reviewable. The merge is only tested:
+    the branch stays at the reviewed tip, so the comments anchored to it and
+    the approve's own check stay valid, and the approve's pre-merge check
+    builds and keeps the merge when it lands.
+    """
+    return _merge_base_and_gate(
+        cfg, container, task_id, slug,
+        keep=False, what="review check", log_name="gates-review.log",
+        stop=lambda c, o, why: _stop_at_review(c, task_id, o, why, merged_task),
+    )
+
+
+def _merge_base_and_gate(
+    cfg: Config,
+    container: str,
+    task_id: str,
+    slug: str,
+    *,
+    keep: bool,
+    what: str,
+    log_name: str,
+    stop: Callable[[Config, docker_exec.PreMergeOutcome, str], str],
+) -> PreMergeVerdict:
+    """The check both callers share: build the merge aside, gate it, keep it or not.
+
+    `keep` adopts a clean, green merge onto the branch (the pre-merge check);
+    without it the merge is dropped either way (the review check). `stop`
+    writes the conflict note and returns the log line.
+    """
     try:
         # `merge-task` comes here with `config.yaml`'s settings; the gate is
         # the project's (ADR 199). Laying the record over twice changes nothing.
@@ -2605,17 +2682,17 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
     try:
         outcome = docker_exec.premerge_base(container, cfg.projects_root, slug, task_id)
     except Exception as exc:
-        return PreMergeVerdict(False, f"task {task_id}: the pre-merge check could not run: {exc}")
+        return PreMergeVerdict(False, f"task {task_id}: the {what} could not run: {exc}")
     if outcome.refused:
-        return PreMergeVerdict(False, f"task {task_id}: pre-merge check refused: {outcome.detail}")
+        return PreMergeVerdict(False, f"task {task_id}: {what} refused: {outcome.detail}")
     if outcome.conflicted:
         why = (
             f"merging {outcome.base} in conflicts in {', '.join(outcome.conflicts)}"
             if outcome.conflicts else outcome.detail
         )
-        return PreMergeVerdict(False, _stop_on_conflict(cfg, task_id, outcome, why))
+        return PreMergeVerdict(False, stop(cfg, outcome, why))
     if outcome.up_to_date:
-        return _passed(cfg, task_id, f"task {task_id}: pre-merge check: {outcome.detail}; nothing new to gate")
+        return _passed(cfg, task_id, f"task {task_id}: {what}: {outcome.detail}; nothing new to gate")
 
     gated = "test gate green"
     log_path = None
@@ -2627,15 +2704,15 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
             duplicated = gates.decisions_log(container, outcome.workdir)
         except Exception as exc:
             return PreMergeVerdict(
-                False, f"task {task_id}: the pre-merge decisions-log gate did not finish: {exc}"
+                False, f"task {task_id}: the {what} decisions-log gate did not finish: {exc}"
             )
         if duplicated:
             why = f"{outcome.base} merged in leaves a broken decisions log: {duplicated[0].detail}"
-            return PreMergeVerdict(False, _stop_on_conflict(cfg, task_id, outcome, why))
+            return PreMergeVerdict(False, stop(cfg, outcome, why))
         if cfg.gates_enabled:
             log_path = os.path.join(
                 context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id),
-                "gates-premerge.log",
+                log_name,
             )
             try:
                 report = gates.run(
@@ -2645,7 +2722,7 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
                 )
             except Exception as exc:
                 return PreMergeVerdict(
-                    False, f"task {task_id}: the pre-merge test gate did not finish: {exc}"
+                    False, f"task {task_id}: the {what} test gate did not finish: {exc}"
                 )
         else:
             # The pool turned its gates off, so the merged result is kept
@@ -2657,17 +2734,19 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
                 f"`{f.gate}` {f.detail}" for f in report.findings if f.level == gates.BLOCKING
             )
             why = f"the test gate went red on {outcome.base} merged in: {failed} (log: {log_path})"
-            return PreMergeVerdict(False, _stop_on_conflict(cfg, task_id, outcome, why))
-        try:
-            docker_exec.adopt_premerge(container, cfg.projects_root, slug, task_id, outcome)
-        except Exception as exc:
-            return PreMergeVerdict(False, f"task {task_id}: pre-merge passed but was not kept: {exc}")
+            return PreMergeVerdict(False, stop(cfg, outcome, why))
+        if keep:
+            try:
+                docker_exec.adopt_premerge(container, cfg.projects_root, slug, task_id, outcome)
+            except Exception as exc:
+                return PreMergeVerdict(False, f"task {task_id}: pre-merge passed but was not kept: {exc}")
     finally:
         try:
             docker_exec.drop_premerge_worktree(container, cfg.projects_root, slug, task_id)
         except Exception as exc:
             logger.warning("task %s: could not drop the pre-merge checkout: %s", task_id, exc)
-    return _passed(cfg, task_id, f"task {task_id}: pre-merge check: {outcome.detail}, {gated}")
+    tested = "" if keep else ", tested only (the branch is unchanged)"
+    return _passed(cfg, task_id, f"task {task_id}: {what}: {outcome.detail}, {gated}{tested}")
 
 
 def _passed(cfg: Config, task_id: str, detail: str) -> PreMergeVerdict:
@@ -2729,6 +2808,7 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
+    _log_recheck(cfg, slug, task_id)
     return True
 
 
@@ -2933,6 +3013,7 @@ def _auto_approve_and_merge(
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
+    _log_recheck(cfg, slug, task_id)
     return ApproveResult(True, push)
 
 
@@ -3052,6 +3133,7 @@ def approve_reviewed(cfg: Config, task_id: str, slug: str, commit: str) -> Appro
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
+    _log_recheck(cfg, slug, task_id)
     try:
         learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
     except Exception as exc:
@@ -4477,18 +4559,92 @@ def _cycle_rounds(
         # merge keeps them here, where the next task still sees them.
         learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
     else:
-        _await_review(cfg, task_id)
+        _await_review(cfg, task_id, slug)
     return CycleOutcome.FINISHED
 
 
-def _await_review(cfg: Config, task_id: str) -> None:
+def _await_review(cfg: Config, task_id: str, slug: str | None = None) -> None:
     """Move a finished, unmerged task to `awaiting_review` and tell the person (ADR 240).
 
     `tasks.mark_awaiting_review` moves only a `done` task not on main, so a
     task the automatic approve moved to `conflict` stays one, told already
-    (ADR 221). It never raises: the cycle has finished, and its outcome stands.
+    (ADR 221). With `review_conflict_check` on and the project given, a task
+    it moved gets the review check at once (ADR 274), so a branch that no
+    longer merges reaches the board as `conflict`, not as reviewable. It
+    never raises: the cycle has finished, and its outcome stands.
     """
     try:
-        tasks.mark_awaiting_review(cfg.hive_tasks_dir, task_id)
+        moved = tasks.mark_awaiting_review(cfg.hive_tasks_dir, task_id)
     except Exception as exc:
         logger.warning("task %s: not moved to awaiting_review: %s", task_id, exc)
+        return
+    if moved and slug is not None and cfg.review_conflict_check:
+        line = _review_check_locked(cfg, task_id, slug, merged_task=None)
+        if line:
+            logger.info("%s", line)
+
+
+def _review_check_locked(
+    cfg: Config, task_id: str, slug: str, *, merged_task: str | None,
+) -> str | None:
+    """The review check under the project's base lock, never raising (ADR 274).
+
+    The scratch checkout and the branch refs live in the project's clone, so
+    the check takes the base lock and restores the tree's owner the way
+    every other operation there does. A held lock skips the check: the task
+    stays reviewable, and the approve's own pre-merge check still runs.
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return None
+    try:
+        base = _base_lock(cfg, slug, "review check").acquire()
+    except tasks.BaseLockHeldError as exc:
+        return f"task {task_id}: review check skipped: {exc}"
+    except Exception as exc:
+        return f"task {task_id}: review check skipped: {exc}"
+    try:
+        with base:
+            project_dir = f"{cfg.projects_root}/{slug}"
+            owner = docker_exec.read_owner(container, project_dir)
+            try:
+                return review_check(cfg, container, task_id, slug, merged_task=merged_task).detail
+            finally:
+                docker_exec.restore_owner(container, project_dir, owner)
+    except Exception as exc:
+        return f"task {task_id}: review check did not finish: {exc}"
+
+
+def recheck_awaiting_review(cfg: Config, slug: str, merged_task: str) -> list[str]:
+    """After `merged_task` landed on `slug`'s base, check every task still in review.
+
+    `docs/plans/review.md` step 8 (ADR 274). Only `awaiting_review` tasks of
+    this project that are not merged: one in its cycle is checked when it
+    reaches review, and one already in `conflict` waits on resolve conflict.
+    Off unless `review_conflict_check` is on. Returns a line per task; it
+    never raises, since the merge it follows has landed and stands.
+    """
+    if not cfg.review_conflict_check:
+        return []
+    try:
+        waiting = sorted(
+            task_id
+            for task_id, task in tasks.read_all_tasks(cfg.hive_tasks_dir).items()
+            if task.status == tasks.AWAITING_REVIEW_STATUS
+            and not task.merged
+            and task.project == slug
+            and task_id != merged_task
+        )
+    except Exception as exc:
+        return [f"project {slug}: the review recheck could not list the tasks: {exc}"]
+    lines = []
+    for task_id in waiting:
+        line = _review_check_locked(cfg, task_id, slug, merged_task=merged_task)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _log_recheck(cfg: Config, slug: str, merged_task: str) -> None:
+    for line in recheck_awaiting_review(cfg, slug, merged_task):
+        logger.info("%s", line)

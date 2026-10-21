@@ -356,6 +356,15 @@ After `board-service.md`'s steps, each a single surface:
    *comment* verdict's form is in (step 3).
 8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
+   **Built 2026-10-21** (ADR 274): `review_conflict_check`, a top-level
+   boolean off by default, turns it on. A task entering `awaiting_review`,
+   and after every merge each other `awaiting_review` task of that project,
+   has the base merged into its branch in the pre-merge scratch checkout and
+   gated (`dispatcher.review_check`). A conflict or a red gate moves it to
+   `conflict` with a `## review check` note naming which, the files or gate,
+   the base commit and the task that merged. The merge is only tested, never
+   kept: the branch stays at the reviewed tip, and the approve's pre-merge
+   check builds and keeps it at merge time.
 9. The integrador role: its prompt, handoff schema, profile and write limit,
    and the *resolve conflict* verdict. Under an ADR, since it adds a role.
 

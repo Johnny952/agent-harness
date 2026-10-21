@@ -281,3 +281,224 @@ def test_a_clean_green_check_keeps_the_merge_and_the_merge_lands_it(
     assert (repo["project"] / "shared.txt").read_text() == "one\nTASK\nthree\n"
     assert (repo["project"] / "other.txt").read_text() == "from main\n"
     assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status == "done"
+
+
+# The check at review (ADR 274, `docs/plans/review.md` step 8): the same
+# merge of the base and the same gate, run when a task enters review and on
+# every task still there after another one merges. It tests and keeps
+# nothing: the branch stays at the reviewed tip either way.
+
+
+def _awaiting(cfg, task_id="task-1", project="myproj") -> None:
+    """A finished, unmerged task waiting for review, its card naming `project`."""
+    from dispatcher.context_transfer import write_task_file
+
+    handoff(cfg.hive_tasks_dir, task_id, "awaiting_review", "## auditor\n\napproved")
+    path = task_file_path(cfg.hive_tasks_dir, task_id)
+    task = read_task_file(path)
+    task.project = project
+    write_task_file(path, task)
+
+
+def _status(cfg, task_id="task-1") -> str:
+    return read_task_file(task_file_path(cfg.hive_tasks_dir, task_id)).status
+
+
+def _premerge_gone(repo, task_id="task-1") -> bool:
+    return not Path(docker_exec_mod.premerge_worktree_path(
+        repo["projects"], "myproj", task_id,
+    )).exists()
+
+
+def test_the_review_check_tests_a_clean_merge_and_keeps_nothing(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    _awaiting(cfg)
+    tip, base = _diverge(repo, conflict=False)
+    seen = _gate(monkeypatch, [])
+
+    verdict = dispatcher_mod.review_check(cfg, _CONTAINER, "task-1", "myproj")
+
+    assert verdict.passed
+    # The gate ran on the base merged in, not on the branch alone...
+    assert seen == [dict(
+        workdir=docker_exec_mod.premerge_worktree_path(repo["projects"], "myproj", "task-1"),
+        has_base=True,
+    )]
+    # ...and the merge was only tested: the reviewed tip is still the tip,
+    # the writer's checkout never saw it, and the scratch checkout is gone.
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _sha(repo["project"], "main") == base
+    assert not (repo["writer"] / "other.txt").exists()
+    assert _premerge_gone(repo)
+    assert _status(cfg) == "awaiting_review"
+
+
+def test_the_review_check_moves_a_conflict_to_conflict_and_says_so(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    _awaiting(cfg)
+    tip, base = _diverge(repo, conflict=True)
+    seen = _gate(monkeypatch, [])
+
+    verdict = dispatcher_mod.review_check(cfg, _CONTAINER, "task-1", "myproj")
+
+    assert not verdict.passed
+    assert seen == []
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _sha(repo["project"], "main") == base
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    note = task.body.split(dispatcher_mod.REVIEW_CHECK_HEADING)[-1]
+    assert "shared.txt" in note and base in note
+    # Not a merge that was refused: nothing was being merged.
+    assert "merge-task" not in note
+
+
+def test_the_review_check_moves_a_red_gate_to_conflict(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    _awaiting(cfg)
+    tip, base = _diverge(repo, conflict=False)
+    _gate(monkeypatch, _red())
+
+    verdict = dispatcher_mod.review_check(cfg, _CONTAINER, "task-1", "myproj")
+
+    assert not verdict.passed
+    assert _sha(repo["project"], _BRANCH) == tip
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    assert "`tests-run`" in task.body and base in task.body
+    assert "gates-review.log" in task.body
+    assert _premerge_gone(repo)
+
+
+def test_the_review_check_names_the_task_that_merged(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    _awaiting(cfg)
+    _diverge(repo, conflict=True)
+    _gate(monkeypatch, [])
+
+    dispatcher_mod.review_check(cfg, _CONTAINER, "task-1", "myproj", merged_task="task-0")
+
+    note = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).body
+    assert "task-0" in note.split(dispatcher_mod.REVIEW_CHECK_HEADING)[-1]
+
+
+def test_entering_review_runs_the_check_when_it_is_on(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    import dataclasses
+
+    cfg = dataclasses.replace(_config(tmp_path, repo["projects"]), review_conflict_check=True)
+    handoff(cfg.hive_tasks_dir, "task-1", "done", "## auditor\n\napproved")
+    tip, _ = _diverge(repo, conflict=True)
+    _gate(monkeypatch, [])
+
+    dispatcher_mod._await_review(cfg, "task-1", "myproj")
+
+    assert _status(cfg) == dispatcher_mod.CONFLICT_STATUS
+    assert _sha(repo["project"], _BRANCH) == tip
+
+
+def test_entering_review_runs_no_check_when_it_is_off(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    assert cfg.review_conflict_check is False
+    handoff(cfg.hive_tasks_dir, "task-1", "done", "## auditor\n\napproved")
+    _diverge(repo, conflict=True)
+    monkeypatch.setattr(
+        docker_exec_mod, "premerge_base",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("the check ran while off")),
+    )
+
+    dispatcher_mod._await_review(cfg, "task-1", "myproj")
+
+    assert _status(cfg) == "awaiting_review"
+
+
+def _second_branch(repo, task_id, name, text) -> str:
+    """Another task branch off main, with one commit, checked out in its own writer."""
+    writer = repo["project"] / "worktrees" / task_id / "work"
+    _git(repo["project"], "worktree", "add", "-q", "-b", f"agent/task/{task_id}", str(writer), "main")
+    return _commit(writer, name, text, f"{task_id} work")
+
+
+def test_a_merge_rechecks_every_task_still_waiting_for_review(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    import dataclasses
+
+    cfg = dataclasses.replace(_config(tmp_path, repo["projects"]), review_conflict_check=True)
+    # task-1 waits for review, editing the line task-0 edits too.
+    tip = _commit(repo["writer"], "shared.txt", "one\nTASK\nthree\n", "task work")
+    _awaiting(cfg, "task-1")
+    _second_branch(repo, "task-0", "shared.txt", "one\nZERO\nthree\n")
+    handoff(cfg.hive_tasks_dir, "task-0", "done", "## auditor\n\napproved")
+    # Left alone: a task in its cycle, one of another project, one merged.
+    handoff(cfg.hive_tasks_dir, "task-2", "in_progress", "## arquitecto\n\nplan")
+    _awaiting(cfg, "task-3", project="otherproj")
+    _gate(monkeypatch, [])
+    checked = []
+    real = docker_exec_mod.premerge_base
+
+    def spy(container, projects_root, slug, task_id):
+        checked.append((slug, task_id))
+        return real(container, projects_root, slug, task_id)
+
+    monkeypatch.setattr(docker_exec_mod, "premerge_base", spy)
+
+    assert dispatcher_mod._merge_task_branch(cfg, "task-0", "myproj")
+
+    # task-0's own pre-merge, then the sweep over the one task it concerns.
+    assert checked == [("myproj", "task-0"), ("myproj", "task-1")]
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == dispatcher_mod.CONFLICT_STATUS
+    note = task.body.split(dispatcher_mod.REVIEW_CHECK_HEADING)[-1]
+    assert "task-0" in note and "shared.txt" in note
+    assert _sha(repo["project"], _BRANCH) == tip
+    assert _status(cfg, "task-2") == "in_progress"
+    assert _status(cfg, "task-3") == "awaiting_review"
+
+
+def test_a_merge_rechecks_nothing_when_the_check_is_off(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"])
+    _commit(repo["writer"], "shared.txt", "one\nTASK\nthree\n", "task work")
+    _awaiting(cfg, "task-1")
+    _second_branch(repo, "task-0", "shared.txt", "one\nZERO\nthree\n")
+    handoff(cfg.hive_tasks_dir, "task-0", "done", "## auditor\n\napproved")
+    _gate(monkeypatch, [])
+
+    assert dispatcher_mod._merge_task_branch(cfg, "task-0", "myproj")
+
+    assert _status(cfg, "task-1") == "awaiting_review"
+
+
+def test_the_recheck_never_raises_and_skips_a_held_base_lock(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    import dataclasses
+
+    cfg = dataclasses.replace(_config(tmp_path, repo["projects"]), review_conflict_check=True)
+    _awaiting(cfg, "task-1")
+    _diverge(repo, conflict=True)
+
+    def held(self):
+        raise dispatcher_mod.tasks.BaseLockHeldError(
+            "myproj", {"owner": "merge-task"}, "review check",
+        )
+
+    monkeypatch.setattr(dispatcher_mod.tasks.BaseLock, "acquire", held)
+
+    lines = dispatcher_mod.recheck_awaiting_review(cfg, "myproj", "task-0")
+
+    assert any("locked by merge-task" in line for line in lines)
+    assert _status(cfg) == "awaiting_review"

@@ -203,6 +203,11 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "Turning it on needs a credential or deploy key on the host that the console "
         "cannot see. That is the second task's ground."
     ),
+    "review_conflict_check": _read_only(
+        "Turning it on runs the test gate on every task waiting for review after "
+        "each merge (ADR 274), a cost in container time the operator decides in "
+        "config.yaml."
+    ),
     "git_credentials_path": _credential(
         "A path. Renewing the GitHub token at that path is the second task. The key "
         "itself is never edited."
@@ -270,6 +275,12 @@ class Config:
     #: Added to allowed_tools for the cartografo's call only (ADR 115).
     mapping_allowed_tools: list[str] = dataclasses.field(default_factory=list)
     update_project_before_task: bool = False
+    #: The check at review (ADR 274, `docs/plans/review.md` step 8): the base
+    #: merged into a task's branch as it enters review, and into every task
+    #: still in review after a merge, then gated; a conflict or a red gate
+    #: moves the task to `conflict`. Only tested, never kept. Off: the check
+    #: then runs only at merge time, as before.
+    review_conflict_check: bool = False
     #: Where that credential is read from, inside the container.
     git_credentials_path: str = docker_exec.GIT_CREDENTIALS_PATH
     #: Where each project's SSH deploy key is, inside the container: one
@@ -1013,6 +1024,7 @@ def _build_config(raw: dict) -> Config:
         # the first phase, and only ever fast-forwards — see
         # docker_exec.update_project_branch for what each outcome means.
         update_project_before_task=bool(raw.get("update_project_before_task", False)),
+        review_conflict_check=bool(raw.get("review_conflict_check", False)),
         git_credentials_path=raw.get(
             "git_credentials_path", docker_exec.GIT_CREDENTIALS_PATH
         ),

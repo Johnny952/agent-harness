@@ -1088,6 +1088,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "allowed_tools": ["Bash(ls*)"],
         "mapping_allowed_tools": ["Bash(make*)"],
         "update_project_before_task": True,
+        "review_conflict_check": True,
         "git_credentials_path": "/g",
         "project_keys_dir": "/k",
         "push_vapid_key_path": "/v",
@@ -1109,7 +1110,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         23,
-        19,
+        20,
         3,
     )
     for spec in CONFIG_KEYS.values():
@@ -1200,3 +1201,9 @@ def test_account_models_refuses_a_bad_list(tmp_path: Path, value: str) -> None:
 
 def test_thread_models_is_editable_in_the_key_table() -> None:
     assert CONFIG_KEYS["thread_models"].key_class == EDITABLE
+
+
+def test_the_review_conflict_check_is_off_unless_turned_on(tmp_path: Path) -> None:
+    """ADR 274: the check at review runs the test gate per task; off by default."""
+    assert _load_with(tmp_path, "").review_conflict_check is False
+    assert _load_with(tmp_path, "\nreview_conflict_check: true\n").review_conflict_check is True

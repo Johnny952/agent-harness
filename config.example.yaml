@@ -321,6 +321,18 @@ merge_on_done: false
 # before any of this existed.
 update_project_before_task: false
 
+# The check at review (ADR 274). When on, a task entering awaiting_review has
+# the base merged into its branch in a scratch checkout of the project clone
+# and the test gate run on the result; after every merge into the base, every
+# other task of that project still in awaiting_review gets the same check. A
+# textual conflict or a red gate moves the task to conflict with a note saying
+# which; clean and green leaves it reviewable. The merge is only tested: the
+# branch stays at the reviewed tip, and the approve's own pre-merge check
+# builds and keeps the merge when it lands. Off, the check runs only at merge
+# time. It costs one test-gate run per waiting task per merge. Optional;
+# defaults to false.
+review_conflict_check: false
+
 # Where update_project_before_task looks for a credential, inside the agent
 # container. A public remote over https:// needs none, and a missing file is
 # not a stop: it is probed, and git is told about it only when it is there. For

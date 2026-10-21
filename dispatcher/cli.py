@@ -35,6 +35,7 @@ from dispatcher.dispatcher import (
     left_behind_report,
     pre_merge_check,
     push_base,
+    recheck_awaiting_review,
     record_merge,
     run_draft_specs,
     run_single_phase,
@@ -1101,6 +1102,10 @@ def main() -> None:
             print(line)
         if problem:
             print(problem, file=sys.stderr)
+        # The base moved: every other task of the project still in review is
+        # merged with it again and gated (ADR 274), when the check is on.
+        for line in recheck_awaiting_review(cfg, args.project, args.task_id):
+            print(line)
         # The same thing the automatic merge does, for the same reason: what
         # the task learned is in the project's docs now, on the branch that
         # just landed, so the inbox copy has stopped earning its place in
