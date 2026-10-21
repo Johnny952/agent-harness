@@ -14,8 +14,8 @@ pinned to it, pins new ones to a line, and records the *comment* verdict at
 the tip. The dispatcher writes the `awaiting_review` status (step 1, ADR 240);
 *approve* is served by the board service's bearer route and drained by the
 worker (step 4), but the console has no button for it yet, nor for *request
-changes*, and no dispatcher reads any other verdict. Two pieces landed on the CLI side through
-`docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
+changes*, and no dispatcher reads any other verdict. Two pieces landed on
+the CLI side through `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
 - the merge and the base push of *approve*, run on an automatic approve
@@ -298,9 +298,9 @@ After `board-service.md`'s steps, each a single surface:
    2026-10-21** (ADR 258, 264, 267): the route by T-125-S2, the worker's
    handler by T-125-S1; the console's button is step 7's. A bearer route `POST
    /api/tasks/<id>/approve` writes the `approve` verdict line at the
-   reviewed tip and an `approve` action (`/verdict` refuses `approve`); the worker drains it and, under
-   the base lock, refuses a stale verdict, then runs the pre-merge check,
-   the merge, ADR 78's push and `record_merge`, and comments the outcome.
+   reviewed tip and an `approve` action (`/verdict` refuses `approve`);
+   the worker drains it and, under the base lock, refuses a stale
+   verdict, then runs the pre-merge check, the merge, ADR 78's push and `record_merge`, and comments the outcome.
    The credential is ADR 78's; step 5 needs no other.
 5. The task-branch push after each phase, per project, off by default.
    Independent of the console, so it may be built first; it needs the same
