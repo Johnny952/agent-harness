@@ -13243,3 +13243,46 @@ Approvals list read it in their own tasks (T-118-S2, T-118-S3).
   disappears is a config that stops loading.
 - Rewriting the hive's `done` unmerged tasks: the task's *Out of scope* keeps
   the real hive untouched, and the readers already accept both.
+
+## ADR 243 — The Board's *Awaiting review* column holds `awaiting_review` and `done` unmerged, and the pill is `warning`
+
+**Status:** accepted (2026-10-21). Planned by T-118-S2's arquitecto; built by
+T-118-S2.
+
+**Context.** ADR 140 gave the Board an *Awaiting review* column with no
+status behind it, always empty and saying "not built". ADR 240 made the
+dispatcher write `awaiting_review` when a cycle passes the auditor and does
+not merge, and left older `done` unmerged tasks as they were (its decision
+8). Until now the console knew neither: `done` unmerged fell to Other, and an
+`awaiting_review` task would have been Other with an unknown-status warning.
+
+**Decision.**
+1. `awaiting_review` is a known status on the console: `TaskStatus` in
+   `front/src/lib/api/types.ts`, `KNOWN_STATUSES` in `front/src/lib/board.ts`,
+   `ACCEPTED_STATUSES` in `front/src/lib/debt.ts`, and the in-play statuses of
+   `inPlay` in `front/src/lib/execution.ts`.
+2. `columnOf` places, first match wins: `merged: true` is Merged; then
+   `awaiting_review`, and `done` not merged, are `review`. The two are one
+   column with no chip telling them apart: both wait on the person's verdict
+   (ADR 240 decision 8), and the card's pill on the task page says which.
+   Other keeps `drafted` and unknown words only.
+3. The review column's empty note is the plain "empty" every column has; the
+   "not built" text goes.
+4. `StatusPill` gives `awaiting_review` the `warning` tone: it waits on the
+   person, so it is neither a terminal good outcome (`success`) nor a failure
+   that happened (`destructive`, which `conflict` and `blocked` keep). `done`
+   stays `success`, merged or not. `docs/ui.md` *The tone of a state* says so.
+
+**Consequences.**
+- A `done` unmerged card no longer carries the Other chip; Other appears only
+  for `drafted` or a word the dispatcher does not write.
+- `/approvals` (T-118-S3) still lists only `done` unmerged and `conflict`
+  until it reads the new status; the Board and Approvals disagree for that
+  window.
+- A task the dispatcher merges later leaves the column by `merged: true`
+  first, whatever its status word says.
+
+**Ruled out.**
+- `info` for `awaiting_review`: nothing is in flight; the harness is idle on it.
+- A separate column or chip for the older `done` unmerged: two names for one
+  wait, and they disappear as the old tasks are merged.
