@@ -784,8 +784,9 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * board-service takes none there (ADR 170, 7). A record's body crosses
  * unchanged, as a turn's does: the route refuses an unknown field or a wrong
  * type itself.
- * The action routes, a task's start, an action's cancel and a thread's turn
- * (ADR 157, on ADR 151; the turn is ADR 190), carry `Authorization: Bearer
+ * The action routes (a task's start, approve and request for changes, an
+ * action's cancel, an epic's start and stop, and a thread's turn;
+ * ADR 157, on ADR 151; the turn is ADR 190), carry `Authorization: Bearer
  * BOARD_ACTIONS_TOKEN`, and after the CSRF checks above, in this order: 503 if
  * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
  * body may hold only `note`, `floor` and `limit` (else 400, `project` included:
