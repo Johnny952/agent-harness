@@ -2340,6 +2340,22 @@ def test_head_commit_is_none_on_a_git_error(monkeypatch) -> None:
     assert docker_exec_mod.head_commit(_CONTAINER, _PROJECT) is None
 
 
+def test_resolve_commit_reads_the_rev_as_a_commit_sha(monkeypatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run", _fake_docker(calls, lambda args: (0, "d" * 40 + "\n", ""))
+    )
+
+    assert docker_exec_mod.resolve_commit(_CONTAINER, _PROJECT, "main") == "d" * 40
+    assert _in_container(calls[0]) == ["git", "rev-parse", "--verify", "--quiet", "main^{commit}"]
+
+
+def test_resolve_commit_is_none_when_the_rev_names_no_commit(monkeypatch) -> None:
+    monkeypatch.setattr(docker_exec_mod.subprocess, "run", _fake_docker([], lambda args: (1, "", "")))
+
+    assert docker_exec_mod.resolve_commit(_CONTAINER, _PROJECT, "gone") is None
+
+
 def test_turn_command_builds_the_read_only_streamed_argv() -> None:
     command = docker_exec_mod.turn_command(
         "hi", resume_session_id="s-1", model="opus", effort="low",

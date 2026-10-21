@@ -718,8 +718,10 @@ class PreMergeOutcome:
         return self.status == REFUSED
 
 
-def _rev_parse(container: str, workdir: str, rev: str) -> str | None:
-    """`rev` as a full commit sha, or None when it does not name one."""
+def resolve_commit(container: str, workdir: str, rev: str) -> str | None:
+    """`rev` as a full commit sha, or None when it does not name one.
+
+    Public: the approve path's stale check reads through it too."""
     proc = run_docker_exec(
         container, workdir, ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
         env=_GIT_ENV,
@@ -770,8 +772,8 @@ def premerge_base(
         return PreMergeOutcome(
             REFUSED, base, None, None, f"{project_dir} is checked out on {branch} itself",
         )
-    base_commit = _rev_parse(container, project_dir, base)
-    tip = _rev_parse(container, project_dir, branch)
+    base_commit = resolve_commit(container, project_dir, base)
+    tip = resolve_commit(container, project_dir, branch)
     if base_commit is None or tip is None:
         return PreMergeOutcome(
             REFUSED, base, base_commit, tip, f"could not resolve {base} or {branch} to a commit",
@@ -818,7 +820,7 @@ def premerge_base(
             conflicts=conflicts,
         )
 
-    merged_tip = _rev_parse(container, workdir, "HEAD")
+    merged_tip = resolve_commit(container, workdir, "HEAD")
     if merged_tip is None:
         _drop_worktrees(container, project_dir, [workdir])
         raise RuntimeError(f"the pre-merge of {base} into {branch} left no HEAD in {workdir}")
