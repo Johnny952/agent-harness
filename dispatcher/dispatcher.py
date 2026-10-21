@@ -2861,6 +2861,146 @@ def _auto_approve_and_merge(
     return ApproveResult(True, push)
 
 
+@dataclasses.dataclass(frozen=True)
+class ApprovalOutcome:
+    """What an `approve` action came to (ADR 258, ADR 264).
+
+    `outcome` is one of `merged`, `merged_not_pushed`, `stale`, `conflict`,
+    `not_run` and `merge_refused`; `comment` is the whole text the task gets.
+    """
+
+    outcome: str
+    commit: str
+    merge_commit: str | None
+    push: docker_exec.PushOutcome | None
+    comment: str
+
+    @property
+    def landed(self) -> bool:
+        return self.outcome in ("merged", "merged_not_pushed")
+
+
+def _stale_reason(
+    cfg: Config, container: str, project_dir: str, task_id: str, commit: str
+) -> tuple[str | None, str | None]:
+    """`(reason, tip)`: why the reviewed `commit` no longer is what an approve may
+    merge (ADR 258, 6; ADR 264, 4), None when it still is, and the branch's tip
+    as read (None when gone or not read). Run under the base lock."""
+    try:
+        task = context_transfer.read_task_file(
+            context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+        )
+    except Exception:
+        return "the task has no task file", None
+    if task.merged:
+        return "the task is already merged", None
+    if task.status not in (tasks.AWAITING_REVIEW_STATUS, "done"):
+        return f"the task is {task.status}, not awaiting review", None
+    tip = docker_exec._rev_parse(
+        container, project_dir, f"refs/heads/{docker_exec.task_branch(task_id)}"
+    )
+    if tip is None:
+        return "the branch is gone", None
+    reviewed = docker_exec._rev_parse(container, project_dir, commit)
+    if reviewed is None:
+        return "the reviewed commit is not in the clone", tip
+    if reviewed != tip:
+        return "the branch moved after the review", tip
+    return None, tip
+
+
+def approve_reviewed(cfg: Config, task_id: str, slug: str, commit: str) -> ApprovalOutcome:
+    """Merge and push the reviewed tip under the base lock, or say why not, never raising.
+
+    The `approve` handler's one function (ADR 258, 4; ADR 264): the stale check,
+    `pre_merge_check`, the merge and the push in one base-lock and owner window,
+    then `record_merge` and `learnings.drop_promoted` as `merge-task` does.
+    Writes no comment; the worker does, from `comment`.
+    """
+    head = f"approve at {commit[:7]}:"
+
+    def out(outcome, text, merge_commit=None, push=None):
+        return ApprovalOutcome(outcome, commit, merge_commit, push, f"{head} {text}")
+
+    container = cleanup_container(cfg)
+    if container is None:
+        return out("not_run", "not merged: no agent container to run it in; nothing changed, approve again")
+    try:
+        base = _base_lock(cfg, slug, "approve").acquire()
+    except tasks.BaseLockHeldError as exc:
+        logger.warning("task %s: approve not run: %s", task_id, exc)
+        return out("not_run", f"not merged: {exc}; nothing changed, approve again")
+    merge_commit = None
+    push = None
+    with base:
+        project_dir = f"{cfg.projects_root}/{slug}"
+        try:
+            owner = docker_exec.read_owner(container, project_dir)
+        except Exception as exc:
+            return out("not_run", f"not merged: the base could not be read: {exc}; nothing changed, approve again")
+        try:
+            for line in left_behind_report(cfg, task_id):
+                logger.warning("%s", line)
+            try:
+                stale, tip = _stale_reason(cfg, container, project_dir, task_id, commit)
+            except Exception as exc:
+                stale, tip = f"the branch could not be read: {exc}", None
+            if stale is not None:
+                now = f"; the branch's tip is now {tip[:7]}" if tip else ""
+                return out("stale", f"not acted on: {stale}{now}")
+            try:
+                verdict = pre_merge_check(cfg, container, task_id, slug)
+            except Exception as exc:
+                verdict = PreMergeVerdict(False, f"the pre-merge check could not run: {exc}")
+            if not verdict.passed:
+                if _task_status(cfg, task_id) == CONFLICT_STATUS:
+                    return out(
+                        "conflict",
+                        f"not merged: {verdict.detail}; it waits on resolve conflict, then a new approve",
+                    )
+                return out("not_run", f"not merged: {verdict.detail}; nothing changed, approve again")
+            logger.info("%s", verdict.detail)
+            try:
+                merged = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
+                if not merged.refused:
+                    merge_commit = docker_exec.head_commit(container, project_dir)
+            except Exception as exc:
+                return out("merge_refused", f"not merged: git refused the merge\nthe merge could not run: {exc}")
+            if merged.refused:
+                return out("merge_refused", f"not merged: git refused the merge\n{merged.detail}")
+            push = push_base(cfg, container, slug)
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
+
+    recorded, problem = record_merge(cfg, task_id, merged)
+    for line in recorded:
+        logger.info("%s", line)
+    if problem:
+        logger.warning("%s", problem)
+    try:
+        learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
+    except Exception as exc:
+        logger.warning("task %s: could not drop its promoted learnings: %s", task_id, exc)
+    target = merged.target or "the project's branch"
+    short = (merge_commit or "")[:7] or "the branch tip"
+    if push.refused:
+        return out(
+            "merged_not_pushed",
+            f"merged locally into {target} as {short}; the push did not land; the base "
+            f"waits on a person, then `dispatch merge-task --push`\n{push.detail}",
+            merge_commit, push,
+        )
+    if push.status == docker_exec.NO_UPSTREAM:
+        return out(
+            "merged", f"merged into {target} as {short}; nothing to push to: {push.detail}",
+            merge_commit, push,
+        )
+    return out(
+        "merged", f"merged into {target} as {short}, pushed to {push.target or 'its upstream'}"
+        f"\n{push.detail}", merge_commit, push,
+    )
+
+
 def record_merge(
     cfg: Config, task_id: str, outcome: docker_exec.MergeOutcome
 ) -> tuple[list[str], str | None]:

@@ -9,7 +9,9 @@ account's free share is under its floor (the pool's floor,
 docs/plans/board-service.md). The handlers are in `HANDLERS`, not in
 `actions.KINDS` (ADR 148, 1). A `turn` runs a streamed `claude -p` in a thread's
 container and logs it (ADR 173). A `clone`, `init`, `keygen` or `check` sets a
-new project up from the console (ADR 212), spending no quota.
+new project up from the console (ADR 212), spending no quota. An `approve`
+merges and pushes the reviewed tip under the project's base lock, with no
+account and no project lock (ADR 258, ADR 264).
 Stdlib only.
 """
 
@@ -819,9 +821,41 @@ def _check(worker: Worker, record: dict, _cancelled=None) -> None:
     })
 
 
+def _approve(worker: Worker, record: dict, _cancelled=None) -> None:
+    """Merge and push the reviewed tip, or say why not (ADR 258, ADR 264).
+
+    `core.approve_reviewed` does the work under the base lock; this writes its
+    one comment on the task and ends the action with the outcome. A comment
+    that cannot be written is logged: the action's result still says it.
+    """
+    cfg, sd = worker.cfg, worker.state_dir
+    record["started_at"] = _utc_now().isoformat()
+    actions.rewrite(sd, record)
+    out = core.approve_reviewed(
+        cfg, record["task_id"], record["project"], record["params"]["commit"]
+    )
+    try:
+        tasks.add_comment(cfg.hive_tasks_dir, record["task_id"], "dispatcher", out.comment)
+    except tasks.BoardWriteError as exc:
+        logger.warning("task %s: the approve's comment was not written: %s", record["task_id"], exc)
+    push = out.push
+    actions.finish(
+        sd, record["id"], "done" if out.landed else "failed",
+        result={
+            "outcome": out.outcome, "commit": out.commit, "merge_commit": out.merge_commit,
+            "push": (
+                {"status": push.status, "target": push.target, "detail": push.detail}
+                if push is not None else None
+            ),
+        },
+        error=None if out.landed else _one_line(out.comment.splitlines()[0]),
+    )
+
+
 HANDLERS = {
     "start": _start, "cancel": _cancel, "command_verdict": _command_verdict, "turn": _turn,
     "clone": _clone, "init": _init, "keygen": _keygen, "check": _check,
+    "approve": _approve,
 }
 
 
