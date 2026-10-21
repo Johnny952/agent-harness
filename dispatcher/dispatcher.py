@@ -2896,12 +2896,12 @@ def _stale_reason(
         return "the task is already merged", None
     if task.status not in (tasks.AWAITING_REVIEW_STATUS, "done"):
         return f"the task is {task.status}, not awaiting review", None
-    tip = docker_exec._rev_parse(
+    tip = docker_exec.resolve_commit(
         container, project_dir, f"refs/heads/{docker_exec.task_branch(task_id)}"
     )
     if tip is None:
         return "the branch is gone", None
-    reviewed = docker_exec._rev_parse(container, project_dir, commit)
+    reviewed = docker_exec.resolve_commit(container, project_dir, commit)
     if reviewed is None:
         return "the reviewed commit is not in the clone", tip
     if reviewed != tip:

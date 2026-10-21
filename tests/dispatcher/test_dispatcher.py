@@ -8699,12 +8699,12 @@ _MERGE_COMMIT = "c" * 40
 @pytest.fixture
 def ap(tmp_path, monkeypatch, fake_git):
     """A task `awaiting_review` whose branch tip is the reviewed commit, plus the
-    reads only the approve makes (`_rev_parse`, `head_commit`) faked."""
+    reads only the approve makes (`resolve_commit`, `head_commit`) faked."""
     cfg = _make_config(tmp_path)
     tasks.handoff(cfg.hive_tasks_dir, "task-1", "awaiting_review", "## auditor")
     refs = {"refs/heads/agent/task/task-1": _TIP, _TIP: _TIP}
     monkeypatch.setattr(
-        dispatcher_mod.docker_exec, "_rev_parse", lambda container, workdir, rev: refs.get(rev)
+        dispatcher_mod.docker_exec, "resolve_commit", lambda container, workdir, rev: refs.get(rev)
     )
     monkeypatch.setattr(dispatcher_mod.docker_exec, "head_commit", lambda container, path: _MERGE_COMMIT)
     dropped = []
@@ -8860,7 +8860,7 @@ def test_approve_is_stale_when_the_stale_check_cannot_read_the_branch(ap, monkey
     def boom(container, workdir, rev):
         raise RuntimeError("docker exec died")
 
-    monkeypatch.setattr(dispatcher_mod.docker_exec, "_rev_parse", boom)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "resolve_commit", boom)
     out = _approve(ap)
     assert out.outcome == "stale" and "docker exec died" in out.comment
     _nothing_merged(ap)
@@ -8974,7 +8974,7 @@ def test_approve_checks_merges_and_pushes_inside_one_base_lock_and_owner_window(
         )
 
     spy("read_owner", ap.read_owner)
-    spy("_rev_parse", lambda container, workdir, rev: ap.refs.get(rev))
+    spy("resolve_commit", lambda container, workdir, rev: ap.refs.get(rev))
     spy("merge_task_branch", ap.merge_task_branch)
     spy("push_base", ap.push_base)
     spy("restore_owner", ap.restore_owner)
@@ -8984,7 +8984,7 @@ def test_approve_checks_merges_and_pushes_inside_one_base_lock_and_owner_window(
     names = [name for name, _ in seen]
     assert names[0] == "read_owner" and names[-1] == "restore_owner"
     assert names.index("merge_task_branch") < names.index("push_base")
-    assert names.index("_rev_parse") < names.index("merge_task_branch")
+    assert names.index("resolve_commit") < names.index("merge_task_branch")
     assert all(record is not None and record["operation"] == "approve" for _, record in seen)
     assert len({record["owner"] for _, record in seen}) == 1
     assert _base_lock_record(ap.cfg) is None
