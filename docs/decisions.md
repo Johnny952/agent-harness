@@ -13481,3 +13481,141 @@ edit was the only repair.
   `mark_merged` writes, which this task's *Out of scope* forbids.
 - A general `set-status` verb. Every other transition has its own writer and
   its own rules.
+
+## ADR 258 — *Approve* is a verdict line and an `approve` action; the worker merges and pushes the reviewed tip, or says why not
+
+**Status:** accepted (2026-10-21), designed by T-121's arquitecto; not built.
+`docs/plans/review.md` step 4. The console's button is step 7, *request
+changes* step 6, the task-branch push step 5.
+
+**Context.** ADR 222 stores a verdict as a `comments.jsonl` line with
+`verdict: {kind, commit}` and takes only `comment` (`VERDICT_KINDS_BUILT`).
+ADR 240 ends a cycle `awaiting_review`. The merge, the pre-merge check, the
+base push and the `merged` block exist, behind `merge-task --push` and the
+automatic approve (ADR 77, 78, 80), and nothing starts them from the
+console. Under C-12 an *approve* is the owner's merge call and push call,
+spends no quota, and its push runs on the dispatcher's side, never in the
+board service or the api. C-8 sends every console action through a queue
+drained by the worker, which alone reaches the Docker socket (ADR 142).
+
+**Decision.**
+
+1. *How it is written.* A new board-service route, `POST
+   /api/tasks/<id>/approve`, behind the `BOARD_ACTIONS_TOKEN` bearer and
+   ADR 151's guards, body `{project, commit, text}` and no other field. It
+   writes two things, in this order:
+   - the verdict line, through `tasks.record_verdict` with `kind: approve`
+     and `commit` the tip the person's diff named: ADR 222's shape, no new
+     key. `VERDICT_KINDS_BUILT` gains `approve`. An approve is taken on
+     `awaiting_review`, or `done` not merged; `conflict` is refused (it waits
+     on *resolve conflict*, not on an approve), and so is a merged task.
+   - an `approve` action (`actions.create`, `actor: "operator"`,
+     `params: {"commit"}`).
+   A refused verdict writes neither. A refused action (the queue cannot be
+   written, an approve already pending or claimed for the task) answers the
+   error, and the verdict line stays as a record of a verdict nothing acted
+   on. `POST /api/tasks/<id>/verdict` (`review_verdict`, no bearer) keeps
+   taking `comment` only and refuses `approve`, naming the route above: an
+   approve stored without its action would read as given and start nothing.
+2. *The `approve` kind* in `actions.KINDS`: serial key `base:<project>`, so
+   two approves of one project do not both wait on the base lock in two
+   threads, and it takes no project `flock`, as `merge-task` takes none;
+   `spends_quota` false, so it waits on no account; recovery `interrupt`
+   with *interrupted during the approve; read the task's comments and the
+   base before approving again*, since a half-run merge is a person's to
+   look at. It joins `_ONE_PER_TASK`. A pending approve is cancelled as any
+   action is; a claimed one runs to its end.
+3. *How the dispatcher learns of it: the action queue.* Not Option A as
+   posed (the dispatcher reading `comments.jsonl` for verdicts, from
+   `run-queue` or a new verb) and not Option B (a signal from the service).
+   The queue is already the console's one channel to the side that holds
+   the socket and the credential: the board service writes a file and holds
+   no credential and no socket (C-12, ADR 124, ADR 166), the worker is
+   running whenever the console can start anything, and a verdict nobody
+   drains stays `pending` where the Queue screen shows it. The
+   `comments.jsonl` line is the review's record, never read to decide.
+   ADR 200's lock is not taken: an approve is not a cycle, and what it moves
+   is the base, which ADR 80's base lock guards against a cycle's update, an
+   automatic approve and `merge-task` alike. `run-queue` neither drains nor
+   waits on it; a queue left `waiting` on a dependency goes on with
+   `--resume` once the approve has merged it, as after `merge-task`.
+4. *The handler* (`worker.HANDLERS["approve"]`, through one dispatcher
+   function the implementador names), in order, every git call in
+   `cleanup_container`'s container inside one base-lock window (ADR 80) and
+   the read_owner/restore_owner window:
+   1. the staleness check (decision 6);
+   2. `pre_merge_check`;
+   3. `docker_exec.merge_task_branch`;
+   4. `push_base`;
+   then, after the window, `record_merge` (`mark_merged`, which moves
+   `awaiting_review` to `done` and notifies `merged`, the epic's close and
+   `epic_runs.follow_on`) and `learnings.drop_promoted`, as `merge-task`
+   does. It writes one outcome comment on the task (decision 7) and
+   finishes the action with `result: {outcome, commit, merge_commit,
+   push}`.
+5. *The credential* is ADR 78's, unchanged: `push_base`, through
+   `docker_exec._remote_access`, with the deploy key or the mounted
+   https:// token, fast-forward only, never forced, the base's own upstream
+   and nothing else. The worker runs with the dispatcher's mounts (ADR 166),
+   so it holds nothing new. Left open for step 5 (the task-branch push):
+   only what that push needs of its own, a function that pushes
+   `agent/task/<id>` and the per-project switch. It needs no other
+   credential, and ADR 78's consequence (a credential with write scope is
+   readable from a phase's container) stays open for both pushes.
+6. *A stale verdict.* Under the base lock, before anything is merged, the
+   handler reads the task file and the branch. The verdict is stale when the
+   task is no longer `awaiting_review` or `done` not merged (merged by
+   another path, back in a cycle, in `conflict`), when the branch is gone,
+   or when the verdict's `commit`, resolved with `rev-parse --verify
+   <commit>^{commit}`, is not the branch's tip. Nothing is merged, the status
+   is left as it is, and the person approves again at the tip they see. A
+   merge commit the pre-merge check adopts in step 4.2 comes after this
+   check and is not a move: its first parent is the reviewed tip, and
+   *Decisions*, 6 keeps the reviewed commits valid across it.
+7. *The outcomes.* One `comments.jsonl` comment, author `dispatcher`, text
+   opening `approve at <short commit>:`, then the reason in the words below
+   and the detail git or the gate gave:
+
+   | Case | Task ends | Action | Comment says |
+   |---|---|---|---|
+   | merged and pushed | `done`, `merged` block | `done`, `merged` | merged into `<base>` as `<merge commit>`, pushed to `<upstream>` |
+   | merged, no upstream | `done`, `merged` block | `done`, `merged` | merged; nothing to push to, and why (ADR 78, 4) |
+   | stale | as it was | `failed` | not acted on: which of decision 6's reasons, and the tip now |
+   | pre-merge conflict | `conflict`, with its `## pre-merge check` note | `failed` | not merged: the base conflicts in the files named; it waits on *resolve conflict*, then a new approve |
+   | the gate goes red at the pre-merge | `conflict`, as above | `failed` | not merged: the test gate went red on the base merged in, and its log |
+   | the check or the gate cannot run, or the base lock is held | as it was | `failed` | not merged: the reason; nothing changed, approve again |
+   | the merge is refused by git | as it was | `failed` | not merged: git's reason |
+   | the push is refused | `done`, `merged` block | `done`, `merged_not_pushed` | merged locally as `<merge commit>`; the push did not land, git's reason; the base waits on a person, then `merge-task --push` |
+
+   A refused push never moves the task to Blocked, as ADR 78, 5 and
+   `review.md` *Decisions*, 4 (*Narrowed*) say: the branch landed. The
+   action's `failed` error is the comment's first line. No notification kind is
+   added: `merged` and `conflict` are told by their writers (ADR 221), and
+   the rest is the answer to a button the person just pressed, on the task
+   and in the Queue.
+
+**Consequences.**
+- One click merges and pushes with no quota spent, and every way it does not
+  is on the task in words, in the order the review reads them.
+- A verdict line can stand with no action behind it (the route's second
+  write refused). Readers of the review read a verdict as given, not as
+  acted on; the outcome comment is what says it was.
+- An approve whose push was refused cannot be given again (the task is
+  merged): pushing after reconciling is `merge-task --push` at the CLI.
+- An approve waits behind another task's merge or update on the same base,
+  up to `BASE_LOCK_WAIT_SECONDS`, and not behind a running cycle.
+- The console needs a forward pair for the route and the button; both are
+  step 7's.
+
+**Ruled out.**
+- The dispatcher polling `comments.jsonl` for approve lines: a second
+  channel beside the queue, with its own "already acted on" record to keep.
+- A signal from the board service: it would need a listener on the
+  dispatcher's side and a socket or network path the board service has
+  none of, and a signal lost while nothing listens is a verdict lost.
+- Running the merge in the board service: C-12 keeps the push and its
+  credential on the dispatcher's side.
+- Merging at the newest tip when the verdict names an older one: the
+  person approved a diff, not a branch name (*Decisions*, 6, 3).
+- Taking ADR 200's project lock: an approve would then wait an hour behind
+  another task's cycle for a base operation of seconds.
