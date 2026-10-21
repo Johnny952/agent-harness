@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { TaskComment } from "@/lib/api/types";
-import { parseDiff, reviewLane, reviewVerdicts } from "./review";
+import { approveOutcomes, parseDiff, reviewLane, reviewVerdicts } from "./review";
 
 const DIFF_TEXT = [
   "diff --git a/src/app.py b/src/app.py",
@@ -72,5 +72,20 @@ describe("reviewVerdicts", () => {
     const nulled = { ...plain, verdict: null } as unknown as TaskComment;
     expect(reviewVerdicts([plain, verdict, broken, nulled, verdict])).toEqual([verdict, verdict]);
     expect(reviewVerdicts([])).toEqual([]);
+  });
+});
+
+describe("approveOutcomes", () => {
+  const base: TaskComment = { at: "2026-10-21T10:00:00Z", author: "dispatcher", text: "x" };
+  it("keeps the dispatcher's comments that open `approve at `, in order", () => {
+    const merged = { ...base, text: "approve at abc: merged" };
+    const refused = { ...base, text: "approve at def: push refused" };
+    const operator = { ...merged, author: "operator" };
+    const other = { ...base, text: "started" };
+    const textless = { ...base, text: undefined } as unknown as TaskComment;
+    expect(approveOutcomes([merged, operator, other, textless, refused])).toEqual([
+      merged,
+      refused,
+    ]);
   });
 });

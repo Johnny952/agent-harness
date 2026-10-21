@@ -7,15 +7,19 @@
  * its counts and the new side's line numbers; a pinned comment sits under its
  * line at the tip and is listed as outdated past it; a line number pins a new
  * comment to that line at the tip; the *comment* verdict (ADR 222) is listed
- * with its tip, marked past it, and posted at the tip, and these two posts are
- * the screen's only writes; a missing diff and a failed read each say so; and
- * approve is the CLI line, not a button.
+ * with its tip, marked past it, and posted at the tip; the *approve* button
+ * (ADR 270) posts `{project, commit, text}` at the tip, is off on the Conflict
+ * lane, queued after a 201, and says in its toast when the verdict was recorded
+ * but nothing queued, and the dispatcher's outcome comments are listed; these
+ * three posts are the screen's only writes; and a missing diff and a failed read
+ * each say so.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { toast } from "sonner";
 import { renderRoute, type Served } from "@/test/render-route";
 import type { Task, TaskComment, TaskDiff } from "@/lib/api/types";
+import { MAX_COMMENT_CHARS } from "@/lib/comments";
 import { Route } from "./approvals";
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -162,7 +166,7 @@ describe("the review", () => {
 
     const verdict = screen.getByTestId("review-verdict");
     expect(within(verdict).getByText("dispatch merge-task T-1 --project ia-harness")).toBeTruthy();
-    expect(verdict.textContent).toMatch(/not in the console yet/i);
+    expect(verdict.textContent).toMatch(/request changes is not in the console yet/i);
   });
 
   it("puts a comment at the tip under its line, and one past it in the outdated list", async () => {
@@ -353,7 +357,119 @@ describe("the review", () => {
     expect((box as HTMLTextAreaElement).value).toBe("late");
   });
 
-  it("reads only its routes, and writes nothing until a pin or a verdict is posted", async () => {
+  describe("the approve button (ADR 270)", () => {
+    const QUEUED = {
+      verdict: { id: "T-1", comment: VERDICT_AT_TIP, comment_count: 1 },
+      action: { id: "A-77" },
+    };
+    const approveButton = () => screen.getByRole("button", { name: /^approve/ });
+
+    it("posts {project, commit, text} at the tip, with Approved. when nothing was typed", async () => {
+      const { sent } = await serve([task("T-1")], {
+        "POST /api/tasks/T-1/approve": { bare: QUEUED, status: 201 },
+      });
+      await screen.findByTestId("verdict-form");
+      expect((approveButton() as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(approveButton());
+      await waitFor(() =>
+        expect(toast.success).toHaveBeenCalledWith(expect.stringContaining("A-77")),
+      );
+      expect(sent.filter((x) => x.method !== "GET")).toEqual([
+        {
+          method: "POST",
+          path: "/api/tasks/T-1/approve",
+          body: { commit: TIP, text: "Approved.", project: "ia-harness" },
+        },
+      ]);
+    });
+
+    it("sends the typed words, leaves out a null project, and reads approve queued after a 201", async () => {
+      const { sent } = await serve([task("T-1", { project: null })], {
+        "POST /api/tasks/T-1/approve": { bare: QUEUED, status: 201 },
+      });
+      fireEvent.change(await screen.findByLabelText("comment verdict on T-1"), {
+        target: { value: "ship it" },
+      });
+      fireEvent.click(approveButton());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "approve queued" })).toBeTruthy(),
+      );
+      expect(sent.find((x) => x.method === "POST")?.body).toEqual({ commit: TIP, text: "ship it" });
+      expect((approveButton() as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("is disabled on the Conflict lane, and says what the conflict waits on", async () => {
+      await serve([task("T-1", { status: "conflict" })]);
+      fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
+      await screen.findByTestId("verdict-form");
+      const button = approveButton() as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.title).toMatch(/resolve conflict/);
+    });
+
+    it("is disabled when the typed words are over the limit", async () => {
+      await serve([task("T-1")]);
+      fireEvent.change(await screen.findByLabelText("comment verdict on T-1"), {
+        target: { value: "x".repeat(MAX_COMMENT_CHARS + 1) },
+      });
+      expect((approveButton() as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("is not drawn when there is no diff, so no tip to send", async () => {
+      await serve([task("T-1")], {
+        "/api/tasks/T-1/diff": { data: null, warnings: ["no branch"] },
+      });
+      await screen.findByText(/there is no diff to show/i);
+      expect(screen.queryByRole("button", { name: /^approve/ })).toBeNull();
+    });
+
+    it("says the verdict was recorded when the route refused after the line", async () => {
+      await serve([task("T-1")], {
+        "POST /api/tasks/T-1/approve": {
+          bare: { error: "the branch moved", verdict: { id: "T-1" } },
+          status: 409,
+        },
+      });
+      await screen.findByTestId("verdict-form");
+      fireEvent.click(approveButton());
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith(
+          "the approve verdict was recorded on T-1, but nothing was queued: the branch moved",
+        ),
+      );
+      expect((approveButton() as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("shows a refusal with no verdict as its words alone", async () => {
+      await serve([task("T-1")], {
+        "POST /api/tasks/T-1/approve": { status: 400, error: "text is blank" },
+      });
+      await screen.findByTestId("verdict-form");
+      fireEvent.click(approveButton());
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("text is blank"));
+    });
+
+    it("lists the dispatcher's approve outcome comments, and no other comment", async () => {
+      const outcome: TaskComment = {
+        at: "2026-10-21T10:00:00Z",
+        author: "dispatcher",
+        text: `approve at ${TIP}: merged`,
+      };
+      const chatter: TaskComment = { ...outcome, text: "started the merge" };
+      await serve([task("T-1")], {
+        "/api/tasks/T-1/comments": {
+          data: { task_id: "T-1", comments: [chatter, outcome, AT_TIP] },
+          warnings: [],
+        },
+      });
+      const box = await screen.findByTestId("review-outcomes");
+      expect(box.textContent).toContain("outcomes · 1");
+      expect(within(box).getByText(`approve at ${TIP}: merged`)).toBeTruthy();
+      expect(within(box).queryByText("started the merge")).toBeNull();
+    });
+  });
+
+  it("reads only its routes, and writes nothing until a pin, a verdict or an approve is posted", async () => {
     const { fetchMock } = await serve([task("T-1")]);
     await screen.findAllByTestId("diff-file");
     const paths = fetchMock.mock.calls.map((c) => new URL(String(c[0]), "http://x").pathname);
@@ -374,15 +490,15 @@ describe("the review", () => {
     for (const call of fetchMock.mock.calls) {
       expect((call[1]?.method ?? "GET").toUpperCase()).toBe("GET");
     }
-    // No approve button: the review's buttons are the tabs, the rows, the
-    // diff's line numbers and the comment verdict.
+    // The review's buttons are the tabs, the rows, the diff's line numbers, the
+    // approve and the comment verdict.
     const review = screen.getByRole("region", { name: "Review" });
     const names = within(review)
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "");
     expect(
       names.every((n) =>
-        /^(Awaiting review|Conflict) · \d+$|^T-1|^comment on \S+ line \d+$|^comment verdict$/.test(
+        /^(Awaiting review|Conflict) · \d+$|^T-1|^comment on \S+ line \d+$|^comment verdict$|^approve$/.test(
           n,
         ),
       ),

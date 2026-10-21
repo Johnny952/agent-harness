@@ -1010,6 +1010,82 @@ describe("the board-service action routes", () => {
 });
 
 /** The seventh board pair (ADR 190): a turn for a thread. */
+describe("the board-service approve route (ADR 270)", () => {
+  function post(path: string, body: string, method = "POST"): Request {
+    return get(path, {
+      method,
+      body: method === "GET" ? null : body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+      },
+    });
+  }
+
+  const PATH = "/api/tasks/T-014/approve";
+  const TIP = "a".repeat(40);
+  const HEADERS = { "Content-Type": "application/json", Authorization: "Bearer actions-token" };
+
+  it("forwards {project, commit, text} with the bearer", async () => {
+    const fetchMock = stubApi('{"verdict":{},"action":{"id":"A-1"}}', 201);
+    const body = JSON.stringify({ project: "other-proj", commit: TIP, text: "Approved." });
+    const answer = await forwardApiRequest(post(PATH, body));
+    expect(answer?.status).toBe(201);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/T-014/approve`);
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual(HEADERS);
+    expect(init.body).toBe(body);
+  });
+
+  it("sends CONSOLE_PROJECT when the body names no project", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post(PATH, JSON.stringify({ commit: TIP, text: "ok" })));
+    expect(fetchMock.mock.calls[0]![1]!.body).toBe(
+      JSON.stringify({ project: "ia-harness", commit: TIP, text: "ok" }),
+    );
+  });
+
+  it("passes commit and text as given, for the route to refuse", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post(PATH, '{"commit":1,"text":" "}'));
+    expect(fetchMock.mock.calls[0]![1]!.body).toBe(
+      '{"project":"ia-harness","commit":1,"text":" "}',
+    );
+  });
+
+  it("400s a bad slug, an unknown field or a body that is not an object, sending nothing", async () => {
+    const fetchMock = stubApi();
+    for (const body of [
+      '{"project":"../x","commit":"a","text":"t"}',
+      '{"project":3,"commit":"a","text":"t"}',
+      '{"commit":"a","text":"t","kind":"approve"}',
+      "[]",
+      "null",
+      "not json",
+    ]) {
+      const answer = await forwardApiRequest(post(PATH, body));
+      expect(answer?.status).toBe(400);
+      expect((await answer!.json()).error).toMatch(/approve/i);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("re-encodes the id, and keeps GET and other methods as they were", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post("/api/tasks/..%2fx/approve", "{}"));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/..%2Fx/approve`);
+    vi.restoreAllMocks();
+    const none = stubApi();
+    expect((await forwardApiRequest(post(PATH, "", "GET")))?.status).toBe(404);
+    expect((await forwardApiRequest(post(PATH, "{}", "PATCH")))?.status).toBe(405);
+    expect((await forwardApiRequest(post("/api/tasks/%zz/approve", "{}")))?.status).toBe(404);
+    expect(none).not.toHaveBeenCalled();
+  });
+});
+
 describe("the board-service turn route", () => {
   function post(path: string, body: string, headers = {}, method = "POST"): Request {
     return get(path, {
@@ -1477,6 +1553,34 @@ describe("the action routes without their configuration", () => {
       expect((await answer!.json()).error).toContain("BOARD_ACTIONS_TOKEN is not set");
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("503s an approve without the token, and without any project, but forwards one that names its own", async () => {
+    const body = JSON.stringify({ commit: "a".repeat(40), text: "ok" });
+    const withProject = JSON.stringify({ project: "other", commit: "a".repeat(40), text: "ok" });
+    const request = (b: string) =>
+      get("/api/tasks/T-014/approve", {
+        method: "POST",
+        body: b,
+        headers: { "content-type": "application/json" },
+      });
+
+    const noToken = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    const refused = await noToken(request(withProject));
+    expect(refused?.status).toBe(503);
+    expect((await refused!.json()).error).toContain("BOARD_ACTIONS_TOKEN is not set");
+
+    const noProject = await configured({ CONSOLE_PROJECT: null });
+    const missing = await noProject(request(body));
+    expect(missing?.status).toBe(503);
+    expect((await missing!.json()).error).toContain("CONSOLE_PROJECT is not set");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    expect((await noProject(request(withProject)))?.status).toBe(200);
+    expect(fetchMock.mock.calls[0]![1]!.body).toBe(
+      JSON.stringify({ project: "other", commit: "a".repeat(40), text: "ok" }),
+    );
   });
 
   it("still 415s before the token, and still forwards the backlog writes", async () => {

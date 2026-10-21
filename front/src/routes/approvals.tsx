@@ -19,9 +19,12 @@
  * (`verdictTaskMutation`); it is a comment line too, and the verdicts given
  * are listed above the diff, marked when the branch has moved since.
  *
- * There is no approve, request-changes or resolve action in the api or the
- * action queue (`dispatcher/actions.py:KINDS`), so the verdict panel names the
- * CLI the operator runs instead of drawing a button that would do nothing.
+ * The verdict form also holds *approve* (ADR 270): `{project, commit, text}` to
+ * `POST /api/tasks/<id>/approve` (`approveTaskMutation`), at the tip the diff
+ * was read at, `Approved.` when nothing was typed. It is off on the conflict
+ * lane, on a merged task, and once queued at this tip; the dispatcher's
+ * `approve at <commit>:` comments are listed as outcomes. There is no
+ * request-changes or resolve route yet, so the verdict panel names the CLI.
  */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -40,7 +43,9 @@ import {
   WarningBanner,
 } from "@/components/console/primitives";
 import { Textarea } from "@/components/ui/textarea";
+import { ApiError } from "@/lib/api/client";
 import {
+  approveTaskMutation,
   commentTaskMutation,
   commentsQuery,
   taskDiffQuery,
@@ -49,7 +54,13 @@ import {
 } from "@/lib/api/queries";
 import type { Task, TaskComment, TaskDiff } from "@/lib/api/types";
 import { MAX_COMMENT_CHARS, commentAnchor, commentLength, commentProblem } from "@/lib/comments";
-import { parseDiff, reviewLane, reviewVerdicts, type ReviewLane as Tab } from "@/lib/review";
+import {
+  approveOutcomes,
+  parseDiff,
+  reviewLane,
+  reviewVerdicts,
+  type ReviewLane as Tab,
+} from "@/lib/review";
 import { formatDateClock } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -211,7 +222,7 @@ function Review({ task, lane }: { task: Task; lane: Tab }) {
         ) : (
           <>
             <BranchLine diff={diff} />
-            <Verdicts taskId={task.task_id} diff={diff} comments={comments} />
+            <Verdicts task={task} lane={lane} diff={diff} comments={comments} />
             <OutdatedComments comments={comments} diff={diff} />
             <DiffView taskId={task.task_id} diff={diff} comments={comments} />
           </>
@@ -222,10 +233,10 @@ function Review({ task, lane }: { task: Task; lane: Tab }) {
 }
 
 /**
- * Approve and request changes have no route yet, so this says what does
- * exist: the CLI merge, and for a conflict the merge of the base into the
+ * Request changes has no route yet, so this names the CLI merge, for a push
+ * an approve could not land, and for a conflict the merge of the base into the
  * branch that comes first (never a rebase: a phase's history stays as it ran).
- * The *comment* verdict is built, and is its own form under the branch line.
+ * The *comment* verdict and the *approve* are built, in the form under the branch line.
  */
 function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
   const project = task.project ? ` --project ${task.project}` : "";
@@ -235,7 +246,7 @@ function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
       <p className="text-muted-foreground">
         {lane === "conflict"
           ? "The merge stopped on a conflict. Merge the base into the task branch, resolve it there, then merge again:"
-          : "Approve and request changes are not in the console yet. To approve, merge from the CLI (add --push to push too):"}
+          : "Request changes is not in the console yet. If the push an approve queued was refused, merge from the CLI (add --push to push too):"}
       </p>
       <Mono className="block select-all text-[11px]">{merge}</Mono>
       <p className="text-[11px] text-muted-foreground">
@@ -272,20 +283,70 @@ function BranchLine({ diff }: { diff: TaskDiff }) {
  * nothing; no dispatcher reads it yet.
  */
 function Verdicts({
-  taskId,
+  task,
+  lane,
   diff,
   comments,
 }: {
-  taskId: string;
+  task: Task;
+  lane: Tab;
   diff: TaskDiff;
   comments: TaskComment[];
 }) {
+  const taskId = task.task_id;
   const qc = useQueryClient();
   const post = useMutation(verdictTaskMutation(qc));
+  const approve = useMutation(approveTaskMutation(qc));
   const [text, setText] = useState("");
+  // The tip an approve was queued at from this screen; the button waits for the tip to move.
+  const [queuedAt, setQueuedAt] = useState<string | null>(null);
   const given = reviewVerdicts(comments);
+  const outcomes = approveOutcomes(comments);
   const problem = commentProblem(text);
   const over = commentLength(text) > MAX_COMMENT_CHARS;
+  const queued = queuedAt === diff.commit;
+  const approveOff =
+    lane === "conflict" ||
+    task.merged !== false ||
+    over ||
+    post.isPending ||
+    approve.isPending ||
+    queued;
+
+  const sendApprove = () => {
+    if (approveOff) return;
+    approve.mutate(
+      {
+        taskId,
+        body: {
+          commit: diff.commit,
+          text: text.trim() ? text : "Approved.",
+          ...(typeof task.project === "string" ? { project: task.project } : {}),
+        },
+      },
+      {
+        onSuccess: (res) => {
+          setText("");
+          setQueuedAt(diff.commit);
+          toast.success(`approve queued as ${res.action.id}; the outcome comes as a comment`);
+        },
+        onError: (err) => {
+          const recorded =
+            err instanceof ApiError &&
+            typeof err.body === "object" &&
+            err.body !== null &&
+            "verdict" in err.body;
+          toast.error(
+            recorded
+              ? `the approve verdict was recorded on ${taskId}, but nothing was queued: ${err.message}`
+              : err instanceof Error
+                ? err.message
+                : `the approve on ${taskId} was not sent`,
+          );
+        },
+      },
+    );
+  };
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -335,15 +396,42 @@ function Verdicts({
               ? problem
               : `${commentLength(text).toLocaleString("en-US")} / ${MAX_COMMENT_CHARS.toLocaleString("en-US")}`}
           </span>
-          <button
-            type="submit"
-            disabled={problem !== null || post.isPending}
-            className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
-          >
-            {post.isPending ? "posting…" : "comment verdict"}
-          </button>
+          <span className="flex gap-2">
+            <button
+              type="button"
+              onClick={sendApprove}
+              disabled={approveOff}
+              title={
+                lane === "conflict"
+                  ? "The conflict waits on resolve conflict; approve once the branch merges cleanly"
+                  : task.merged !== false
+                    ? "This task's work is already on main"
+                    : "Approve the change at this tip and queue its merge"
+              }
+              className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
+            >
+              {approve.isPending ? "approving…" : queued ? "approve queued" : "approve"}
+            </button>
+            <button
+              type="submit"
+              disabled={problem !== null || post.isPending || approve.isPending}
+              className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
+            >
+              {post.isPending ? "posting…" : "comment verdict"}
+            </button>
+          </span>
         </div>
       </form>
+      {outcomes.length > 0 && (
+        <div data-testid="review-outcomes">
+          <p className="label-xs mb-1">outcomes · {outcomes.length}</p>
+          <ul className="space-y-1.5">
+            {outcomes.map((c, i) => (
+              <CommentLine key={i} comment={c} />
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

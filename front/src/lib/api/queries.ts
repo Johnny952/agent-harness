@@ -3,6 +3,7 @@ import * as api from "./client";
 import type {
   AcceptTaskBody,
   ApiResult,
+  ApproveTaskBody,
   CommandRequestState,
   CommentTaskBody,
   CreateThreadBody,
@@ -166,6 +167,19 @@ export const verdictTaskMutation = (qc: QueryClient) =>
     mutationFn: ({ taskId, body }: { taskId: string; body: VerdictTaskBody }) =>
       api.verdictTask(taskId, body),
     onSettled: (_data, _error, { taskId }) => invalidateBoard(qc, taskId),
+  });
+
+/** An approve stores a verdict comment and queues an action, so both refetch (ADR 270). */
+export const approveTaskMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "approve"],
+    mutationFn: ({ taskId, body }: { taskId: string; body: ApproveTaskBody }) =>
+      api.approveTask(taskId, body),
+    onSettled: (_data, _error, { taskId }) =>
+      Promise.all([
+        invalidateBoard(qc, taskId),
+        qc.invalidateQueries({ queryKey: ["action-queue"] }),
+      ]),
   });
 
 /** An epic's accept moves its children too, so the whole board refetches anyway. */
