@@ -185,7 +185,9 @@ keeps today's behaviour). The cycle is split in two by what it touches:
   checked before it is broken.
 - **Slots still bound it.** `--parallel N` is a ceiling, not a promise: with
   two accounts there are two slots, and an account holds one phase. More
-  than one phase per account is *Decisions*, 8.
+  than one phase per account is *Decisions*, 8. Since T-123 the ceiling is
+  the sum of each account's `max_concurrent_phases` (`docs/decisions.md`
+  ADR 252).
 - **Order between tasks of one queue** stays the confirmed order for who
   takes a free slot first, and for who takes a contested surface lock first.
 
