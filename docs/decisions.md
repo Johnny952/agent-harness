@@ -13174,3 +13174,72 @@ later task.
 - Storing every kind on each write: a default changed in the table would then
   never reach a person who had saved once.
 - A `POST` alias or a `PATCH`: one verb, and the console sends one body.
+
+## ADR 240 — A cycle that passes the auditor and is not merged ends `awaiting_review`
+
+**Status:** accepted (2026-10-21). Planned by T-118-S1's arquitecto; built by
+T-118-S1.
+
+**Context.** `docs/plans/review.md` step 1 puts a state between `done` and
+merged: *awaiting review*. Until now there was none, and the readers used a
+stand-in: a task `done` with no `merged` block (ADR 219 decision 3, ADR 221
+decision 4, which notified `awaiting_review` from the dispatcher without
+moving anything). This is the server side; the board column and the
+Approvals list read it in their own tasks (T-118-S2, T-118-S3).
+
+**Decision.**
+1. `dispatcher/tasks.py` holds `AWAITING_REVIEW_STATUS = "awaiting_review"`
+   beside `CONFLICT_STATUS`, and a writer under the task's lock,
+   `mark_awaiting_review(hive_dir, task_id) -> bool`. A task `done` with no
+   `merged` block moves to `awaiting_review`, is told as `awaiting_review`
+   ("is waiting for your review", ADR 221's text), and the call returns
+   True. Any other status, a merged task included, is left as it is, unwritten
+   and untold, and the call returns False. Owner, heartbeat, phase and body
+   are not touched; a task with no file raises, as `mark_merged` does.
+2. The cycle's end calls it where it notified before: after the auditor, when
+   no merge landed. The dispatcher's wrapper never raises; a failure is a
+   warning and the cycle's outcome stands. It replaces
+   `_notify_awaiting_review`, so the record is written by the writer of the
+   state, as ADR 221 asks of every kind.
+3. `mark_merged` moves `awaiting_review` to `done`: a merged task is `done`
+   with its `merged` block, whichever path merged it (`merge-task`,
+   `merge_on_done`, the automatic approve). Other statuses stay as they were.
+4. A task in `conflict` whose pre-merge check passes goes to
+   `awaiting_review`, not `done` (`_passed`, with its `## pre-merge check`
+   note), told nothing: the merge that follows in the same call moves it to
+   `done`, and one that does not land leaves it waiting where it belongs.
+   `_record_auto_approve` keeps `conflict` and `awaiting_review` and writes
+   `done` otherwise.
+5. `REVIEW_STATUSES` is `awaiting_review`, `done`, `conflict`. `record_verdict`
+   takes a verdict on `awaiting_review`, on `conflict`, and on `done` not
+   merged; a `done` or `awaiting_review` task with a `merged` block is
+   refused as merged.
+6. `_file_split` refuses an `awaiting_review` parent as it refuses `done`:
+   `docs/business.md` *Task status* lets only `pending`, `in_progress` and
+   `blocked` become an epic.
+7. `merge_on_done` stays, deprecated, as an alias for "merge at the cycle's
+   end": it merges first, and only a task it did not merge moves to
+   `awaiting_review`. No runtime warning; `config.example.yaml` and the
+   field's comment in `dispatcher/config.py` say so.
+8. No hive migration. A task left `done` and unmerged before this stays so,
+   and every reader of the review keeps treating it as awaiting review.
+
+**Consequences.**
+- `done` now means finished and merged for every task this harness finishes
+  from here on; `done` unmerged is an older task, or one whose
+  `awaiting_review` move failed and was logged.
+- Until T-118-S2 and T-118-S3 land, the console's board and `/approvals`
+  filter on `done` unmerged and do not list a new `awaiting_review` task;
+  `/api/tasks` serves the status as written.
+- A conflict that passes and then fails to merge is not notified again; the
+  `conflict` notification and the command's own output were the person's.
+- `open_cycle` runs an `awaiting_review` task again as it runs a `done` one
+  today: `acquire_lock` leaves the status, the phases' handoffs rewrite it,
+  and the new cycle ends `awaiting_review` again unless it merges.
+
+**Ruled out.**
+- Notifying from `_passed`: the person ran the merge that resolved it.
+- Removing `merge_on_done`: projects and overrides set it; a key that
+  disappears is a config that stops loading.
+- Rewriting the hive's `done` unmerged tasks: the task's *Out of scope* keeps
+  the real hive untouched, and the readers already accept both.
