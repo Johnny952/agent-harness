@@ -13062,3 +13062,32 @@ npm dependency and no edit to the generated `vite.config.ts`.
   chosen yet.
 - Remembering *on* in `localStorage`: the browser's subscription is the
   truth, and a remembered flag would drift from it.
+
+## ADR NNN — The push control says why a browser refused the subscription
+
+**Status:** accepted (2026-10-21). Built in the operator's session.
+
+**Context.** ADR 232's control shows a refused subscription in the browser's
+own text. Chrome in a private window grants notifications and then rejects
+`pushManager.subscribe` with "Registration failed - permission denied", which
+names no cause the person can act on. Checked with Playwright against the
+rebuilt console.
+
+**Decision.** `turnOn` catches the rejection of `pushManager.subscribe` and
+throws `subscribeRefusal`'s sentence, with the browser's text kept at its
+end. A `NotAllowedError` says that private or incognito windows cannot
+receive push, and to open the console in a normal window or check the
+profile's push setting. An `AbortError` says that the browser's push service
+did not answer, which some browsers ship turned off. Anything else says that
+the browser could not subscribe. Nothing is posted and the state stays *off*.
+
+**Consequences.**
+- The person reads a cause and a next step, and the browser's words remain
+  for a report.
+- The names are the browsers' conventions, not a standard per cause. A
+  browser that names the same failure otherwise gets the generic sentence.
+
+**Ruled out.**
+- Detecting a private window before the click: there is no supported way,
+  and the guesses (storage quotas, file system APIs) change between
+  browser versions.

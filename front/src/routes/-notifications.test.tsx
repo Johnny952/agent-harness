@@ -216,16 +216,19 @@ describe("a thread's url, ?thread=<id>", () => {
 /**
  * A browser with push: `navigator.serviceWorker`, `PushManager` and a
  * `Notification` whose permission starts at `permission` and becomes `ask` when
- * asked. `subscribed` starts it holding a subscription under the key `AQID`.
+ * asked. `subscribed` starts it holding a subscription under the key `AQID`;
+ * `refuse` is what its `subscribe` rejects with.
  */
 function fakePush({
   permission = "default",
   ask = "granted",
   subscribed = false,
+  refuse,
 }: {
   permission?: NotificationPermission;
   ask?: NotificationPermission;
   subscribed?: boolean;
+  refuse?: DOMException;
 } = {}) {
   let perm = permission;
   let registered = subscribed;
@@ -249,6 +252,7 @@ function fakePush({
     ? makeSub(new Uint8Array([1, 2, 3]))
     : null;
   const subscribe = vi.fn(async (opts: PushSubscriptionOptionsInit) => {
+    if (refuse) throw refuse;
     sub = makeSub(opts.applicationServerKey as Uint8Array);
     return sub;
   });
@@ -397,5 +401,21 @@ describe("push for this browser", () => {
     expect(await within(control()).findByText(/the subscription store is full/)).toBeTruthy();
     await settled("off");
     expect(fake.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("says in plain words why a private window refuses the subscription, and stays off", async () => {
+    const fake = fakePush({
+      refuse: new DOMException("Registration failed - permission denied", "NotAllowedError"),
+    });
+    const { sent } = await renderRoute(Route, "/notifications", KEY);
+    await settled("off");
+    fireEvent.click(within(control()).getByRole("button", { name: "Turn push on" }));
+    expect(
+      await within(control()).findByText(/Private or incognito windows cannot receive push/),
+    ).toBeTruthy();
+    expect(within(control()).getByText(/Registration failed - permission denied/)).toBeTruthy();
+    await settled("off");
+    expect(fake.subscribe).toHaveBeenCalledTimes(1);
+    expect(sent.some((r) => r.method === "POST")).toBe(false);
   });
 });
