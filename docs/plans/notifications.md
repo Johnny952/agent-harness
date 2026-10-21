@@ -1,18 +1,18 @@
 ---
-status: building
+status: built
 approved: 2026-10-11
-built: null
+built: 2026-10-21
 supersedes: []
 ---
 
 # Notifications — the console tells the person when it needs them
 
-**Status:** building, accepted in outline by the user on 2026-10-11. The
+**Status:** built, accepted in outline by the user on 2026-10-11. The
 record and its writers are built (ADR 221), and so are the read route and the
 polled inbox, with read state per browser (ADR 225), and the notifier with its
 subscription store on the server (ADR 229), and the service worker, the
 installable console and its push control (ADR 232); the per-kind settings
-and quiet hours are built on the server (ADR 237), the console's screen is not.
+and quiet hours are built on the server (ADR 237) and in the inbox (ADR 246).
 It records a gap the user named that day: push notifications for an awaited
 approval, a finished development and the like. It fills a weakness the main
 thread's analysis of the same day found: in a near-automatic workflow, the
@@ -160,8 +160,12 @@ Each step is a single surface:
    (ADR 237): `push-settings.json` beside the subscriptions, `GET` (open) and
    `PUT` (bearer) `/api/push/settings`, validated. The notifier skips a kind
    that is off, moving its cursor past it, and holds its cursor during the
-   quiet hours so the records go out, grouped, when they end. The console's
-   settings screen and the forwarding of the two routes are still open.
+   quiet hours so the records go out, grouped, when they end. **Built
+   2026-10-21** (ADR 246): the console forwards the two routes, and the inbox
+   has a settings section with one switch per kind, the four that need the
+   person first, and a quiet hours window with its time zone, the browser's
+   by default. It says when the board service cannot be reached and disables
+   the writes while the server has push off.
 
 ## Open questions
 

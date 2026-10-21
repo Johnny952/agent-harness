@@ -13286,3 +13286,78 @@ not merge, and left older `done` unmerged tasks as they were (its decision
 - `info` for `awaiting_review`: nothing is in flight; the harness is idle on it.
 - A separate column or chip for the older `done` unmerged: two names for one
   wait, and they disappear as the old tasks are merged.
+
+## ADR 246 — The inbox edits the push settings: one write per kind switch, quiet hours saved as a window, and the server's push state read beside them
+
+**Status:** accepted (2026-10-21). Planned by T-120's arquitecto; built by
+T-120.
+
+**Context.** Step 5 of `docs/plans/notifications.md`. ADR 237 built the
+server half: an open `GET` and a bearer `PUT /api/push/settings` on the board
+service, the `PUT` merging the kinds it names and replacing `quiet_hours`
+when present, refusing with 400 `{"error"}`. The console forwards neither,
+and the inbox has only the per-browser `PushControl` (ADR 232). Flask's
+`jsonify` sorts keys, so the served `kinds` arrive in alphabetical order,
+not `KINDS`' order.
+
+**Decision.**
+1. `front/src/lib/api/forward.ts` forwards `GET /api/push/settings` as it
+   forwards the key (ADR 232): a read of the board service, no token, no
+   query string, no header of the browser's, 502/504 when it does not answer.
+   `PUT /api/push/settings` is a board write with `action` "push": the
+   bearer, the CSRF checks, the 64 KiB cap, the body unchanged. Every other
+   method on the path keeps the answer it had (the 405). The board writes
+   become twenty-one; the api's twenty-one forwarded reads are unchanged.
+2. The shape is typed in `front/src/lib/push.ts`, not `lib/api/types.ts`:
+   `PushSettings` is `{kinds: Record<string, boolean>, quiet_hours: null |
+   QuietHours}` and `QuietHours` is `{start, end, zone}`, strings. A served
+   body is checked before use; a `kinds` entry that is not a boolean is
+   dropped, and a body without an object `kinds` or with a malformed window
+   is no settings.
+3. `readSettings()` resolves to the settings or rejects with plain words: a
+   fetch that throws, a 502 or a 504 is "the board service cannot be
+   reached"; another refusal is its `{"error"}`; a body that is not settings
+   says so. `writeSettings(partial)` sends only the fields `partial` names,
+   with `kinds` holding only the kinds it names, and resolves to the
+   effective settings the `PUT` answers; a refusal, the 400 above all,
+   rejects with "The push settings were not saved: <the server's error>".
+   An empty change is refused before any request.
+4. The inbox has a *Push settings* section under `PushControl`. A kind
+   switch writes at once, one `PUT` naming that kind. Quiet hours have their
+   own switch: turning it off writes `quiet_hours: null` at once; turning it
+   on opens start, end and zone fields and writes nothing until *Save quiet
+   hours*. The fields start from the served window, else 22:00 to 07:00 in
+   the browser's zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`,
+   `UTC` when it has none). The console does not validate the window: the
+   server's 400 is shown as it says it.
+5. The switches list every kind the server serves: the four that need the
+   person first, in the plan's order (awaiting review, conflict, command
+   request, blocked), then the rest in the order served. A kind the console
+   does not know still gets a switch, labelled by its name.
+6. "The server has push off" is read by the section itself, from
+   `readPushKey()`: no key while the settings did answer means push is off
+   there, and the section shows the settings with every write disabled and a
+   sentence saying why. It does not borrow `PushControl`'s state, which
+   never reads the key in a browser without push and so cannot say this
+   there. The key is therefore read twice when the inbox opens in a browser
+   with push.
+7. Settings that cannot be read leave the section with its sentence and no
+   switches. A write in flight disables every write; a refused write leaves
+   the shown settings as they were and shows the error in the section.
+
+**Consequences.**
+- The test "says so in a browser without push, and reads nothing for it"
+  in `front/src/routes/-notifications.test.tsx` no longer holds as written:
+  the settings section reads the key. It narrows to *the push control* asking
+  for no permission and writing no subscription.
+- A host without the tz database takes only `UTC` (ADR 237): a browser zone
+  such as `Europe/Madrid` is then refused, and the section shows that 400.
+- `docs/plans/notifications.md` step 5 and the plan are built.
+
+**Ruled out.**
+- One *Save* for the whole section: a kind switch that does not save when
+  flipped reads as saved when it is not.
+- Writing quiet hours on every field change: a half-typed window is a 400.
+- A route-level `useQuery` cache shared with `PushControl`: `readState`
+  reads the key inside `lib/push.ts`, and sharing it would change ADR 232's
+  control for one saved request.

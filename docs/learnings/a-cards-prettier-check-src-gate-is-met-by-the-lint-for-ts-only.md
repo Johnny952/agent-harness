@@ -3,7 +3,8 @@
 **When it applies:** your card's *Done when* lists `prettier --check src` for
 `front/` beside typecheck, lint and test, and you are about to run it.
 
-**Status:** unconfirmed — reported by T-118-S2's arquitecto and implementador;
+**Status:** confirmed by T-120, whose implementador and revisor found the
+same refusal — first reported by T-118-S2's arquitecto and implementador;
 its auditor hit the same refusal and read the config.
 
 ## Symptom

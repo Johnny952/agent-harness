@@ -2,7 +2,7 @@
  * Web Push for this browser (`docs/plans/notifications.md` step 4, ADR 232).
  *
  * The board service holds the VAPID key and the subscriptions (ADR 229); the
- * console forwards its three routes (`lib/api/forward.ts`). This module is the
+ * console forwards its five routes (`lib/api/forward.ts`). This module is the
  * browser's half: it registers `public/sw.js`, asks for permission, subscribes
  * with the server's public key and hands the subscription to the server, and
  * undoes all of it.
@@ -26,9 +26,17 @@
  * cause the person can act on ("Registration failed - permission denied" is what
  * Chrome says in a private window, with permission granted). `turnOn` throws
  * `subscribeRefusal`'s sentence instead, with the browser's text kept at its end.
+ *
+ * **The settings are the server's, read and written whole by name** (ADR 237,
+ * ADR 246): which kinds are pushed and the quiet hours. `readSettings` and
+ * `writeSettings` are the two routes' client; a write sends only what changed
+ * and the server merges it, and a 400's `{"error"}` is given in the server's
+ * own words. Their types live here and not in `lib/api/types.ts`, which is the
+ * api's.
  */
 
 export const PUSH_KEY_PATH = "/api/push/key";
+export const PUSH_SETTINGS_PATH = "/api/push/settings";
 export const PUSH_SUBSCRIPTIONS_PATH = "/api/push/subscriptions";
 export const SERVICE_WORKER_PATH = "/sw.js";
 
@@ -94,6 +102,91 @@ async function refusal(res: Response, what: string): Promise<Error> {
     /* No JSON body: the status says it. */
   }
   return new Error(`${what}: ${detail}`);
+}
+
+export type QuietHours = { start: string; end: string; zone: string };
+export type PushSettings = { kinds: Record<string, boolean>; quiet_hours: QuietHours | null };
+/** A write: a key left out is a field left alone; `quiet_hours: null` turns the window off. */
+export type PushSettingsChange = {
+  kinds?: Record<string, boolean>;
+  quiet_hours?: QuietHours | null;
+};
+
+/** The settings in a body, or null when it is not their shape. Non-boolean kinds are dropped. */
+export function parseSettings(body: unknown): PushSettings | null {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+  const record = body as Record<string, unknown>;
+  const served = record["kinds"];
+  if (served === null || typeof served !== "object" || Array.isArray(served)) return null;
+  const kinds: Record<string, boolean> = {};
+  for (const [kind, on] of Object.entries(served as Record<string, unknown>)) {
+    if (typeof on === "boolean") kinds[kind] = on;
+  }
+  const window = record["quiet_hours"];
+  if (window === null || window === undefined) return { kinds, quiet_hours: null };
+  if (typeof window !== "object" || Array.isArray(window)) return null;
+  const { start, end, zone } = window as Record<string, unknown>;
+  if (typeof start !== "string" || typeof end !== "string" || typeof zone !== "string") return null;
+  return { kinds, quiet_hours: { start, end, zone } };
+}
+
+const UNREACHABLE_READ =
+  "The board service cannot be reached, so the push settings cannot be read.";
+const UNREACHABLE_WRITE =
+  "The board service cannot be reached, so the push settings were not saved.";
+const NO_SETTINGS = "The board service answered no push settings.";
+
+/** Reads the settings. Throws a sentence for the person: unreachable, refused, or malformed. */
+export async function readSettings(): Promise<PushSettings> {
+  let res: Response;
+  try {
+    res = await fetch(PUSH_SETTINGS_PATH, { headers: { Accept: "application/json" } });
+  } catch {
+    throw new Error(UNREACHABLE_READ);
+  }
+  if (res.status === 502 || res.status === 504) throw new Error(UNREACHABLE_READ);
+  if (!res.ok) throw await refusal(res, "The push settings could not be read");
+  const settings = parseSettings(await res.json().catch(() => null));
+  if (!settings) throw new Error(NO_SETTINGS);
+  return settings;
+}
+
+/**
+ * Saves a change and resolves to the settings the server now holds. Only the
+ * fields present are sent. Throws on an empty change without sending, and with
+ * the server's `{"error"}` on a refusal.
+ */
+export async function writeSettings(partial: PushSettingsChange): Promise<PushSettings> {
+  const body: PushSettingsChange = {};
+  if (partial.kinds && Object.keys(partial.kinds).length > 0) body.kinds = partial.kinds;
+  if ("quiet_hours" in partial && partial.quiet_hours !== undefined) {
+    body.quiet_hours = partial.quiet_hours;
+  }
+  if (Object.keys(body).length === 0) throw new Error("Nothing to save.");
+  let res: Response;
+  try {
+    res = await fetch(PUSH_SETTINGS_PATH, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(UNREACHABLE_WRITE);
+  }
+  if (res.status === 502 || res.status === 504) throw new Error(UNREACHABLE_WRITE);
+  if (!res.ok) throw await refusal(res, "The push settings were not saved");
+  const settings = parseSettings(await res.json().catch(() => null));
+  if (!settings) throw new Error(NO_SETTINGS);
+  return settings;
+}
+
+/** The browser's time zone, the quiet hours' default; UTC where it cannot say. */
+export function browserZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
 }
 
 /**

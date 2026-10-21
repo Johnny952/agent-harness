@@ -1562,6 +1562,23 @@ describe("the action routes without their configuration", () => {
     expect(target(fetchMock)).toBe(`${BOARD}/api/push/key`);
   });
 
+  it("503s the settings PUT without the token, but still reads the settings", async () => {
+    const without = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi('{"kinds":{},"quiet_hours":null}');
+    const answer = await without(
+      get("/api/push/settings", {
+        method: "PUT",
+        body: "{}",
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(answer?.status).toBe(503);
+    expect((await answer!.json()).error).toContain("push routes");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await without(get("/api/push/settings")))?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/push/settings`);
+  });
+
   it("503s a start without CONSOLE_PROJECT, but still forwards a cancel", async () => {
     const forward = await configured({ CONSOLE_PROJECT: null });
     const fetchMock = stubApi();
@@ -1717,5 +1734,73 @@ describe("the board-service push routes", () => {
       (await forwardApiRequest(get("/api/push/subscriptions", { method: "PUT" })))?.status,
     ).toBe(405);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  describe("the settings", () => {
+    const CHANGE = '{"kinds":{"merged":false}}';
+
+    function save(body: string, headers = {}, method = "PUT"): Request {
+      return get("/api/push/settings", {
+        method,
+        body,
+        headers: {
+          "content-type": "application/json",
+          "sec-fetch-site": "same-origin",
+          origin: "http://console.test",
+          authorization: "Bearer from-the-browser",
+          ...headers,
+        },
+      });
+    }
+
+    it("forwards the read to the board-service, with nothing of the browser's", async () => {
+      const fetchMock = stubApi('{"kinds":{"merged":true},"quiet_hours":null}');
+      const answer = await forwardApiRequest(
+        get("/api/push/settings?x=1", { headers: { authorization: "Bearer from-the-browser" } }),
+      );
+      expect(answer?.status).toBe(200);
+      expect(await answer?.json()).toEqual({ kinds: { merged: true }, quiet_hours: null });
+      expect(target(fetchMock)).toBe(`${BOARD}/api/push/settings`);
+      expect(fetchMock.mock.calls[0]![1]!.headers).toEqual({ Accept: "application/json" });
+    });
+
+    it("502s a read the board-service does not answer, without its address", async () => {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed"));
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const answer = await forwardApiRequest(get("/api/push/settings"));
+      expect(answer?.status).toBe(502);
+      expect(JSON.stringify(await answer!.json())).not.toContain("board.test");
+    });
+
+    it("forwards a PUT with the bearer, the body unchanged, and passes a 400 back", async () => {
+      const fetchMock = stubApi('{"error":"quiet_hours start equals its end"}', 400);
+      const answer = await forwardApiRequest(save(CHANGE));
+      expect(answer?.status).toBe(400);
+      expect((await answer!.json()).error).toContain("start equals its end");
+      expect(target(fetchMock)).toBe(`${BOARD}/api/push/settings`);
+      const init = fetchMock.mock.calls[0]![1]!;
+      expect(init.method).toBe("PUT");
+      expect(init.headers).toEqual({
+        "Content-Type": "application/json",
+        Authorization: "Bearer actions-token",
+      });
+      expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe(CHANGE);
+    });
+
+    it("refuses a PUT from another site or as a form, sending nothing", async () => {
+      const fetchMock = stubApi();
+      const cross = await forwardApiRequest(save(CHANGE, { "sec-fetch-site": "cross-site" }));
+      expect(cross?.status).toBe(403);
+      const form = await forwardApiRequest(save(CHANGE, { "content-type": "text/plain" }));
+      expect(form?.status).toBe(415);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("keeps the answers the other methods had", async () => {
+      const fetchMock = stubApi();
+      expect((await forwardApiRequest(save(CHANGE, {}, "POST")))?.status).toBe(405);
+      expect((await forwardApiRequest(save(CHANGE, {}, "DELETE")))?.status).toBe(405);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
   });
 });

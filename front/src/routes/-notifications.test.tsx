@@ -15,6 +15,7 @@ import { Route } from "./notifications";
 import { Route as QueueRoute } from "./queue";
 import { renderRoute, type Served } from "@/test/render-route";
 import { LAST_SEEN_KEY, readLastSeen } from "@/lib/notifications";
+import { browserZone } from "@/lib/push";
 import { OPEN_THREAD_EVENT } from "@/hooks/use-console";
 import type { ActionQueue, Notification } from "@/lib/api/types";
 
@@ -305,12 +306,13 @@ describe("push for this browser", () => {
     await waitFor(() => expect(control().getAttribute("data-push-state")).toBe(state));
   }
 
-  it("says so in a browser without push, and reads nothing for it", async () => {
+  it("says so in a browser without push, and asks nothing of it", async () => {
     const { sent } = await renderRoute(Route, "/notifications", KEY);
     await settled("unsupported");
     expect(within(control()).getByText(/cannot receive push notifications/)).toBeTruthy();
     expect(within(control()).queryByRole("button")).toBeNull();
-    expect(sent.some((r) => r.path === "/api/push/key")).toBe(false);
+    // The settings section reads the key; the control subscribes nothing.
+    expect(sent.some((r) => r.method === "POST")).toBe(false);
   });
 
   it("asks permission only on the click, then subscribes with the key and stores it", async () => {
@@ -360,13 +362,14 @@ describe("push for this browser", () => {
     expect(fake.unsubscribe).toHaveBeenCalledTimes(1);
   });
 
-  it("is denied when the browser blocks it, with no button and no key read", async () => {
-    fakePush({ permission: "denied" });
+  it("is denied when the browser blocks it, with no button and no subscription", async () => {
+    const fake = fakePush({ permission: "denied" });
     const { sent } = await renderRoute(Route, "/notifications", KEY);
     await settled("denied");
     expect(within(control()).getByText(/blocked for this console/)).toBeTruthy();
     expect(within(control()).queryByRole("button")).toBeNull();
-    expect(sent.some((r) => r.path === "/api/push/key")).toBe(false);
+    expect(fake.subscribe).not.toHaveBeenCalled();
+    expect(sent.some((r) => r.method === "POST")).toBe(false);
   });
 
   it("is denied when the person refuses on the click, and subscribes nothing", async () => {
@@ -417,5 +420,171 @@ describe("push for this browser", () => {
     await settled("off");
     expect(fake.subscribe).toHaveBeenCalledTimes(1);
     expect(sent.some((r) => r.method === "POST")).toBe(false);
+  });
+});
+
+describe("the push settings", () => {
+  const WINDOW = { start: "23:00", end: "06:30", zone: "Europe/Madrid" };
+  // Served alphabetically, as Flask does: the page has to put the four first.
+  const KINDS = {
+    awaiting_review: true,
+    blocked: true,
+    command_request: false,
+    conflict: true,
+    merged: true,
+    phase_failed: false,
+    pool: true,
+    turn_finished: true,
+  };
+
+  function served(over: Served = {}, quiet: unknown = null): Served {
+    return {
+      "/api/notifications": { data: [] },
+      "/api/push/key": { bare: { publicKey: "AQID" }, status: 200 },
+      "/api/push/settings": { bare: { kinds: KINDS, quiet_hours: quiet }, status: 200 },
+      ...over,
+    };
+  }
+
+  function section(): HTMLElement {
+    return screen.getByRole("region", { name: "Push settings" });
+  }
+
+  async function ready(): Promise<void> {
+    await waitFor(() => expect(section().getAttribute("data-settings-state")).toBe("ready"));
+  }
+
+  function puts(sent: { method: string; path: string; body?: unknown }[]) {
+    return sent.filter((r) => r.method === "PUT" && r.path === "/api/push/settings");
+  }
+
+  it("lists one switch per kind, the four that need the person first", async () => {
+    await renderRoute(Route, "/notifications", served());
+    await ready();
+    const names = within(within(section()).getByRole("list", { name: "Pushed kinds" }))
+      .getAllByRole("switch")
+      .map((s) => s.getAttribute("aria-label"));
+    expect(names).toEqual([
+      "awaiting review",
+      "conflict",
+      "command request",
+      "blocked",
+      "merged",
+      "phase failed",
+      "pool",
+      "turn finished",
+    ]);
+    expect(
+      within(section()).getByRole("switch", { name: "merged" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      within(section()).getByRole("switch", { name: "phase failed" }).getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("sends only the flipped kind and shows the server's answer", async () => {
+    const answer = { kinds: { ...KINDS, merged: false }, quiet_hours: null };
+    const { sent } = await renderRoute(
+      Route,
+      "/notifications",
+      served({ "PUT /api/push/settings": { bare: answer, status: 200 } }),
+    );
+    await ready();
+    fireEvent.click(within(section()).getByRole("switch", { name: "merged" }));
+    await waitFor(() =>
+      expect(
+        within(section()).getByRole("switch", { name: "merged" }).getAttribute("aria-checked"),
+      ).toBe("false"),
+    );
+    expect(puts(sent).map((r) => r.body)).toEqual([{ kinds: { merged: false } }]);
+  });
+
+  it("turns quiet hours on with the browser's zone, writing nothing until saved", async () => {
+    const answer = { kinds: KINDS, quiet_hours: { start: "21:00", end: "07:00", zone: "UTC" } };
+    const { sent } = await renderRoute(
+      Route,
+      "/notifications",
+      served({ "PUT /api/push/settings": { bare: answer, status: 200 } }),
+    );
+    await ready();
+    fireEvent.click(within(section()).getByRole("switch", { name: "Quiet hours" }));
+    const start = within(section()).getByLabelText("Quiet hours start") as HTMLInputElement;
+    const end = within(section()).getByLabelText("Quiet hours end") as HTMLInputElement;
+    const zone = within(section()).getByLabelText("Time zone") as HTMLInputElement;
+    expect([start.value, end.value, zone.value]).toEqual(["22:00", "07:00", browserZone()]);
+    expect(puts(sent)).toEqual([]);
+    fireEvent.change(start, { target: { value: "21:00" } });
+    fireEvent.change(zone, { target: { value: "UTC" } });
+    fireEvent.click(within(section()).getByRole("button", { name: "Save quiet hours" }));
+    await waitFor(() => expect(puts(sent)).toHaveLength(1));
+    expect(puts(sent)[0]!.body).toEqual({
+      quiet_hours: { start: "21:00", end: "07:00", zone: "UTC" },
+    });
+  });
+
+  it("turns a served window off with quiet_hours null", async () => {
+    const answer = { kinds: KINDS, quiet_hours: null };
+    const { sent } = await renderRoute(
+      Route,
+      "/notifications",
+      served({ "PUT /api/push/settings": { bare: answer, status: 200 } }, WINDOW),
+    );
+    await ready();
+    expect((within(section()).getByLabelText("Time zone") as HTMLInputElement).value).toBe(
+      "Europe/Madrid",
+    );
+    fireEvent.click(within(section()).getByRole("switch", { name: "Quiet hours" }));
+    await waitFor(() => expect(within(section()).queryByLabelText("Time zone")).toBeNull());
+    expect(puts(sent).map((r) => r.body)).toEqual([{ quiet_hours: null }]);
+  });
+
+  it("shows the server's words on a 400 and keeps the served switch", async () => {
+    await renderRoute(
+      Route,
+      "/notifications",
+      served({
+        "PUT /api/push/settings": { status: 400, error: "unknown notification kind 'x'" },
+      }),
+    );
+    await ready();
+    fireEvent.click(within(section()).getByRole("switch", { name: "merged" }));
+    expect(
+      await within(section()).findByText(
+        "The push settings were not saved: unknown notification kind 'x'",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(section()).getByRole("switch", { name: "merged" }).getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("says when the board service cannot be reached, and shows no switches", async () => {
+    await renderRoute(
+      Route,
+      "/notifications",
+      served({
+        "/api/push/settings": { status: 502, error: "The board-service could not be reached." },
+      }),
+    );
+    await waitFor(() => expect(section().getAttribute("data-settings-state")).toBe("unreadable"));
+    expect(within(section()).getByText(/cannot be reached/)).toBeTruthy();
+    expect(within(section()).queryByRole("switch")).toBeNull();
+  });
+
+  it("disables the writes while the server has push off", async () => {
+    await renderRoute(
+      Route,
+      "/notifications",
+      served({ "/api/push/key": { status: 404, error: "push is off" } }, WINDOW),
+    );
+    await waitFor(() => expect(section().getAttribute("data-settings-state")).toBe("server-off"));
+    expect(within(section()).getByText(/Push is off on the server/)).toBeTruthy();
+    const switches = within(section()).getAllByRole("switch");
+    expect(switches.length).toBe(9);
+    expect(switches.every((s) => s.hasAttribute("disabled"))).toBe(true);
+    expect(
+      (within(section()).getByRole("button", { name: "Save quiet hours" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 });
