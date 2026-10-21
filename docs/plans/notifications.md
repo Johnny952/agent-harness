@@ -153,7 +153,9 @@ Each step is a single surface:
    and opens its url on a click; `front/public/manifest.webmanifest` makes
    the console installable. The inbox has a control that turns push on or
    off for this browser, asking permission only on its click, and says when
-   the browser cannot, has blocked it, or the server has push off.
+   the browser cannot, has blocked it, or the server has push off. A
+   subscription the browser refuses, as in a private window, is said in
+   plain words (ADR 233).
 5. The per-kind settings and quiet hours.
 
 ## Open questions

@@ -20,6 +20,12 @@
  * endpoint and never says which browser one belongs to, so *on* is the
  * browser's word; a subscription the server dropped (a 404 or 410 from the push
  * service, ADR 229) is put back by turning push on again.
+ *
+ * **A browser that refuses the subscription is said in plain words** (ADR 233).
+ * `pushManager.subscribe` rejects with the browser's own text, which names no
+ * cause the person can act on ("Registration failed - permission denied" is what
+ * Chrome says in a private window, with permission granted). `turnOn` throws
+ * `subscribeRefusal`'s sentence instead, with the browser's text kept at its end.
  */
 
 export const PUSH_KEY_PATH = "/api/push/key";
@@ -90,6 +96,25 @@ async function refusal(res: Response, what: string): Promise<Error> {
   return new Error(`${what}: ${detail}`);
 }
 
+/**
+ * What a rejected `pushManager.subscribe` means for the person. `NotAllowedError`
+ * is a browser that will not push to this window though permission is granted:
+ * a private or incognito window, or a profile whose push is turned off.
+ * `AbortError` is the browser's push service not answering (some browsers ship
+ * it turned off). Anything else keeps a generic sentence.
+ */
+export function subscribeRefusal(e: unknown): Error {
+  const name = e instanceof Error || e instanceof DOMException ? e.name : "";
+  const said = e instanceof Error || e instanceof DOMException ? e.message : String(e);
+  const plain =
+    name === "NotAllowedError"
+      ? "This browser refused the push subscription. Private or incognito windows cannot receive push; open the console in a normal window, or check that push is not turned off for this browser profile."
+      : name === "AbortError"
+        ? "This browser's push service did not answer. Some browsers turn it off by default (Brave has a setting for it); turn it on or use another browser, then try again."
+        : "This browser could not subscribe to push.";
+  return new Error(said ? `${plain} (The browser said: ${said})` : plain);
+}
+
 function sameKey(sub: PushSubscription, key: Uint8Array): boolean {
   const held = sub.options?.applicationServerKey;
   if (!held) return false;
@@ -108,7 +133,8 @@ function send(method: "POST" | "DELETE", body: unknown): Promise<Response> {
 /**
  * Turn push on for this browser. Asks permission (call it from a click), then
  * registers the worker, subscribes and stores the subscription on the server.
- * Resolves to the state it left; throws when the server refused the write, after
+ * Resolves to the state it left; throws when the browser refused the
+ * subscription (`subscribeRefusal`), or when the server refused the write, after
  * dropping the browser's subscription so the state stays *off*.
  */
 export async function turnOn(): Promise<PushState> {
@@ -127,7 +153,13 @@ export async function turnOn(): Promise<PushState> {
     await sub.unsubscribe();
     sub = null;
   }
-  sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+  if (!sub) {
+    try {
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
+    } catch (e) {
+      throw subscribeRefusal(e);
+    }
+  }
   const res = await send("POST", sub.toJSON());
   if (!res.ok) {
     const error = await refusal(res, "The subscription was not stored");
