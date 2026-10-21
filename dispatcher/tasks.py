@@ -177,11 +177,11 @@ DEBT_TAG = "debt"
 COMMENTS_FILE = "comments.jsonl"
 #: The keys that make a `comments.jsonl` line a comment: `add_comment`'s three.
 COMMENT_KEYS = ("at", "author", "text")
-#: The verdicts `docs/plans/review.md` names. Only *comment* is recorded yet
-#: (step 3): *approve* is step 4 and *request changes* step 6, so the writer
-#: refuses the other two rather than store a verdict nothing acts on.
+#: The verdicts `docs/plans/review.md` names. *comment* (step 3) and *approve*
+#: (step 4) are recorded; *request changes* is step 6, so the writer refuses it
+#: rather than store a verdict nothing acts on.
 VERDICT_KINDS = ("comment", "approve", "request_changes")
-VERDICT_KINDS_BUILT = ("comment",)
+VERDICT_KINDS_BUILT = ("comment", "approve")
 #: Where a review happens: a task waiting for review, one whose merge stopped
 #: on a conflict, or an older `done` one not on main (ADR 240).
 REVIEW_STATUSES = (AWAITING_REVIEW_STATUS, "done", CONFLICT_STATUS)
@@ -2851,18 +2851,22 @@ def record_verdict(
     person reviewed (*Decisions* 4), as the console's diff named it; its shape
     is checked and nothing more, since this side holds no clone.
 
-    Only `kind` "comment" is taken (`VERDICT_KINDS_BUILT`): it starts nothing
-    (*Decisions* 1), so recording it is the whole of it, and no dispatcher
-    reads it. The task must be under review, `awaiting_review`, `conflict` or
-    `done` and not merged: a verdict on a task not finished, or already merged, reviewed
-    nothing. Returns `add_comment`'s `{"id", "comment", "comment_count"}`.
+    Only the kinds in `VERDICT_KINDS_BUILT` are taken: a "comment" starts
+    nothing (*Decisions* 1), so recording it is the whole of it; an "approve"
+    is followed by its action, queued by the caller (ADR 267). The task must
+    be under review, `awaiting_review`, `conflict` or `done` and not merged: a
+    verdict on a task not finished, or already merged, reviewed nothing. An
+    approve is refused on `conflict` too, which waits on resolve conflict.
+    Returns `add_comment`'s `{"id", "comment", "comment_count"}`.
     """
     task_id = _check_id(task_id)
     problems = []
     if kind not in VERDICT_KINDS:
         problems.append(f"the verdict is {kind!r}, not one of {', '.join(VERDICT_KINDS)}")
     elif kind not in VERDICT_KINDS_BUILT:
-        problems.append(f"the {kind} verdict is not built yet; only comment is")
+        problems.append(
+            f"the {kind} verdict is not built yet; only {' and '.join(VERDICT_KINDS_BUILT)} are"
+        )
     if not isinstance(commit, str) or not _COMMIT_RE.match(commit):
         problems.append(f"commit is {commit!r}, not a commit hash")
     problems += _comment_problems(author, text)
@@ -2877,6 +2881,11 @@ def record_verdict(
     }
 
     def under_review(task: context_transfer.TaskFile) -> None:
+        if kind == "approve" and task.status == CONFLICT_STATUS:
+            raise BoardWriteError(
+                f"task {task_id}",
+                ["it is conflict: an approve waits on resolve conflict"],
+            )
         if task.status in REVIEW_STATUSES and not (
             task.status in ("done", AWAITING_REVIEW_STATUS) and task.merged
         ):

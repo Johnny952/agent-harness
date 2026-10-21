@@ -10,7 +10,8 @@ person's verdict on a task under review (`docs/plans/review.md` step 3), which
 no phase is listed. None moves a task once it is on the board, and none
 dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 `start`, a `cancel` or a `command_verdict` in the dispatcher's action queue
-(ADR 142, ADR 151), and two behind the same bearer create a project record and
+(ADR 142, ADR 151), and `POST /api/tasks/<id>/approve` writes the `approve`
+verdict line and then queues the `approve` action (ADR 258, ADR 267); two behind the same bearer create a project record and
 change its settings (ADR 203), through `dispatcher/projects.py`'s one writer.
 Four more queue a new project's `clone`, `init`, `keygen` and `check` for the
 worker (ADR 212); none carries a remote, the worker reads it from the record.
@@ -363,8 +364,15 @@ def review_verdict(
     """`review.md`'s verdict, step 3: a comment line that names a kind and the tip reviewed.
 
     Over HTTP only, as the operator: no role in `ROLE_TOOLS` lists it, since a
-    verdict is the person's, as accepting is (section 4).
+    verdict is the person's, as accepting is (section 4). An approve is not
+    taken here: it writes its action too, through `POST /api/tasks/<id>/approve`
+    (ADR 267).
     """
+    if kind == "approve":
+        raise ToolError(
+            f"an approve is not taken here: use POST /api/tasks/{task_id}/approve, "
+            "which also queues the action"
+        )
     return _writing(task_store.record_verdict, hive_dir, task_id, role, kind, text, commit)
 
 
@@ -681,7 +689,8 @@ TOOLS: dict[str, dict] = {
         "name": "review_verdict",
         "description": (
             "Record the person's verdict on a task under review, at the commit they "
-            "reviewed. Only the comment verdict is built. Over HTTP only."
+            "reviewed. Only the comment verdict is taken here; an approve goes through "
+            "POST /api/tasks/<id>/approve. Over HTTP only."
         ),
         "inputSchema": {
             "type": "object",
@@ -951,6 +960,47 @@ def create_app(config_path: str) -> Flask:
             )
 
         return _action(actions_token, make)
+
+    @app.post("/api/tasks/<task_id>/approve")
+    def http_approve(task_id: str):
+        # ADR 258, 1 and ADR 267: check what can be checked, write the verdict
+        # line, then queue the action. Not `_action`: a refused action answers
+        # with the verdict too, since its line stays.
+        body, refused = _bearer_guards(actions_token, "action")
+        if refused is not None:
+            return refused
+        unknown = sorted(set(body) - {"project", "commit", "text"})
+        if unknown:
+            return jsonify({"error": f"unknown field {unknown[0]!r}"}), 400
+        project, commit = body.get("project"), body.get("commit")
+        try:
+            actions.check_new(
+                "approve", project=project, task_id=task_id, params={"commit": commit},
+                actor="operator",
+            )
+        except actions.ActionRefused as exc:
+            return jsonify({"error": exc.reason}), exc.status
+        try:
+            verdict = _writing(
+                task_store.record_verdict, hive_dir, task_id, OPERATOR, "approve",
+                body.get("text"), commit,
+            )
+        except NotFoundError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ToolError as exc:
+            return jsonify({"error": str(exc)}), 400
+        try:
+            record = actions.create(
+                state_dir, "approve", project=project, task_id=task_id,
+                params={"commit": commit}, actor="operator",
+            )
+        except actions.ActionRefused as exc:
+            return jsonify({"error": exc.reason, "verdict": verdict}), exc.status
+        except OSError as exc:
+            return jsonify({
+                "error": f"the action queue could not be written: {exc}", "verdict": verdict,
+            }), 503
+        return jsonify({"verdict": verdict, "action": record}), 201
 
     @app.post("/api/epics/<epic_id>/start")
     def http_epic_start(epic_id: str):

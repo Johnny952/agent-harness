@@ -223,7 +223,7 @@ def test_http_a_comment_verdict_is_201_and_a_comment(client, hive, status):
 @pytest.mark.parametrize(
     "status, body, needle",
     [
-        ("done", {"kind": "approve", "text": "x", "commit": COMMIT}, "not built yet"),
+        ("done", {"kind": "approve", "text": "x", "commit": COMMIT}, "/api/tasks/T-001/approve"),
         ("done", {"kind": "praise", "text": "x", "commit": COMMIT}, "kind must be one of"),
         ("done", {"kind": "comment", "text": "x"}, "needs 'commit'"),
         ("done", {"kind": "comment", "text": "x", "commit": "main"}, "not a commit hash"),

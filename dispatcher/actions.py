@@ -430,6 +430,13 @@ def create(
     return _write_all(state_dir, [record], ready)[0]
 
 
+def check_new(
+    kind: str, *, project=None, task_id=None, params=None, actor: str = "operator", note=None
+) -> None:
+    """Raise `ActionRefused(400)` if `create` would refuse the record as malformed; write nothing."""
+    _new_record(kind, project, task_id, params, actor, note)
+
+
 def create_starts(
     state_dir,
     project,

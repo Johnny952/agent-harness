@@ -13689,3 +13689,55 @@ waits as.
 - Telling `conflict` from `not_run` reads the task status after the check,
   so a `conflict` whose handoff write failed reads `not_run`; the comment
   still carries the check's words.
+
+## ADR 267 — The `approve` route checks everything it can before the verdict line, and answers both writes
+
+**Status:** accepted (2026-10-21), T-125-S2's arquitecto. Narrows ADR 258
+decision 1 for the board service; the worker side is ADR 264, the console
+T-125-S3.
+
+**Context.** ADR 258, 1 orders the route's two writes (the verdict line,
+then the `approve` action) and lets the line stand when the action is
+refused. It leaves open which refusals may come after the line, what the
+route answers, how `record_verdict` refuses `conflict` for an approve while
+still taking it for a *comment*, and how `/verdict` refuses `approve` once
+`VERDICT_KINDS_BUILT` holds it.
+
+**Decision.**
+
+1. *The order in `POST /api/tasks/<id>/approve`:* ADR 151's guards
+   (`_bearer_guards(actions_token, "action")`: origin 403, no token 503,
+   bearer 401, query 400, body not an object 400); then a field outside
+   `{project, commit, text}` is 400; then the action record is checked
+   without being written (`actions.check_new`, a public wrapper of
+   `_new_record` that raises `ActionRefused(400)` and writes nothing), so a
+   missing or bad `project` or `commit` is refused before the line; then
+   `tasks.record_verdict(..., author OPERATOR, kind "approve")`, whose
+   refusals answer as `_http`'s do (no task 404, any other 400) and write
+   nothing; then `actions.create("approve", project, task_id,
+   params={"commit"}, actor "operator")`. The only refusals left after the
+   line are ADR 258's two: an approve already pending or claimed for the
+   task (409) and a queue that cannot be written (503).
+2. *The answers.* Both writes landed: 201, `{"verdict": <record_verdict's
+   {id, comment, comment_count}>, "action": <the action record>}`. The
+   action refused: its status, `{"error": <reason>, "verdict": <the same>}`,
+   so the console can say the verdict was recorded and nothing queued.
+   Refused before the line: `{"error"}` alone.
+3. *`record_verdict` reads the kind for the status.* `VERDICT_KINDS_BUILT`
+   is `("comment", "approve")`. A *comment* is taken on `awaiting_review`,
+   `conflict` or `done` not merged, as before; an *approve* on
+   `awaiting_review` or `done` not merged only, and on `conflict` it is
+   refused with words naming *resolve conflict*. A merged task refuses both.
+4. *`/verdict` refuses `approve` in the board service*, in `review_verdict`
+   before `record_verdict` is called: a 400 naming `POST
+   /api/tasks/<id>/approve`. `request_changes` stays refused by
+   `record_verdict` as not built. The `review_verdict` tool's description
+   says the same; no role lists it.
+
+**Consequences.**
+- A verdict line with no action behind it comes only from a duplicate
+  approve or an unwritable queue, never from a malformed body.
+- A second approve while the first is queued writes a second verdict line
+  and answers 409; the review reads two verdicts and one action.
+- `record_verdict` callers other than the two routes (none today) get the
+  approve status rule too.

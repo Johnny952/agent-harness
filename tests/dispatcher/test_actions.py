@@ -267,6 +267,19 @@ def test_an_invalid_approve_is_refused_400(tmp_path, over):
     assert err.value.status == 400
 
 
+@pytest.mark.parametrize("over", [{"params": {"commit": "nothex"}}, {"project": None}])
+def test_check_new_refuses_400_like_create_and_writes_nothing(tmp_path, over):
+    with pytest.raises(ActionRefused) as err:
+        actions.check_new("approve", **{**APPROVE, **over})
+    assert err.value.status == 400
+    assert not (tmp_path / "actions").exists()
+
+
+def test_check_new_takes_a_valid_record_and_writes_nothing(tmp_path):
+    assert actions.check_new("approve", **APPROVE) is None
+    assert actions.read_all(tmp_path) == ([], [])
+
+
 def test_an_approve_serialises_on_the_base_and_spends_no_quota(tmp_path):
     rec = create(tmp_path, "approve", **APPROVE)
     assert actions.serial_key(rec) == "base:proj"
