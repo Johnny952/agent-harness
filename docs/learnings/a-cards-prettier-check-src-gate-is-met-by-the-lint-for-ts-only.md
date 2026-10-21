@@ -5,7 +5,8 @@
 
 **Status:** confirmed by T-120, whose implementador and revisor found the
 same refusal — first reported by T-118-S2's arquitecto and implementador;
-its auditor hit the same refusal and read the config.
+its auditor hit the same refusal and read the config. T-118-S3's
+implementador hit it again and got the check run as a command request.
 
 ## Symptom
 
@@ -31,10 +32,17 @@ for `bunx prettier --check src` (and, per the implementador,
 
 Make one attempt at `bunx prettier --check src`; when it is refused, count a
 clean `bun run lint` as the check for `.ts`/`.tsx`, say so, and say whether the
-diff touched `styles.css` or a `.md` under `src/`.
+diff touched `styles.css` or a `.md` under `src/`. To meet the gate itself,
+file `bunx prettier --check src` in `front` as a command request: the
+operator runs it and the log lands under the task's `commands/` directory
+(T-118-S3).
 
 ## Evidence
 
 T-118-S2 auditor, 2026-10-21, from `front/`: `bunx prettier --check src`
 answered `This command requires approval`; `bun run lint` printed
 `$ eslint .` and exited clean; the diff touched no non-TS file under `src/`.
+
+T-118-S3 implementador, 2026-10-21: the same refusal; the command request
+was run by the operator, and `<hive_tasks_dir>/T-118-S3/commands/1.log`
+reads `All matched files use Prettier code style!`, exit 0.
