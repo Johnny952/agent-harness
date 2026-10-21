@@ -185,6 +185,9 @@ had before this, which `dispatch migrate` writes once
   `--parallel` above 1, and until it is built this rule holds.
   *Built 2026-10-17* for `run-queue --parallel N` (`docs/decisions.md`
   ADR 83); every other start still runs one cycle per project.
+  *Widened 2026-10-21:* N may go up to the pool's phase slots, the sum of
+  each account's `max_concurrent_phases`, not one per account
+  (`docs/decisions.md` ADR 252).
 - **What "running" means.** A project is busy from its cycle's first phase
   until the task is *Awaiting review*, and again for a revision round. Two
   tasks awaiting review on one project can still diverge from the base, as

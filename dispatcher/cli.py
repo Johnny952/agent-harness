@@ -772,7 +772,8 @@ def main() -> None:
     )
     queue_parser.add_argument(
         "--parallel", type=int, default=1,
-        help="Cycles at a time, at most one per account; overlapping surfaces "
+        help="Cycles at a time, at most the pool's phase slots (sum of "
+        "max_concurrent_phases, ADR 252); overlapping surfaces "
         "never write at once (docs/plans/autonomy.md, B-3, ADR 83)",
     )
     queue_parser.add_argument(
@@ -1205,11 +1206,13 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
     """
     if args.parallel < 1:
         parser.error("--parallel: at least 1")
-    if args.parallel > len(cfg.accounts):
-        # One phase per account (out of B-3's scope to change): a slot no
-        # account can serve only holds its cycle at the next phase.
+    slots = sum(a.max_concurrent_phases for a in cfg.accounts)
+    if args.parallel > slots:
+        # One cycle per phase slot (ADR 88, ADR 252): a slot no account can
+        # serve only holds its cycle at the next phase.
         parser.error(
-            f"--parallel: at most {len(cfg.accounts)}, one cycle per configured account"
+            f"--parallel: at most {slots}, the pool's phase slots "
+            "(the sum of max_concurrent_phases, ADR 252)"
         )
     if args.resume:
         if (

@@ -22,6 +22,8 @@ from dispatcher.config import AccountConfig
 from tests.dispatcher.test_dispatcher import _make_config
 from tests.dispatcher.test_queue import _usage
 
+_REAL_PICK = core.pick_idle_account
+
 _DESCRIPTION = (
     "## Goal\n\nDo {id}.\n\n## Surface\n\n{surface}\n\n## Done when\n\nIt is done.\n"
 )
@@ -480,3 +482,71 @@ def test_cli_runs_a_parallel_queue_up_to_the_accounts(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exit_:
         cli_mod.main()
     assert exit_.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "slots, parallel, accepted",
+    [
+        ([3], 3, True), ([3], 4, False),
+        ([2, 1], 3, True), ([2, 1], 4, False),
+        ([1, 1], 2, True), ([1, 1], 3, False),
+    ],
+)
+def test_cli_caps_parallel_at_the_pool_s_phase_slots(
+    tmp_path, monkeypatch, capsys, slots, parallel, accepted,
+):
+    cfg = _make_config(tmp_path, accounts=[
+        AccountConfig(name=f"cuenta{i}", container=f"agent-cuenta{i}", max_concurrent_phases=n)
+        for i, n in enumerate(slots, start=1)
+    ])
+    _task(cfg, "T-1", "`a.py`")
+    fake = ScheduledCycle(cfg)
+    monkeypatch.setattr(core, "run_task_cycle", fake)
+    config = tmp_path / "config.yaml"
+    config.write_text("")
+    monkeypatch.setattr(cli_mod, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["dispatch", "--config", str(config), "run-queue", "--project", "proj",
+         "--limit", "10000", "--parallel", str(parallel), "--yes", "--task-id", "T-1"],
+    )
+    if accepted:
+        try:
+            cli_mod.main()
+        except SystemExit as exc:
+            assert exc.code in (0, None)
+        assert ("T-1", "leave") in fake.events
+    else:
+        with pytest.raises(SystemExit) as exit_:
+            cli_mod.main()
+        assert exit_.value.code == 2
+        assert f"at most {sum(slots)}" in capsys.readouterr().err
+        assert fake.events == []
+
+
+def test_one_multi_slot_account_runs_two_cycles_at_once(tmp_path, monkeypatch):
+    cfg = _make_config(tmp_path, accounts=[
+        AccountConfig(name="cuenta1", container="agent-cuenta1", max_concurrent_phases=2),
+    ])
+    monkeypatch.setattr(core, "pick_idle_account", _REAL_PICK)
+
+    class ClaimingCycle(ScheduledCycle):
+        def __call__(self, cfg, task_id, *args, **kwargs):
+            from dispatcher import state_machine
+            assert state_machine.claim(
+                cfg.state_dir, "cuenta1", task_id, capacity=core._capacity_for(cfg, "cuenta1"),
+            )
+            try:
+                return super().__call__(cfg, task_id, *args, **kwargs)
+            finally:
+                state_machine.release(cfg.state_dir, "cuenta1", task_id)
+
+    _task(cfg, "T-1", "`a.py`")
+    _task(cfg, "T-2", "`b.py`")
+    fake = ClaimingCycle(cfg, arquitecto_barrier=threading.Barrier(2))
+
+    queue = _run(cfg, monkeypatch, fake, ["T-1", "T-2"], parallel=2)
+
+    assert queue.status == queue_mod.Q_DONE
+    assert [e.state for e in queue.entries] == [queue_mod.MERGED] * 2
+    assert {t for t, what in fake.events if what == "arquitecto"} == {"T-1", "T-2"}
