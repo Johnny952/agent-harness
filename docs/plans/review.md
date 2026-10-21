@@ -154,7 +154,9 @@ when step 4 below is built.
 
 How the dispatcher learns of a verdict the service wrote, by reading the hive
 as it reads tasks today or by a signal from the service, is decided when step
-4 is built.
+4 is built. Both were decided ahead of the build, on 2026-10-21, by ADR 258:
+the credential is ADR 78's, and the dispatcher learns of an *approve* through
+the action queue (an `approve` action the worker drains), neither of the two.
 
 *Narrowed* 2026-10-17, from what `docs/plans/autonomy.md` built:
 
