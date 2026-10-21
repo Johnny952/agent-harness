@@ -95,6 +95,8 @@ import type {
   ActionRecord,
   ApproveTaskBody,
   ApproveTaskResult,
+  RequestChangesBody,
+  RequestChangesResult,
   EpicStartResult,
   EpicStopResult,
   ApiResult,
@@ -528,6 +530,21 @@ export function approveTask(taskId: string, body: ApproveTaskBody): Promise<Appr
     method: "POST",
     body,
   });
+}
+
+/**
+ * Send a task under review back at the tip the diff shows: `POST
+ * /api/tasks/<id>/request-changes` (ADR 272, ADR 276). Like the approve, a
+ * refusal after the verdict is an `ApiError` whose `body` carries `verdict`.
+ */
+export function requestChanges(
+  taskId: string,
+  body: RequestChangesBody,
+): Promise<RequestChangesResult> {
+  return readBare<RequestChangesResult>(
+    `/api/tasks/${encodeURIComponent(taskId)}/request-changes`,
+    { method: "POST", body },
+  );
 }
 
 /**

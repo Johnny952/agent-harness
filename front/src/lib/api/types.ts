@@ -552,7 +552,7 @@ export interface TaskComment {
   verdict?: { kind: VerdictKind; commit: string };
 }
 
-/** The verdicts `dispatcher/tasks.py` knows; `comment` and `approve` are built (ADR 222, ADR 270). */
+/** The verdicts `dispatcher/tasks.py` knows; all three are built (ADR 222, ADR 270, ADR 276). */
 export type VerdictKind = "comment" | "approve" | "request_changes";
 
 /**
@@ -654,6 +654,22 @@ export interface ApproveTaskBody {
 
 /** The approve route's 201: the verdict stored, and the action it queued. */
 export interface ApproveTaskResult {
+  verdict: CommentTaskResult;
+  action: ActionRecord;
+}
+
+/**
+ * `POST /api/tasks/<id>/request-changes`'s body (ADR 272, ADR 276): approve's
+ * shape. `text` is what to change, non-blank: there is no default.
+ */
+export interface RequestChangesBody {
+  project?: string;
+  commit: string;
+  text: string;
+}
+
+/** The request-changes route's 201: the verdict stored, and the action it queued. */
+export interface RequestChangesResult {
   verdict: CommentTaskResult;
   action: ActionRecord;
 }

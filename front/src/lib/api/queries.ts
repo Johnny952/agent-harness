@@ -4,6 +4,7 @@ import type {
   AcceptTaskBody,
   ApiResult,
   ApproveTaskBody,
+  RequestChangesBody,
   CommandRequestState,
   CommentTaskBody,
   CreateThreadBody,
@@ -175,6 +176,19 @@ export const approveTaskMutation = (qc: QueryClient) =>
     mutationKey: ["board", "approve"],
     mutationFn: ({ taskId, body }: { taskId: string; body: ApproveTaskBody }) =>
       api.approveTask(taskId, body),
+    onSettled: (_data, _error, { taskId }) =>
+      Promise.all([
+        invalidateBoard(qc, taskId),
+        qc.invalidateQueries({ queryKey: ["action-queue"] }),
+      ]),
+  });
+
+/** A request for changes stores a verdict comment and queues an action, as an approve does (ADR 276). */
+export const requestChangesMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "request-changes"],
+    mutationFn: ({ taskId, body }: { taskId: string; body: RequestChangesBody }) =>
+      api.requestChanges(taskId, body),
     onSettled: (_data, _error, { taskId }) =>
       Promise.all([
         invalidateBoard(qc, taskId),

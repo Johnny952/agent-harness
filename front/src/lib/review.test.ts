@@ -5,7 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 import type { TaskComment } from "@/lib/api/types";
-import { approveOutcomes, parseDiff, reviewLane, reviewVerdicts } from "./review";
+import {
+  approveOutcomes,
+  parseDiff,
+  requestChangesRefusal,
+  reviewLane,
+  reviewVerdicts,
+} from "./review";
 
 const DIFF_TEXT = [
   "diff --git a/src/app.py b/src/app.py",
@@ -35,6 +41,23 @@ describe("reviewLane", () => {
     expect(reviewLane({ status: "awaiting_review", merged: true })).toBeNull();
     expect(reviewLane({ status: "conflict", merged: false })).toBe("conflict");
     expect(reviewLane({ status: "in_progress", merged: false })).toBeNull();
+  });
+});
+
+describe("requestChangesRefusal", () => {
+  it("is null on an awaiting_review task not on main", () => {
+    expect(requestChangesRefusal({ status: "awaiting_review", merged: false })).toBeNull();
+  });
+
+  it("says why for conflict, done, merged and any other status", () => {
+    expect(requestChangesRefusal({ status: "conflict", merged: false })).toMatch(
+      /resolve conflict/,
+    );
+    expect(requestChangesRefusal({ status: "done", merged: false })).toMatch(
+      /Finished before review/,
+    );
+    expect(requestChangesRefusal({ status: "awaiting_review", merged: true })).toMatch(/merged/);
+    expect(requestChangesRefusal({ status: "pending", merged: false })).toMatch(/pending/);
   });
 });
 

@@ -23,8 +23,12 @@
  * `POST /api/tasks/<id>/approve` (`approveTaskMutation`), at the tip the diff
  * was read at, `Approved.` when nothing was typed. It is off on the conflict
  * lane, on a merged task, and once queued at this tip; the dispatcher's
- * `approve at <commit>:` comments are listed as outcomes. There is no
- * request-changes or resolve route yet, so the verdict panel names the CLI.
+ * `approve at <commit>:` comments are listed as outcomes. *Request changes*
+ * (ADR 276) posts the same body to `/request-changes`
+ * (`requestChangesMutation`) with the typed words required and no default; it
+ * is on only for an `awaiting_review` task not on main, and its outcome is the
+ * task leaving the list and returning at a new tip. There is no resolve route
+ * yet, so the verdict panel names the CLI.
  */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -48,6 +52,7 @@ import {
   approveTaskMutation,
   commentTaskMutation,
   commentsQuery,
+  requestChangesMutation,
   taskDiffQuery,
   tasksQuery,
   verdictTaskMutation,
@@ -57,6 +62,7 @@ import { MAX_COMMENT_CHARS, commentAnchor, commentLength, commentProblem } from 
 import {
   approveOutcomes,
   parseDiff,
+  requestChangesRefusal,
   reviewLane,
   reviewVerdicts,
   type ReviewLane as Tab,
@@ -233,10 +239,10 @@ function Review({ task, lane }: { task: Task; lane: Tab }) {
 }
 
 /**
- * Request changes has no route yet, so this names the CLI merge, for a push
- * an approve could not land, and for a conflict the merge of the base into the
- * branch that comes first (never a rebase: a phase's history stays as it ran).
- * The *comment* verdict and the *approve* are built, in the form under the branch line.
+ * This names the CLI merge, for a push an approve could not land, and for a
+ * conflict the merge of the base into the branch that comes first (never a
+ * rebase: a phase's history stays as it ran). The *comment* verdict, the
+ * *approve* and *request changes* are built, in the form under the branch line.
  */
 function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
   const project = task.project ? ` --project ${task.project}` : "";
@@ -246,7 +252,7 @@ function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
       <p className="text-muted-foreground">
         {lane === "conflict"
           ? "The merge stopped on a conflict. Merge the base into the task branch, resolve it there, then merge again:"
-          : "Request changes is not in the console yet. If the push an approve queued was refused, merge from the CLI (add --push to push too):"}
+          : "If the push an approve queued was refused, merge from the CLI (add --push to push too):"}
       </p>
       <Mono className="block select-all text-[11px]">{merge}</Mono>
       <p className="text-[11px] text-muted-foreground">
@@ -297,21 +303,40 @@ function Verdicts({
   const qc = useQueryClient();
   const post = useMutation(verdictTaskMutation(qc));
   const approve = useMutation(approveTaskMutation(qc));
+  const requestChanges = useMutation(requestChangesMutation(qc));
   const [text, setText] = useState("");
-  // The tip an approve was queued at from this screen; the button waits for the tip to move.
-  const [queuedAt, setQueuedAt] = useState<string | null>(null);
+  // The tip and the kind of the review-ending verdict queued from this screen; both
+  // buttons wait for the tip to move (ADR 276).
+  const [queuedAt, setQueuedAt] = useState<{
+    commit: string;
+    kind: "approve" | "request_changes";
+  } | null>(null);
   const given = reviewVerdicts(comments);
   const outcomes = approveOutcomes(comments);
   const problem = commentProblem(text);
   const over = commentLength(text) > MAX_COMMENT_CHARS;
-  const queued = queuedAt === diff.commit;
+  const queued = queuedAt?.commit === diff.commit ? queuedAt.kind : null;
+  const anyPending = post.isPending || approve.isPending || requestChanges.isPending;
   const approveOff =
-    lane === "conflict" ||
-    task.merged !== false ||
-    over ||
-    post.isPending ||
-    approve.isPending ||
-    queued;
+    lane === "conflict" || task.merged !== false || over || anyPending || queued !== null;
+  const refusal = requestChangesRefusal(task);
+  const requestOff = refusal !== null || problem !== null || anyPending || queued !== null;
+
+  // A refusal carrying `verdict` was recorded and queued nothing; any other is its words.
+  const refused = (what: string, err: unknown) => {
+    const recorded =
+      err instanceof ApiError &&
+      typeof err.body === "object" &&
+      err.body !== null &&
+      "verdict" in err.body;
+    toast.error(
+      recorded
+        ? `the ${what} verdict was recorded on ${taskId}, but nothing was queued: ${(err as ApiError).message}`
+        : err instanceof Error
+          ? err.message
+          : `the ${what} on ${taskId} was not sent`,
+    );
+  };
 
   const sendApprove = () => {
     if (approveOff) return;
@@ -327,23 +352,34 @@ function Verdicts({
       {
         onSuccess: (res) => {
           setText("");
-          setQueuedAt(diff.commit);
+          setQueuedAt({ commit: diff.commit, kind: "approve" });
           toast.success(`approve queued as ${res.action.id}; the outcome comes as a comment`);
         },
-        onError: (err) => {
-          const recorded =
-            err instanceof ApiError &&
-            typeof err.body === "object" &&
-            err.body !== null &&
-            "verdict" in err.body;
-          toast.error(
-            recorded
-              ? `the approve verdict was recorded on ${taskId}, but nothing was queued: ${err.message}`
-              : err instanceof Error
-                ? err.message
-                : `the approve on ${taskId} was not sent`,
+        onError: (err) => refused("approve", err),
+      },
+    );
+  };
+
+  const sendRequestChanges = () => {
+    if (requestOff) return;
+    requestChanges.mutate(
+      {
+        taskId,
+        body: {
+          commit: diff.commit,
+          text,
+          ...(typeof task.project === "string" ? { project: task.project } : {}),
+        },
+      },
+      {
+        onSuccess: (res) => {
+          setText("");
+          setQueuedAt({ commit: diff.commit, kind: "request_changes" });
+          toast.success(
+            `changes requested, queued as ${res.action.id}; ${taskId} leaves the list while its cycle reruns`,
           );
         },
+        onError: (err) => refused("request for changes", err),
       },
     );
   };
@@ -410,11 +446,33 @@ function Verdicts({
               }
               className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
             >
-              {approve.isPending ? "approving…" : queued ? "approve queued" : "approve"}
+              {approve.isPending
+                ? "approving…"
+                : queued === "approve"
+                  ? "approve queued"
+                  : "approve"}
+            </button>
+            <button
+              type="button"
+              onClick={sendRequestChanges}
+              disabled={requestOff}
+              title={
+                refusal ??
+                (problem
+                  ? "Write what to change first"
+                  : "Send the change back to the arquitecto at this tip")
+              }
+              className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
+            >
+              {requestChanges.isPending
+                ? "requesting…"
+                : queued === "request_changes"
+                  ? "changes requested"
+                  : "request changes"}
             </button>
             <button
               type="submit"
-              disabled={problem !== null || post.isPending || approve.isPending}
+              disabled={problem !== null || anyPending}
               className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
             >
               {post.isPending ? "posting…" : "comment verdict"}

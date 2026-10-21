@@ -27,19 +27,21 @@
  * deliberately not entries of `FORWARDED`, whose twenty-one routes, count and
  * rejection message describe the api alone.
  *
- * **Fifteen method and path pairs go to the board-service** (`docs/decisions.md`
+ * **Sixteen method and path pairs go to the board-service** (`docs/decisions.md`
  * ADR 136, ADR 157, ADR 190, ADR 195 for the two thread records, ADR 206
  * for the two project records, ADR 211 for the two epic actions, ADR 222
- * for the review verdict, and ADR 270 for the approve):
+ * for the review verdict, ADR 270 for the approve, and ADR 276 for the request
+ * for changes):
  * `POST /api/backlog`, `PATCH /api/tasks/<id>`, `POST /api/tasks/<id>/comments`,
  * `POST /api/tasks/<id>/accept`, `POST /api/tasks/<id>/verdict`,
- * `POST /api/tasks/<id>/approve`, `POST /api/threads` and
+ * `POST /api/tasks/<id>/approve`, `POST /api/tasks/<id>/request-changes`,
+ * `POST /api/threads` and
  * `PATCH /api/threads/<id>`, the three action routes
  * `POST /api/tasks/<id>/start`, `POST /api/actions/<id>/cancel` and
  * `POST /api/threads/<id>/turns`, and the two project-record writes
  * `POST /api/projects` and `PATCH /api/projects/<slug>`, and the two epic actions
  * `POST /api/epics/<id>/start` and `POST /api/epics/<id>/stop`, onto the same paths
- * there; the last eight carry a bearer. Four more, a new project's setup actions
+ * there; the last nine carry a bearer. Four more, a new project's setup actions
  * `POST /api/projects/<slug>/{clone,init,keygen,check}` (ADR 212), go there
  * too with the same bearer (see `forwardBoard`). They are matched by method *and* path before the read-only
  * check, so every other method on those paths keeps the answer it had: a `GET`
@@ -54,7 +56,7 @@
  * drop this browser's subscription, carry the same bearer and the same CSRF
  * checks as the action routes, the body unchanged, and so does
  * `PUT /api/push/settings` (ADR 237, ADR 246), which saves which kinds are
- * pushed and the quiet hours; with the nineteen above they make twenty-two
+ * pushed and the quiet hours; with the twenty above they make twenty-three
  * writes. `GET /api/push/key`, the VAPID public key, and
  * `GET /api/push/settings` are reads of the board-service and not of the api:
  * no token, no query parameter, no header of the browser's
@@ -212,6 +214,13 @@ const TASK_START = /^\/api\/tasks\/([^/]+)\/start$/;
  */
 const TASK_APPROVE = /^\/api\/tasks\/([^/]+)\/approve$/;
 
+/**
+ * A person's request for changes on a task under review (ADR 272, ADR 276):
+ * approve's twin, a `POST` to the board-service with the actions bearer and a
+ * rebuilt body. A `GET` is the api's 404.
+ */
+const TASK_REQUEST_CHANGES = /^\/api\/tasks\/([^/]+)\/request-changes$/;
+
 /** Cancelling an action: a `POST` to the board-service, with the actions bearer. */
 const ACTION_CANCEL = /^\/api\/actions\/([^/]+)\/cancel$/;
 
@@ -349,7 +358,7 @@ type Resolution =
   | {
       kind: "forward";
       target: string;
-      action?: "start" | "cancel" | "turn" | "project" | "push" | "approve";
+      action?: "start" | "cancel" | "turn" | "project" | "push" | "approve" | "request_changes";
     }
   | { kind: "reject"; status: number; error: string };
 
@@ -375,7 +384,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardBoardRead(PUSH_SETTINGS);
   }
 
-  // Also before the read-only check, and only for the twenty-two exact pairs: a method
+  // Also before the read-only check, and only for the twenty-three exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -560,7 +569,7 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the twenty-two writes goes, or `null` for any
+ * Where on the board-service one of the twenty-three writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
@@ -638,6 +647,13 @@ function boardTarget(method: string, path: string): Resolution | null {
         tail: "approve",
         what: "task",
         action: "approve",
+      },
+      {
+        pattern: TASK_REQUEST_CHANGES,
+        route: "tasks",
+        tail: "request-changes",
+        what: "task",
+        action: "request_changes",
       },
       {
         pattern: ACTION_CANCEL,
@@ -739,7 +755,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its twenty-two writes (`docs/decisions.md`
+ * The board-service's answer to one of its twenty-three writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -771,7 +787,8 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * body may hold only `note`, `floor` and `limit` (else 400, `project` included:
  * the project is the console's, set here); the upstream body is rebuilt from
  * them, the route checking the floor's and the limit's values. A cancel sends `{}`.
- * An approve (ADR 270) takes the token's 503, then the 413 cap, then its body: only
+ * An approve (ADR 270) and a request for changes (ADR 276) take the token's 503, then
+ * the 413 cap, then their body: only
  * `project`, `commit` and `text` (else 400), `project` shaped like a slug (400) and
  * absent meaning `CONSOLE_PROJECT`, with neither a 503 naming it.
  * *Start epic* and *Stop epic* (ADR 211) are a start and a cancel here: the same
@@ -852,21 +869,22 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     }
   }
 
-  if (action === "approve") {
-    const approve = approveBody(read);
-    if ("error" in approve) return jsonResponse(approve, 400);
-    const project = approve.project ?? CONSOLE_PROJECT;
+  if (action === "approve" || action === "request_changes") {
+    const who = action === "approve" ? "An approve" : "A request for changes";
+    const review = reviewBody(read, who);
+    if ("error" in review) return jsonResponse(review, 400);
+    const project = review.project ?? CONSOLE_PROJECT;
     if (!project) {
       return jsonResponse(
         {
           error:
-            "CONSOLE_PROJECT is not set, so the console cannot say which project an approve is for. " +
+            `CONSOLE_PROJECT is not set, so the console cannot say which project ${who.toLowerCase()} is for. ` +
             "Set it and restart the console.",
         },
         503,
       );
     }
-    body = JSON.stringify({ project, commit: approve.commit, text: approve.text });
+    body = JSON.stringify({ project, commit: review.commit, text: review.text });
   }
 
   let upstream: Response;
@@ -978,43 +996,45 @@ function startBody(bytes: ArrayBuffer): StartFields | { error: string } {
 }
 
 /**
- * An approve's fields from the browser's body, or `{ error }` for a 400 (ADR
- * 270): `project`, `commit` and `text` and nothing else. `project`, when
- * present, must be a string shaped like a slug; `commit` and `text` cross as
- * given, the route checking them.
+ * An approve's or a request for changes' fields from the browser's body, or
+ * `{ error }` for a 400 (ADR 270, ADR 276): `project`, `commit` and `text` and
+ * nothing else. `project`, when present, must be a string shaped like a slug;
+ * `commit` and `text` cross as given, the route checking them. `who` ("An
+ * approve", "A request for changes") opens each error.
  */
-const APPROVE_FIELDS = new Set(["project", "commit", "text"]);
+const REVIEW_FIELDS = new Set(["project", "commit", "text"]);
 
-type ApproveFields = { project?: string; commit?: unknown; text?: unknown };
+type ReviewFields = { project?: string; commit?: unknown; text?: unknown };
 
-function approveBody(bytes: ArrayBuffer): ApproveFields | { error: string } {
+function reviewBody(bytes: ArrayBuffer, who: string): ReviewFields | { error: string } {
+  const owner = who.endsWith("changes") ? `${who}'` : `${who}'s`;
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
-    return { error: "An approve's body must be a JSON object." };
+    return { error: `${owner} body must be a JSON object.` };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { error: "An approve's body must be a JSON object." };
+    return { error: `${owner} body must be a JSON object.` };
   }
   const fields = parsed as Record<string, unknown>;
   for (const key of Object.keys(fields)) {
-    if (APPROVE_FIELDS.has(key)) continue;
+    if (REVIEW_FIELDS.has(key)) continue;
     return {
-      error: `An approve's body may hold only a project, a commit and a text, not ${JSON.stringify(key)}.`,
+      error: `${owner} body may hold only a project, a commit and a text, not ${JSON.stringify(key)}.`,
     };
   }
-  const approve: ApproveFields = {};
+  const review: ReviewFields = {};
   const project = fields["project"];
   if (project !== undefined) {
     if (typeof project !== "string" || !PROJECT_SLUG.test(project)) {
-      return { error: "An approve's project must be a slug the harness takes." };
+      return { error: `${owner} project must be a slug the harness takes.` };
     }
-    approve.project = project;
+    review.project = project;
   }
-  if (fields["commit"] !== undefined) approve.commit = fields["commit"];
-  if (fields["text"] !== undefined) approve.text = fields["text"];
-  return approve;
+  if (fields["commit"] !== undefined) review.commit = fields["commit"];
+  if (fields["text"] !== undefined) review.text = fields["text"];
+  return review;
 }
 
 /**
