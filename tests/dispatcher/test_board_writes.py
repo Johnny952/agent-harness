@@ -626,7 +626,6 @@ def test_a_verdict_on_a_task_not_under_review_is_refused(tmp_path: Path, status,
 @pytest.mark.parametrize(
     "kind, text, commit, needle",
     [
-        ("approve", "x", _COMMIT, "the approve verdict is not built yet"),
         ("request_changes", "x", _COMMIT, "the request_changes verdict is not built yet"),
         ("praise", "x", _COMMIT, "not one of comment, approve, request_changes"),
         ("comment", "x", "main", "not a commit hash"),
@@ -639,6 +638,33 @@ def test_a_bad_verdict_is_refused_and_nothing_is_written(tmp_path: Path, kind, t
     _task(hive, "T-001", status="done")
     with pytest.raises(tasks.BoardWriteError, match=needle):
         tasks.record_verdict(hive, "T-001", "operator", kind, text, commit)
+    assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+@pytest.mark.parametrize("status", ["awaiting_review", "done"])
+def test_an_approve_verdict_is_taken_on_a_finished_task_not_merged(tmp_path: Path, status) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status)
+    result = tasks.record_verdict(hive, "T-001", "operator", "approve", "Ship it.", _COMMIT)
+    assert result["comment"]["verdict"] == {"kind": "approve", "commit": _COMMIT}
+    assert _comments(hive, "T-001") == [result["comment"]]
+    assert _read(hive, "T-001").status == status
+
+
+def test_an_approve_on_a_conflict_waits_on_resolve_conflict(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="conflict")
+    with pytest.raises(tasks.BoardWriteError, match="waits on resolve conflict"):
+        tasks.record_verdict(hive, "T-001", "operator", "approve", "x", _COMMIT)
+    assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+@pytest.mark.parametrize("status", ["awaiting_review", "done"])
+def test_an_approve_on_a_merged_task_is_refused(tmp_path: Path, status) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status, merged={"into": "main", "at": "2026-10-11T16:00:36+00:00"})
+    with pytest.raises(tasks.BoardWriteError, match="it is merged"):
+        tasks.record_verdict(hive, "T-001", "operator", "approve", "x", _COMMIT)
     assert not os.path.exists(tasks.comments_path(hive, "T-001"))
 
 

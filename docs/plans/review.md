@@ -12,8 +12,9 @@ review is built but for two of its verdicts (ADR 219, ADR 222): the api
 serves a task branch's diff, and `/approvals` draws it with the comments
 pinned to it, pins new ones to a line, and records the *comment* verdict at
 the tip. The dispatcher writes the `awaiting_review` status (step 1, ADR 240);
-there is no *approve* or *request changes* from the console, and no
-dispatcher reads a verdict. Two pieces landed on the CLI side through
+*approve* is served by the board service's bearer route and drained by the
+worker (step 4), but the console has no button for it yet, nor for *request
+changes*, and no dispatcher reads any other verdict. Two pieces landed on the CLI side through
 `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -293,10 +294,11 @@ After `board-service.md`'s steps, each a single surface:
    `conflict` or `done` and not merged, and listed on the review with its tip. It is
    recorded only: no dispatcher reads it, which is step 4's.
 4. The *approve* verdict: merge, push and the `merged` block, with the
-   credential's ADR, and the dispatcher picking up verdicts. **Designed
-   2026-10-21** (ADR 258), not built: a bearer route `POST
+   credential's ADR, and the dispatcher picking up verdicts. **Built
+   2026-10-21** (ADR 258, 264, 267): the route by T-125-S2, the worker's
+   handler by T-125-S1; the console's button is step 7's. A bearer route `POST
    /api/tasks/<id>/approve` writes the `approve` verdict line at the
-   reviewed tip and an `approve` action; the worker drains it and, under
+   reviewed tip and an `approve` action (`/verdict` refuses `approve`); the worker drains it and, under
    the base lock, refuses a stale verdict, then runs the pre-merge check,
    the merge, ADR 78's push and `record_merge`, and comments the outcome.
    The credential is ADR 78's; step 5 needs no other.
