@@ -54,12 +54,17 @@ describe("itemState", () => {
     expect(itemState(task("T-1", { status }))).toEqual({ kind: "backlog", status });
   });
 
-  it.each(["pending", "in_progress", "blocked", "conflict", "done", "epic"] as const)(
-    "counts %s as accepted, naming the status",
-    (status) => {
-      expect(itemState(task("T-1", { status }))).toEqual({ kind: "accepted", status });
-    },
-  );
+  it.each([
+    "pending",
+    "in_progress",
+    "blocked",
+    "conflict",
+    "awaiting_review",
+    "done",
+    "epic",
+  ] as const)("counts %s as accepted, naming the status", (status) => {
+    expect(itemState(task("T-1", { status }))).toEqual({ kind: "accepted", status });
+  });
 
   it("says merged over the status word", () => {
     expect(itemState(task("T-1", { status: "done", merged: true }))).toEqual({

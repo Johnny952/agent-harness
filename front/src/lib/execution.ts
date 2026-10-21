@@ -45,8 +45,8 @@ function startsQueued(queue: unknown): Set<string> {
 /**
  * The tasks the dock lists as executions (ADR 197, 2): started and not closed.
  * A task is in play while it is not merged and it is `in_progress`, runs a
- * phase, is `blocked` or `conflict` mid-cycle, is `done` and waiting for its
- * merge, or has a `start` pending or claimed in the queue. `merged`, `dropped`,
+ * phase, is `blocked` or `conflict` mid-cycle, is `done` or `awaiting_review`
+ * and waiting for its merge, or has a `start` pending or claimed in the queue. `merged`, `dropped`,
  * a backlog item, an epic, and a plain `pending` no one started are not. A
  * running phase first, then the board's order.
  */
@@ -56,7 +56,8 @@ export function inPlay(tasks: Task[], queue: unknown): Task[] {
     if (!isObject(t) || typeof t.task_id !== "string" || t.merged === true) return false;
     if (t.status === "epic" || t.status === "dropped") return false;
     if (typeof t.phase === "string" && t.phase !== "") return true;
-    if (["in_progress", "blocked", "conflict", "done"].includes(t.status)) return true;
+    if (["in_progress", "blocked", "conflict", "awaiting_review", "done"].includes(t.status))
+      return true;
     return starting.has(t.task_id);
   });
   const running = (t: Task) => (typeof t.phase === "string" && t.phase !== "" ? 0 : 1);
