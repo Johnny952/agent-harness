@@ -48,6 +48,23 @@ export function approveOutcomes(comments: TaskComment[]): TaskComment[] {
   );
 }
 
+/**
+ * Why a task cannot be sent back from the console, or `null` when it can (ADR
+ * 272, ADR 276): only an `awaiting_review` task whose work is not on main. The
+ * sentence is the button's title.
+ */
+export function requestChangesRefusal(t: Pick<Task, "status" | "merged">): string | null {
+  if (t.status === "conflict") {
+    return "In conflict: it waits on resolve conflict, not on a request for changes";
+  }
+  if (t.merged === true) return "Already merged into main";
+  if (t.status === "done") {
+    return "Finished before review: start it again to rerun it";
+  }
+  if (t.status !== "awaiting_review") return `A task in ${t.status} is not under review`;
+  return null;
+}
+
 export interface DiffLine {
   text: string;
   /** The line's number in the branch's file, for a context or added line. */

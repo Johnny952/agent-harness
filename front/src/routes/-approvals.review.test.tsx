@@ -166,7 +166,7 @@ describe("the review", () => {
 
     const verdict = screen.getByTestId("review-verdict");
     expect(within(verdict).getByText("dispatch merge-task T-1 --project ia-harness")).toBeTruthy();
-    expect(verdict.textContent).toMatch(/request changes is not in the console yet/i);
+    expect(verdict.textContent).not.toMatch(/not in the console yet/i);
   });
 
   it("puts a comment at the tip under its line, and one past it in the outdated list", async () => {
@@ -469,6 +469,84 @@ describe("the review", () => {
     });
   });
 
+  describe("the request changes button (ADR 276)", () => {
+    const QUEUED = {
+      verdict: { id: "T-1", comment: VERDICT_AT_TIP, comment_count: 1 },
+      action: { id: "A-78" },
+    };
+    const requestButton = () =>
+      screen.getByRole("button", { name: /^(request changes|changes requested)$/ });
+    const type = async (value: string) =>
+      fireEvent.change(await screen.findByLabelText("comment verdict on T-1"), {
+        target: { value },
+      });
+
+    it("is off until words are typed, then posts {project, commit, text} at the tip", async () => {
+      const { sent } = await serve([task("T-1", { status: "awaiting_review" })], {
+        "POST /api/tasks/T-1/request-changes": { bare: QUEUED, status: 201 },
+      });
+      await screen.findByTestId("verdict-form");
+      expect((requestButton() as HTMLButtonElement).disabled).toBe(true);
+      expect((requestButton() as HTMLButtonElement).title).toMatch(/Write what to change/);
+      await type("rename the helper");
+      expect((requestButton() as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(requestButton());
+      await waitFor(() =>
+        expect(toast.success).toHaveBeenCalledWith(expect.stringContaining("A-78")),
+      );
+      expect(sent.filter((x) => x.method !== "GET")).toEqual([
+        {
+          method: "POST",
+          path: "/api/tasks/T-1/request-changes",
+          body: { commit: TIP, text: "rename the helper", project: "ia-harness" },
+        },
+      ]);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "changes requested" })).toBeTruthy(),
+      );
+      expect((requestButton() as HTMLButtonElement).disabled).toBe(true);
+      expect((approveButtonByName() as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    const approveButtonByName = () => screen.getByRole("button", { name: /^approve/ });
+
+    it("is off on the Conflict lane and on a done task, with the reason as its title", async () => {
+      await serve([task("T-1", { status: "conflict" })]);
+      fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
+      await screen.findByTestId("verdict-form");
+      await type("x");
+      const button = requestButton() as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.title).toMatch(/resolve conflict/);
+    });
+
+    it("shows a 409 naming the other queued verdict, with the verdict recorded", async () => {
+      await serve([task("T-1", { status: "awaiting_review" })], {
+        "POST /api/tasks/T-1/request-changes": {
+          bare: { error: "an approve is already queued", verdict: { id: "T-1" } },
+          status: 409,
+        },
+      });
+      await type("fix it");
+      fireEvent.click(requestButton());
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith(
+          "the request for changes verdict was recorded on T-1, but nothing was queued: an approve is already queued",
+        ),
+      );
+      expect((requestButton() as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("shows a refusal with no verdict as its words alone", async () => {
+      await serve([task("T-1", { status: "awaiting_review" })], {
+        "POST /api/tasks/T-1/request-changes": { status: 400, error: "text is blank" },
+      });
+      await type("fix it");
+      fireEvent.click(requestButton());
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("text is blank"));
+    });
+  });
+
   it("reads only its routes, and writes nothing until a pin, a verdict or an approve is posted", async () => {
     const { fetchMock } = await serve([task("T-1")]);
     await screen.findAllByTestId("diff-file");
@@ -498,7 +576,7 @@ describe("the review", () => {
       .map((b) => b.getAttribute("aria-label") ?? b.textContent ?? "");
     expect(
       names.every((n) =>
-        /^(Awaiting review|Conflict) · \d+$|^T-1|^comment on \S+ line \d+$|^comment verdict$|^approve$/.test(
+        /^(Awaiting review|Conflict) · \d+$|^T-1|^comment on \S+ line \d+$|^comment verdict$|^approve$|^request changes$/.test(
           n,
         ),
       ),

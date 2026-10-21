@@ -8,16 +8,17 @@ supersedes: []
 # Review — a person approves a task's diff in the console before it merges
 
 **Status:** design, approved in outline by the user on 2026-10-11. The console
-review is built but for one of its verdicts (ADR 219, ADR 222, ADR 270): the
+review is built but for the diff library and the handoffs' summary beside the
+diff (ADR 219, ADR 222, ADR 270, ADR 276): the
 api serves a task branch's diff, and `/approvals` draws it with the comments
 pinned to it, pins new ones to a line, records the *comment* verdict at
-the tip, and has an *approve* button. The dispatcher writes the
+the tip, and has *approve* and *request changes* buttons. The dispatcher writes the
 `awaiting_review` status (step 1, ADR 240), and pushes the task branch after
 each committing phase for a project that turns it on (step 5, ADR 271); *approve* is served by the board
 service's bearer route and drained by the worker (step 4); *request changes*
 is served by its own bearer route and drained by the worker, which reruns the
-cycle from the arquitecto on the task's branch (step 6, ADR 272, T-128), but
-the console has no button for it yet. Two pieces landed on
+cycle from the arquitecto on the task's branch (step 6, ADR 272, T-128), and
+the console's button for it calls that route (step 7, ADR 276, T-129). Two pieces landed on
 the CLI side through `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -346,9 +347,13 @@ After `board-service.md`'s steps, each a single surface:
    shown read-only. The *approve* button is in too (**built 2026-10-21**,
    ADR 270, T-125-S3): in the verdict form, at the tip on screen, off on
    *Conflict* and merged tasks, with the dispatcher's outcome comment listed.
-   Still open: the library, the handoffs' summary beside the diff, and the
-   *request changes* button (step 6's route is built, ADR 272); the *comment* verdict's
-   form is in (step 3).
+   The *request changes* button is in too (**built 2026-10-21**, ADR 276,
+   T-129, over step 6's route, ADR 272): beside *approve*, at the tip on
+   screen, on only for an `awaiting_review` task not on main and with words
+   typed, its refusals (a 409 included) shown in a toast; the task leaving
+   the list and returning at a new tip is its outcome.
+   Still open: the library and the handoffs' summary beside the diff; the
+   *comment* verdict's form is in (step 3).
 8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
 9. The integrador role: its prompt, handoff schema, profile and write limit,
