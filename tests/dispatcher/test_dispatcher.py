@@ -3312,10 +3312,10 @@ def test_a_premerge_check_that_cannot_run_merges_nothing_and_changes_no_status(
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert fake_git.merges == []
-    assert _task(cfg).status == "done"
+    assert _task(cfg).status == "awaiting_review"
 
 
-def test_a_task_stopped_on_a_conflict_is_done_again_once_the_check_passes(
+def test_a_task_stopped_on_a_conflict_awaits_review_once_the_check_passes(
     tmp_path, fake_git,
 ) -> None:
     cfg = _make_config(tmp_path)
@@ -3324,7 +3324,7 @@ def test_a_task_stopped_on_a_conflict_is_done_again_once_the_check_passes(
     verdict = dispatcher_mod.pre_merge_check(cfg, "agent-cuenta1", "task-1", "myproj")
 
     assert verdict.passed
-    assert _task(cfg).status == "done"
+    assert _task(cfg).status == "awaiting_review"
 
 
 def test_run_task_cycle_still_drops_the_entries_its_auditor_filed(
@@ -3657,7 +3657,7 @@ def test_a_finished_cycle_leaves_done_in_the_task_file_and_no_board_key(
 
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     path = task_file_path(cfg.hive_tasks_dir, "task-1")
-    assert read_task_file(path).status == "done"
+    assert read_task_file(path).status == "awaiting_review"
     assert "kanban_issue_id" not in Path(path).read_text()
     assert "kanban" not in caplog.text.lower()
 
@@ -3869,7 +3869,7 @@ def test_run_task_cycle_runs_the_task_anyway_when_the_map_fails(
 
     assert calls[1]["role"] == "arquitecto"
     task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
-    assert task.status == "done"
+    assert task.status == "awaiting_review"
     # Whatever it managed still hands off — a partial map is worth having, and
     # the next phase has to know it is partial.
     assert project_docs.MAPPER_ROLE in task.body
@@ -7420,7 +7420,7 @@ def test_a_blocked_task_runs_again_and_can_finish(tmp_path, monkeypatch) -> None
     outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj")
 
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
-    assert _task(cfg).status == "done"
+    assert _task(cfg).status == "awaiting_review"
 
 
 def test_a_held_cycle_does_not_mark_the_task_blocked(tmp_path, monkeypatch) -> None:
@@ -7672,7 +7672,7 @@ def test_a_cycle_with_an_empty_split_goes_on_to_the_implementador(tmp_path, monk
     assert roles == ["arquitecto", "implementador", "revisor", "auditor"]
 
 
-@pytest.mark.parametrize("status", ["done", "epic"])
+@pytest.mark.parametrize("status", ["done", "awaiting_review", "epic"])
 def test_file_split_refuses_a_parent_that_is_done_or_an_epic(tmp_path, caplog, status) -> None:
     cfg = _make_config(tmp_path)
     _with_status(cfg, status)
@@ -8072,7 +8072,7 @@ def test_auto_approve_refuses_on_a_phase_condition_alone(
 
     assert outcome is dispatcher_mod.CycleOutcome.FINISHED
     _assert_refused_on(cfg, aa_git, condition)
-    assert _task(cfg).status == "done"
+    assert _task(cfg).status == "awaiting_review"
 
 
 def test_auto_approve_refuses_when_debt_was_filed_this_cycle(tmp_path, monkeypatch, aa_git) -> None:
@@ -8099,6 +8099,19 @@ def test_auto_approve_refuses_a_branch_that_conflicts_with_its_base(tmp_path, mo
     _assert_refused_on(cfg, aa_git, "pre-merge")
     # The pre-merge check still moves a conflicting task to `conflict`.
     assert _task(cfg).status == dispatcher_mod.CONFLICT_STATUS
+
+
+@pytest.mark.parametrize("status", ["awaiting_review", "conflict", "in_progress"])
+def test_record_auto_approve_keeps_conflict_and_awaiting_review_else_done(
+    tmp_path, status,
+) -> None:
+    cfg = _make_config(tmp_path)
+    tasks.handoff(cfg.hive_tasks_dir, "task-1", status, "before")
+
+    dispatcher_mod._record_auto_approve(cfg, "task-1", "note")
+
+    kept = status in ("awaiting_review", "conflict")
+    assert _task(cfg).status == (status if kept else "done")
 
 
 @pytest.mark.parametrize(
@@ -8178,7 +8191,7 @@ def test_auto_approve_records_a_merge_that_did_not_land(tmp_path, monkeypatch, a
 
     task = _task(cfg)
     assert task.merged is None
-    assert task.status == "done"
+    assert task.status == "awaiting_review"
     assert "but the merge did not land: the project has uncommitted changes" in task.body
 
 

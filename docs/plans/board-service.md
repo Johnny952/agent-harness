@@ -205,7 +205,7 @@ are the same task files, told apart by `status`:
   | Ready | `pending`, every `depends_on` merged |
   | Waiting | `pending`, a dependency not merged yet |
   | Arquitecto · Implementador · Revisor · Auditor · Integrador | `in_progress` plus a new `phase` field the dispatcher writes as each phase starts |
-  | Awaiting review | the state `review.md` adds between the audit and the merge |
+  | Awaiting review | `awaiting_review` (ADR 240); `done` and not merged for tasks finished before it |
   | Conflict | a task under review whose branch no longer merges into the base cleanly, or whose gate went red after the base moved (`review.md` *Decisions*, 6); while the integrador runs it shows in its own phase column |
   | Blocked | `blocked` |
   | Merged | the `merged` block from `task-split.md` |

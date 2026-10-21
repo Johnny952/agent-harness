@@ -273,6 +273,9 @@ phase_timeout_seconds: 7200
 #     --task-id T-001 --project my-project
 # Either way it is a --no-ff merge that refuses on a dirty tree and rolls
 # itself back on a conflict, and the task branch always survives.
+# Deprecated alias (ADR 240): a cycle this does not merge ends
+# `awaiting_review`, the status that waits for a person's review, and this
+# merges before that move. Kept so existing configs and project records load.
 # Optional; defaults to false.
 merge_on_done: false
 

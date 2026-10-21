@@ -2596,11 +2596,11 @@ def pre_merge_check(cfg: Config, container: str, task_id: str, slug: str) -> Pre
 
 
 def _passed(cfg: Config, task_id: str, detail: str) -> PreMergeVerdict:
-    """A pass; a task the check stopped before is `done` again once it passes."""
+    """A pass; a task the check stopped before is `awaiting_review` once it passes."""
     if _task_status(cfg, task_id) == CONFLICT_STATUS:
         try:
             tasks.handoff(
-                cfg.hive_tasks_dir, task_id, "done",
+                cfg.hive_tasks_dir, task_id, tasks.AWAITING_REVIEW_STATUS,
                 f"{PRE_MERGE_HEADING}\n\nResolved: {detail}.",
             )
         except Exception as exc:
@@ -2669,9 +2669,10 @@ def _task_surface(description: str | None) -> frozenset[str]:
 
 
 def _record_auto_approve(cfg: Config, task_id: str, note: str) -> None:
-    """Write the automatic approve's comment, keeping a `conflict` the
-    pre-merge check set; every other refusal leaves the task `done`."""
-    status = CONFLICT_STATUS if _task_status(cfg, task_id) == CONFLICT_STATUS else "done"
+    """Write the automatic approve's comment, keeping a `conflict` or
+    `awaiting_review` already set; every other refusal leaves the task `done`."""
+    current = _task_status(cfg, task_id)
+    status = current if current in (CONFLICT_STATUS, tasks.AWAITING_REVIEW_STATUS) else "done"
     try:
         tasks.handoff(cfg.hive_tasks_dir, task_id, status, note)
     except Exception as exc:
@@ -3469,8 +3470,8 @@ def _file_split(ctx: CycleContext, subtasks: list[handoff.SubTask]) -> CycleOutc
     `docs/decisions.md` ADR 60. SPLIT when the sub-tasks are on disk and the
     task is their epic, BLOCKED otherwise, with nothing written. It marks
     nothing either way: a cycle marks its own block, and `file-split` has no
-    cycle. A `done` or `epic` task is not split (`docs/business.md`,
-    *Task status*), and neither is one a live run
+    cycle. A `done`, `awaiting_review` or `epic` task is not split
+    (`docs/business.md`, *Task status*), and neither is one a live run
     still holds, since that run's next handoff would write `pending` over the
     `epic` and filing again does not repair a parent.
     """
@@ -3481,7 +3482,7 @@ def _file_split(ctx: CycleContext, subtasks: list[handoff.SubTask]) -> CycleOutc
     except FileNotFoundError:
         parent = None  # `tasks.file_split` reports it.
     if parent is not None:
-        if parent.status in ("done", "epic"):
+        if parent.status in ("done", tasks.AWAITING_REVIEW_STATUS, "epic"):
             problems.append(
                 f"task {ctx.task_id} is {parent.status}; only a pending, in_progress or "
                 "blocked task can be split"
@@ -4199,7 +4200,8 @@ def _cycle_rounds(
         merged = approve.merged
     else:
         # Never pushes: the push of the base belongs to an approve, a
-        # person's or the automatic one (ADR 78), not to `merge_on_done`.
+        # person's or the automatic one (ADR 78), not to `merge_on_done`,
+        # which is a deprecated alias: it merges before the move (ADR 240).
         merged = cfg.merge_on_done and _merge_task_branch(cfg, task_id, slug)
     if merged:
         # Only now: the entries are in the project's docs on the branch
@@ -4208,27 +4210,18 @@ def _cycle_rounds(
         # merge keeps them here, where the next task still sees them.
         learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
     else:
-        _notify_awaiting_review(cfg, task_id)
+        _await_review(cfg, task_id)
     return CycleOutcome.FINISHED
 
 
-def _notify_awaiting_review(cfg: Config, task_id: str) -> None:
-    """Tell the person a finished cycle left the task for their review (ADR 221).
+def _await_review(cfg: Config, task_id: str) -> None:
+    """Move a finished, unmerged task to `awaiting_review` and tell the person (ADR 240).
 
-    The board has no "awaiting review" status (ADR 219): a task waits on the
-    person when its cycle ended `done` and nothing merged it. A task the
-    automatic approve moved to `conflict` was told as one, so it is not told
-    twice. It never raises: the cycle has finished, and its outcome stands.
+    `tasks.mark_awaiting_review` moves only a `done` task not on main, so a
+    task the automatic approve moved to `conflict` stays one, told already
+    (ADR 221). It never raises: the cycle has finished, and its outcome stands.
     """
     try:
-        task = context_transfer.read_task_file(
-            context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
-        )
-        if task.status != "done" or task.merged:
-            return
-        notifications.notify_task(
-            cfg.hive_tasks_dir, "awaiting_review", task_id, "is waiting for your review",
-            task.title,
-        )
+        tasks.mark_awaiting_review(cfg.hive_tasks_dir, task_id)
     except Exception as exc:
-        logger.warning("task %s: awaiting-review notification not written: %s", task_id, exc)
+        logger.warning("task %s: not moved to awaiting_review: %s", task_id, exc)

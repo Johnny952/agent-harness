@@ -335,6 +335,17 @@ def test_both_task_routes_serve_the_phase_the_dispatcher_writes_and_clears(
     assert (listed["phase"], detail["phase"]) == (None, None)
 
 
+def test_an_awaiting_review_task_is_served_as_it_is(tmp_path: Path) -> None:
+    """ADR 240: the status is the dispatcher's own, and no warning for it."""
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="awaiting_review")
+
+    body = _get(harness, "/api/tasks").get_json()
+
+    assert [row["status"] for row in body["data"]] == ["awaiting_review"]
+    assert body["warnings"] == []
+
+
 def test_a_task_file_that_will_not_parse_is_a_warning_and_not_a_missing_list(
     tmp_path: Path,
 ) -> None:

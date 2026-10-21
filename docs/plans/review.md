@@ -11,8 +11,9 @@ supersedes: []
 review is built but for two of its verdicts (ADR 219, ADR 222): the api
 serves a task branch's diff, and `/approvals` draws it with the comments
 pinned to it, pins new ones to a line, and records the *comment* verdict at
-the tip; but there is no *awaiting review* state, no *approve* or *request
-changes* from the console, and no dispatcher reads a verdict. Two pieces landed on the CLI side through
+the tip. The dispatcher writes the `awaiting_review` status (step 1, ADR 240);
+there is no *approve* or *request changes* from the console, and no
+dispatcher reads a verdict. Two pieces landed on the CLI side through
 `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -44,9 +45,12 @@ becomes a person's decision, taken over a diff, in the console.
   worktree on `agent/task/<task_id>` (`docker_exec.task_branch`); the
   reviewing roles get a detached checkout of its tip. Parallel tasks never
   share a tree.
-- **The cycle ends at `done`, unmerged, by default.** `merge_on_done` is off
-  (`dispatcher/config.py`), so a task that passes the revisor and the auditor
-  is `done` with its work on its task branch. The merge is a later
+- **The cycle ends at `awaiting_review`, unmerged, by default.** A task that
+  passes the revisor and the auditor and is not merged ends `awaiting_review`
+  with its work on its task branch (ADR 240; `done` unmerged is how older
+  tasks look). `merge_on_done` is a deprecated alias, off by default
+  (`dispatcher/config.py`): it merges before that move, and a merge leaves
+  the task `done` and merged. The merge is a later
   `dispatch merge-task`, which calls `docker_exec.merge_task_branch` into
   whatever branch the project's checkout is on. Nothing in the dispatcher
   pushes yet; the push is the operator's. C-5 as amended on 2026-10-11 lets
@@ -56,7 +60,8 @@ becomes a person's decision, taken over a diff, in the console.
   the pre-merge check first. The task branch is still never pushed.)
 - **A screen without verdicts.** `front/src/routes/approvals.tsx` was a Lovable
   draft over mock data until ADR 219. It now lists the tasks that are `done`
-  and not merged, as the stand-in for *Awaiting review*, and the `conflict`
+  and not merged, as the stand-in for *Awaiting review* (until the console
+  reads `awaiting_review`, steps 1 and 7), and the `conflict`
   ones, and draws each one's diff from the api's diff route, by hand, with
   the line comments `comments.jsonl` already holds; a line number pins a
   new one at the tip. The verdict is the `merge-task` CLI line it prints,
@@ -164,9 +169,9 @@ as it reads tasks today or by a signal from the service, is decided when step
   did not land. After `merge-task --push`, the reason goes to stderr and the
   command exits 4. Reconciling with the remote is a person's decision, and
   then `merge-task --push` pushes again (ADR 78, 5).
-- *A conflict is caught at the merge.* There is no *awaiting review* state
-  yet, so the pre-merge check (*Decisions*, 6, step 1) runs before every
-  merge, not when a task enters review.
+- *A conflict is caught at the merge.* The `awaiting_review` status exists
+  (step 1, ADR 240), but the pre-merge check (*Decisions*, 6, step 1) still
+  runs before every merge, not when a task enters review.
 - *Pushing the task branch after each phase* (step 5 below) is not built.
 
 ### 5. *Request changes* goes back to the arquitecto
@@ -228,8 +233,8 @@ work that is mostly mechanical. Three steps instead, decided by the user on
 (`docs/plans/autonomy.md` *Decisions*, 2, task A-2;
 `dispatcher.pre_merge_check`). It runs at each merge, from `merge_on_done`,
 `merge-task` or an automatic approve. It does not run when a task enters
-review, and it does not re-run on the other tasks after a merge, since
-neither the review state nor its queue exists.
+`awaiting_review` (ADR 240 adds the status, not the check), and it does not
+re-run on the other tasks after a merge, since the queue does not exist.
 
 - The base is merged into the task branch in a detached pre-merge checkout.
 - If the base is already in the branch, nothing new came in, and the gate is
@@ -241,7 +246,7 @@ neither the review state nor its queue exists.
   pool with `gates_enabled: false` keeps a clean merge without running the
   gate.
 - A check that cannot run stops the merge without changing the status.
-- A task in `conflict` that later passes goes back to `done`.
+- A task in `conflict` that later passes goes to `awaiting_review` (ADR 240).
 
 The integrador (steps 2 and 3) is not built, so for now the operator
 resolves a conflict: they merge the base into the branch, never rebasing,
@@ -267,7 +272,12 @@ and run `merge-task` again.
 
 After `board-service.md`'s steps, each a single surface:
 
-1. The *awaiting review* state, replacing `merge_on_done`.
+1. The *awaiting review* state, replacing `merge_on_done`. **Built
+   2026-10-21** (ADR 240): `tasks.mark_awaiting_review` moves a `done`
+   unmerged task to `awaiting_review` at the cycle's end, `mark_merged`
+   moves it back to `done`, and `record_verdict` accepts it. `merge_on_done`
+   stays as a deprecated alias. Server side only: the console still lists
+   `done` unmerged tasks.
 2. The diff route in the api. **Built 2026-10-20** (ADR 219):
    `GET /api/tasks/<id>/diff?project=<slug>` runs `git` read-only on the
    project's clone, against the merge base with the base branch, capped in
@@ -277,8 +287,8 @@ After `board-service.md`'s steps, each a single surface:
    board-service's anchored `task_comment`, and the review writes them at
    the tip. The *comment* verdict is a `comments.jsonl` line with
    `verdict: {kind, commit}`, written by the board-service's HTTP-only
-   `review_verdict` (`POST /api/tasks/<id>/verdict`) for a task `done` and
-   not merged or in `conflict`, and listed on the review with its tip. It is
+   `review_verdict` (`POST /api/tasks/<id>/verdict`) for a task `awaiting_review`,
+   `conflict` or `done` and not merged, and listed on the review with its tip. It is
    recorded only: no dispatcher reads it, which is step 4's.
 4. The *approve* verdict: merge, push and the `merged` block, with the
    credential's ADR, and the dispatcher picking up verdicts.
