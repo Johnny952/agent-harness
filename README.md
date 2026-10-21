@@ -771,6 +771,16 @@ is how a task merged before the record existed gets one. A record that
 could not be written is reported on stderr and the exit is still 0, because
 the branch did land (`docs/decisions.md` ADR 60).
 
+A task that has a `merged` block but whose status was left behind (`pending`,
+`blocked`, ...) is set to `done` with `close-task`. It changes only `status`,
+touches no git and no container, and refuses a task with no `merged` block
+(exit 1); a task already `done` is reported and left alone
+(`docs/decisions.md` ADR 255):
+
+```
+python -m dispatcher.cli --config config.yaml close-task --task-id T-001 --project my-project
+```
+
 To have a cycle do this by itself the moment the auditor signs off, set
 `merge_on_done: true` in `config.yaml`. It defaults to `false`, because
 the merge is the one thing a run writes into the branch you work from. The

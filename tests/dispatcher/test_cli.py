@@ -1783,3 +1783,94 @@ def test_cli_import_debt_takes_exactly_one_source(tmp_path: Path, monkeypatch, a
         _run_command(monkeypatch, config_path, *argv)
 
     assert excinfo.value.code == 2
+
+
+# --- close-task (ADR 255) ---
+
+
+def _closable_card(tmp_path: Path, status: str, *, merged: bool = True, project: str = "") -> Path:
+    hive = tmp_path / "hive"
+    hive.mkdir(parents=True, exist_ok=True)
+    path = hive / "task-1.md"
+    path.write_text(
+        f"---\ntask_id: task-1\nstatus: {status}\nowner: null\ndepends_on: []\nheartbeat: null\n"
+        + (f"project: {project}\n" if project else "")
+        + ("merged:\n  into: main\n  at: '2026-10-20T10:00:00+00:00'\n" if merged else "")
+        + "---\n\n## arquitecto\n\nDone.\n"
+    )
+    return path
+
+
+def _close(monkeypatch, config_path: Path, project: str = "myproj") -> None:
+    def no_docker(*args, **kwargs):
+        raise AssertionError("close-task reached docker")
+
+    monkeypatch.setattr(cli_mod.docker_exec, "run_docker_exec", no_docker)
+    monkeypatch.setattr(sys, "argv", [
+        "ia-harness-dispatcher", "--config", str(config_path),
+        "close-task", "--task-id", "task-1", "--project", project,
+    ])
+    cli_mod.main()
+
+
+def test_cli_close_task_moves_a_merged_task_to_done(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_config(tmp_path)
+    path = _closable_card(tmp_path, "pending", project="myproj")
+
+    _close(monkeypatch, config_path)
+
+    assert capsys.readouterr().out.strip() == "task task-1: pending -> done"
+    assert "status: done" in path.read_text()
+
+
+def test_cli_close_task_refuses_an_unmerged_task(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_config(tmp_path)
+    path = _closable_card(tmp_path, "pending", merged=False)
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _close(monkeypatch, config_path)
+
+    assert excinfo.value.code == 1
+    assert "merged" in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
+def test_cli_close_task_on_a_done_task_says_so_and_exits_zero(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config_path = _write_config(tmp_path)
+    path = _closable_card(tmp_path, "done")
+    before = path.read_bytes()
+
+    _close(monkeypatch, config_path)
+
+    assert "already done" in capsys.readouterr().out
+    assert path.read_bytes() == before
+
+
+def test_cli_close_task_with_no_file_exits_one(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path = _write_config(tmp_path)
+    (tmp_path / "hive").mkdir()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _close(monkeypatch, config_path)
+
+    assert excinfo.value.code == 1
+    assert "no task file" in capsys.readouterr().err
+    assert list((tmp_path / "hive").iterdir()) == []
+
+
+def test_cli_close_task_refuses_a_card_of_another_project(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config_path = _write_config(tmp_path)
+    path = _closable_card(tmp_path, "pending", project="other")
+    before = path.read_bytes()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _close(monkeypatch, config_path)
+
+    assert excinfo.value.code == 1
+    assert "other" in capsys.readouterr().err
+    assert path.read_bytes() == before
