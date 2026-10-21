@@ -13361,3 +13361,36 @@ not `KINDS`' order.
 - A route-level `useQuery` cache shared with `PushControl`: `readState`
   reads the key inside `lib/push.ts`, and sharing it would change ADR 232's
   control for one saved request.
+
+## ADR 249 — `/approvals` lists `awaiting_review` and `done` unmerged under *Awaiting review*, by the Board's rule
+
+**Status:** accepted (2026-10-21). Planned by T-118-S3's arquitecto; built by
+T-118-S3.
+
+**Context.** ADR 240 made the dispatcher write `awaiting_review`; ADR 243
+put it, with `done` unmerged, in the Board's *Awaiting review* column and
+left `/approvals` reading `done` unmerged only (its consequences), so the two
+screens disagreed. `reviewLane` in `front/src/lib/review.ts` (ADR 219) is the
+one place the Approvals lists are decided.
+
+**Decision.**
+1. `reviewLane` returns `conflict` for the `conflict` status whatever
+   `merged` says, as before; then `review` for `awaiting_review` or `done`
+   when `merged` is `false`; `null` otherwise. A `merged: true` task is in
+   neither list whatever its status word, which is the Board's `columnOf`
+   order (ADR 243 decision 2) and `record_verdict`'s refusal of a merged task
+   (ADR 240 decision 5).
+2. The two statuses share one list with no chip telling them apart, as on the
+   Board; nothing else on the screen changes (tabs, empty notes, verdict
+   panel, CLI line).
+3. The `approvals.tsx` header comment drops "the board has no *awaiting
+   review* status yet" and names both statuses.
+
+**Consequences.**
+- The Board and `/approvals` agree again on which tasks wait on a review.
+- An older `done` unmerged task stays listed until it is merged (ADR 240
+  decision 8).
+
+**Ruled out.**
+- Listing `awaiting_review` regardless of `merged`: a merged task has no
+  review left, and the verdict route refuses it.
