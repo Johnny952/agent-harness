@@ -291,7 +291,13 @@ After `board-service.md`'s steps, each a single surface:
    `conflict` or `done` and not merged, and listed on the review with its tip. It is
    recorded only: no dispatcher reads it, which is step 4's.
 4. The *approve* verdict: merge, push and the `merged` block, with the
-   credential's ADR, and the dispatcher picking up verdicts.
+   credential's ADR, and the dispatcher picking up verdicts. **Designed
+   2026-10-21** (ADR 258), not built: a bearer route `POST
+   /api/tasks/<id>/approve` writes the `approve` verdict line at the
+   reviewed tip and an `approve` action; the worker drains it and, under
+   the base lock, refuses a stale verdict, then runs the pre-merge check,
+   the merge, ADR 78's push and `record_merge`, and comments the outcome.
+   The credential is ADR 78's; step 5 needs no other.
 5. The task-branch push after each phase, per project, off by default.
    Independent of the console, so it may be built first; it needs the same
    credential, and the ADR goes with whichever of 4 and 5 lands first.
