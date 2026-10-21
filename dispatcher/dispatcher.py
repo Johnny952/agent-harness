@@ -3491,6 +3491,20 @@ def run_phase(
                 role if round_num is None else f"{role} (round {round_num})",
                 result.result_text or "no diagnosis: the phase produced no output",
             )
+            # A phase that ran out of turns may still commit, and so push,
+            # before it fails here (ADR 273); with no handoff to carry it, its
+            # push note goes on the task alone, never in the way of the stop.
+            if result.branch_push:
+                try:
+                    tasks.append_note(
+                        cfg.hive_tasks_dir, ctx.task_id,
+                        f"## Task-branch push\n\n{result.branch_push}",
+                    )
+                except Exception as exc:  # noqa: BLE001 — the note is not the stop
+                    logger.warning(
+                        "task %s: the push note was not recorded (%s): %s",
+                        ctx.task_id, exc, result.branch_push,
+                    )
             ctx.held = result.no_account
             ctx.phase_failed = not result.no_account
             return None
@@ -3538,8 +3552,10 @@ def run_phase(
     context_transfer.save_handoff(
         cfg.hive_tasks_dir, ctx.task_id, role, result.handoff, round_num=round_num,
         permission_denials=result.permission_denials, **requests,
-        # What a verdict on a request filed here needs to resume this call.
+        # What a verdict on a request filed here needs to resume this call,
+        # and the note its cycle carried for the arquitecto (ADR 273).
         session_id=result.session_id, account=result.account,
+        changes_requested=ctx.changes_requested,
     )
     return result
 

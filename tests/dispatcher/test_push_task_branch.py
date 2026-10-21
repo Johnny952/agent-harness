@@ -25,6 +25,7 @@ from tests.dispatcher.test_dispatcher import (  # noqa: F401 - fixtures used by 
     _phase_exec,
     _phases_may_end_in_prose,
     _split_ctx,
+    _with_status,
     fake_git,
 )
 
@@ -369,3 +370,40 @@ def test_the_note_goes_into_the_handoff(tmp_path, monkeypatch) -> None:
 
     body = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).body
     assert f"## Task-branch push\n\n{note}" in body
+
+
+def _failed_phase(monkeypatch, branch_push=""):
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        return dispatcher_mod.DispatchResult(
+            success=False, session_id=None, result_text="error_max_turns", account="cuenta1",
+            branch_push=branch_push,
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+
+
+def test_a_fatal_phase_still_records_its_push_note(tmp_path, monkeypatch, caplog) -> None:
+    """A phase that hit its turn budget can commit, and so push, before it
+    fails; the note is kept on the task though no handoff is written (ADR 273)."""
+    cfg = _make_config(tmp_path, push_task_branch={"myproj": True})
+    _with_status(cfg, "in_progress", owner="cuenta1")
+    note = f"{_BRANCH} was not pushed after this phase: the remote said no"
+    _failed_phase(monkeypatch, branch_push=note)
+    ctx = _split_ctx(cfg)
+
+    assert dispatcher_mod.run_phase(ctx, "implementador", round_num=1) is None
+
+    assert ctx.phase_failed
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.body == f"## arquitecto\n\n## Task-branch push\n\n{note}"
+    assert task.status == "in_progress" and task.owner == "cuenta1"
+
+
+def test_a_fatal_phase_with_no_push_note_leaves_the_body_alone(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    _with_status(cfg, "in_progress", owner="cuenta1")
+    _failed_phase(monkeypatch)
+
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=1)
+
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).body == "## arquitecto"

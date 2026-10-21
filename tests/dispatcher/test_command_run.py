@@ -395,6 +395,80 @@ def test_a_mapping_resume_carries_on_to_the_arquitecto(tmp_path, monkeypatch) ->
     assert outcome == dispatcher_mod.CycleOutcome.FINISHED
 
 
+def _mapping_blocked_on_changes(tmp_path, monkeypatch, no_account_on_resume=False):
+    """A request-changes cycle (ADR 272) whose cartografo blocked on a request."""
+    cfg = _make_config(tmp_path, mapping_enabled=True)
+    _fake_index(monkeypatch, exists=False)
+    phases = _Phases({project_docs.MAPPER_ROLE: [
+        _mapper_return([_request(argv=("npm", "ci"))]), _mapper_return([]),
+    ]}, no_account_on_resume=no_account_on_resume)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", phases)
+    note = dispatcher_mod.changes_requested_note(
+        "a" * 40, [{"author": "operator", "text": "Rename it."}],
+    )
+    dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, changes_requested=note,
+    )
+    assert phases.roles() == [project_docs.MAPPER_ROLE]
+    envelope = context_transfer.read_handoff_envelope(
+        cfg.hive_tasks_dir, "task-1", project_docs.MAPPER_ROLE,
+    )
+    assert envelope["changes_requested"] == note
+    phases.calls.clear()
+    return cfg, phases, note
+
+
+def test_a_mapping_resume_keeps_the_requested_changes_for_the_arquitecto(tmp_path, monkeypatch) -> None:
+    """The person's comments survive the block: the arquitecto after the
+    resume reads them as the one the cycle started for would have (ADR 273)."""
+    cfg, phases, note = _mapping_blocked_on_changes(tmp_path, monkeypatch)
+    _exec(monkeypatch, stdout="added 3 packages\n")
+
+    outcome = command_run.run_command_request(cfg, "task-1", "myproj", 1, "run")
+
+    assert outcome == dispatcher_mod.CycleOutcome.FINISHED
+    prompts = {call["role"]: call["prompt"] for call in reversed(phases.calls)}
+    assert note in prompts["arquitecto"]
+    assert all("Rename it." not in prompts[role] for role in ("implementador", "revisor", "auditor"))
+
+
+def test_a_held_mapping_resume_keeps_the_requested_changes_too(tmp_path, monkeypatch) -> None:
+    cfg, phases, note = _mapping_blocked_on_changes(tmp_path, monkeypatch, no_account_on_resume=True)
+    _exec(monkeypatch, stdout="added 3 packages\n")
+    assert command_run.run_command_request(cfg, "task-1", "myproj", 1, "run") == (
+        dispatcher_mod.CycleOutcome.HELD
+    )
+    phases.calls.clear()
+    phases.no_account_on_resume = False
+
+    outcome = command_run.resume_command_verdict(cfg, "task-1", "myproj")
+
+    assert outcome == dispatcher_mod.CycleOutcome.FINISHED
+    arquitecto = [call["prompt"] for call in phases.calls if call["role"] == "arquitecto"]
+    assert len(arquitecto) == 1 and note in arquitecto[0]
+
+
+def test_a_cycle_with_no_request_for_changes_resumes_with_no_note(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, mapping_enabled=True)
+    _fake_index(monkeypatch, exists=False)
+    phases = _Phases({project_docs.MAPPER_ROLE: [
+        _mapper_return([_request(argv=("npm", "ci"))]), _mapper_return([]),
+    ]})
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", phases)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+    envelope = context_transfer.read_handoff_envelope(
+        cfg.hive_tasks_dir, "task-1", project_docs.MAPPER_ROLE,
+    )
+    assert "changes_requested" not in envelope
+    phases.calls.clear()
+    _exec(monkeypatch, stdout="added 3 packages\n")
+
+    command_run.run_command_request(cfg, "task-1", "myproj", 1, "run")
+
+    arquitecto = [call["prompt"] for call in phases.calls if call["role"] == "arquitecto"]
+    assert "requested changes" not in arquitecto[0]
+
+
 # --- the CLI ----------------------------------------------------------------
 
 

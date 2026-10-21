@@ -1163,6 +1163,20 @@ def handoff(
 
 
 @_locked
+def append_note(hive_dir: str, task_id: str, body: str) -> None:
+    """Add `body` under the task's trail, every other field as it was.
+
+    For what the dispatcher found on a phase that hands nothing off: the
+    status, the owner and the lock are the failure path's to settle (ADR 273).
+    A task with no file raises, as `mark_blocked` does.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.body = f"{task.body}\n\n{body}" if task.body else body
+    _write_task_file(path, task)
+
+
+@_locked
 def mark_blocked(
     hive_dir: str, task_id: str, reason: str | None = None, *, failed: bool = False,
     spent: str | None = None,

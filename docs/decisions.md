@@ -13971,6 +13971,47 @@ holds an account.
   which *resolve conflict* owns.
 - No account, as approve: the rerun is phases, and phases spend quota (C-12).
 
+## ADR 273 — A resume keeps the request for changes, and a fatal phase keeps its push note
+
+**Status:** accepted (2026-10-21), a fix-up to T-127 and T-128. Closes ADR
+272's first *Open* item and the third consequence of ADR 271.
+
+**Context.** A cycle a command request blocked (ADR 119) is resumed by a new
+`open_cycle`, which rebuilt everything but `CycleContext.changes_requested`:
+a cartografo blocked in a request-changes cycle resumed into an arquitecto
+that never saw the person's comments. And `run_phase`'s fatal return came
+before the handoff body, so a phase that committed and pushed, then failed
+(the turn budget lets `_should_commit` keep its work), dropped
+`DispatchResult.branch_push`.
+
+**Decision.**
+
+1. *The note rides in the envelope.* `context_transfer.save_handoff` takes
+   `changes_requested`, written only when non-empty, and `run_phase` passes
+   the cycle's. Both resumes (`run_command_request`, `resume_command_verdict`)
+   hand the filing envelope's `changes_requested` to `_resume`, which sets it
+   on the new context before the resumed phase runs, so a request filed again
+   after the resume keeps it, and the arquitecto it reaches reads it.
+2. *A fatal phase's push note goes on the task.* When the fatal branch has a
+   non-empty `branch_push`, `tasks.append_note` adds it under
+   `## Task-branch push` to the task's body, leaving status, owner and lock to
+   the failure path. A note that cannot be written is logged and never stops
+   the stop.
+
+**Consequences.**
+- An envelope from a request-changes cycle carries one more key; any other
+  envelope is unchanged, and an envelope written before this resumes with no
+  note, as it did.
+- A failed phase's push, landed or not, is now on the task the person reads,
+  next to the failure.
+
+**Ruled out.**
+- Rebuilding the note from the task's verdicts on resume: whether the
+  blocked cycle was a request for changes is the cycle's fact, and the last
+  verdict on a task need not be the one that started it.
+- The note in the error log line only: the task file is where the person
+  reads a stopped task, and ADR 271 put the note there for every other phase.
+
 ## ADR 276 — The console's *Request changes*: approve's forward and button with the kind swapped, typed words required, `awaiting_review` only
 
 **Status:** accepted (2026-10-21), T-129's arquitecto. Builds

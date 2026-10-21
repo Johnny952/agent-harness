@@ -432,7 +432,10 @@ def run_command_request(
             prompt = run_prompt(n, request, run, pattern)
         else:
             prompt = deny_prompt(n, request, comment)
-        return _resume(ctx, role, envelope.get("round"), session_id, account, prompt, filed_at)
+        return _resume(
+            ctx, role, envelope.get("round"), session_id, account, prompt, filed_at,
+            changes_requested=envelope.get("changes_requested") or "",
+        )
     finally:
         close_cycle(ctx, completed=ctx.completed)
 
@@ -574,7 +577,10 @@ def resume_command_verdict(
             "task %s: resuming the %s on the %s verdict given on request %d at %s",
             task_id, role, entry.get("verdict"), n, entry.get("at"),
         )
-        return _resume(ctx, role, envelope.get("round"), session_id, account, prompt, filed_at)
+        return _resume(
+            ctx, role, envelope.get("round"), session_id, account, prompt, filed_at,
+            changes_requested=envelope.get("changes_requested") or "",
+        )
     finally:
         close_cycle(ctx, completed=ctx.completed)
 
@@ -605,10 +611,16 @@ def _settle_resume(ctx: CycleContext, role: str, filed_at: object) -> None:
 
 def _resume(
     ctx: CycleContext, role: str, round_num: int | None, session_id: str, account: str, prompt: str,
-    filed_at: object,
+    filed_at: object, changes_requested: str = "",
 ) -> CycleOutcome:
-    """The filing phase's session resumed, then the cycle from after that phase."""
+    """The filing phase's session resumed, then the cycle from after that phase.
+
+    `changes_requested` is the note the filing phase's cycle carried (ADR
+    272), read back from its envelope: the arquitecto this resume runs reads
+    it as the one that cycle would have (ADR 273).
+    """
     cfg = ctx.cfg
+    ctx.changes_requested = changes_requested
     if role == project_docs.MAPPER_ROLE:
         mapped = run_phase(
             ctx, role, fatal=False, model=cfg.mapping_model, max_turns=cfg.mapping_max_turns,
