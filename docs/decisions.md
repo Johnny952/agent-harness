@@ -13394,3 +13394,45 @@ one place the Approvals lists are decided.
 **Ruled out.**
 - Listing `awaiting_review` regardless of `merged`: a merged task has no
   review left, and the verdict route refuses it.
+
+## ADR 252 — `run-queue --parallel N` is capped at the pool's phase slots, not its account count
+
+**Status:** accepted (2026-10-21). Planned by T-123's arquitecto; built by
+T-123. Amends ADR 83 decision 1 ("N may not exceed the number of configured
+accounts, since there is still one phase per account").
+
+**Context.** ADR 83 capped `--parallel` at `len(cfg.accounts)` because an
+account then held one phase. ADR 88 gave each account `max_concurrent_phases`
+and said `--parallel` stays the ceiling on phases at once, but the cap in
+`dispatcher/cli.py` `_run_queue` was never moved. With one account at
+`max_concurrent_phases: 4`, a queue could not run two cycles of a project.
+Everything below the cap already counts slots: `pick_idle_account` offers a
+busy account with a free slot (`state_machine.list_shared_accounts`), so the
+queue's `wait_for_account` opens on it, and `dispatch_phase` claims with
+`capacity=_capacity_for(cfg, account)`.
+
+**Decision.**
+1. `run-queue --parallel N` accepts N from 1 to the sum of
+   `max_concurrent_phases` over every configured account, the primary
+   included as before, and refuses above it with a usage error (exit 2)
+   naming that sum. With every account at the default 1 the sum is the
+   account count, so the old behaviour is unchanged.
+2. Nothing else in `dispatcher/queue.py` changes: the queue's slots are its
+   own count of running cycles, and an account is open to it while it has a
+   free slot, by the picker's rule (ADR 88 decision 2).
+3. The cap is read from the config at start. A resumed queue keeps the
+   parallelism it was confirmed with and is not re-checked against a pool
+   that shrank since; a slot no account can serve only holds its cycle at
+   its next phase, as ADR 83's consequences already say.
+
+**Consequences.**
+- Parallel cycles of one project can run on one multi-slot account, under
+  the project lock (ADR 200) and the surface locks (ADR 83).
+- Plain `run-task` and the worker still run one cycle per project.
+- The primary's slots count toward the ceiling, though a phase reaches the
+  primary only through the `fallback_roles` and `_waitable_workers` gates.
+
+**Ruled out.**
+- Counting only open (idle or free-slot) accounts at start: the pool moves
+  during a queue, and a ceiling that depends on the moment is not one the
+  owner can confirm.
