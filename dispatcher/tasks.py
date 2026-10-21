@@ -217,6 +217,17 @@ class UnmigratedTaskError(ValueError):
         self.path = path
 
 
+class NotMergedError(ValueError):
+    """`mark_closed` on a task with no `merged` block (ADR 255)."""
+
+    def __init__(self, task_id: str) -> None:
+        super().__init__(
+            f"task {task_id} has no `merged` block, so close-task does not close it; "
+            "`merge-task` is the way to merge it"
+        )
+        self.task_id = task_id
+
+
 class BacklogTaskError(ValueError):
     """A backlog task asked to run: `acquire_lock` refuses it, as `open_cycle` does."""
 
@@ -1236,6 +1247,29 @@ def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     # block, and the merge it describes was told already (ADR 221).
     if first:
         notifications.notify_task(hive_dir, "merged", task_id, f"merged into {target}", task.title)
+
+
+@_locked
+def mark_closed(hive_dir: str, task_id: str) -> str | None:
+    """Set `status: done` on a merged task whose status was left behind (ADR 255).
+
+    Returns the status it moved from, or None when the task was already done.
+    Only `status` changes: owner, heartbeat, phase, blocked_reason and body stay,
+    and nothing is announced. A task with no `merged` block raises
+    `NotMergedError`, an unmigrated one `UnmigratedTaskError`, a task with no
+    file `FileNotFoundError`; the file is left as it was in each case.
+    """
+    _refuse_unmigrated(hive_dir, task_id)
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    if not task.merged:
+        raise NotMergedError(task_id)
+    if task.status == "done":
+        return None
+    was = task.status
+    task.status = "done"
+    _write_task_file(path, task)
+    return was
 
 
 @_locked

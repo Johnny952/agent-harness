@@ -177,6 +177,35 @@ def _require_migrated(cfg: Config, parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _run_close_task(cfg: Config, args: argparse.Namespace) -> None:
+    """`close-task`: `status: done` on a merged task, a refusal is exit 1 (ADR 255)."""
+    task_id = args.task_id
+    path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    try:
+        card = context_transfer.read_task_file(path)
+    except (OSError, ValueError):
+        card = None  # mark_closed below says what is wrong with the file
+    if card is not None and card.project is not None and card.project != args.project:
+        print(
+            f"task {task_id}: not closed: its card names project {card.project}, "
+            f"not {args.project}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    try:
+        was = tasks.mark_closed(cfg.hive_tasks_dir, task_id)
+    except FileNotFoundError:
+        print(f"task {task_id}: not closed: no task file at {path}", file=sys.stderr)
+        raise SystemExit(1)
+    except (tasks.NotMergedError, tasks.UnmigratedTaskError) as exc:
+        print(f"task {task_id}: not closed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if was is None:
+        print(f"task {task_id}: already done; nothing changed")
+    else:
+        print(f"task {task_id}: {was} -> done")
+
+
 def _run_migrate(cfg: Config, default: str | None = None) -> None:
     """Move every description out of its task file, then register the projects.
 
@@ -624,6 +653,15 @@ def main() -> None:
     cleanup_parser.add_argument("--task-id", required=True)
     cleanup_parser.add_argument("--project", required=True, help="Project slug")
 
+    close_parser = sub.add_parser(
+        "close-task",
+        help="Set `status: done` on a task that already has a `merged` block but whose "
+        "status was left behind; refuse one with no `merged` block (exit 1). Touches "
+        "no git and no container (docs/decisions.md ADR 255).",
+    )
+    close_parser.add_argument("--task-id", required=True)
+    close_parser.add_argument("--project", required=True, help="Project slug")
+
     merge_parser = sub.add_parser(
         "merge-task",
         help="Merge agent/task/<task-id> into the branch the project is checked out on. "
@@ -998,6 +1036,8 @@ def main() -> None:
         branch = docker_exec.task_branch(args.task_id)
         print(f"removed {len(removed)} worktree(s): {', '.join(removed) or '(none)'}")
         print(f"branch {branch} kept; `git worktree add <path> {branch}` checks it out again")
+    elif args.command == "close-task":
+        _run_close_task(cfg, args)
     elif args.command == "merge-task":
         container = cleanup_container(cfg)
         if container is None:

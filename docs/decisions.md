@@ -13436,3 +13436,48 @@ queue's `wait_for_account` opens on it, and `dispatch_phase` claims with
 - Counting only open (idle or free-slot) accounts at start: the pool moves
   during a queue, and a ceiling that depends on the moment is not one the
   owner can confirm.
+
+## ADR 255 — `close-task` sets `status: done` on a merged task, and only on a merged one
+
+**Status:** accepted (2026-10-21). Planned by T-122's arquitecto; built by
+T-122.
+
+**Context.** A task can carry a `merged` block and still read `pending`,
+`blocked` or `awaiting_review`: T-037, T-051 and T-066 did, and on
+2026-10-21 they were fixed with a root `sed` on the hive. `mark_merged`
+moves only `awaiting_review` to `done` (ADR 240), so a task merged in any
+other status, or merged before that rule, keeps its old status. No verb and
+no board tool sets a task's status, and the hive is root-owned, so a hand
+edit was the only repair.
+
+**Decision.**
+1. `dispatcher/tasks.py` gains `mark_closed(hive_dir, task_id)`, a
+   `@_locked` writer. It refuses an unmigrated file first, as every writer
+   does. Then a task with a truthy `merged` block whose status is not `done`
+   moves to `done`, and nothing else on the file changes: lock, heartbeat,
+   phase, blocked reason, body. It returns the status it moved from. A task
+   already `done` and merged writes nothing and returns `None`. A task with
+   no `merged` block raises `NotMergedError` and writes nothing. A task with
+   no file raises `FileNotFoundError` and gets no file.
+2. It sends no notification. The merge was already notified by
+   `mark_merged` (ADR 221), and this only fixes the status.
+3. `dispatch close-task --task-id <id> --project <slug>` calls it. It prints
+   `task <id>: <old status> -> done`, or `task <id>: already done` and exits
+   0. A refusal (not merged, no file, unmigrated, or a card whose `project`
+   names another project) goes to stderr and exits 1. It uses no git, no
+   container, no Claude and no base lock.
+
+**Consequences.**
+- Merged, and not `done`, is the only rule. The verb does not refuse an
+  `in_progress` task with a live lock. A cycle still running on a merged
+  task would write its own status over `done` at its next handoff.
+- A `blocked` task closed this way keeps its `blocked_reason`.
+- Closing unmerged work stays a hand edit on purpose. Without the `merged`
+  block, `done` would say the work landed when nothing shows it did, and
+  `unmet_dependencies` would still read the task as unmet.
+
+**Ruled out.**
+- Letting `merge-task` repair the status on a re-run. That changes what
+  `mark_merged` writes, which this task's *Out of scope* forbids.
+- A general `set-status` verb. Every other transition has its own writer and
+  its own rules.

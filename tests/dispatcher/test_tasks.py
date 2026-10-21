@@ -852,6 +852,79 @@ def test_marking_a_task_with_no_file_raises_and_creates_nothing(tmp_path: Path, 
     assert _tree(hive) == {}
 
 
+# -- mark_closed (ADR 255) ----------------------------------------------------------
+
+_MERGED_BLOCK = "merged:\n  into: main\n  at: '2026-10-20T10:00:00+00:00'\n"
+
+
+def _closable(hive: str, status: str, *, merged: bool = True, extra: str = "") -> Path:
+    """A migrated task file in `status`, with or without a `merged` block."""
+    path = Path(task_file_path(hive, "task-1"))
+    path.write_text(
+        f"---\ntask_id: task-1\nstatus: {status}\nowner: cuenta1\ndepends_on: []\n"
+        f"heartbeat: '2026-10-11T16:00:36+00:00'\n{extra}{_MERGED_BLOCK if merged else ''}---\n"
+        "\n## arquitecto\n\n**Status:** complete\n"
+    )
+    return path
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked", "awaiting_review"])
+def test_mark_closed_moves_a_merged_task_to_done(tmp_path: Path, status: str) -> None:
+    hive = _hive(tmp_path)
+    extra = "blocked_reason: waiting on a human\n" if status == "blocked" else ""
+    path = _closable(hive, status, extra=extra)
+    before = read_task_file(str(path))
+
+    assert tasks.mark_closed(hive, "task-1") == status
+
+    after = read_task_file(str(path))
+    assert after.status == "done"
+    assert after.blocked_reason == before.blocked_reason
+    after.status = before.status
+    assert after == before  # owner, heartbeat, merged and body are untouched
+
+
+def test_mark_closed_on_a_done_merged_task_changes_nothing(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    path = _closable(hive, "done")
+    before = path.read_bytes()
+
+    assert tasks.mark_closed(hive, "task-1") is None
+
+    assert path.read_bytes() == before
+
+
+def test_mark_closed_refuses_a_task_with_no_merged_block(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    path = _closable(hive, "pending", merged=False)
+    before = path.read_bytes()
+
+    with pytest.raises(tasks.NotMergedError, match="no `merged` block"):
+        tasks.mark_closed(hive, "task-1")
+
+    assert path.read_bytes() == before
+
+
+def test_mark_closed_on_a_task_with_no_file_raises_and_creates_nothing(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        tasks.mark_closed(hive, "task-1")
+
+    assert _tree(hive) == {}
+
+
+def test_mark_closed_refuses_an_unmigrated_task_before_its_own_errors(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    path = _legacy(hive, "description: Add it.\n")  # no merged block either
+    before = path.read_bytes()
+
+    with pytest.raises(tasks.UnmigratedTaskError):
+        tasks.mark_closed(hive, "task-1")
+
+    assert path.read_bytes() == before
+
+
 def test_unmet_dependencies_says_which_are_missing_and_which_are_not_merged(
     tmp_path: Path,
 ) -> None:
