@@ -42,6 +42,11 @@ refuses only at the write, after every other condition held, which is the
 order this entry warns against and is harmless there because nothing is
 written before it.
 
+A second exception, added by T-122's auditor: a writer that refuses a plain
+migrated file (`mark_closed`, which needs a `merged` block) fails the
+neighbour test and stays out too; see
+[a-writer-that-refuses-unmerged-state-cannot-join-writers](a-writer-that-refuses-unmerged-state-cannot-join-writers.md).
+
 ## Evidence
 
 T-029: `_WRITERS` in `tests/dispatcher/test_tasks.py`, which gained
