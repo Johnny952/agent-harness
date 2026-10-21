@@ -6,7 +6,8 @@ hand-apply the reflow (as
 [prettier-rewraps-jsx-text-children](prettier-rewraps-jsx-text-children.md)
 says) or reach for `bunx prettier`.
 
-**Status:** unconfirmed — reported by T-105-S2's implementador; its auditor
+**Status:** confirmed by T-120, whose implementador ran it to apply the format
+— first reported by T-105-S2's implementador; its auditor
 ran `bun run lint --fix` in `front/` and it was not refused (`$ eslint . --fix`,
 no change on a clean tree).
 
