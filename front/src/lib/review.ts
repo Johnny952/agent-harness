@@ -9,10 +9,16 @@ import type { Task, TaskComment } from "@/lib/api/types";
 /** The two lists of the Approvals screen's review. */
 export type ReviewLane = "review" | "conflict";
 
-/** Which list a task belongs to, or `null` for one that is in neither. */
+/**
+ * Which list a task belongs to, or `null` for one that is in neither: an
+ * `awaiting_review` task, or an older `done` one, whose work is not on main
+ * is under review (ADR 249).
+ */
 export function reviewLane(t: Pick<Task, "status" | "merged">): ReviewLane | null {
   if (t.status === "conflict") return "conflict";
-  if (t.status === "done" && t.merged === false) return "review";
+  if ((t.status === "awaiting_review" || t.status === "done") && t.merged === false) {
+    return "review";
+  }
   return null;
 }
 
