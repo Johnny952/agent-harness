@@ -8,7 +8,8 @@ supersedes: []
 # Review — a person approves a task's diff in the console before it merges
 
 **Status:** design, approved in outline by the user on 2026-10-11. The console
-review is built but for one of its verdicts (ADR 219, ADR 222, ADR 270): the
+review is built but for the diff library and the handoffs' summary beside the
+diff (ADR 219, ADR 222, ADR 270, ADR 276): the
 api serves a task branch's diff, and `/approvals` draws it with the comments
 pinned to it, pins new ones to a line, records the *comment* verdict at
 the tip, and has *approve* and *request changes* buttons. The dispatcher writes the
