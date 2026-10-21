@@ -13091,3 +13091,86 @@ the browser could not subscribe. Nothing is posted and the state stays *off*.
 - Detecting a private window before the click: there is no supported way,
   and the guesses (storage quotas, file system APIs) change between
   browser versions.
+
+## ADR 237 — The push settings live beside the subscriptions, and quiet hours hold the cursor
+
+**Status:** accepted (2026-10-21). Planned by T-119's arquitecto; built by
+T-119.
+
+**Context.** Step 5 of `docs/plans/notifications.md`: the person turns each
+kind on or off (*Decisions* 1, defaults in its table and in
+`dispatcher/notifications.py` `KINDS`), and may set quiet hours, off by
+default, during which pushes wait and the inbox fills (*Decisions* 6). ADR
+229 decision 7 pushed every kind on by default and none other, waiting for
+these settings. This is the server half; the console's settings screen is a
+later task.
+
+**Decision.**
+1. The settings are `<hive root>/push-settings.json`, beside
+   `push-subscriptions.json`, written whole by `dispatcher/push.py`'s
+   `_write_json` (temporary file, `os.replace`, 0600) under the same
+   `_lock` as the subscriptions. The file is
+   `{"kinds": {<kind>: <bool>}, "quiet_hours": null | {"start", "end", "zone"}}`
+   and holds only the kinds the person set. What is served and obeyed is the
+   effective settings: every kind in `KINDS`, in its order, taking the
+   file's value or else the table's default, and quiet hours off unless the
+   file holds a well-formed window. A missing file is the defaults. An
+   unreadable file, a non-boolean for a kind, or a malformed window is the
+   default for that part, with a warning; a kind the file names that `KINDS`
+   does not is ignored. A kind added to `KINDS` later takes its default.
+2. `GET /api/push/settings` serves the effective settings,
+   `{"kinds": {...}, "quiet_hours": null | {...}}`, open like
+   `GET /api/push/key` because nothing in it is secret; 400 to a query.
+   `PUT /api/push/settings` takes `_bearer_guards` like the subscription
+   routes and a body naming `kinds`, `quiet_hours` or both; it sets the
+   kinds it names and leaves the others as stored, replaces the quiet hours
+   when `quiet_hours` is present (`null` turns them off), and answers 200
+   with the effective settings. It refuses with 400 and `{"error"}`: another
+   top-level field, a body naming neither, `kinds` not an object, a kind not
+   in `KINDS`, a value not a boolean, `quiet_hours` neither `null` nor an
+   object of exactly `start`, `end` and `zone`, a time not `HH:MM` from
+   00:00 to 23:59, a start equal to its end, and a zone that is not a
+   string of at most 64 characters naming a zone this host can load. `UTC`
+   is taken as UTC without the tz database; any other name goes through
+   `zoneinfo.ZoneInfo`. There is no `POST` alias.
+3. Quiet hours are local times in their zone, the start included and the end
+   not. A start before its end is one span within a day; a start after its
+   end crosses midnight, quiet from the start to midnight and from midnight
+   to the end. The wall time is the notifier's own seam, an injected UTC
+   clock, converted into the zone at each pass, so a daylight-saving change
+   moves the window with the local clock.
+4. During quiet hours the notifier does not read: its cursor stays where it
+   is and nothing is sent. The first pass after the end reads everything
+   written meanwhile, and ADR 229's grouping makes one push per kind of
+   several records ("3 tasks awaiting review", tagged `kind:<kind>`) or the
+   record's own push for one, tagged as it would have been. The held records
+   are the file's, so a restart of the board service during the night loses
+   none.
+5. A kind turned off is skipped when its record is read, and the cursor moves
+   past it as past any other: turning the kind on later does not push what
+   was skipped. The settings are read at each pass, so a change takes effect
+   within one interval, and the one read of the night decides: a kind turned
+   off before the end is not pushed at the end.
+6. Settings change pushes only. `notifications.jsonl`, `GET
+   /api/notifications` and the inbox are untouched.
+
+**Consequences.**
+- ADR 229 decision 7's default-only rule is replaced by decision 1 here; ADR
+  229 is otherwise unchanged.
+- A host without the tz database accepts `UTC` alone; every other zone is
+  refused at the write and, if it stops loading later, reads as quiet hours
+  off with a warning. The board-service image's tz database is not checked
+  by this task, and `tzdata` is not added to `pyproject.toml`.
+- One person, one settings file, as with the subscriptions; per-person
+  settings come with the users store.
+- The console's settings screen and the forwarding of these two routes are
+  a `front/` task.
+
+**Ruled out.**
+- Holding pushes in memory during quiet hours: a restart would lose them,
+  and the file already holds every record.
+- Pushing at the end the records of a kind that was off when they were read:
+  off means off, and the inbox holds them.
+- Storing every kind on each write: a default changed in the table would then
+  never reach a person who had saved once.
+- A `POST` alias or a `PATCH`: one verb, and the console sends one body.
