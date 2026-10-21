@@ -321,6 +321,73 @@ def test_recover_approve_is_interrupted_with_adr_258s_text(tmp_path):
     )
 
 
+CHANGES = APPROVE
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"params": {}},
+        {"params": {"commit": "nothex"}},
+        {"params": {"commit": "a" * 40, "text": "x"}},
+        {"task_id": None},
+        {"project": None},
+        {"note": "go"},
+    ],
+)
+def test_an_invalid_request_changes_is_refused_400(tmp_path, over):
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, "request_changes", **{**CHANGES, **over})
+    assert err.value.status == 400
+    with pytest.raises(ActionRefused):
+        actions.check_new("request_changes", **{**CHANGES, **over})
+
+
+def test_a_request_changes_holds_the_project_and_spends_quota(tmp_path):
+    rec = create(tmp_path, "request_changes", **CHANGES)
+    assert actions.validate(rec) == []
+    assert actions.serial_key(rec) == "project:proj"
+    assert actions.KINDS["request_changes"].spends_quota
+    assert actions.KINDS["request_changes"].recovery == "requeue_unless_started"
+
+
+def test_a_second_request_changes_for_the_task_is_refused_409(tmp_path):
+    first = create(tmp_path, "request_changes", **CHANGES)
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, "request_changes", **CHANGES)
+    assert err.value.status == 409
+    actions.claim(tmp_path, first["id"])
+    with pytest.raises(ActionRefused):
+        create(tmp_path, "request_changes", **CHANGES)
+    create(tmp_path, "request_changes", **{**CHANGES, "task_id": "T-2"})
+    actions.finish(tmp_path, first["id"], "done")
+    create(tmp_path, "request_changes", **CHANGES)
+
+
+@pytest.mark.parametrize("queued, then", [("approve", "request_changes"),
+                                          ("request_changes", "approve")])
+def test_an_approve_and_a_request_changes_for_a_task_refuse_each_other(tmp_path, queued, then):
+    create(tmp_path, queued, **APPROVE)
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, then, **APPROVE)
+    assert err.value.status == 409
+    assert f"a {queued} for task T-1 is already queued" in err.value.reason
+    create(tmp_path, then, **{**APPROVE, "task_id": "T-2"})
+
+
+def test_recover_request_changes_not_started_goes_back_to_pending(tmp_path):
+    aid = claimed(tmp_path, "request_changes", params=CHANGES["params"], claimed_at="t")
+    assert actions.recover(tmp_path) == [(aid, "back to pending")]
+    assert read(tmp_path, "pending", aid)["status"] == "pending"
+
+
+def test_recover_started_request_changes_is_interrupted(tmp_path):
+    aid = claimed(tmp_path, "request_changes", params=CHANGES["params"], started_at="t")
+    actions.recover(tmp_path)
+    rec = read(tmp_path, "done", aid)
+    assert rec["status"] == "interrupted" and rec["error"] == "interrupted after it started"
+
+
 def test_recover_cancel_runs_again(tmp_path):
     aid = claimed(tmp_path, "cancel", project=None, task_id=None,
                   params={"target": "a-20260101T000000000000Z-abcd"})

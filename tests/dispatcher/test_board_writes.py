@@ -626,7 +626,6 @@ def test_a_verdict_on_a_task_not_under_review_is_refused(tmp_path: Path, status,
 @pytest.mark.parametrize(
     "kind, text, commit, needle",
     [
-        ("request_changes", "x", _COMMIT, "the request_changes verdict is not built yet"),
         ("praise", "x", _COMMIT, "not one of comment, approve, request_changes"),
         ("comment", "x", "main", "not a commit hash"),
         ("comment", "x", None, "not a commit hash"),
@@ -666,6 +665,84 @@ def test_an_approve_on_a_merged_task_is_refused(tmp_path: Path, status) -> None:
     with pytest.raises(tasks.BoardWriteError, match="it is merged"):
         tasks.record_verdict(hive, "T-001", "operator", "approve", "x", _COMMIT)
     assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+def test_a_request_for_changes_is_taken_on_a_task_awaiting_review(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="awaiting_review")
+    result = tasks.record_verdict(hive, "T-001", "operator", "request_changes", "Rename it.", _COMMIT)
+    assert result["comment"]["verdict"] == {"kind": "request_changes", "commit": _COMMIT}
+    assert _comments(hive, "T-001") == [result["comment"]]
+    assert _read(hive, "T-001").status == "awaiting_review"  # the action moves it, not the line
+
+
+@pytest.mark.parametrize(
+    "status, merged, needle",
+    [
+        ("conflict", None, "waits on resolve conflict"),
+        ("done", None, "it is done, not awaiting_review"),
+        ("awaiting_review", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged"),
+        ("done", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged"),
+        ("merged", None, "it is merged"),
+        ("pending", None, "it is pending, not awaiting_review"),
+        ("in_progress", None, "it is in_progress, not awaiting_review"),
+    ],
+)
+def test_a_request_for_changes_not_awaiting_review_is_refused(tmp_path: Path, status, merged, needle) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status, **({"merged": merged} if merged else {}))
+    with pytest.raises(tasks.BoardWriteError, match=needle):
+        tasks.record_verdict(hive, "T-001", "operator", "request_changes", "x", _COMMIT)
+    assert not os.path.exists(tasks.comments_path(hive, "T-001"))
+
+
+# -- reopen_for_changes and review_comments (ADR 272) -------------------------
+
+
+def test_reopen_for_changes_moves_awaiting_review_to_pending(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="awaiting_review")
+    assert tasks.reopen_for_changes(hive, "T-001") is True
+    assert _read(hive, "T-001").status == "pending"
+
+
+@pytest.mark.parametrize(
+    "status, merged",
+    [("done", None), ("conflict", None), ("in_progress", None), ("pending", None),
+     ("awaiting_review", {"into": "main", "at": "2026-10-11T16:00:36+00:00"})],
+)
+def test_reopen_for_changes_leaves_any_other_task_alone(tmp_path: Path, status, merged) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status=status, **({"merged": merged} if merged else {}))
+    assert tasks.reopen_for_changes(hive, "T-001") is False
+    assert _read(hive, "T-001").status == status
+
+
+def test_review_comments_are_the_authors_since_the_last_closing_verdict(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="awaiting_review")
+    old = "f" * 40
+    tasks.add_comment(hive, "T-001", "operator", "Before the first round.")
+    tasks.record_verdict(hive, "T-001", "operator", "request_changes", "First round.", old)
+    tasks.add_comment(hive, "T-001", "operator", "This name.", file="src/a.py", line=3, commit=_COMMIT)
+    tasks.add_comment(hive, "T-001", "arquitecto", "Not the person's.")
+    tasks.add_comment(hive, "T-001", "operator", "And a test.")
+    tasks.record_verdict(hive, "T-001", "operator", "request_changes", "Second round.", _COMMIT)
+
+    got = tasks.review_comments(hive, "T-001", _COMMIT)
+    assert [c["text"] for c in got] == ["This name.", "And a test.", "Second round."]
+    assert (got[0]["file"], got[0]["line"]) == ("src/a.py", 3)
+    first = tasks.review_comments(hive, "T-001", old)
+    assert [c["text"] for c in first] == ["Before the first round.", "First round."]
+
+
+def test_review_comments_without_the_verdict_are_empty(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="awaiting_review")
+    assert tasks.review_comments(hive, "T-001", _COMMIT) == []  # no comments file
+    tasks.add_comment(hive, "T-001", "operator", "Just a note.")
+    tasks.record_verdict(hive, "T-001", "operator", "comment", "A comment verdict.", _COMMIT)
+    assert tasks.review_comments(hive, "T-001", _COMMIT) == []
 
 
 def test_a_verdict_on_no_task_is_no_task(tmp_path: Path) -> None:

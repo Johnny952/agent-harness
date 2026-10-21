@@ -11,7 +11,9 @@ docs/plans/board-service.md). The handlers are in `HANDLERS`, not in
 container and logs it (ADR 173). A `clone`, `init`, `keygen` or `check` sets a
 new project up from the console (ADR 212), spending no quota. An `approve`
 merges and pushes the reviewed tip under the project's base lock, with no
-account and no project lock (ADR 258, ADR 264).
+account and no project lock (ADR 258, ADR 264). A `request_changes` runs the
+task's cycle again from the arquitecto on its branch, holding the project and
+an account as a start does (ADR 272).
 Stdlib only.
 """
 
@@ -459,7 +461,7 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
             entry = next(
                 (r for r in worker.running.values() if r.action_id == target), None
             )
-        if tgt.get("kind") in ("start", "turn") and entry is not None:
+        if tgt.get("kind") in ("start", "turn", "request_changes") and entry is not None:
             entry.cancelled.set()
             if entry.kill is not None:
                 entry.kill()
@@ -852,10 +854,72 @@ def _approve(worker: Worker, record: dict, _cancelled=None) -> None:
     )
 
 
+def _request_changes(worker: Worker, record: dict, cancelled: threading.Event) -> None:
+    """Run the task's cycle again from the arquitecto on its branch (ADR 272).
+
+    The person's request for changes is on the task's comments, written by
+    the board service before this was queued; it and their review comments
+    before it go to the arquitecto as its note. The task moves from
+    `awaiting_review` to `pending` first, so the cycle takes it as any start
+    does and an approve on the old tip reads as stale. Not authorized: the
+    cycle ends in `awaiting_review` again, for the person to review the new
+    tip. Ended like a start: cancelled or stopped while held, done otherwise.
+    """
+    cfg, sd = worker.cfg, worker.state_dir
+    task_id, commit = record["task_id"], record["params"]["commit"]
+    task = _read_task(cfg, task_id)
+    if task is None or task.status != tasks.AWAITING_REVIEW_STATUS or task.merged:
+        why = (
+            "it has no task file" if task is None
+            else "it is merged" if task.merged
+            else f"it is {task.status}"
+        )
+        actions.finish(sd, record["id"], "failed",
+                       error=f"task {task_id} is not awaiting review: {why}")
+        return
+    try:
+        comments = tasks.review_comments(cfg.hive_tasks_dir, task_id, commit)
+    except OSError as exc:
+        actions.finish(sd, record["id"], "failed",
+                       error=_one_line(f"the task's comments could not be read: {exc}"))
+        return
+    if not comments:
+        actions.finish(sd, record["id"], "failed",
+                       error=f"task {task_id} has no request for changes on {commit}")
+        return
+    record["started_at"] = _utc_now().isoformat()
+    actions.rewrite(sd, record)
+    if not tasks.reopen_for_changes(cfg.hive_tasks_dir, task_id):
+        actions.finish(sd, record["id"], "failed",
+                       error=f"task {task_id} left awaiting review before it was reopened")
+        return
+    outcome = core.run_task_cycle(
+        cfg, task_id, record["project"], authorized=False,
+        may_start_phase=lambda: not (cancelled.is_set() or worker.stopping.is_set()),
+        project_lock=_held_project_lock(worker, record),
+        changes_requested=core.changes_requested_note(commit, comments),
+    )
+    task = _read_task(cfg, task_id)
+    result = {
+        "commit": commit, "outcome": outcome.value,
+        "blocked_reason": (
+            task.blocked_reason if outcome is core.CycleOutcome.BLOCKED and task else None
+        ),
+    }
+    held = outcome is core.CycleOutcome.HELD
+    if held and cancelled.is_set():
+        result["last_phase"] = task.phase if task else None
+        actions.finish(sd, record["id"], "cancelled", result=result)
+    elif held and worker.stopping.is_set():
+        actions.finish(sd, record["id"], "interrupted", result=result, error=STOPPED_ERROR)
+    else:
+        actions.finish(sd, record["id"], "done", result=result)
+
+
 HANDLERS = {
     "start": _start, "cancel": _cancel, "command_verdict": _command_verdict, "turn": _turn,
     "clone": _clone, "init": _init, "keygen": _keygen, "check": _check,
-    "approve": _approve,
+    "approve": _approve, "request_changes": _request_changes,
 }
 
 

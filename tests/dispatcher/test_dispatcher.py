@@ -8996,3 +8996,66 @@ def test_approve_does_not_hold_the_project_lock_or_ask_for_an_account(ap, monkey
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("an approve waits on no account")),
     )
     assert _approve(ap).outcome == "merged"
+
+
+# --- request changes: the arquitecto's prompt (ADR 272, T-128) ---------------
+
+_CHANGES = [
+    {"author": "operator", "text": "This name hides what it counts.", "file": "src/app.py", "line": 12},
+    {"author": "operator", "text": "Rename it."},
+]
+
+
+def _first_prompts(monkeypatch):
+    """Fake every phase complete, the revisor approving; keep each role's first prompt."""
+    prompts = {}
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        prompts.setdefault(role, prompt)
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="Structured output provided successfully",
+            account="cuenta1",
+            handoff={"status": "complete", "verdict": "APPROVED"} if role == "revisor" else {"status": "complete"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    return prompts
+
+
+def test_changes_requested_note_names_the_commit_and_every_comment_in_order() -> None:
+    note = dispatcher_mod.changes_requested_note("a" * 40, _CHANGES)
+
+    assert f"at commit {'a' * 40} and requested changes" in note
+    assert "the Goal and Done when above still hold" in note
+    diff = "- operator on src/app.py:12: This name hides what it counts."
+    plain = "- operator: Rename it."
+    assert note.index(diff) < note.index(plain)
+    assert note.endswith(plain)
+
+
+def test_run_task_cycle_hands_the_requested_changes_to_the_arquitecto_only(tmp_path, monkeypatch) -> None:
+    """The person's comments reach the arquitecto below the task's Goal and
+    Done when; the later roles work from its plan, not from the note."""
+    cfg = _make_config(tmp_path)
+    prompts = _first_prompts(monkeypatch)
+    note = dispatcher_mod.changes_requested_note("a" * 40, _CHANGES)
+
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, changes_requested=note,
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert list(prompts) == ["arquitecto", "implementador", "revisor", "auditor"]
+    arquitecto = prompts["arquitecto"]
+    assert note in arquitecto
+    assert arquitecto.index("## Done when") < arquitecto.index(note)
+    assert all("Rename it." not in prompts[role] for role in ("implementador", "revisor", "auditor"))
+
+
+def test_run_task_cycle_without_a_request_gives_the_arquitecto_no_note(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+    prompts = _first_prompts(monkeypatch)
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert "requested changes" not in prompts["arquitecto"]

@@ -3197,6 +3197,9 @@ class CycleContext:
     # a caller passed in (the worker, a queue) is the caller's to release.
     project_lock: ProjectLock | None = None
     owns_project_lock: bool = False
+    # A person's request for changes (ADR 272): the note the arquitecto's
+    # prompt carries, `changes_requested_note`'s text. "" for any other cycle.
+    changes_requested: str = ""
 
 
 def project_config(cfg: Config, task_id: str, slug: str) -> Config | None:
@@ -4055,6 +4058,7 @@ def run_task_cycle(
     via: str = "run-task",
     token_limit: int | None = None,
     usage_offset: int = 0,
+    changes_requested: str = "",
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
 
@@ -4081,6 +4085,10 @@ def run_task_cycle(
     tokens since `usage_offset`: reached, the cycle starts no new phase and
     ends BLOCKED with `budget_reached`.
 
+    `changes_requested` is a person's request for changes on the task's
+    reviewed tip (ADR 272), `changes_requested_note`'s text: the arquitecto's
+    prompt carries it, and the cycle runs on the task's branch as it stands.
+
     `scheduler` is the parallel queue's (B-3, ADR 83), None everywhere else,
     and None runs the cycle exactly as before. With one, the mapping runs once
     for the queue (`scheduler.mapping_lock`, `scheduler.mapped_by`), and the
@@ -4098,6 +4106,7 @@ def run_task_cycle(
         return CycleOutcome.BLOCKED
     ctx.may_start_phase = may_start_phase
     ctx.token_limit, ctx.usage_offset = token_limit, usage_offset
+    ctx.changes_requested = changes_requested
     def blocked(reason: str | None = None) -> CycleOutcome:
         return _blocked_outcome(ctx, reason)
 
@@ -4199,6 +4208,29 @@ def _blocked_outcome(ctx: CycleContext, reason: str | None = None) -> CycleOutco
     return CycleOutcome.BLOCKED
 
 
+def changes_requested_note(commit: str, comments: list[dict]) -> str:
+    """The arquitecto's note for a request for changes (ADR 272).
+
+    `comments` are `tasks.review_comments`'s, the person's review of `commit`
+    ending in the request itself. The task description above the note still
+    gives the Goal and Done when; the note says what the person asked to
+    change on the branch they reviewed, a diff comment with its file and line.
+    """
+    lines = [
+        f"A person reviewed this task's branch at commit {commit} and requested "
+        "changes. Plan the changes they ask for on the task's branch as it "
+        "stands: the work there is kept, and the Goal and Done when above still "
+        "hold. Their comments, in the order written:",
+    ]
+    for comment in comments:
+        where = (
+            f" on {comment['file']}:{comment['line']}"
+            if comment.get("file") and comment.get("line") else ""
+        )
+        lines.append(f"- {comment['author']}{where}: {comment['text']}")
+    return "\n".join(lines)
+
+
 def _cycle_from_arquitecto(
     ctx: CycleContext,
     authorized: bool,
@@ -4212,7 +4244,7 @@ def _cycle_from_arquitecto(
     window this enters, on `ctx.write_window`.
     """
     cfg, task_id, slug = ctx.cfg, ctx.task_id, ctx.slug
-    arquitecto = run_phase(ctx, "arquitecto")
+    arquitecto = run_phase(ctx, "arquitecto", note=ctx.changes_requested)
     if arquitecto is None:
         return _stopped(ctx)
     if handoff.blocked(arquitecto.handoff):

@@ -11,7 +11,9 @@ no phase is listed. None moves a task once it is on the board, and none
 dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 `start`, a `cancel` or a `command_verdict` in the dispatcher's action queue
 (ADR 142, ADR 151), and `POST /api/tasks/<id>/approve` writes the `approve`
-verdict line and then queues the `approve` action (ADR 258, ADR 267); two behind the same bearer create a project record and
+verdict line and then queues the `approve` action (ADR 258, ADR 267), and
+`POST /api/tasks/<id>/request-changes` does the same for `request_changes`
+(ADR 272); two behind the same bearer create a project record and
 change its settings (ADR 203), through `dispatcher/projects.py`'s one writer.
 Four more queue a new project's `clone`, `init`, `keygen` and `check` for the
 worker (ADR 212); none carries a remote, the worker reads it from the record.
@@ -366,12 +368,18 @@ def review_verdict(
     Over HTTP only, as the operator: no role in `ROLE_TOOLS` lists it, since a
     verdict is the person's, as accepting is (section 4). An approve is not
     taken here: it writes its action too, through `POST /api/tasks/<id>/approve`
-    (ADR 267).
+    (ADR 267), and so does a request for changes, through
+    `POST /api/tasks/<id>/request-changes` (ADR 272).
     """
     if kind == "approve":
         raise ToolError(
             f"an approve is not taken here: use POST /api/tasks/{task_id}/approve, "
             "which also queues the action"
+        )
+    if kind == "request_changes":
+        raise ToolError(
+            "a request for changes is not taken here: use "
+            f"POST /api/tasks/{task_id}/request-changes, which also queues the action"
         )
     return _writing(task_store.record_verdict, hive_dir, task_id, role, kind, text, commit)
 
@@ -690,7 +698,8 @@ TOOLS: dict[str, dict] = {
         "description": (
             "Record the person's verdict on a task under review, at the commit they "
             "reviewed. Only the comment verdict is taken here; an approve goes through "
-            "POST /api/tasks/<id>/approve. Over HTTP only."
+            "POST /api/tasks/<id>/approve and a request for changes through "
+            "POST /api/tasks/<id>/request-changes. Over HTTP only."
         ),
         "inputSchema": {
             "type": "object",
@@ -961,11 +970,10 @@ def create_app(config_path: str) -> Flask:
 
         return _action(actions_token, make)
 
-    @app.post("/api/tasks/<task_id>/approve")
-    def http_approve(task_id: str):
-        # ADR 258, 1 and ADR 267: check what can be checked, write the verdict
-        # line, then queue the action. Not `_action`: a refused action answers
-        # with the verdict too, since its line stays.
+    def _review_action(task_id: str, kind: str):
+        # ADR 258, 1, ADR 267 and ADR 272: check what can be checked, write the
+        # verdict line, then queue the action of the same kind. Not `_action`:
+        # a refused action answers with the verdict too, since its line stays.
         body, refused = _bearer_guards(actions_token, "action")
         if refused is not None:
             return refused
@@ -975,14 +983,14 @@ def create_app(config_path: str) -> Flask:
         project, commit = body.get("project"), body.get("commit")
         try:
             actions.check_new(
-                "approve", project=project, task_id=task_id, params={"commit": commit},
+                kind, project=project, task_id=task_id, params={"commit": commit},
                 actor="operator",
             )
         except actions.ActionRefused as exc:
             return jsonify({"error": exc.reason}), exc.status
         try:
             verdict = _writing(
-                task_store.record_verdict, hive_dir, task_id, OPERATOR, "approve",
+                task_store.record_verdict, hive_dir, task_id, OPERATOR, kind,
                 body.get("text"), commit,
             )
         except NotFoundError as exc:
@@ -991,7 +999,7 @@ def create_app(config_path: str) -> Flask:
             return jsonify({"error": str(exc)}), 400
         try:
             record = actions.create(
-                state_dir, "approve", project=project, task_id=task_id,
+                state_dir, kind, project=project, task_id=task_id,
                 params={"commit": commit}, actor="operator",
             )
         except actions.ActionRefused as exc:
@@ -1001,6 +1009,16 @@ def create_app(config_path: str) -> Flask:
                 "error": f"the action queue could not be written: {exc}", "verdict": verdict,
             }), 503
         return jsonify({"verdict": verdict, "action": record}), 201
+
+    @app.post("/api/tasks/<task_id>/approve")
+    def http_approve(task_id: str):
+        return _review_action(task_id, "approve")
+
+    @app.post("/api/tasks/<task_id>/request-changes")
+    def http_request_changes(task_id: str):
+        # ADR 272: the verdict line closes the person's review comments;
+        # the worker reopens the task's cycle at the arquitecto.
+        return _review_action(task_id, "request_changes")
 
     @app.post("/api/epics/<epic_id>/start")
     def http_epic_start(epic_id: str):

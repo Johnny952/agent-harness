@@ -177,11 +177,11 @@ DEBT_TAG = "debt"
 COMMENTS_FILE = "comments.jsonl"
 #: The keys that make a `comments.jsonl` line a comment: `add_comment`'s three.
 COMMENT_KEYS = ("at", "author", "text")
-#: The verdicts `docs/plans/review.md` names. *comment* (step 3) and *approve*
-#: (step 4) are recorded; *request changes* is step 6, so the writer refuses it
-#: rather than store a verdict nothing acts on.
+#: The verdicts `docs/plans/review.md` names: *comment* (step 3), *approve*
+#: (step 4) and *request changes* (step 6, ADR 272). `VERDICT_KINDS_BUILT` is
+#: what the writer takes; all three are, now.
 VERDICT_KINDS = ("comment", "approve", "request_changes")
-VERDICT_KINDS_BUILT = ("comment", "approve")
+VERDICT_KINDS_BUILT = ("comment", "approve", "request_changes")
 #: Where a review happens: a task waiting for review, one whose merge stopped
 #: on a conflict, or an older `done` one not on main (ADR 240).
 REVIEW_STATUSES = (AWAITING_REVIEW_STATUS, "done", CONFLICT_STATUS)
@@ -1227,6 +1227,27 @@ def mark_awaiting_review(hive_dir: str, task_id: str) -> bool:
 
 
 @_locked
+def reopen_for_changes(hive_dir: str, task_id: str) -> bool:
+    """Move an `awaiting_review` task not on main back to `pending` (ADR 272).
+
+    The `request_changes` action calls it before the cycle runs again from
+    the arquitecto: the task is no longer waiting for review, so an approve
+    queued on the old tip reads as stale, and the arquitecto's lock takes it
+    from `pending` as any start's does. Returns whether it moved: any other
+    status, and a task already merged, is left alone. Nothing is announced;
+    the cycle's end tells the task is waiting for review again. A task with
+    no file raises rather than getting one.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    if task.status != AWAITING_REVIEW_STATUS or task.merged:
+        return False
+    task.status = "pending"
+    _write_task_file(path, task)
+    return True
+
+
+@_locked
 def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     """Record on the task that its branch was merged into `target`.
 
@@ -2187,6 +2208,47 @@ def count_comments(path: str, problems: list[str] | None = None) -> int:
     return count
 
 
+#: The verdicts that close a review: the comments a request for changes
+#: carries are the ones after the last of these (ADR 272).
+_REVIEW_ENDING_VERDICTS = ("approve", "request_changes")
+
+
+def review_comments(hive_dir: str, task_id: str, commit: str) -> list[dict]:
+    """The comments a request for changes on `commit` carries (ADR 272).
+
+    The last `request_changes` verdict on `commit`, and before it the same
+    author's comments since the verdict before it that closed a review (an
+    approve or an earlier request for changes): what the person wrote while
+    reviewing this tip, diff comments included, in the order written. `[]`
+    when there is no such verdict. Lines that are not comments are skipped, as
+    every reader skips them. `OSError` propagates, and a missing file is `[]`.
+    """
+    try:
+        with open(comments_path(hive_dir, task_id), "rb") as fh:
+            lines = [parse_comment_line(line)[0] for line in fh if line.strip()]
+    except FileNotFoundError:
+        return []
+    comments = [c for c in lines if c is not None]
+    for index in range(len(comments) - 1, -1, -1):
+        verdict = comments[index].get("verdict")
+        if (
+            isinstance(verdict, dict)
+            and verdict.get("kind") == "request_changes"
+            and verdict.get("commit") == commit
+        ):
+            break
+    else:
+        return []
+    author = comments[index]["author"]
+    start = index
+    while start > 0:
+        verdict = comments[start - 1].get("verdict")
+        if isinstance(verdict, dict) and verdict.get("kind") in _REVIEW_ENDING_VERDICTS:
+            break
+        start -= 1
+    return [c for c in comments[start:index] if c["author"] == author] + [comments[index]]
+
+
 def _title_problems(title: object, what: str) -> list[str]:
     if not isinstance(title, str) or not title.strip():
         return [f"{what} is blank"]
@@ -2853,10 +2915,13 @@ def record_verdict(
 
     Only the kinds in `VERDICT_KINDS_BUILT` are taken: a "comment" starts
     nothing (*Decisions* 1), so recording it is the whole of it; an "approve"
-    is followed by its action, queued by the caller (ADR 267). The task must
-    be under review, `awaiting_review`, `conflict` or `done` and not merged: a
-    verdict on a task not finished, or already merged, reviewed nothing. An
-    approve is refused on `conflict` too, which waits on resolve conflict.
+    and a "request_changes" are followed by their action, queued by the caller
+    (ADR 267, ADR 272). The task must be under review, `awaiting_review`,
+    `conflict` or `done` and not merged: a verdict on a task not finished, or
+    already merged, reviewed nothing. An approve is refused on `conflict` too,
+    which waits on resolve conflict. A request for changes is taken on
+    `awaiting_review` alone (ADR 272): it reopens the cycle the task came out
+    of, and a `conflict` waits on resolve conflict first.
     Returns `add_comment`'s `{"id", "comment", "comment_count"}`.
     """
     task_id = _check_id(task_id)
@@ -2886,6 +2951,18 @@ def record_verdict(
                 f"task {task_id}",
                 ["it is conflict: an approve waits on resolve conflict"],
             )
+        if (
+            kind == "request_changes"
+            and not task.merged
+            and task.status != AWAITING_REVIEW_STATUS
+        ):
+            reason = (
+                "it is conflict: a request for changes waits on resolve conflict"
+                if task.status == CONFLICT_STATUS
+                else f"it is {task.status}, not awaiting_review: a request for changes "
+                "reopens a cycle that ended in review"
+            )
+            raise BoardWriteError(f"task {task_id}", [reason])
         if task.status in REVIEW_STATUSES and not (
             task.status in ("done", AWAITING_REVIEW_STATUS) and task.merged
         ):

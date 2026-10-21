@@ -1311,6 +1311,181 @@ def test_a_claimed_approve_is_interrupted_on_recovery_and_never_run_again(cfg, w
     assert approves.calls == [] and comments(cfg, "T-1") == []
 
 
+# ---- request changes --------------------------------------------------------
+
+
+class ChangesCycle:
+    """A fake `core.run_task_cycle` for a request for changes: it keeps what it
+    was handed and the task's status when it was called, and can be held."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.calls: list[dict] = []
+        self.entered = threading.Event()
+        self.gate: threading.Event | None = None
+        self.outcome = core.CycleOutcome.FINISHED
+
+    def __call__(self, cfg, task_id, slug, description=None, authorized=True,
+                 on_approve=None, may_start_phase=None, scheduler=None, project_lock=None,
+                 token_limit=None, usage_offset=0, changes_requested=""):
+        status = worker_mod._read_task(cfg, task_id).status
+        self.calls.append({"task_id": task_id, "slug": slug, "authorized": authorized,
+                           "changes_requested": changes_requested, "status": status,
+                           "project_lock": project_lock})
+        self.entered.set()
+        if self.gate is not None:
+            assert self.gate.wait(WAIT)
+        if not may_start_phase():
+            return core.CycleOutcome.HELD
+        tasks.handoff(cfg.hive_tasks_dir, task_id, "done", "## auditor\n\nPassed.")
+        tasks.mark_awaiting_review(cfg.hive_tasks_dir, task_id)
+        return self.outcome
+
+
+@pytest.fixture
+def changes(cfg, monkeypatch):
+    fake = ChangesCycle(cfg)
+    monkeypatch.setattr(core, "run_task_cycle", fake)
+    yield fake
+    if fake.gate is not None:
+        fake.gate.set()
+
+
+def awaiting(cfg, task_id="T-1"):
+    _task(cfg, task_id)
+    tasks.handoff(cfg.hive_tasks_dir, task_id, "done", "## auditor\n\nPassed.")
+    assert tasks.mark_awaiting_review(cfg.hive_tasks_dir, task_id)
+
+
+def request_changes(cfg, task_id="T-1", project="proj", commit=TIP, text="Rename it.",
+                    make_task=True):
+    if make_task:
+        awaiting(cfg, task_id)
+    tasks.add_comment(cfg.hive_tasks_dir, task_id, "operator", "The name is off.",
+                      file="src/app.py", line=12, commit=commit)
+    tasks.record_verdict(cfg.hive_tasks_dir, task_id, "operator", "request_changes", text, commit)
+    return actions.create(cfg.state_dir, "request_changes", project=project, task_id=task_id,
+                          params={"commit": commit})
+
+
+def test_a_request_for_changes_reruns_the_cycle_unauthorized_with_the_comments(
+    cfg, worker, changes,
+):
+    rec = request_changes(cfg)
+    worker.tick()
+    worker.join()
+    [call] = changes.calls
+    assert (call["task_id"], call["slug"], call["authorized"]) == ("T-1", "proj", False)
+    assert call["status"] == "pending"  # reopened before the cycle took it
+    assert call["project_lock"] is not None
+    note = call["changes_requested"]
+    assert f"at commit {TIP}" in note
+    assert "- operator on src/app.py:12: The name is off." in note
+    assert note.rstrip().endswith("- operator: Rename it.")
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "done" and got["error"] is None
+    assert got["started_at"] is not None
+    assert got["result"] == {"commit": TIP, "outcome": "finished", "blocked_reason": None}
+    assert worker_mod._read_task(cfg, "T-1").status == "awaiting_review"
+
+
+def test_a_request_for_changes_waits_for_an_account(cfg, worker, changes, accounts):
+    accounts["open"] = False
+    rec = request_changes(cfg)
+    worker.tick()
+    state, got = where(cfg, rec["id"])
+    assert state == "pending" and got["waiting"] == "account"
+    assert changes.calls == []
+
+
+def test_a_request_for_changes_waits_for_a_start_on_its_project(cfg, worker, cycle):
+    cycle.hold("T-2")
+    s = start(cfg, "T-2")
+    worker.tick()
+    cycle.wait_entered("T-2")
+    awaiting(cfg)
+    tasks.record_verdict(cfg.hive_tasks_dir, "T-1", "operator", "request_changes", "x", TIP)
+    rec = actions.create(cfg.state_dir, "request_changes", project="proj", task_id="T-1",
+                         params={"commit": TIP})
+    worker.tick()
+    state, got = where(cfg, rec["id"])
+    assert state == "pending" and got["waiting"] == "project"
+    cycle.release("T-2")
+    worker.join()
+    assert where(cfg, s["id"])[1]["status"] == "done"
+
+
+@pytest.mark.parametrize("status, why", [
+    ("pending", "it is pending"), ("conflict", "it is conflict"), ("done", "it is done"),
+])
+def test_a_request_for_changes_on_a_task_not_awaiting_review_fails_and_runs_nothing(
+    cfg, worker, changes, status, why,
+):
+    rec = request_changes(cfg)
+    tasks.handoff(cfg.hive_tasks_dir, "T-1", status, "")
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed"
+    assert got["error"] == f"task T-1 is not awaiting review: {why}"
+    assert got["started_at"] is None
+    assert changes.calls == []
+
+
+def test_a_request_for_changes_with_no_verdict_on_its_commit_fails(cfg, worker, changes):
+    rec = request_changes(cfg)
+    other = "b" * 40
+    actions.finish(cfg.state_dir, rec["id"], "cancelled")
+    rec = actions.create(cfg.state_dir, "request_changes", project="proj", task_id="T-1",
+                         params={"commit": other})
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed"
+    assert got["error"] == f"task T-1 has no request for changes on {other}"
+    assert changes.calls == []
+    assert worker_mod._read_task(cfg, "T-1").status == "awaiting_review"
+
+
+def test_a_cancel_on_a_running_request_for_changes_holds_it(cfg, worker, changes):
+    changes.gate = threading.Event()
+    rec = request_changes(cfg)
+    worker.tick()
+    assert changes.entered.wait(WAIT)
+    c = cancel(cfg, rec["id"])
+    worker.tick()
+    assert where(cfg, c["id"])[1]["result"]["target_status"] == "running"
+    changes.gate.set()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "cancelled" and got["result"]["outcome"] == "held"
+    assert "last_phase" in got["result"]
+
+
+def test_a_request_for_changes_interrupted_before_started_at_runs_again(cfg, worker, changes):
+    rec = request_changes(cfg)
+    assert actions.claim(cfg.state_dir, rec["id"]) is not None
+    assert worker.recover() == [(rec["id"], "back to pending")]
+    worker.tick()
+    worker.join()
+    assert where(cfg, rec["id"])[1]["status"] == "done"
+    assert len(changes.calls) == 1
+
+
+def test_a_request_for_changes_interrupted_after_started_at_is_not_run_again(
+    cfg, worker, changes,
+):
+    rec = request_changes(cfg)
+    claimed = actions.claim(cfg.state_dir, rec["id"])
+    claimed["started_at"] = "2026-01-01T00:00:00+00:00"
+    actions.rewrite(cfg.state_dir, claimed)
+    assert worker.recover() == [(rec["id"], "interrupted")]
+    worker.tick()
+    worker.join()
+    assert where(cfg, rec["id"])[1]["status"] == "interrupted"
+    assert changes.calls == []
+
+
 # ---- heartbeat, shutdown ----------------------------------------------------
 
 

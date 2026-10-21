@@ -14,8 +14,10 @@ pinned to it, pins new ones to a line, records the *comment* verdict at
 the tip, and has an *approve* button. The dispatcher writes the
 `awaiting_review` status (step 1, ADR 240), and pushes the task branch after
 each committing phase for a project that turns it on (step 5, ADR 271); *approve* is served by the board
-service's bearer route and drained by the worker (step 4); the console has no
-button for *request changes*, and no dispatcher reads any other verdict. Two pieces landed on
+service's bearer route and drained by the worker (step 4); *request changes*
+is served by its own bearer route and drained by the worker, which reruns the
+cycle from the arquitecto on the task's branch (step 6, ADR 272, T-128), but
+the console has no button for it yet. Two pieces landed on
 the CLI side through `docs/plans/autonomy.md`, and they narrow *Decisions*, 4 and 6 as the notes
 there say:
 
@@ -70,6 +72,14 @@ becomes a person's decision, taken over a diff, in the console.
   the line comments `comments.jsonl` already holds; a line number pins a
   new one at the tip. The verdict is the `merge-task` CLI line it prints,
   not a button.
+- **A request for changes reruns the cycle.** Built (ADR 272, T-128):
+  `POST /api/tasks/<id>/request-changes`, on an `awaiting_review` task, writes
+  the `request_changes` verdict line and queues a `request_changes` action.
+  The worker moves the task back to `pending` and runs the cycle from the
+  arquitecto on its existing branch, unauthorized, with the person's review
+  comments in the arquitecto's prompt, so the task ends in `awaiting_review`
+  again at a new tip. It spends quota (C-12) and holds the project as a
+  start does.
 - **The api writes nothing.** Every route in `observability/api/app.py` is a
   `GET` and every mount is `:ro`. Writes go through the board service of
   `docs/plans/board-service.md`, never the api.
@@ -317,6 +327,17 @@ After `board-service.md`'s steps, each a single surface:
    never forced. A push that does not land is logged and noted in the
    handoff under `## Task-branch push`; the phase carries on.
 6. The *request changes* verdict: the cycle reopened at the arquitecto.
+   **Built 2026-10-21** (ADR 272, T-128): a bearer route `POST
+   /api/tasks/<id>/request-changes`, approve's with the kind swapped, takes
+   it on an `awaiting_review` task only (a `conflict` waits on *resolve
+   conflict*), writes the verdict line and queues a `request_changes` action;
+   it starts nothing, and `/verdict` refuses it. One approve or request for
+   changes per task is queued at a time. The worker, holding the project and
+   an account, moves the task to `pending` and runs the cycle unauthorized
+   from the arquitecto on the task's branch, with the person's comments on
+   the reviewed tip in the arquitecto's prompt below the Goal and Done when;
+   the task ends in `awaiting_review` at a new tip, so an earlier approval
+   does not carry over. No new CLI verb. The console's button is step 7's.
 7. The screen, with the diff library. A front task, behind its own ask for a
    build and for the package. **Partly built 2026-10-20** (ADR 219): the
    screen reads and draws, with a hand-written diff view instead of a
@@ -326,7 +347,7 @@ After `board-service.md`'s steps, each a single surface:
    ADR 270, T-125-S3): in the verdict form, at the tip on screen, off on
    *Conflict* and merged tasks, with the dispatcher's outcome comment listed.
    Still open: the library, the handoffs' summary beside the diff, and the
-   *request changes* button (it waits for step 6); the *comment* verdict's
+   *request changes* button (step 6's route is built, ADR 272); the *comment* verdict's
    form is in (step 3).
 8. The *Conflict* state: the base merged into each branch at review and after
    every merge, and the test gate run on it. No model.
@@ -341,7 +362,9 @@ Steps 4, 6 and 9 start runs from the console under C-12.
   candidates above.
 - **Does a request for changes re-run every role?** *Decisions* 5 re-runs all
   four. A one-line wording fix might skip the arquitecto; whether the person
-  may choose that on the verdict is left to step 6.
+  may choose that on the verdict is left to step 6. *Answered* by step 6 (ADR
+  272): every role reruns from the arquitecto, and the verdict offers no
+  choice. A lighter path for a wording fix would be its own ADR.
 - **The integrador's model.** A cheaper model for textual conflicts, or the
   implementador's; set by its profile when step 9 is built, and measured
   against the first conflicts it resolves.

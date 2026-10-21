@@ -211,6 +211,12 @@ def _validate_approve(record: dict) -> list[str]:
     return problems
 
 
+def _validate_request_changes(record: dict) -> list[str]:
+    """A request for changes names the task and the commit the person reviewed
+    (ADR 272), as an approve does. Its comments are on the task, not here."""
+    return _validate_approve(record)
+
+
 def _validate_turn(record: dict) -> list[str]:
     problems = []
     if record.get("task_id") is not None:
@@ -306,11 +312,22 @@ KINDS: dict[str, Kind] = {
             "interrupted during the approve; read the task's comments and the "
             "base before approving again",
         ),
+        # A request for changes reruns the task's cycle from the arquitecto on
+        # its branch (ADR 272). It holds the project and spends quota as a
+        # start does, and as a start it is requeued only if it had not begun.
+        Kind(
+            "request_changes", _validate_request_changes,
+            lambda r: f"project:{r['project']}", True, "requeue_unless_started",
+            "interrupted after it started",
+        ),
     )
 }
 
 #: Kinds a second pending or claimed action for the same task is refused.
-_ONE_PER_TASK = ("start", "command_verdict", "approve")
+_ONE_PER_TASK = ("start", "command_verdict", "approve", "request_changes")
+#: The verdicts that end a review: one of them at a time per task (ADR 272), so
+#: an approve and a request for changes never race on the same branch.
+_ONE_REVIEW_PER_TASK = ("approve", "request_changes")
 #: Kinds a second pending or claimed action for the same project is refused.
 _ONE_PER_PROJECT = ("clone", "init", "keygen", "check")
 
@@ -549,8 +566,9 @@ def _new_record(kind, project, task_id, params, actor, note) -> dict:
 
 
 def _refuse_locked(root: Path, record: dict, ready) -> None:
-    """The checks made under `write.lock`: one start (verdict, approve) per task,
-    one setup action of each kind per project, and Ready."""
+    """The checks made under `write.lock`: one start (verdict, approve, request
+    for changes) per task, one approve or request for changes per task, one
+    setup action of each kind per project, and Ready."""
     kind, project, task_id = record["kind"], record["project"], record["task_id"]
     if kind in _ONE_PER_TASK:
         held, _ = _scan(root, (PENDING, CLAIMED))
@@ -561,6 +579,20 @@ def _refuse_locked(root: Path, record: dict, ready) -> None:
             for e in held
         ):
             raise ActionRefused(409, f"a {kind} for task {task_id} is already queued")
+    if kind in _ONE_REVIEW_PER_TASK:
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        other = next(
+            (
+                e.record["kind"] for e in held
+                if e.record.get("kind") in _ONE_REVIEW_PER_TASK
+                and e.record.get("kind") != kind
+                and e.record.get("project") == project
+                and e.record.get("task_id") == task_id
+            ),
+            None,
+        )
+        if other is not None:
+            raise ActionRefused(409, f"a {other} for task {task_id} is already queued")
     if kind in _ONE_PER_PROJECT:
         held, _ = _scan(root, (PENDING, CLAIMED))
         if any(

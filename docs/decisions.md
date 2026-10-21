@@ -13883,3 +13883,90 @@ branch, and step 5 left open where the push sits and what a refused one does.
   work, and the phase's commit is already safe locally.
 - One shared loader for `auto_approve` and `push_task_branch`: the same
   twelve lines twice, kept apart so each key's message names itself.
+## ADR 272 — *Request changes*: the route records the verdict and queues `request_changes`, and the worker reruns the cycle from the arquitecto on the task's branch
+
+**Status:** accepted (2026-10-21), T-128. Builds `docs/plans/review.md` step 6
+and *Decisions* 5, mirroring approve's route (ADR 258, 1, ADR 267) and
+handler shape (ADR 264). C-12: a request for changes spends quota.
+
+**Context.** *Decisions* 5 says a request for changes reopens the cycle at
+the arquitecto with the person's comments, Goal and Done when; the
+implementador, revisor and auditor rerun on the same branch, and the task
+returns to `awaiting_review` with a new commit. `record_verdict` refused
+`request_changes` as not built (ADR 267, 4). Left open: which statuses take
+it, which comments travel, how the cycle is entered on a task that already
+finished one, what becomes of an approve queued beside it, and whether it
+holds an account.
+
+**Decision.**
+
+1. *The route.* `POST /api/tasks/<id>/request-changes`, the approve route's
+   code with the kind swapped (`_review_action(task_id, kind)` in
+   `board_service/app.py`): the same guards, the same body `{project, commit,
+   text}` with `text` required and non-blank, the same order (check the
+   action, write the verdict line, queue the action), the same answers (201
+   with both; 409 or 503 after the line carrying `verdict`). No new CLI verb.
+   `/verdict` and the `review_verdict` tool refuse `request_changes` naming
+   the new route, as they refuse approve. It starts nothing.
+2. *Statuses.* `record_verdict` takes `request_changes` on `awaiting_review`
+   only, not merged: on `conflict` it is refused naming *resolve conflict*,
+   and on a legacy `done` not merged it is refused (unlike approve, ADR 240):
+   that task came out of a cycle before review existed, and a fresh start is
+   what reruns it. Merged, running, pending and blocked tasks are refused
+   before anything is written.
+3. *The action.* `request_changes` in `dispatcher/actions.py`: params
+   `{commit}` validated as approve's are, serial key `project:<slug>`, spends
+   quota (it waits for an account, as a start does), recovery
+   `requeue_unless_started`. One per task, and one *review-ending* action per
+   task: a `request_changes` while an `approve` for the task is pending or
+   claimed is 409, and the other way round, so the two never race on one
+   branch.
+4. *The comments that travel.* `tasks.review_comments(hive, id, commit)`: the
+   last `request_changes` verdict on `commit`, preceded by the same author's
+   comments since the verdict before it that closed a review (an approve or
+   an earlier request for changes), diff comments with their file and line,
+   in the order written. `dispatcher.changes_requested_note(commit,
+   comments)` turns them into the arquitecto's note: a header naming the
+   commit, saying the work on the branch is kept and the Goal and Done when
+   above still hold, then one `- author[ on file:line]: text` line each.
+5. *The handler.* `worker._request_changes`, holding the project lock and an
+   account: it fails the action without touching anything when the task is
+   not `awaiting_review`, is merged, or has no request for changes on the
+   commit; then it sets `started_at`, moves the task to `pending`
+   (`tasks.reopen_for_changes`) and calls `run_task_cycle(..., authorized=False,
+   changes_requested=<the note>)`. The cycle reuses the task branch
+   (`_add_writer_worktree` checks an existing branch out, never `-b`), and
+   `_cycle_from_arquitecto` passes the note to the arquitecto's `run_phase`
+   alone; the later roles read its plan. Unauthorized, a finished cycle ends
+   in `awaiting_review` with a new tip. The result is `{commit, outcome,
+   blocked_reason}`; a cancel while it runs ends `cancelled` with
+   `last_phase`, a shutdown `interrupted`, as a start's do (`cancel` reaches
+   a running `request_changes` as it reaches a start).
+6. *An earlier approval does not carry over.* The task leaves
+   `awaiting_review` before the cycle, so an approve queued on the old tip
+   reads stale (ADR 264), and the person's next verdict is on the new tip:
+   approve and request changes both name the commit they were given.
+
+**Consequences.**
+- A request for changes costs a full cycle (arquitecto, rounds, auditor) on
+  a worker account, and waits behind other work on its project.
+- A crash before `started_at` requeues it; after, it stays interrupted and
+  the task is left wherever the cycle left it, for the person to look at.
+- The arquitecto may answer `blocked`, as on any cycle: the task then ends
+  blocked rather than in review.
+
+**Open.**
+- A cycle resumed after a mapping or a command request (ADR 119) rebuilds its
+  context without `changes_requested`, so a resume after the arquitecto ran
+  carries the plan but a resume that reruns the arquitecto loses the note.
+- The arquitecto could split the task; nothing here stops it, and the
+  subtasks would not inherit the note.
+- Round numbering and the mapping are the cycle's own: a rerun may map the
+  project again and count rounds from one.
+
+**Ruled out.**
+- Rerunning from the implementador with the comments: *Decisions* 5 puts the
+  re-plan at the arquitecto, which is where Goal and Done when are read.
+- Accepting it on `conflict`: the branch first has to merge with the base,
+  which *resolve conflict* owns.
+- No account, as approve: the rerun is phases, and phases spend quota (C-12).
