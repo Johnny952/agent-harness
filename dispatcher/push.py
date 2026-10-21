@@ -6,7 +6,9 @@ its own: every few seconds it reads the records `dispatcher/notifications.py`
 appended to `notifications.jsonl` past its cursor, and sends each one to every
 subscription, over Web Push signed with the VAPID key.
 
-Three files, all in the hive root beside `notifications.jsonl`:
+Four files, all in the hive root beside `notifications.jsonl`:
+
+- `push-settings.json`: which kinds are pushed and the quiet hours (ADR 237).
 
 - `push-subscriptions.json`: `{"subscriptions": [{endpoint, keys, at}]}`,
   replaced whole (a temporary file and `os.replace`) under an `flock`, 0600:
@@ -20,9 +22,11 @@ Three files, all in the hive root beside `notifications.jsonl`:
 The plan's rules that the server can keep are kept here (*Decisions* 6): each
 push has a tag per task, thread or account, so a newer one replaces the older
 on the device, and records of one kind within `GROUP_WINDOW_SECONDS` become
-one push, "3 tasks awaiting review", tagged by the kind. A kind off by default
-in `notifications.KINDS` is not pushed: the person's per-kind settings are
-step 5, and so are quiet hours. A push carries the record's title, its url,
+one push, "3 tasks awaiting review", tagged by the kind. A kind the
+settings turn off (by default, `notifications.KINDS`' table) is not pushed,
+and its cursor moves past it. During the quiet hours the notifier does not
+read, so the records wait in the file and go out, grouped, when they end
+(ADR 237). A push carries the record's title, its url,
 its kind and id, and the tag (*Decisions* 4); nothing else.
 
 The send is a seam: `Notifier(send=...)`. The real one, `webpush_send`,
@@ -44,10 +48,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
 import urllib.parse
+import zoneinfo
 from typing import Callable
 
 from dispatcher import context_transfer, notifications
@@ -57,6 +63,10 @@ logger = logging.getLogger(__name__)
 SUBSCRIPTIONS_FILE = "push-subscriptions.json"
 CURSOR_FILE = "push-cursor.json"
 LOCK_FILE = ".push-subscriptions.lock"
+SETTINGS_FILE = "push-settings.json"
+
+MAX_ZONE_CHARS = 64
+_HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 
 #: Where the VAPID private key is read from, inside the board service's
 #: container: a PEM EC P-256 key. On the host it is
@@ -113,6 +123,10 @@ class StoreFull(SubscriptionRefused):
     """A new subscription past `MAX_SUBSCRIPTIONS`."""
 
 
+class SettingsRefused(ValueError):
+    """A settings body that is not one; its message says why."""
+
+
 # -- the store ---------------------------------------------------------------
 
 
@@ -126,6 +140,10 @@ def subscriptions_path(hive_dir: str) -> str:
 
 def cursor_path(hive_dir: str) -> str:
     return os.path.join(_root(hive_dir), CURSOR_FILE)
+
+
+def settings_path(hive_dir: str) -> str:
+    return os.path.join(_root(hive_dir), SETTINGS_FILE)
 
 
 def _b64url_bytes(value: object, name: str) -> bytes:
@@ -262,6 +280,138 @@ def remove(hive_dir: str, endpoint: str) -> bool:
     return True
 
 
+# -- the settings ------------------------------------------------------------
+
+
+def _zone(name: str) -> dt.tzinfo:
+    """The zone `name`, or `SettingsRefused`. `UTC` needs no tz database."""
+    if name == "UTC":
+        return dt.timezone.utc
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        raise SettingsRefused(f"zone {name!r} is not a time zone this host knows") from None
+
+
+def default_settings() -> dict:
+    """Every kind at its table default, quiet hours off."""
+    return {"kinds": {kind: on for kind, (_, on) in notifications.KINDS.items()},
+            "quiet_hours": None}
+
+
+def _validate_quiet(value: object) -> dict | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"start", "end", "zone"}:
+        raise SettingsRefused("quiet_hours must be null or an object of start, end and zone")
+    for name in ("start", "end"):
+        text = value[name]
+        if not isinstance(text, str) or not _HHMM.fullmatch(text):
+            raise SettingsRefused(f"quiet_hours.{name} must be HH:MM, 00:00 to 23:59")
+    if value["start"] == value["end"]:
+        raise SettingsRefused("quiet_hours.start and end must differ")
+    zone = value["zone"]
+    if not isinstance(zone, str) or not zone or len(zone) > MAX_ZONE_CHARS:
+        raise SettingsRefused(f"quiet_hours.zone must be a time zone name of 1 to "
+                              f"{MAX_ZONE_CHARS} characters")
+    _zone(zone)
+    return {"start": value["start"], "end": value["end"], "zone": zone}
+
+
+def _stored(hive_dir: str) -> tuple[dict, list[str]]:
+    """The file's well-formed parts, `{"kinds": {known kind: bool}, "quiet_hours"}`, and problems."""
+    path = settings_path(hive_dir)
+    stored: dict = {"kinds": {}, "quiet_hours": None}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return stored, []
+    except (OSError, ValueError) as exc:
+        return stored, [f"push settings at {path} do not read: {exc}"]
+    if not isinstance(data, dict):
+        return stored, [f"push settings at {path} are not an object"]
+    problems = []
+    kinds = data.get("kinds", {})
+    if isinstance(kinds, dict):
+        for kind, value in kinds.items():
+            if kind not in notifications.KINDS:
+                continue
+            if isinstance(value, bool):
+                stored["kinds"][kind] = value
+            else:
+                problems.append(f"push settings: kind {kind!r} is not a boolean")
+    else:
+        problems.append("push settings: kinds is not an object")
+    try:
+        stored["quiet_hours"] = _validate_quiet(data.get("quiet_hours"))
+    except SettingsRefused as exc:
+        problems.append(f"push settings: quiet hours ignored: {exc}")
+    return stored, problems
+
+
+def read_settings(hive_dir: str) -> tuple[dict, list[str]]:
+    """The effective settings, and what was wrong with the file (empty when nothing)."""
+    stored, problems = _stored(hive_dir)
+    settings = default_settings()
+    settings["kinds"].update(stored["kinds"])
+    settings["quiet_hours"] = stored["quiet_hours"]
+    return settings, problems
+
+
+def update_settings(hive_dir: str, body: object) -> dict:
+    """Merge `body` into the stored settings; the effective settings. `SettingsRefused`.
+
+    The kinds it names are set and the others stay as stored; `quiet_hours`,
+    when present, replaces the window (`null` turns it off).
+    """
+    if not isinstance(body, dict):
+        raise SettingsRefused("the body is not a JSON object")
+    unknown = sorted(set(body) - {"kinds", "quiet_hours"})
+    if unknown:
+        raise SettingsRefused(f"unknown field {unknown[0]!r}")
+    if not body:
+        raise SettingsRefused("the body names neither kinds nor quiet_hours")
+    kinds = body.get("kinds")
+    if "kinds" in body:
+        if not isinstance(kinds, dict):
+            raise SettingsRefused("kinds must be an object of kind to true or false")
+        for kind, value in kinds.items():
+            if kind not in notifications.KINDS:
+                raise SettingsRefused(f"unknown kind {kind!r}")
+            if not isinstance(value, bool):
+                raise SettingsRefused(f"kinds.{kind} must be true or false")
+    quiet = _validate_quiet(body["quiet_hours"]) if "quiet_hours" in body else None
+    with _lock(hive_dir):
+        stored, _ = _stored(hive_dir)
+        if "kinds" in body:
+            stored["kinds"].update(kinds)
+        if "quiet_hours" in body:
+            stored["quiet_hours"] = quiet
+        _write_json(settings_path(hive_dir), stored)
+    return read_settings(hive_dir)[0]
+
+
+def in_quiet_hours(quiet: dict | None, at: dt.datetime) -> bool:
+    """Whether the aware instant `at` falls in `quiet`: local, start in, end out.
+
+    A start after its end crosses midnight. A zone that no longer loads is
+    not quiet.
+    """
+    if not quiet:
+        return False
+    try:
+        local = at.astimezone(_zone(quiet["zone"]))
+    except SettingsRefused:
+        return False
+    now = local.hour * 60 + local.minute
+    start, end = (int(h) * 60 + int(m) for h, m in
+                  (quiet[k].split(":") for k in ("start", "end")))
+    if start < end:
+        return start <= now < end
+    return now >= start or now < end
+
+
 # -- the key -----------------------------------------------------------------
 
 
@@ -350,6 +500,7 @@ class Notifier:
         send: Send | None = None,
         clock: Callable[[], float] = time.monotonic,
         group_window: float = GROUP_WINDOW_SECONDS,
+        wall_clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc),
     ) -> None:
         self.hive_dir = hive_dir
         self.key_path = key_path
@@ -357,6 +508,9 @@ class Notifier:
         self.send = send or webpush_send
         self.clock = clock
         self.group_window = group_window
+        #: Aware UTC; the quiet hours are read against it in their own zone.
+        self.wall_clock = wall_clock
+        self._settings_problems: list[str] = []
         #: Per kind, when each record pushed within the window was pushed.
         self._recent: dict[str, list[float]] = {}
         self._off_logged = False
@@ -407,12 +561,19 @@ class Notifier:
     def _tick(self) -> int:
         if not self.enabled():
             return 0
+        settings, problems = read_settings(self.hive_dir)
+        if problems != self._settings_problems:
+            for problem in problems:
+                logger.warning("%s", problem)
+            self._settings_problems = problems
+        if in_quiet_hours(settings["quiet_hours"], self.wall_clock()):
+            return 0  # The cursor stays: the records wait in the file (ADR 237).
         records = self._new_records()
         if not records:
             return 0
         subscriptions = read_subscriptions(self.hive_dir)
         sent = 0
-        for push in self._pushes(records):
+        for push in self._pushes(records, settings["kinds"]):
             if not subscriptions:
                 break
             sent += self._deliver(push, subscriptions)
@@ -459,13 +620,17 @@ class Notifier:
         self._write_cursor(offset + end + 1)
         return records
 
-    def _pushes(self, records: list[dict]) -> list[dict]:
-        """The pushes `records` make: one each, or one per kind when grouped."""
+    def _pushes(self, records: list[dict], kinds: dict[str, bool]) -> list[dict]:
+        """The pushes `records` make: one each, or one per kind when grouped.
+
+        `kinds` is the settings' on or off per kind; a record of one that is
+        off makes no push.
+        """
         now = self.clock()
         by_kind: dict[str, list[dict]] = {}
         for record in records:
-            if not notifications.KINDS[record["kind"]][1]:
-                continue  # Off by default; the per-kind settings are step 5.
+            if not kinds.get(record["kind"], False):
+                continue
             by_kind.setdefault(record["kind"], []).append(record)
         pushes = []
         for kind, group in by_kind.items():

@@ -9,8 +9,6 @@ import json
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
 
 from board_service.app import create_app
 from dispatcher import push
@@ -31,8 +29,19 @@ SUB = {
 
 @pytest.fixture
 def key_path(tmp_path: Path) -> Path:
-    key = ec.generate_private_key(ec.SECP256R1())
+    """A VAPID key made here; a placeholder file where `cryptography` is missing.
+
+    Only the tests that read the key's content need the real one, and they
+    `importorskip` it themselves: the rest of the file runs without it.
+    """
     path = tmp_path / "vapid-private.pem"
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        path.write_text("placeholder\n")
+        return path
+    key = ec.generate_private_key(ec.SECP256R1())
     path.write_bytes(key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
@@ -134,7 +143,44 @@ def test_a_delete_with_junk_is_refused(client, body):
     assert unsubscribe(client, body).status_code == 400
 
 
-CALLS = [subscribe, unsubscribe]
+def put_settings(client, body=None, headers=AUTH, **kw):
+    return client.put(
+        "/api/push/settings", json={"kinds": {"phase_failed": True}} if body is None else body,
+        headers=headers, **kw,
+    )
+
+
+def test_settings_are_served_open_as_the_defaults(client):
+    res = client.get("/api/push/settings")
+    assert res.status_code == 200
+    assert res.get_json() == push.default_settings()
+    assert client.get("/api/push/settings?x=1").status_code == 400
+
+
+def test_a_put_stores_and_a_get_returns_the_change(client, hive):  # noqa: F811
+    body = {"kinds": {"phase_failed": True, "merged": False},
+            "quiet_hours": {"start": "22:00", "end": "07:00", "zone": "UTC"}}
+    res = put_settings(client, body)
+    assert res.status_code == 200
+    got = client.get("/api/push/settings").get_json()
+    assert res.get_json() == got
+    assert got["kinds"]["phase_failed"] is True and got["kinds"]["merged"] is False
+    assert got["quiet_hours"] == body["quiet_hours"]
+    assert push.read_settings(str(hive))[0] == got
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"kinds": {"nope": True}}, {"kinds": {"merged": "yes"}},
+    {"quiet_hours": {"start": "25:00", "end": "07:00", "zone": "UTC"}},
+])
+def test_a_put_with_junk_is_refused_and_nothing_is_stored(client, hive, body):  # noqa: F811
+    res = put_settings(client, body)
+    assert res.status_code == 400
+    assert "error" in res.get_json()
+    assert not Path(push.settings_path(str(hive))).exists()
+
+
+CALLS = [subscribe, unsubscribe, put_settings]
 
 
 @pytest.mark.parametrize("call", CALLS)
@@ -161,14 +207,20 @@ def test_the_routes_are_off_without_a_token(cfg, call, monkeypatch):  # noqa: F8
 @pytest.mark.parametrize("call", CALLS)
 def test_a_query_or_a_body_that_is_not_an_object_is_refused(client, call):
     assert call(client, query_string={"x": "1"}).status_code == 400
+    path, method = {
+        subscribe: ("/api/push/subscriptions", "POST"),
+        unsubscribe: ("/api/push/subscriptions", "DELETE"),
+        put_settings: ("/api/push/settings", "PUT"),
+    }[call]
     res = client.open(
-        "/api/push/subscriptions", method="POST" if call is subscribe else "DELETE",
+        path, method=method,
         data="[1]", content_type="application/json", headers=AUTH,
     )
     assert res.status_code == 400
 
 
 def test_the_public_key_is_served_open(client, key_path):
+    pytest.importorskip("cryptography.hazmat.primitives.serialization")
     res = client.get("/api/push/key")
     assert res.status_code == 200
     key = res.get_json()["publicKey"]
@@ -179,6 +231,7 @@ def test_the_public_key_is_served_open(client, key_path):
 
 
 def test_no_key_is_a_404(cfg, tmp_path, monkeypatch):  # noqa: F811
+    pytest.importorskip("cryptography.hazmat.primitives.serialization")
     cfg.write_text(cfg.read_text() + f"\npush_vapid_key_path: {tmp_path / 'none.pem'}\n")
     res = create_app(str(cfg)).test_client().get("/api/push/key")
     assert res.status_code == 404
@@ -186,6 +239,7 @@ def test_no_key_is_a_404(cfg, tmp_path, monkeypatch):  # noqa: F811
 
 
 def test_a_key_that_is_not_one_is_a_404(cfg, tmp_path):  # noqa: F811
+    pytest.importorskip("cryptography.hazmat.primitives.serialization")
     bad = tmp_path / "bad.pem"
     bad.write_text("not a key\n")
     cfg.write_text(cfg.read_text() + f"\npush_vapid_key_path: {bad}\n")

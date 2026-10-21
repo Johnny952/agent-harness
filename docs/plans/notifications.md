@@ -12,7 +12,7 @@ record and its writers are built (ADR 221), and so are the read route and the
 polled inbox, with read state per browser (ADR 225), and the notifier with its
 subscription store on the server (ADR 229), and the service worker, the
 installable console and its push control (ADR 232); the per-kind settings
-are not.
+and quiet hours are built on the server (ADR 237), the console's screen is not.
 It records a gap the user named that day: push notifications for an awaited
 approval, a finished development and the like. It fills a weakness the main
 thread's analysis of the same day found: in a near-automatic workflow, the
@@ -145,7 +145,7 @@ Each step is a single surface:
    kind's records within five minutes, and drops a subscription its push
    service answers 404 or 410. The key is
    `push_vapid_key_path` (default `/run/secrets/vapid-private.pem`); without
-   it push is off and the inbox is unchanged. Quiet hours wait for step 5.
+   it push is off and the inbox is unchanged. Quiet hours are step 5.
 4. The service worker and the installable console. A front task, behind its
    own ask for a build. **Built 2026-10-20** (ADR 232): the console forwards
    the three push routes to the board service, the two writes with the
@@ -156,7 +156,12 @@ Each step is a single surface:
    the browser cannot, has blocked it, or the server has push off. A
    subscription the browser refuses, as in a private window, is said in
    plain words (ADR 233).
-5. The per-kind settings and quiet hours.
+5. The per-kind settings and quiet hours. **Server half built 2026-10-21**
+   (ADR 237): `push-settings.json` beside the subscriptions, `GET` (open) and
+   `PUT` (bearer) `/api/push/settings`, validated. The notifier skips a kind
+   that is off, moving its cursor past it, and holds its cursor during the
+   quiet hours so the records go out, grouped, when they end. The console's
+   settings screen and the forwarding of the two routes are still open.
 
 ## Open questions
 
