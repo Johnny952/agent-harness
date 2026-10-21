@@ -136,6 +136,9 @@ ACCEPTED_STATUS = "pending"
 #: (`dispatcher.CONFLICT_STATUS`, which is this one): here because `handoff`
 #: notifies the move into it (ADR 221).
 CONFLICT_STATUS = "conflict"
+#: The status a cycle that passed the auditor and was not merged ends in: the
+#: task waits for a person's review (`docs/plans/review.md` step 1, ADR 240).
+AWAITING_REVIEW_STATUS = "awaiting_review"
 #: The priority buckets, highest first; `rank` is the order inside one (ADR 130).
 PRIORITIES = ("high", "normal", "low")
 #: The bucket of a task that names none: every task filed before the field,
@@ -179,9 +182,9 @@ COMMENT_KEYS = ("at", "author", "text")
 #: refuses the other two rather than store a verdict nothing acts on.
 VERDICT_KINDS = ("comment", "approve", "request_changes")
 VERDICT_KINDS_BUILT = ("comment",)
-#: Where a review happens: a finished task whose work is not on main, or one
-#: whose merge stopped on a conflict, the Approvals screen's two lists.
-REVIEW_STATUSES = ("done", "conflict")
+#: Where a review happens: a task waiting for review, one whose merge stopped
+#: on a conflict, or an older `done` one not on main (ADR 240).
+REVIEW_STATUSES = (AWAITING_REVIEW_STATUS, "done", CONFLICT_STATUS)
 
 _LEGACY_KEY = "description"
 #: A comment's `commit`: an abbreviated or full git object name.
@@ -1192,18 +1195,42 @@ def mark_blocked(
 
 
 @_locked
+def mark_awaiting_review(hive_dir: str, task_id: str) -> bool:
+    """Move a `done` task not on main to `awaiting_review`, and say so.
+
+    The cycle's end calls it when the task passed the auditor and nothing
+    merged it (ADR 240). Returns whether it moved: any other status, and a
+    `done` task already merged, is left alone and not notified. A task with
+    no file raises rather than getting one.
+    """
+    path = context_transfer.task_file_path(hive_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    if task.status != "done" or task.merged:
+        return False
+    task.status = AWAITING_REVIEW_STATUS
+    _write_task_file(path, task)
+    notifications.notify_task(
+        hive_dir, "awaiting_review", task_id, "is waiting for your review", task.title
+    )
+    return True
+
+
+@_locked
 def mark_merged(hive_dir: str, task_id: str, target: str) -> None:
     """Record on the task that its branch was merged into `target`.
 
     `docs/plans/task-split.md` section 3, "Merged is recorded on the task":
     this block, not `status: done`, is what a dependency waits for. Status,
-    lock and body are left as they were; a second call replaces the block. A
-    task with no file raises rather than getting one.
+    lock and body are left as they were, except that `awaiting_review` becomes
+    `done` (ADR 240); a second call replaces the block. A task with no file
+    raises rather than getting one.
     """
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
     first = not task.merged
     task.merged = {"into": target, "at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    if task.status == AWAITING_REVIEW_STATUS:
+        task.status = "done"
     _write_task_file(path, task)
     # The first record only: `merge-task` run again repairs or replaces the
     # block, and the merge it describes was told already (ADR 221).
@@ -2792,8 +2819,8 @@ def record_verdict(
 
     Only `kind` "comment" is taken (`VERDICT_KINDS_BUILT`): it starts nothing
     (*Decisions* 1), so recording it is the whole of it, and no dispatcher
-    reads it. The task must be under review, `done` and not merged or
-    `conflict`: a verdict on a task not finished, or already merged, reviewed
+    reads it. The task must be under review, `awaiting_review`, `conflict` or
+    `done` and not merged: a verdict on a task not finished, or already merged, reviewed
     nothing. Returns `add_comment`'s `{"id", "comment", "comment_count"}`.
     """
     task_id = _check_id(task_id)
@@ -2816,7 +2843,9 @@ def record_verdict(
     }
 
     def under_review(task: context_transfer.TaskFile) -> None:
-        if task.status in REVIEW_STATUSES and not (task.status == "done" and task.merged):
+        if task.status in REVIEW_STATUSES and not (
+            task.status in ("done", AWAITING_REVIEW_STATUS) and task.merged
+        ):
             return
         state = "merged" if task.merged else task.status
         raise BoardWriteError(

@@ -115,6 +115,8 @@ cite the entry and move it up, or drop the row.
   `file_split` itself still does not look, so a caller that reached it another
   way would not be held to this, and an operator writing an epic by hand is
   not either: `tasks.epic_problems` asks only that the parent be `epic`.
+  Since ADR 240 an `awaiting_review` task, a finished one not yet merged, is
+  refused as a `done` one is (T-118-S1).
 
 ## Unconfirmed — inferred from the code by T-009
 

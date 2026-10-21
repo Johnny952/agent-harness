@@ -589,7 +589,7 @@ def test_concurrent_comments_never_interleave(tmp_path: Path) -> None:
 # -- record_verdict (review.md step 3) -----------------------------------------
 
 
-@pytest.mark.parametrize("status", ["done", "conflict"])
+@pytest.mark.parametrize("status", ["awaiting_review", "done", "conflict"])
 def test_a_comment_verdict_is_a_comment_line_with_its_kind_and_commit(tmp_path: Path, status) -> None:
     hive = _hive(tmp_path)
     _task(hive, "T-001", status=status)
@@ -611,6 +611,7 @@ def test_a_comment_verdict_is_a_comment_line_with_its_kind_and_commit(tmp_path: 
         ("pending", None, "it is pending, not under review"),
         ("in_progress", None, "it is in_progress, not under review"),
         ("merged", None, "it is merged, not under review"),
+        ("awaiting_review", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged, not under review"),
         ("done", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged, not under review"),
     ],
 )

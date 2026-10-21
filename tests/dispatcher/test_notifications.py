@@ -214,28 +214,62 @@ def _owned_by_nobody(cfg, status: str, merged: bool = False) -> None:
         tasks.mark_merged(cfg.hive_tasks_dir, "task-1", "main")
 
 
+def _status(cfg) -> str:
+    return read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).status
+
+
 def test_a_cycle_left_done_and_unmerged_waits_for_review(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path)
     _owned_by_nobody(cfg, "done")
 
-    dispatcher_mod._notify_awaiting_review(cfg, "task-1")
+    assert tasks.mark_awaiting_review(cfg.hive_tasks_dir, "task-1") is True
 
+    assert _status(cfg) == "awaiting_review"
     assert _kinds(cfg.hive_tasks_dir) == [("awaiting_review", "task-1")]
 
 
-@pytest.mark.parametrize("status, merged", [("done", True), ("pending", False), ("blocked", False)])
+def test_the_cycle_end_moves_a_done_task_to_awaiting_review(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path)
+    _owned_by_nobody(cfg, "done")
+
+    dispatcher_mod._await_review(cfg, "task-1")
+
+    assert _status(cfg) == "awaiting_review"
+    assert _kinds(cfg.hive_tasks_dir) == [("awaiting_review", "task-1")]
+
+
+@pytest.mark.parametrize(
+    "status, merged",
+    [("done", True), ("pending", False), ("blocked", False), ("conflict", False),
+     ("awaiting_review", False)],
+)
 def test_a_cycle_that_merged_or_did_not_finish_is_not_waiting(tmp_path: Path, status, merged) -> None:
     cfg = _make_config(tmp_path)
     _owned_by_nobody(cfg, status, merged)
 
-    dispatcher_mod._notify_awaiting_review(cfg, "task-1")
+    assert tasks.mark_awaiting_review(cfg.hive_tasks_dir, "task-1") is False
 
+    assert _status(cfg) == status
     assert [k for k, _ in _kinds(cfg.hive_tasks_dir)] == (["merged"] if merged else [])
+
+
+def test_a_merge_leaves_an_awaiting_review_task_done_and_merged(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path)
+    _owned_by_nobody(cfg, "awaiting_review")
+
+    tasks.mark_merged(cfg.hive_tasks_dir, "task-1", "main")
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.status == "done"
+    assert task.merged["into"] == "main"
+    assert _kinds(cfg.hive_tasks_dir) == [("merged", "task-1")]
 
 
 def test_no_task_file_is_no_review_and_no_raise(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path)
-    dispatcher_mod._notify_awaiting_review(cfg, "task-404")
+    with pytest.raises(FileNotFoundError):
+        tasks.mark_awaiting_review(cfg.hive_tasks_dir, "task-404")
+    dispatcher_mod._await_review(cfg, "task-404")
     assert _records(cfg.hive_tasks_dir) == []
 
 

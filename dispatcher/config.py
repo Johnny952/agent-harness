@@ -248,6 +248,8 @@ class Config:
     escalate_effort_after_round: int
     escalated_effort: str
     phase_timeout_seconds: int
+    #: Deprecated alias (ADR 240): it merges before the cycle's end moves an
+    #: unmerged task to `awaiting_review`. Kept so existing configs load.
     merge_on_done: bool
     mapping_enabled: bool
     mapping_model: str

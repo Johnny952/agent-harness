@@ -207,8 +207,9 @@ def test_no_role_is_listed_the_verdict_or_may_call_it(client, hive, role):
     assert not (hive.parent / "board" / "T-001" / "comments.jsonl").exists()
 
 
-def test_http_a_comment_verdict_is_201_and_a_comment(client, hive):
-    task(hive, "T-001", status="done")
+@pytest.mark.parametrize("status", ["awaiting_review", "done"])
+def test_http_a_comment_verdict_is_201_and_a_comment(client, hive, status):
+    task(hive, "T-001", status=status)
 
     res = client.post("/api/tasks/T-001/verdict", json={"kind": "comment", "text": "Fine.", "commit": COMMIT})
 
