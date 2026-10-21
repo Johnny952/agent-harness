@@ -15,7 +15,9 @@ change its settings (ADR 203), through `dispatcher/projects.py`'s one writer.
 Four more queue a new project's `clone`, `init`, `keygen` and `check` for the
 worker (ADR 212); none carries a remote, the worker reads it from the record.
 Two more behind the bearer store and drop a browser's Web Push subscription,
-and an open `GET /api/push/key` serves the VAPID public key; `serve` also runs
+and an open `GET /api/push/key` serves the VAPID public key; an open `GET` and
+a bearer-guarded `PUT /api/push/settings` read and write which kinds are pushed
+and the quiet hours (ADR 237); `serve` also runs
 `dispatcher/push.py`'s notifier on a thread, which pushes each new line of
 `notifications.jsonl` (ADR 229).
 
@@ -1134,6 +1136,29 @@ def create_app(config_path: str) -> Flask:
         except (OSError, ValueError):
             return jsonify({"error": "push is off: there is no VAPID key"}), 404
         return jsonify({"publicKey": key})
+
+    # The settings (ADR 237): read open, written behind the bearer.
+
+    @app.get("/api/push/settings")
+    def http_push_settings():
+        if request.args:
+            return jsonify(
+                {"error": f"unknown query parameter {sorted(request.args)[0]!r}"}
+            ), 400
+        settings, problems = push.read_settings(hive_dir)
+        for problem in problems:
+            app.logger.warning("%s", problem)
+        return jsonify(settings)
+
+    @app.put("/api/push/settings")
+    def http_push_settings_put():
+        body, refused = _bearer_guards(actions_token, "push")
+        if refused is not None:
+            return refused
+        try:
+            return jsonify(push.update_settings(hive_dir, body))
+        except push.SettingsRefused as exc:
+            return jsonify({"error": str(exc)}), 400
 
     # Built here, started by `serve` alone: a test's app runs no thread.
     app.config["PUSH_NOTIFIER"] = push.Notifier(

@@ -3,8 +3,10 @@
 The send is a stub: nothing here imports pywebpush or reaches the network.
 """
 import base64
+import datetime as dt
 import json
 import logging
+import zoneinfo
 from pathlib import Path
 
 import pytest
@@ -296,3 +298,146 @@ def test_webpush_send_maps_a_push_service_answer(monkeypatch):
     assert seen["vapid_claims"] == {"sub": "mailto:x@y"}
     assert seen["vapid_private_key"] == "/k"
     assert seen["subscription_info"]["endpoint"] == sub("a")["endpoint"]
+
+
+# -- the settings (ADR 237) ---------------------------------------------------
+
+QUIET = {"start": "22:00", "end": "07:00", "zone": "UTC"}
+
+
+class Wall:
+    def __init__(self, hour: int, minute: int = 0) -> None:
+        self.at = dt.datetime(2026, 10, 21, hour, minute, tzinfo=dt.timezone.utc)
+
+    def __call__(self) -> dt.datetime:
+        return self.at
+
+
+def write_settings(hive, text: str) -> None:
+    Path(push.settings_path(hive)).write_text(text)
+
+
+def test_no_file_is_the_defaults(hive):
+    settings, problems = push.read_settings(hive)
+    assert problems == []
+    assert settings == {"kinds": {k: on for k, (_, on) in notifications.KINDS.items()},
+                        "quiet_hours": None}
+    assert settings["kinds"]["awaiting_review"] is True
+    assert settings["kinds"]["phase_failed"] is False
+
+
+def test_an_unreadable_file_is_the_defaults_and_a_problem(hive):
+    write_settings(hive, "{not json")
+    settings, problems = push.read_settings(hive)
+    assert settings == push.default_settings()
+    assert len(problems) == 1
+
+
+def test_bad_parts_take_their_default_unknown_kinds_are_ignored(hive):
+    write_settings(hive, json.dumps({
+        "kinds": {"awaiting_review": "yes", "merged": False, "gone_kind": True},
+        "quiet_hours": {"start": "7:00", "end": "08:00", "zone": "UTC"},
+    }))
+    settings, problems = push.read_settings(hive)
+    assert settings["kinds"]["awaiting_review"] is True  # default
+    assert settings["kinds"]["merged"] is False
+    assert "gone_kind" not in settings["kinds"]
+    assert settings["quiet_hours"] is None
+    assert len(problems) == 2  # the kind and the window; the unknown kind is quiet
+
+
+def test_a_kind_the_file_does_not_name_takes_its_default(hive):
+    write_settings(hive, json.dumps({"kinds": {"phase_failed": True}}))
+    settings, problems = push.read_settings(hive)
+    assert problems == []
+    assert settings["kinds"]["phase_failed"] is True
+    assert settings["kinds"]["conflict"] == notifications.KINDS["conflict"][1]
+
+
+def test_an_update_merges_and_is_private(hive):
+    push.update_settings(hive, {"kinds": {"phase_failed": True}})
+    out = push.update_settings(hive, {"kinds": {"merged": False}, "quiet_hours": QUIET})
+    assert out["kinds"]["phase_failed"] is True and out["kinds"]["merged"] is False
+    assert out["quiet_hours"] == QUIET
+    assert push.update_settings(hive, {"quiet_hours": None})["quiet_hours"] is None
+    assert push.read_settings(hive)[0]["kinds"]["phase_failed"] is True
+    assert Path(push.settings_path(hive)).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("body", [
+    [], {}, {"x": 1}, {"kinds": []}, {"kinds": {"nope": True}},
+    {"kinds": {"merged": "yes"}}, {"kinds": {"merged": 1}},
+    {"quiet_hours": "22:00"},
+    {"quiet_hours": {**QUIET, "start": "7:00"}},
+    {"quiet_hours": {**QUIET, "start": "24:00"}},
+    {"quiet_hours": {**QUIET, "end": "07:60"}},
+    {"quiet_hours": {**QUIET, "end": "22:00"}},
+    {"quiet_hours": {**QUIET, "zone": "Mars/Base"}},
+    {"quiet_hours": {**QUIET, "zone": "A" * 65}},
+    {"quiet_hours": {**QUIET, "zone": ""}},
+    {"quiet_hours": {**QUIET, "x": 1}},
+    {"quiet_hours": {"start": "22:00", "end": "07:00"}},
+])
+def test_a_bad_body_is_refused_and_nothing_is_stored(hive, body):
+    with pytest.raises(push.SettingsRefused):
+        push.update_settings(hive, body)
+    assert not Path(push.settings_path(hive)).exists()
+
+
+@pytest.mark.parametrize("hour, minute, quiet", [
+    (21, 59, False), (22, 0, True), (3, 0, True), (6, 59, True), (7, 0, False),
+])
+def test_a_window_crossing_midnight(hour, minute, quiet):
+    assert push.in_quiet_hours(QUIET, Wall(hour, minute)()) is quiet
+
+
+def test_a_same_day_window_and_no_window():
+    window = {"start": "13:00", "end": "14:00", "zone": "UTC"}
+    assert push.in_quiet_hours(window, Wall(13, 0)()) is True
+    assert push.in_quiet_hours(window, Wall(14, 0)()) is False
+    assert push.in_quiet_hours(None, Wall(13, 0)()) is False
+
+
+def test_a_window_is_read_in_its_zone():
+    try:
+        zoneinfo.ZoneInfo("America/New_York")
+    except (zoneinfo.ZoneInfoNotFoundError, OSError):
+        pytest.skip("no tz database here")
+    window = {"start": "22:00", "end": "07:00", "zone": "America/New_York"}
+    assert push.in_quiet_hours(window, Wall(3, 0)()) is True   # 23:00 the evening before
+    assert push.in_quiet_hours(window, Wall(15, 0)()) is False  # 11:00
+
+
+def test_a_kind_turned_on_is_pushed_and_one_turned_off_is_skipped(hive, key):
+    send = Sender()
+    n = started(hive, key, send)
+    push.update_settings(hive, {"kinds": {"phase_failed": True, "awaiting_review": False}})
+    note(hive, "phase_failed")
+    note(hive, "awaiting_review")
+    assert n.tick() == 1
+    assert [c[1]["kind"] for c in send.calls] == ["phase_failed"]
+    # The cursor moved past the skipped one: turning the kind back on pushes nothing.
+    push.update_settings(hive, {"kinds": {"awaiting_review": True}})
+    assert n.tick() == 0
+
+
+def test_quiet_hours_hold_the_pushes_and_send_them_when_they_end(hive, key):
+    wall = Wall(23)
+    send = Sender()
+    n = started(hive, key, send, wall_clock=wall)
+    push.add(hive, sub("b"))
+    push.update_settings(hive, {"quiet_hours": QUIET})
+    note(hive, task="t-1")
+    note(hive, task="t-2")
+    note(hive, "merged", task="t-3")
+    inbox = Path(notifications.notifications_path(hive)).read_bytes()
+    cursor = Path(push.cursor_path(hive)).read_text()
+    assert n.tick() == 0
+    assert send.calls == [] and Path(push.cursor_path(hive)).read_text() == cursor
+    wall.at = wall.at.replace(day=22, hour=7)
+    assert n.tick() == 4  # two pushes, two subscriptions
+    by_tag = {c[1]["tag"]: c[1]["title"] for c in send.calls}
+    assert by_tag == {"kind:awaiting_review": "2 tasks awaiting review",
+                      "task:t-3": "t-3 merged"}
+    assert {c[0] for c in send.calls} == {sub("a")["endpoint"], sub("b")["endpoint"]}
+    assert Path(notifications.notifications_path(hive)).read_bytes() == inbox
