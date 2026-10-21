@@ -675,9 +675,10 @@ Each step is a single surface, built in this order:
    dispatcher's order, *Waiting*, one lane per role from `phase`, *Blocked*,
    *Conflict* and *Merged*, with one swimlane per epic (T-095). The Debt
    screen links each open entry to its backlog item and says whether it was
-   accepted (T-096). Not built: *Awaiting review* stays empty until
-   `review.md` gives it a status, an integrador lane waits for that role in
-   the dispatcher, and *Start development* and the Queue screen are step 9.
+   accepted (T-096). *Awaiting review* holds `awaiting_review` tasks
+   and older `done` unmerged ones since T-118-S2 (ADR 243). Not built: an
+   integrador lane waits for that role in the dispatcher, and *Start
+   development* and the Queue screen are step 9.
    T-096's two pending items are built 2026-10-20 (ADR 193): the filter
    finds an open entry by its item and its state, and an open entry whose
    *where* falls on the *Surface* of a task in play points at that task.

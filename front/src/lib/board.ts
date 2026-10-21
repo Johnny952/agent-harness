@@ -18,11 +18,9 @@
  *   dispatcher's phase) or a phase no role names, it is "no live phase", still
  *   on the board and saying which of the three it is;
  * - `blocked` and `conflict` are their own columns;
- * - anything else — `done` not merged, `drafted`, a word the api passed through
- *   — is Other.
- *
- * Awaiting review has a column and no status: nothing writes one yet
- * (`docs/plans/review.md`), so it is always empty and says so.
+ * - `awaiting_review`, and `done` not merged (a task finished before ADR 240
+ *   wrote `awaiting_review`), are Awaiting review (ADR 243);
+ * - anything else — `drafted`, a word the api passed through — is Other.
  */
 import { ROLES, type Role, type Task } from "@/lib/api/types";
 import { compareIds, compareTasks, isBacklog, isEpic, splitInto } from "@/lib/backlog";
@@ -56,6 +54,7 @@ export const KNOWN_STATUSES: readonly string[] = [
   "in_progress",
   "blocked",
   "conflict",
+  "awaiting_review",
   "done",
   "epic",
   "drafted",
@@ -129,6 +128,9 @@ export function columnOf(task: Task, ready: ReadonlySet<string> | null): ColumnK
       return "blocked";
     case "conflict":
       return "conflict";
+    case "awaiting_review":
+    case "done":
+      return "review";
     default:
       return "other";
   }

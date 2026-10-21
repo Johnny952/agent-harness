@@ -437,9 +437,6 @@ function Column({
   count: number;
   children: React.ReactNode;
 }) {
-  // Awaiting review has no status behind it yet (`docs/plans/review.md`), so its
-  // empty is "not built", not "nothing waiting". ADR 140.
-  const empty = column.key === "review" ? "not built: no status says this yet" : "empty";
   return (
     <section data-column={column.key} className="panel flex w-[200px] shrink-0 flex-col">
       <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
@@ -449,7 +446,7 @@ function Column({
         <span className="mono text-[10px] text-muted-foreground">{count}</span>
       </div>
       <div className="flex-1 space-y-2 p-2">
-        {count === 0 && <p className="px-1 py-2 text-[10px] text-muted-foreground/70">{empty}</p>}
+        {count === 0 && <p className="px-1 py-2 text-[10px] text-muted-foreground/70">empty</p>}
         {children}
       </div>
     </section>

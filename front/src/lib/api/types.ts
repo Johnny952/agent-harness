@@ -23,16 +23,26 @@ export interface ApiResult<T> {
 }
 
 /**
- * The five statuses the dispatcher writes into a task file. Four come from
+ * The six statuses the dispatcher writes into a task file. Four come from
  * `dispatcher/context_transfer.py`; there is no `queued` and `in_progress` carries
  * no role: `docs/decisions.md` ADR 26. The fifth, `conflict`, is
  * `CONFLICT_STATUS` in `dispatcher/dispatcher.py`: the pre-merge check stopped a
  * merge, and the operator resolves it (`docs/plans/autonomy.md` *Decisions*, 2).
- * The api serves what the file says, so a status outside these five is possible
+ * The sixth, `awaiting_review`, is `AWAITING_REVIEW_STATUS` in
+ * `dispatcher/tasks.py` (ADR 240): the cycle passed the auditor, the branch is
+ * not merged, and the task waits on the person.
+ * The api serves what the file says, so a status outside these six is possible
  * and the screens render it verbatim rather than dropping the row.
  */
 export type TaskStatus =
-  "pending" | "in_progress" | "blocked" | "conflict" | "done" | BacklogStatus | "epic";
+  | "pending"
+  | "in_progress"
+  | "blocked"
+  | "conflict"
+  | "awaiting_review"
+  | "done"
+  | BacklogStatus
+  | "epic";
 
 /**
  * The three statuses a backlog item holds before it is on the board

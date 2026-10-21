@@ -64,8 +64,15 @@ describe("columnOf", () => {
     expect(columnOf(task("T-8", { status: "pending", merged: true }), READY)).toBe("merged");
   });
 
-  it("puts done-not-merged, drafted and an unknown status in Other", () => {
-    expect(columnOf(task("T-9", { status: "done" }), READY)).toBe("other");
+  it("puts awaiting_review and done-not-merged in Awaiting review, merged first", () => {
+    expect(columnOf(task("T-9", { status: "awaiting_review" }), READY)).toBe("review");
+    expect(columnOf(task("T-9", { status: "done" }), READY)).toBe("review");
+    expect(columnOf(task("T-9", { status: "awaiting_review", merged: true }), READY)).toBe(
+      "merged",
+    );
+  });
+
+  it("puts drafted and an unknown status in Other", () => {
     for (const status of ["drafted", "queued"]) {
       expect(columnOf(task("T-9", { status } as unknown as Partial<Task>), READY)).toBe("other");
     }

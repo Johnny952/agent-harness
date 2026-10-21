@@ -38,6 +38,7 @@ export const ACCEPTED_STATUSES: readonly string[] = [
   "in_progress",
   "blocked",
   "conflict",
+  "awaiting_review",
   "done",
   "epic",
 ];

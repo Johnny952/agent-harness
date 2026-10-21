@@ -98,6 +98,8 @@ describe("inPlay", () => {
       task("T-conflict", { status: "conflict" }),
       task("T-done", { status: "done" }),
       task("T-merged", { status: "done", merged: true }),
+      task("T-await", { status: "awaiting_review" }),
+      task("T-await-merged", { status: "awaiting_review", merged: true }),
       task("T-dropped", { status: "dropped" }),
       task("T-proposed", { status: "proposed" }),
       task("T-deferred", { status: "deferred" }),
@@ -112,6 +114,7 @@ describe("inPlay", () => {
       "T-blocked",
       "T-conflict",
       "T-done",
+      "T-await",
     ]);
   });
 

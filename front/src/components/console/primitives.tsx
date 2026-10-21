@@ -29,12 +29,14 @@ export function RoleBadge({ role, compact = false }: { role: Role; compact?: boo
 }
 
 /**
- * The five states the harness writes, and a sixth rendering for anything else.
+ * The six states the harness writes, and a seventh rendering for anything else.
  *
  * `pending` is `muted` because nothing has happened to the task yet, which is not
  * the same news as something that finished. `conflict` takes `blocked`'s tone:
  * the pre-merge check already stopped the merge, and the task waits on the
- * operator the same way. A status outside the five is possible
+ * operator the same way. `awaiting_review` is `warning`: the cycle passed and the
+ * task waits on the person, so it is not terminal like `done` and not failed
+ * like `blocked` (ADR 243). A status outside the six is possible
  * — the api serves what the task file says and `read_task_file` validates none of
  * it — and renders muted with the string verbatim rather than as an unstyled pill
  * nobody designed. `docs/ui.md` *The tone of a state*, `docs/decisions.md` ADR 26.
@@ -46,6 +48,7 @@ export function StatusPill({ status }: { status: TaskStatus }) {
     in_progress: "text-info border-info/50 bg-info/10",
     blocked: "text-destructive border-destructive/60 bg-destructive/10",
     conflict: "text-destructive border-destructive/60 bg-destructive/10",
+    awaiting_review: "text-warning border-warning/50 bg-warning/10",
     done: "text-success border-success/50 bg-success/10",
   };
   return (

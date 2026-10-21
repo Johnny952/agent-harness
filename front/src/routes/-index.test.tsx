@@ -309,7 +309,7 @@ describe("the board's columns and swimlanes", () => {
       "Blocked",
       "Merged",
     ]);
-    expect(screen.getByText("not built: no status says this yet")).toBeTruthy();
+    expect(screen.queryByText(/not built/)).toBeNull();
   });
 
   it("places every card in its column", async () => {
@@ -321,6 +321,8 @@ describe("the board's columns and swimlanes", () => {
         task("T-214", { status: "blocked" }),
         task("T-215", { status: "conflict" }),
         task("T-216", { status: "done", merged: true }),
+        task("T-217", { status: "awaiting_review" }),
+        task("T-218", { status: "done" }),
       ],
       { data: ["T-211"] },
     );
@@ -331,7 +333,10 @@ describe("the board's columns and swimlanes", () => {
     expect(columnOf("T-214")).toBe("blocked");
     expect(columnOf("T-215")).toBe("conflict");
     expect(columnOf("T-216")).toBe("merged");
+    expect(columnOf("T-217")).toBe("review");
+    expect(columnOf("T-218")).toBe("review");
     expect(screen.queryByText(/is in Other/)).toBeNull();
+    expect(screen.queryByText(/T-217: status/)).toBeNull();
   });
 
   it("keeps a stale phase and a task between phases on the board, and says which", async () => {
@@ -424,13 +429,8 @@ describe("the board's columns and swimlanes", () => {
   );
 
   it("shows a status it has no column for in Other, and names an unknown one", async () => {
-    await board([
-      task("T-271", { status: "done" }),
-      task("T-272", { status: "drafted" }),
-      task("T-273", { status: "queued" }),
-    ]);
-    await screen.findByText("T-271");
-    expect(columnOf("T-271")).toBe("other");
+    await board([task("T-272", { status: "drafted" }), task("T-273", { status: "queued" })]);
+    await screen.findByText("T-272");
     expect(columnOf("T-272")).toBe("other");
     expect(columnOf("T-273")).toBe("other");
     expect(

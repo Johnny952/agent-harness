@@ -73,7 +73,12 @@ describe("StatusPill", () => {
     expect(pill("conflict").className).toContain("text-destructive");
   });
 
-  it("draws a status outside the five muted, with its own word", () => {
+  it("draws awaiting_review as a warning: waiting on the person, not done", () => {
+    expect(pill("awaiting_review").className).toContain("text-warning");
+    expect(pill("awaiting_review").className).not.toBe(pill("done").className);
+  });
+
+  it("draws a status outside the six muted, with its own word", () => {
     const el = pill("queued");
     expect(el.textContent).toBe("queued");
     expect(el.className).toContain("text-muted-foreground");
