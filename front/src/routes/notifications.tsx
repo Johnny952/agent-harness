@@ -14,7 +14,21 @@ import { notificationsQuery } from "@/lib/api/queries";
 import type { Notification } from "@/lib/api/types";
 import { formatDateClock } from "@/lib/format";
 import { isUnread, markSeen, readLastSeen } from "@/lib/notifications";
-import { readState, turnOff, turnOn, type PushState } from "@/lib/push";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import {
+  browserZone,
+  readPushKey,
+  readSettings,
+  readState,
+  turnOff,
+  turnOn,
+  writeSettings,
+  type PushSettings,
+  type PushSettingsChange,
+  type PushState,
+  type QuietHours,
+} from "@/lib/push";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/notifications")({
@@ -34,7 +48,16 @@ export const Route = createFileRoute("/notifications")({
 });
 
 /** The four kinds that need the person (`dispatcher/notifications.py`). */
-const NEEDS_PERSON = new Set(["awaiting_review", "conflict", "command_request", "blocked"]);
+const NEEDS_PERSON_ORDER = ["awaiting_review", "conflict", "command_request", "blocked"] as const;
+const NEEDS_PERSON: ReadonlySet<string> = new Set(NEEDS_PERSON_ORDER);
+
+/** The settings' kinds as the page lists them: the four that need the person first, then the rest as served. */
+function orderKinds(kinds: string[]): string[] {
+  return [
+    ...NEEDS_PERSON_ORDER.filter((k) => kinds.includes(k)),
+    ...kinds.filter((k) => !NEEDS_PERSON.has(k)),
+  ];
+}
 
 function kindLabel(kind: unknown): string {
   return typeof kind === "string" && kind ? kind.replaceAll("_", " ") : "unknown";
@@ -72,6 +95,7 @@ function NotificationsPage() {
       />
 
       <PushControl />
+      <PushSettingsSection />
 
       <WarningBanner warnings={query.data?.warnings ?? []} />
 
@@ -165,6 +189,167 @@ function PushControl() {
           {state === "on" ? "Turn push off" : "Turn push on"}
         </Button>
       )}
+    </section>
+  );
+}
+
+type SettingsState = "reading" | "unreadable" | "server-off" | "ready";
+
+const SERVER_OFF_TEXT =
+  "Push is off on the server, so these settings cannot be changed here: the board service has no VAPID key configured.";
+
+/**
+ * Which kinds are pushed and the quiet hours (ADR 246, on ADR 237). The server
+ * holds them; a switch or a saved window writes only what changed and shows
+ * what the server answers. While the server has push off the writes are
+ * disabled, and a board service that cannot be reached is said, not shown as
+ * empty.
+ */
+function PushSettingsSection() {
+  const [settings, setSettings] = useState<PushSettings | null>(null);
+  const [state, setState] = useState<SettingsState>("reading");
+  const [problem, setProblem] = useState<string | null>(null);
+  // The quiet hours as being edited: null is "off". Starts at the served window.
+  const [draft, setDraft] = useState<QuietHours | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    Promise.all([
+      readSettings().then(
+        (s) => s,
+        (e: unknown) => e,
+      ),
+      readPushKey(),
+    ]).then(([read, key]) => {
+      if (!live) return;
+      if (read instanceof Error || !("kinds" in (read as object))) {
+        setProblem(read instanceof Error ? read.message : String(read));
+        setState("unreadable");
+        return;
+      }
+      const served = read as PushSettings;
+      setSettings(served);
+      setDraft(served.quiet_hours);
+      setState(key === null ? "server-off" : "ready");
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  async function save(change: PushSettingsChange) {
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await writeSettings(change);
+      setSettings(saved);
+      if ("quiet_hours" in change) setDraft(saved.quiet_hours);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleWindow(on: boolean) {
+    if (on) {
+      setDraft({ start: "22:00", end: "07:00", zone: browserZone() });
+    } else if (settings?.quiet_hours) {
+      void save({ quiet_hours: null });
+    } else {
+      setDraft(null);
+    }
+  }
+
+  const locked = state !== "ready" || busy;
+
+  return (
+    <section
+      aria-label="Push settings"
+      data-settings-state={state}
+      className="mx-4 mt-3 space-y-3 rounded-md border border-border bg-surface-2 px-3 py-2 text-xs"
+    >
+      {state === "reading" && <p className="text-muted-foreground">Reading the push settings…</p>}
+      {state === "unreadable" && <p className="text-muted-foreground">{problem}</p>}
+      {state === "server-off" && <p className="text-muted-foreground">{SERVER_OFF_TEXT}</p>}
+      {settings && (
+        <>
+          <ul aria-label="Pushed kinds" className="grid gap-2 sm:grid-cols-2">
+            {orderKinds(Object.keys(settings.kinds)).map((kind) => (
+              <li key={kind} className="flex items-center gap-2">
+                <Switch
+                  id={`push-kind-${kind}`}
+                  aria-label={kindLabel(kind)}
+                  checked={settings.kinds[kind] === true}
+                  disabled={locked}
+                  onCheckedChange={(next) => void save({ kinds: { [kind]: next } })}
+                />
+                <label
+                  htmlFor={`push-kind-${kind}`}
+                  className={cn("mono", NEEDS_PERSON.has(kind) && "text-warning")}
+                >
+                  {kindLabel(kind)}
+                </label>
+              </li>
+            ))}
+          </ul>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="push-quiet-hours"
+                aria-label="Quiet hours"
+                checked={draft !== null}
+                disabled={locked}
+                onCheckedChange={toggleWindow}
+              />
+              <label htmlFor="push-quiet-hours">Quiet hours</label>
+              <span className="text-muted-foreground">
+                Pushes wait during these hours and go out grouped when they end; the inbox still
+                fills.
+              </span>
+            </div>
+            {draft && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  type="time"
+                  aria-label="Quiet hours start"
+                  className="h-8 w-28"
+                  value={draft.start}
+                  disabled={locked}
+                  onChange={(e) => setDraft({ ...draft, start: e.target.value })}
+                />
+                <Input
+                  type="time"
+                  aria-label="Quiet hours end"
+                  className="h-8 w-28"
+                  value={draft.end}
+                  disabled={locked}
+                  onChange={(e) => setDraft({ ...draft, end: e.target.value })}
+                />
+                <Input
+                  aria-label="Time zone"
+                  className="h-8 w-48"
+                  value={draft.zone}
+                  disabled={locked}
+                  onChange={(e) => setDraft({ ...draft, zone: e.target.value })}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={locked}
+                  onClick={() => void save({ quiet_hours: draft })}
+                >
+                  Save quiet hours
+                </Button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+      {error && <p className="text-destructive">{error}</p>}
     </section>
   );
 }
