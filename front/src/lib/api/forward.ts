@@ -779,11 +779,13 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * console's server half is not a browser. No query string: the board-service
  * refuses one.
  *
- * The four backlog writes and the two thread-record writes carry no token: the
+ * The backlog writes (`POST /api/backlog`, and a task's `PATCH`, comment,
+ * accept and verdict) and the two thread-record writes carry no token: the
  * board-service takes none there (ADR 170, 7). A record's body crosses
  * unchanged, as a turn's does: the route refuses an unknown field or a wrong
  * type itself.
- * The three action routes (ADR 157, on ADR 151; the turn is ADR 190) carry `Authorization: Bearer
+ * The action routes, a task's start, an action's cancel and a thread's turn
+ * (ADR 157, on ADR 151; the turn is ADR 190), carry `Authorization: Bearer
  * BOARD_ACTIONS_TOKEN`, and after the CSRF checks above, in this order: 503 if
  * the token is unset, 503 if a start has no `CONSOLE_PROJECT`, then 413. A start
  * body may hold only `note`, `floor` and `limit` (else 400, `project` included:
