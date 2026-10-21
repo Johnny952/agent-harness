@@ -28,9 +28,11 @@ const DIFF_TEXT = [
 ].join("\n");
 
 describe("reviewLane", () => {
-  it("puts a done task not on main under review, a conflict under conflict, and nothing else", () => {
+  it("puts an awaiting_review or done task not on main under review, a conflict under conflict, and nothing else", () => {
     expect(reviewLane({ status: "done", merged: false })).toBe("review");
     expect(reviewLane({ status: "done", merged: true })).toBeNull();
+    expect(reviewLane({ status: "awaiting_review", merged: false })).toBe("review");
+    expect(reviewLane({ status: "awaiting_review", merged: true })).toBeNull();
     expect(reviewLane({ status: "conflict", merged: false })).toBe("conflict");
     expect(reviewLane({ status: "in_progress", merged: false })).toBeNull();
   });

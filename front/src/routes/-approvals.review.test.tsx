@@ -1,8 +1,9 @@
 /**
  * The Approvals screen's review (ADR 219), mounted whole through `renderRoute`
  * with what `/api/tasks`, `/api/tasks/<id>/diff` and `/api/tasks/<id>/comments`
- * served (`reviewLane` and `parseDiff` are `src/lib/review.test.ts`'s). What these hold: *Awaiting review* lists a `done` task not on main
- * and *Conflict* a `conflict` one, and no other; the diff is drawn by file with
+ * served (`reviewLane` and `parseDiff` are `src/lib/review.test.ts`'s).
+ * What these hold: *Awaiting review* lists an `awaiting_review` or `done` task
+ * not on main and *Conflict* a `conflict` one, and no other; the diff is drawn by file with
  * its counts and the new side's line numbers; a pinned comment sits under its
  * line at the tip and is listed as outdated past it; a line number pins a new
  * comment to that line at the tip; the *comment* verdict (ADR 222) is listed
@@ -124,16 +125,18 @@ function serve(tasks: Task[], extra: Served = {}) {
 }
 
 describe("the review", () => {
-  it("lists done-not-merged under Awaiting review and conflicts apart, and nothing else", async () => {
+  it("lists awaiting_review and done-not-merged under Awaiting review and conflicts apart, and nothing else", async () => {
     await serve([
       task("T-1"),
       task("T-2", { merged: true }),
       task("T-3", { status: "in_progress" }),
       task("T-4", { status: "conflict" }),
+      task("T-5", { status: "awaiting_review" }),
+      task("T-6", { status: "awaiting_review", merged: true }),
     ]);
-    const tab = await screen.findByRole("button", { name: "Awaiting review · 1" });
+    const tab = await screen.findByRole("button", { name: "Awaiting review · 2" });
     const rows = await screen.findAllByTestId("review-row");
-    expect(rows.map((r) => within(r).getByText(/^T-/).textContent)).toEqual(["T-1"]);
+    expect(rows.map((r) => within(r).getByText(/^T-/).textContent)).toEqual(["T-1", "T-5"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Conflict · 1" }));
     const conflict = await screen.findAllByTestId("review-row");

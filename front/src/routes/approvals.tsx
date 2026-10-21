@@ -3,9 +3,8 @@
  * review of a finished task's branch (`docs/plans/review.md`, ADR 219).
  *
  * The review reads three routes and writes one. `/api/tasks` gives the two
- * lists: *Awaiting review* is a `done` task whose work is not on main — the
- * board has no *awaiting review* status yet (review.md step 1), and with
- * `merge_on_done` off that is where a finished task sits — and *Conflict* is
+ * lists: *Awaiting review* is an `awaiting_review` task, or an older `done`
+ * one, whose work is not on main (ADR 240, ADR 249), and *Conflict* is
  * the `conflict` status a failed merge leaves. `/api/tasks/<id>/diff` is the
  * branch against its merge base, drawn by hand (review.md step 7 leaves the
  * diff library to its own ask). `/api/tasks/<id>/comments` gives the comments,
