@@ -15025,3 +15025,49 @@ past 800 (`dispatcher.py` 5041, `tasks.py` 3186, `docker_exec.py` 2189,
 - *Reporting untouched files:* limits go on what travels; a file this
   task did not touch is not this task's to answer for.
 - *Counting tests:* see decision 2; a later ADR can bring them in.
+
+## ADR 318 — `status` and `release-account` read a refusal's hold through `_refusal_hold_until`
+
+**Status:** accepted (2026-10-22), T-145's arquitecto. Resolves the last
+consequence bullet of ADR 312 (`docs/debt/T-143-D1.md`).
+
+**Context.** ADR 312 point 6 holds a refused account until the `retry_at`
+its `rate_limit_event` named, else for `quota_cooldown_seconds`, and
+`dispatcher/dispatcher.py` `_refusal_hold_until` is that rule. `dispatcher/operator.py`
+`_cooldown_remaining` still counted `rate_limited_at + quota_cooldown_seconds`,
+so `dispatch status` printed a wrong time left and `release-account`'s
+refusal guard lapsed while the dispatcher still held the account — the 429
+the guard exists to stop.
+
+**Decision.**
+1. **One rule, one copy.** `operator.py` imports `_refusal_hold_until` from
+   `dispatcher.dispatcher` beside the private names it already imports, and
+   `_cooldown_remaining` becomes `(cfg, account, now)`, returning
+   `max(0.0, hold - now)`, 0.0 when the hold is None. No second reading of
+   `get_retry_at` in `operator.py`.
+2. **The report carries the instant.** `AccountReport` gains
+   `hold_until: float | None` (epoch seconds, None when never refused), the
+   value `_refusal_hold_until` returned; `cooldown_remaining` stays and is
+   computed from it.
+3. **Wording.** A hold is printed as an instant, `%Y-%m-%d %H:%M UTC`,
+   whichever source set it. `format_status`: `refused, held until <time>
+   (<duration> left)`; once elapsed it still reads `refused once, cooldown
+   elapsed`. `release_account`'s guard: `<name> was refused by the service
+   <ago> ago and is held until <time> (<duration> left).`, the rest of the
+   message unchanged; the `quota_cooldown_seconds` figure is no longer
+   printed, since it is not the hold when `retry_at` is set.
+
+**Consequences.**
+- An account refused on its week reads as held until that week's reset in
+  `status`, and `release-account` refuses until then without
+  `--clear-rate-limit` or `--force`.
+- `--clear-rate-limit` forgets `retry_at` with the refusal
+  (`state_machine.clear_rate_limit`), so it lifts the guard as before.
+- A refusal with no `retry_at` behaves exactly as before; only its wording
+  changed.
+
+**Ruled out.**
+- *Reading `get_retry_at` in `operator.py` itself:* a second copy of point 6
+  is how this debt happened.
+- *Printing the hold's source (event or cooldown):* the operator acts on the
+  instant, not on where it came from.
