@@ -1503,7 +1503,9 @@ number and title.
 6. **Observability and hardening.**
    - Auth on the collector's `/events` — **built**: `docs/decisions.md`
      ADR 72, a read token for the operator and a write token per agent.
-   - Redacting hook payloads — **open**.
+   - Redacting hook payloads — **built**: `docs/decisions.md` ADR 74,
+     `hooks/emit_event.py` redacts before the POST by fixed rules and fails
+     closed.
    - A salted password digest — **planned**:
      `docs/plans/server-deployment.md` *1. Sign-in is a real login, with
      sessions, behind HTTPS*. The constant-time compare is **built**
