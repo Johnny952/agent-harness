@@ -54,7 +54,7 @@ from pathlib import Path
 
 import yaml
 
-from dispatcher import context_transfer
+from dispatcher import context_transfer, surface
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +92,9 @@ PROMOTING_ROLE = "auditor"
 #: Rows of the table a phase is handed. A prompt that grows with the inbox
 #: would quietly tax every phase of every task, so the table is capped and the
 #: rest is left to the grep the fragment asks for. When this starts truncating
-#: often, the fix is the filtering the README describes — rows matching the
-#: task's profile, labels or the paths its plan names — not a bigger cap.
+#: often, the fix is the filtering the README describes — `select`, which keeps
+#: the rows matching the task's labels or the paths it names (`docs/decisions.md`
+#: ADR 315) — not a bigger cap.
 MAX_ROWS = 40
 
 #: Confirmed rows survive the cut first because something independent backs
@@ -153,7 +154,8 @@ def harness_fingerprint(
     whether a command is refused, and whether a phase's edits reach the branch
     — and a coarser fingerprint would mark the whole inbox stale every time a
     timeout was tuned. Primitives rather than a Config, so this module keeps
-    importing nothing from the package but the path helpers.
+    importing nothing from the package but the path helpers and the surface
+    parser.
     """
     surface = "\n".join(
         (
@@ -907,17 +909,113 @@ def handed(entries: list[Entry], harness: str = "") -> list[Entry]:
     return ordered(entries, harness)[:MAX_ROWS]
 
 
+@dataclasses.dataclass(frozen=True)
+class TaskContext:
+    """What a task names, for `select` to match entries against.
+
+    The README's "profile" is the project, which `eligible` already applies;
+    nothing finer exists on a task, so only paths and tags are here
+    (`docs/decisions.md` ADR 315).
+    """
+
+    paths: frozenset[str] = frozenset()
+    tags: frozenset[str] = frozenset()
+
+    @property
+    def usable(self) -> bool:
+        return bool(self.paths or self.tags)
+
+
+NO_CONTEXT = TaskContext()
+
+_HAS_EXTENSION = re.compile(r"\.[A-Za-z0-9]+$")
+_GLOB_CHARS = re.compile(r"[*?\[]")
+
+
+def task_context(
+    hive_dir: str, task_id: str, task_file: str, description: str | None
+) -> TaskContext:
+    """The paths and tags a task carries, or nothing for what cannot be read.
+
+    Never raises: it runs inside the prompt builder, and a card or handoff
+    that will not parse costs the phase a filter, not a dispatch.
+    """
+    paths = set(surface.parse(description or ""))
+    try:
+        payload = context_transfer.read_handoff(hive_dir, task_id, "arquitecto")
+        items = payload.get("paths") if isinstance(payload, dict) else None
+        for item in items if isinstance(items, list) else ():
+            cited = item.get("path") if isinstance(item, dict) else None
+            if not isinstance(cited, str) or not cited.split():
+                continue
+            token = re.split(r"[:#]", cited.split()[0], maxsplit=1)[0]
+            paths |= surface.parse(f"`{token}`")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError):
+        pass
+    tags: set[str] = set()
+    try:
+        raw = context_transfer.read_task_file(task_file).tags
+        for tag in raw if isinstance(raw, list) else ():
+            if isinstance(tag, str) and tag.strip():
+                tags.add(tag.strip().lower())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError):
+        pass
+    return TaskContext(paths=frozenset(paths), tags=frozenset(tags))
+
+
+def _kept(entry: Entry) -> bool:
+    """Rows that reach every phase: the shared environment's traps."""
+    return entry.scope == SCOPE_HARNESS or entry.reviewed
+
+
+def _matches(entry: Entry, context: TaskContext) -> bool:
+    text = f"{entry.when}\n{entry.body}"
+    low = text.lower()
+    cited = None
+    for path in context.paths:
+        needle = _GLOB_CHARS.split(path, maxsplit=1)[0].rstrip("/").lower()
+        if needle and needle in low:
+            return True
+        last = needle.rsplit("/", 1)[-1]
+        if last and _HAS_EXTENSION.search(last) and last in low:
+            return True
+        if cited is None:
+            cited = surface.parse(text)
+        if any(surface.covers(frozenset({named}), path) for named in cited):
+            return True
+    return any(
+        re.search(rf"(?<![a-z0-9_-]){re.escape(tag)}(?![a-z0-9_-])", low)
+        for tag in context.tags
+    )
+
+
+def select(entries: list[Entry], context: TaskContext) -> list[Entry]:
+    """The rows that match what the task names, harness-scoped ones always.
+
+    Conservative by construction: with no usable context, or when no other
+    row matches, the answer is `entries` unchanged, so a task that names
+    nothing is handed today's table (`docs/decisions.md` ADR 315).
+    """
+    if not context.usable:
+        return list(entries)
+    matching = [entry for entry in entries if not _kept(entry) and _matches(entry, context)]
+    if not matching:
+        return list(entries)
+    return [entry for entry in entries if _kept(entry) or _matches(entry, context)]
+
+
 def _cell(text: str) -> str:
     flat = " ".join((text or "").split()).replace("|", "\\|")
     return flat if len(flat) <= _CELL_CHARS else f"{flat[:_CELL_CHARS - 1]}…"
 
 
-def table(entries: list[Entry], harness: str = "") -> str:
+def table(entries: list[Entry], harness: str = "", filtered: int = 0) -> str:
     """The rows, as the index everywhere else in the harness renders them.
 
     `harness` is the permission surface being rendered against; without one
     nothing is stale, which is what the human listing wants when it is asked
-    about a hive it is not currently running.
+    about a hive it is not currently running. `filtered` is how many rows
+    `select` left out before `entries` got here, so the trailer can say so.
     """
     # The order and the cut are `handed`, which is also what the api asks when
     # it answers whether a row reaches a phase: one selector, so the column on
@@ -930,10 +1028,19 @@ def table(entries: list[Entry], harness: str = "") -> str:
         for entry in shown
     ]
     lines = ["| # | Learning | When it applies | Status |", "|---|---|---|---|", *rows]
-    if len(entries) > len(shown):
+    cut = len(entries) - len(shown)
+    if filtered:
+        capped = f", and {cut} more are past the {MAX_ROWS}-row cap" if cut else ""
         lines.append("")
         lines.append(
-            f"{len(entries) - len(shown)} more are in the directory but not in this table; "
+            f"{filtered} more were filtered out because nothing in them names this "
+            f"task's paths or tags{capped}; they are still in the directory, and "
+            "the grep finds them."
+        )
+    elif cut:
+        lines.append("")
+        lines.append(
+            f"{cut} more are in the directory but not in this table; "
             "the grep finds them."
         )
     return "\n".join(lines)
@@ -1004,7 +1111,12 @@ _ROLES = ("cartografo", "arquitecto", "implementador", "revisor", "auditor")
 
 
 def duties(
-    role: str, task_id: str, project: str, hive_dir: str, harness: str = ""
+    role: str,
+    task_id: str,
+    project: str,
+    hive_dir: str,
+    harness: str = "",
+    context: TaskContext = NO_CONTEXT,
 ) -> str:
     """The inbox, as a prompt fragment for one role.
 
@@ -1024,9 +1136,9 @@ def duties(
     # turns, not to hide that it was ever written.
     rows = eligible(read_all(hive_dir), project)
     if rows:
-        parts.append(
-            f"Entries that apply here, by file under `{root}/`:\n\n{table(rows, harness)}"
-        )
+        chosen = select(rows, context)
+        shown = table(chosen, harness, filtered=len(rows) - len(chosen))
+        parts.append(f"Entries that apply here, by file under `{root}/`:\n\n{shown}")
         if role == "auditor":
             parts.append(_AUDITOR.format(task_id=task_id))
     return "\n\n".join(parts)
