@@ -400,3 +400,9 @@ text; it is a plan, a record, and left as written.
 T-144 resolved `T-142-D1` with a resolution row (ADR 297): `/api/learnings`
 takes `?task=` and answers `in_phase_table` through the dispatcher's own
 `select` and `task_context` for that task (ADR 321). It declared no new debt.
+
+T-146 built step 1 of `docs/plans/server-deployment.md`, sign-in in the board
+service (ADR 324), and filed two entries its revisor accepted: `T-146-D1`, the
+failure throttle that is per user and not per address until the console
+forwards `X-Forwarded-For`, and `T-146-D2`, verdicts still authored by
+`operator` rather than the signed-in user. It resolved none.
