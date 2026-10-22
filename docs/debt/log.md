@@ -406,3 +406,10 @@ service (ADR 324), and filed two entries its revisor accepted: `T-146-D1`, the
 failure throttle that is per user and not per address until the console
 forwards `X-Forwarded-For`, and `T-146-D2`, verdicts still authored by
 `operator` rather than the signed-in user. It resolved none.
+
+T-147 built step 8 of `docs/plans/server-deployment.md`, backup and restore
+(ADR 327, 328), and filed one entry its revisor accepted: `T-147-D1`, no
+backup before a merge and no wired nightly schedule, pending a `BACKUP_DIR`
+mount in the worker. The scripts' missing executable bit, also accepted, was
+fixed inside the task by the operator's `chmod +x` and is not an entry. It
+resolved none.

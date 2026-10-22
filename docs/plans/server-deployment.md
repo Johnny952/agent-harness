@@ -379,7 +379,8 @@ Each step is a single surface:
    `dispatcher/backup.py`, the `backup` and `restore` verbs, and
    `scripts/backup.sh` / `scripts/restore.sh`. A copy is a plain directory
    taken with every project lock held; the cap is `BACKUP_KEEP` (default 7).
-   Restore syncs in place and sets aside what it replaces. Not built: the
+   Restore syncs in place: a file the copy holds is written over the live
+   one, and what the copy lacks is set aside, never deleted. Not built: the
    nightly and before-merge scheduling (the worker has no `BACKUP_DIR` mount,
    a compose change awaiting approval) and an off-server destination.
 9. The dind modes (*Decisions*, 9): the per-account key, the compose
