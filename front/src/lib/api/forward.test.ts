@@ -972,9 +972,15 @@ describe("the board-service action routes", () => {
     expect(none).not.toHaveBeenCalled();
   });
 
-  it("gives the four backlog writes no Authorization", async () => {
+  it.each([
+    ["POST", "/api/backlog"],
+    ["PATCH", "/api/tasks/T-014"],
+    ["POST", "/api/tasks/T-014/comments"],
+    ["POST", "/api/tasks/T-014/accept"],
+    ["POST", "/api/tasks/T-014/verdict"],
+  ])("gives the backlog write %s %s no Authorization", async (method, path) => {
     const fetchMock = stubApi();
-    await forwardApiRequest(post("/api/tasks/T-014/accept", "{}"));
+    await forwardApiRequest(post(path, "{}", {}, method));
     expect(sent(fetchMock).headers).toEqual({ "Content-Type": "application/json" });
   });
 
