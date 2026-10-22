@@ -2713,6 +2713,15 @@ def _merge_base_and_gate(
         if duplicated:
             why = f"{outcome.base} merged in leaves a broken decisions log: {duplicated[0].detail}"
             return PreMergeVerdict(False, stop(cfg, outcome, why))
+        try:
+            repeated = gates.debt_index(container, outcome.workdir)
+        except Exception as exc:
+            return PreMergeVerdict(
+                False, f"task {task_id}: the {what} debt-index gate did not finish: {exc}"
+            )
+        if repeated:
+            why = f"{outcome.base} merged in leaves a broken debt index: {repeated[0].detail}"
+            return PreMergeVerdict(False, stop(cfg, outcome, why))
         if cfg.gates_enabled:
             log_path = os.path.join(
                 context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id),
@@ -2846,6 +2855,9 @@ def _gate_resolution(
     duplicated = gates.decisions_log(container, workdir)
     if duplicated:
         return f"`{duplicated[0].gate}` {duplicated[0].detail}"
+    repeated = gates.debt_index(container, workdir)
+    if repeated:
+        return f"`{repeated[0].gate}` {repeated[0].detail}"
     if not cfg.gates_enabled:
         return None
     log_path = os.path.join(

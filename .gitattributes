@@ -8,3 +8,9 @@ docs/decisions.md merge=union
 docs/ROADMAP.md merge=union
 docs/implementations/** merge=union
 docs/learnings/** merge=union
+# The debt index only grows at its end and a resolution is a row of its own
+# (ADR 297), so two branches that each appended merge by keeping both. A row
+# both sides edited in place would be kept twice: the pre-merge debt-index gate
+# catches that, not git.
+docs/debt/README.md merge=union
+docs/debt/log.md merge=union

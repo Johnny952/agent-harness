@@ -124,7 +124,7 @@ def test_backlog_item_cuts_a_long_title_and_fills_an_empty_fix() -> None:
     title, description, _ = debt.backlog_item(_row(what="x " * 300, fix="", where=""))
     assert len(title) <= tasks.MAX_TITLE_CHARS and title.endswith("...")
     assert "Where:" not in description
-    assert "marked resolved in `docs/debt/README.md`" in description
+    assert "has a resolution row in `docs/debt/README.md`" in description
     assert tasks._description_problems(description, "it") == []
 
 
