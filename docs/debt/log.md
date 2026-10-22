@@ -381,3 +381,8 @@ T-139 resolved `T-132-D1` with a resolution row (ADR 297): both
 `server-env.ts` comments now name the actions token's routes by `boardTarget`'s
 `action` and `forwardBoard`'s doc comment, with no count. It declared no new
 debt.
+
+`T-143-D1` is `none` for the first reason above. The revisor accepted it as a
+wrong status text; the auditor filed it as `risk` because the same
+`_cooldown_remaining` also drives `release-account`'s refusal guard, which
+lapses at `quota_cooldown_seconds` even when `retry_at` is later.
