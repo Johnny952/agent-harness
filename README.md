@@ -645,7 +645,9 @@ stopgap: the sign-in of `docs/plans/server-deployment.md` replaces it.
 ### 5. Run a task
 
 Bootstrap a project directory on an account's container, then run a task
-through the full role cycle:
+through the full role cycle. Every command, argument, unit, default and exit
+code is in [docs/cli.md](docs/cli.md); note that `run-queue --limit` is in
+measured tokens, not tasks.
 
 ```bash
 python -m dispatcher.cli --config config.yaml bootstrap-project \

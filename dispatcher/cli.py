@@ -75,6 +75,10 @@ EXIT_NOT_PUSHED = 4
 #: whose push did not land; a queue stopped on a refused push exits 4 as
 #: `merge-task --push` does (`docs/decisions.md` ADR 79).
 EXIT_LIMIT = 5
+#: The smallest `run-queue --limit`, in measured tokens. One phase alone
+#: measures more, so a smaller number is a task count misread as a limit
+#: (`docs/decisions.md` ADR 333).
+MIN_QUEUE_LIMIT = 100_000
 
 
 def _epic_line(cfg: Config, task_id: str) -> str:
@@ -493,14 +497,8 @@ def _run_allowlist(args: argparse.Namespace, cfg: Config, parser: argparse.Argum
     print("\n".join(lines))
 
 
-def main() -> None:
-    # Before the parser, so that even an unparseable invocation logs the way
-    # a real run does.
-    bad_level = _configure_logging()
-    if bad_level:
-        logging.getLogger(__name__).warning(
-            "%s=%r is not a log level; using INFO", _LOG_LEVEL_ENV, bad_level
-        )
+def build_parser() -> argparse.ArgumentParser:
+    """The dispatcher's whole argument parser; `docs/cli.md` is checked against it."""
     parser = argparse.ArgumentParser(prog="ia-harness-dispatcher")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -822,8 +820,10 @@ def main() -> None:
         "the listed order is kept (ADR 132)",
     )
     queue_parser.add_argument(
-        "--limit", type=int,
-        help="The ceiling in measured tokens from the usage log (ADR 79)",
+        "--limit", type=int, metavar="TOKENS",
+        help="The ceiling in measured tokens (input + output + cache, from the "
+        "usage log, ADR 79), checked before each phase; not a number of tasks. "
+        f"At least {MIN_QUEUE_LIMIT} (ADR 333)",
     )
     queue_parser.add_argument(
         "--parallel", type=int, default=1,
@@ -903,7 +903,18 @@ def main() -> None:
     import_debt_parser.add_argument(
         "--dry-run", action="store_true", help="Print what would be filed; write nothing",
     )
+    return parser
 
+
+def main() -> None:
+    # Before the parser, so that even an unparseable invocation logs the way
+    # a real run does.
+    bad_level = _configure_logging()
+    if bad_level:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a log level; using INFO", _LOG_LEVEL_ENV, bad_level
+        )
+    parser = build_parser()
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -1300,7 +1311,14 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
             parser.error("--ready: at least 0")
         if not args.project or not (args.task_ids or args.ready) or args.limit is None:
             parser.error(
-                "run-queue needs --project, --task-id or --ready, and --limit, or --resume"
+                "run-queue needs --project, --task-id or --ready, and --limit TOKENS, "
+                "or --resume QUEUE_ID"
+            )
+        if args.limit < MIN_QUEUE_LIMIT:
+            parser.error(
+                f"--limit {args.limit}: the limit is in measured tokens "
+                "(input + output + cache, ADR 79), not tasks; "
+                f"at least {MIN_QUEUE_LIMIT}, since one phase alone measures more"
             )
         try:
             queue = queue_mod.plan(

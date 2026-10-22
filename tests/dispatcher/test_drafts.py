@@ -324,7 +324,7 @@ def test_run_queue_on_a_draft_id_never_reaches_a_cycle(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit) as exc:
         _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj", "--task-id", DRAFT_ID,
-             "--limit", "1000", "--yes")
+             "--limit", "1000000", "--yes")
     assert exc.value.code == 2  # parser.error: the queue is refused before it is shown
 
 
