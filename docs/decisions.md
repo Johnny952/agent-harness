@@ -15247,3 +15247,93 @@ argon2 or bcrypt package, and the agent image has no `cryptography`.
   until step 2, so it would lock the console out the day this merged.
 - *Users in the hive or `state_dir`:* the agents read the first, and the
   second is backed up.
+
+## ADR 333 — `run-queue` refuses a `--limit` below 100000 measured tokens
+
+**Status:** accepted (2026-10-22), T-151.
+
+**Context.** `run-queue --limit` is a ceiling in measured tokens: input +
+output + cache creation + cache read per usage line, checked before each
+phase, a started phase let finish (ADR 79, 2 and 3). The parser took any
+positive integer and named it only as a bare `--limit`, and nothing but
+`--help` said the unit. An operator read `--limit 2` as "two tasks": the queue
+was saved, its first phase ran and measured 6.3M tokens, and the queue stopped
+`limit_reached` at 6.3M of 2. Cache reads dominate the measure, so a single
+phase measures in the hundreds of thousands at the least and usually in the
+millions. A limit below one phase's cost therefore means "run exactly one
+phase and stop", which nobody asks for, while every value small enough to be
+a task count is far below that cost.
+
+**Decision.**
+1. `dispatcher/cli.py` holds `MIN_QUEUE_LIMIT = 100_000` measured tokens.
+   `run-queue` without `--resume` refuses `--limit N` with `N` below it as a
+   usage error (exit 2, `parser.error`) that names the number given, says the
+   limit is in measured tokens (input + output + cache, ADR 79) and not a
+   number of tasks, and names the minimum. The refusal comes before
+   `queue.plan`, so no queue file is written, no confirmation is printed and
+   no phase starts.
+2. The option is shown as `--limit TOKENS` (argparse `metavar`), and the
+   message for a missing argument reads `--limit TOKENS` rather than a bare
+   `--limit`.
+3. The floor is the command line's only. `queue.plan` keeps its own refusal of
+   a non-positive limit and nothing more; `--resume` runs under the limit its
+   queue file already holds and is not re-checked; the console's start limit
+   (`dispatcher/actions.py` `_limit_ok`, ADR 230) is a different path and is
+   unchanged.
+4. 100000 is a floor against a misread unit, not a budget: it is well under
+   any phase measured so far and far above any plausible task count. Raising
+   it is a new ADR, not an edit of the constant alone.
+
+**Consequences.** A `run-queue` limit that cannot cover one phase now fails
+before anything is written. Tests that drove the CLI with small limits
+(`tests/dispatcher/test_queue.py`, `tests/dispatcher/test_drafts.py`,
+`tests/dispatcher/test_parallel_queue.py`) move to limits at or above the
+floor, with any fake spend they compare against scaled to match; tests that
+call `queue.plan` directly keep their small limits. ADR 79's measure, its
+check before each phase and its exit 5 are untouched.
+
+**Ruled out.**
+- *Accepting a count and converting it:* a task's cost varies by an order of
+  magnitude, so any tokens-per-task factor is a guess the owner did not
+  confirm.
+- *A warning and a second confirmation:* `--yes` skips the prompt, and the
+  run that went wrong was exactly an unattended one.
+- *The floor in `queue.plan`:* it would bind the worker's and the console's
+  paths too, which have their own limit rule and did not misread anything.
+
+## ADR 334 — The command line has one reference, `docs/cli.md`, checked against the parser
+
+**Status:** accepted (2026-10-22), T-151.
+
+**Context.** The root `README.md` describes `run-task` and `merge-task` and a
+few other verbs in prose; `run-queue` had no description outside its `--help`.
+`dispatcher/cli.py` builds its whole parser inside `main()`, so no test could
+look at it without running a command.
+
+**Decision.**
+1. `dispatcher/cli.py` gains `build_parser() -> argparse.ArgumentParser`,
+   which builds and returns the parser `main()` used to build inline; `main()`
+   calls it. Nothing else about any subcommand changes, except ADR 333.
+2. `docs/cli.md` is the reference: the global options, the exit codes and the
+   commands that give each, the whole-project lock (ADR 200: a second cycle
+   start on a busy project exits 75, a queue waits), that more than one cycle
+   of a project at once runs from the command line only through
+   `run-queue --parallel` (ADR 200, 7; the worker's start group is the other
+   path, ADR 306), and one `### \`<subcommand>\`` section per subcommand under
+   `## Commands`, each with a table whose first cell is the argument in
+   backticks (`` `--limit TOKENS` ``, or a positional's `metavar` or `dest`)
+   and whose other columns give its unit, its default and what it does.
+3. `tests/dispatcher/test_cli_reference.py` builds the parser with
+   `build_parser()` and compares, both ways, the subcommands with the
+   `### \`…\`` headings under `## Commands`, each subcommand's arguments
+   (`-h` excluded) with its table's first cells, the top-level options with
+   the `## Global options` table, and the `EXIT_*` codes plus 0 and 2 with
+   the exit-code table. A missing or an extra entry on either side fails
+   with its name.
+4. The root `README.md` links `docs/cli.md` and keeps its prose; where the two
+   differ, the reference is the one the suite checks.
+
+**Consequences.** Adding, renaming or removing a subcommand or an option, or
+an exit code, now fails the suite until `docs/cli.md` says the same. What an
+argument *does* is still prose and can still drift; only the names and the
+codes are checked.
