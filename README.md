@@ -1408,7 +1408,8 @@ number and title.
      **built**: `_BUDGET_BYTES` in `dispatcher/handoff.py`, `MAX_ROWS` and
      `_CELL_CHARS` in `dispatcher/learnings.py`.
    - *Limits go on what travels*, a gate that notes a touched source file
-     past a size — **open**.
+     past a size — **built**: the `size` gate and `SIZE_NOTE_LINES` in
+     `dispatcher/gates.py`, `docs/decisions.md` ADR 309.
    - *Indexes and pointers* — **built**: the duties and `_ANCHORS` in
      `dispatcher/project_docs.py`, the `pointers` gate in
      `dispatcher/gates.py`, `docs/learnings/README.md` and
