@@ -14465,3 +14465,44 @@ sits and when it is off, and where the comment shows.
   text, and a resolution sends neither.
 - *Reading the action's `result.outcome`:* the comment says it, as ADR 270
   ruled for approve.
+
+## ADR 291 — `resolve_conflict_locked` is the one resolve under the base lock, and the CLI takes the worker's outcomes
+
+**Status:** accepted (2026-10-22), T-134's arquitecto. Resolves
+`docs/debt/T-133-S1-D1.md`; builds on ADR 277 and ADR 285.
+
+**Context.** `dispatch resolve-conflict` (ADR 277) and the worker's
+`resolve_conflict` handler (ADR 285) each took the cleanup container, the
+base lock named `resolve-conflict` and `read_owner`/`restore_owner` around
+`resolve_conflict`; the worker's copy reached the private `_base_lock`. The
+two copies differed at the edges: the CLI let a failed `read_owner` or a
+raising `resolve_conflict` escape as a traceback and called no container a
+usage error (exit 2), while the worker turned each into an outcome.
+
+**Decision.** `dispatcher/dispatcher.py` `resolve_conflict_locked(cfg,
+task_id, slug) -> tuple[str, str]`, beside `resolve_conflict`, is the one
+body. It returns `(outcome, detail)` with the worker's three outcomes and
+words, unchanged: `resolved`; `not_resolved` (the resolution said no, or it
+raised: *resolve conflict did not finish: …*); `not_run` (no container, the
+base lock held, or the owner unreadable — nothing ran). The owner is
+restored whenever it was read. The worker calls it in place of its own
+`_resolve_locked`, which goes. The CLI maps the outcome: `resolved` prints
+the detail and exits 0; `not_resolved` prints the detail to stderr, exit 1;
+`not_run` prints `task <id>: not resolved: <detail>` to stderr, exit 1 —
+the line a held lock printed already.
+
+**Consequences.**
+- The CLI's edges change and nothing else does: no container is exit 1 with
+  *no agent container to run it in* instead of exit 2 with a usage line, and
+  an exception in `read_owner` or `resolve_conflict` is a one-line exit 1
+  instead of a traceback. The resolution itself is untouched.
+- `_base_lock` has no caller outside `dispatcher/dispatcher.py` but the CLI's
+  `merge-task`, which is not this decision's.
+- A change to how a resolution locks or restores the owner lands once.
+
+**Ruled out.**
+- *A function that raises and lets each caller map:* the worker tells an
+  unreadable owner (`not_run`) from a raising resolution (`not_resolved`),
+  and a raise would make each caller re-wrap the two steps to keep that.
+- *Taking the container as a parameter:* each caller would call
+  `cleanup_container` again, the repetition this removes.

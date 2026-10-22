@@ -1503,7 +1503,7 @@ def test_a_request_for_changes_interrupted_after_started_at_is_not_run_again(
 
 
 class Resolve:
-    """A fake `worker._resolve_locked`, held and answering the way `Approve` is."""
+    """A fake `core.resolve_conflict_locked`, held and answering the way `Approve` is."""
 
     def __init__(self):
         self.calls: list[tuple] = []
@@ -1522,7 +1522,7 @@ class Resolve:
 @pytest.fixture
 def resolves(monkeypatch):
     fake = Resolve()
-    monkeypatch.setattr(worker_mod, "_resolve_locked", fake)
+    monkeypatch.setattr(core, "resolve_conflict_locked", fake)
     yield fake
     if fake.gate is not None:
         fake.gate.set()
@@ -1654,7 +1654,7 @@ def test_a_claimed_resolve_is_interrupted_on_recovery_and_never_run_again(
 
 
 class Locked:
-    """The pieces `_resolve_locked` calls, replaced: the container, the base lock,
+    """The pieces `resolve_conflict_locked` calls, replaced: the container, the base lock,
     the owner and the resolution."""
 
     def __init__(self, monkeypatch):
@@ -1707,39 +1707,39 @@ def locked(monkeypatch):
 
 
 def test_the_helper_resolves_under_the_base_lock_and_restores_the_owner(cfg, locked):
-    got = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    got = core.resolve_conflict_locked(cfg, "T-1", "proj")
     assert got == ("resolved", "resolved it")
     assert locked.events == ["acquire", "read_owner", "resolve", "restore 1000:1000", "release"]
 
 
 def test_the_helper_reports_a_resolution_that_did_not_land(cfg, locked):
     locked.outcome = core.ResolveOutcome(False, "design conflict")
-    assert worker_mod._resolve_locked(cfg, "T-1", "proj") == ("not_resolved", "design conflict")
+    assert core.resolve_conflict_locked(cfg, "T-1", "proj") == ("not_resolved", "design conflict")
 
 
 def test_the_helper_restores_the_owner_when_the_resolution_raises(cfg, locked):
     locked.raises = RuntimeError("boom")
-    outcome, detail = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    outcome, detail = core.resolve_conflict_locked(cfg, "T-1", "proj")
     assert outcome == "not_resolved" and "boom" in detail
     assert "restore 1000:1000" in locked.events
 
 
 def test_the_helper_with_no_container_is_not_run(cfg, locked):
     locked.container = None
-    assert worker_mod._resolve_locked(cfg, "T-1", "proj")[0] == "not_run"
+    assert core.resolve_conflict_locked(cfg, "T-1", "proj")[0] == "not_run"
     assert locked.events == []
 
 
 def test_the_helper_with_the_base_lock_held_is_not_run(cfg, locked):
     locked.held = tasks.BaseLockHeldError("proj", {"owner": "x"}, "merge-task", 1.0)
-    outcome, detail = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    outcome, detail = core.resolve_conflict_locked(cfg, "T-1", "proj")
     assert outcome == "not_run" and detail
     assert locked.events == []
 
 
 def test_the_helper_with_an_unreadable_owner_is_not_run(cfg, locked):
     locked.owner_error = OSError("no docker")
-    outcome, detail = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    outcome, detail = core.resolve_conflict_locked(cfg, "T-1", "proj")
     assert outcome == "not_run" and "no docker" in detail
     assert "resolve" not in locked.events and locked.events[-1] == "release"
 

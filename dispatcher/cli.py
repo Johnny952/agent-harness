@@ -37,7 +37,7 @@ from dispatcher.dispatcher import (
     push_base,
     recheck_awaiting_review,
     record_merge,
-    resolve_conflict,
+    resolve_conflict_locked,
     run_draft_specs,
     run_single_phase,
     run_task_cycle,
@@ -1056,27 +1056,15 @@ def main() -> None:
     elif args.command == "close-task":
         _run_close_task(cfg, args)
     elif args.command == "resolve-conflict":
-        container = cleanup_container(cfg)
-        if container is None:
-            parser.error("no accounts configured: nothing to run the resolution in")
-        # The resolution merges the base into the task branch and may push it:
-        # a base operation, under the same lock as merge-task (ADR 80, ADR 277).
-        try:
-            base = _base_lock(cfg, args.project, "resolve-conflict").acquire()
-        except tasks.BaseLockHeldError as exc:
-            print(f"task {args.task_id}: not resolved: {exc}", file=sys.stderr)
+        # The resolution is a base operation, under the lock merge-task takes
+        # (ADR 80, ADR 277); the worker runs the same body (ADR 291).
+        outcome, detail = resolve_conflict_locked(cfg, args.task_id, args.project)
+        if outcome == "not_run":
+            detail = f"task {args.task_id}: not resolved: {detail}"
+        if outcome != "resolved":
+            print(detail, file=sys.stderr)
             raise SystemExit(1)
-        with base:
-            project_dir = f"{cfg.projects_root}/{args.project}"
-            owner = docker_exec.read_owner(container, project_dir)
-            try:
-                resolved = resolve_conflict(cfg, container, args.task_id, args.project)
-            finally:
-                docker_exec.restore_owner(container, project_dir, owner)
-        if not resolved.resolved:
-            print(resolved.detail, file=sys.stderr)
-            raise SystemExit(1)
-        print(resolved.detail)
+        print(detail)
     elif args.command == "merge-task":
         container = cleanup_container(cfg)
         if container is None:

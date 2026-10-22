@@ -924,34 +924,6 @@ def _request_changes(worker: Worker, record: dict, cancelled: threading.Event) -
         actions.finish(sd, record["id"], "done", result=result)
 
 
-def _resolve_locked(cfg: Config, task_id: str, slug: str) -> tuple[str, str]:
-    """`dispatch resolve-conflict`'s body: (outcome, detail) (ADR 277, ADR 285).
-
-    The base lock, the tree's owner restored and `core.resolve_conflict`, as the
-    CLI verb does. Outcomes: `resolved`, `not_resolved`, `not_run` (nothing ran).
-    """
-    container = core.cleanup_container(cfg)
-    if container is None:
-        return "not_run", "no agent container to run it in"
-    try:
-        base = core._base_lock(cfg, slug, "resolve-conflict").acquire()
-    except tasks.BaseLockHeldError as exc:
-        return "not_run", str(exc)
-    with base:
-        project_dir = f"{cfg.projects_root}/{slug}"
-        try:
-            owner = docker_exec.read_owner(container, project_dir)
-        except Exception as exc:
-            return "not_run", f"the project could not be read: {exc}"
-        try:
-            resolved = core.resolve_conflict(cfg, container, task_id, slug)
-        except Exception as exc:
-            return "not_resolved", f"resolve conflict did not finish: {exc}"
-        finally:
-            docker_exec.restore_owner(container, project_dir, owner)
-    return ("resolved" if resolved.resolved else "not_resolved"), resolved.detail
-
-
 def _resolve_conflict(worker: Worker, record: dict, _cancelled=None) -> None:
     """Resolve a `conflict` task's merge conflict, or say why not (ADR 285).
 
@@ -972,7 +944,7 @@ def _resolve_conflict(worker: Worker, record: dict, _cancelled=None) -> None:
     else:
         record["started_at"] = _utc_now().isoformat()
         actions.rewrite(sd, record)
-        outcome, detail = _resolve_locked(cfg, task_id, record["project"])
+        outcome, detail = core.resolve_conflict_locked(cfg, task_id, record["project"])
     comment = f"resolve conflict, asked by {actor}: {detail}"
     try:
         tasks.add_comment(cfg.hive_tasks_dir, task_id, "dispatcher", comment)
