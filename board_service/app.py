@@ -40,6 +40,9 @@ body. The caller's role is the `?role=` query parameter, not a credential
 (section 5): it decides which tools are listed and which may be called. It
 keeps a confused phase off a tool outside its role; it does not stop someone on
 the network from naming another role, and is not meant to.
+
+A person's sign-in, sessions, CSRF check and audit log are `signin.py`'s, installed
+here once (ADR 324).
 """
 from __future__ import annotations
 
@@ -53,6 +56,7 @@ import sys
 import yaml
 from flask import Flask, jsonify, request
 
+from board_service import signin
 from dispatcher import actions, context_transfer, epic_runs, push
 from dispatcher import projects as project_store
 from dispatcher import tasks as task_store
@@ -853,6 +857,7 @@ def create_app(config_path: str) -> Flask:
     # Read once, as the config is: rotating it is a restart (ADR 151, 5).
     actions_token = os.environ.get(ACTIONS_TOKEN_ENV, "")
     app = Flask(__name__)
+    signin.install(app, os.environ.get(signin.AUTH_DIR_ENV, ""))
 
     @app.get("/health")
     def health():
