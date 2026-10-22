@@ -643,6 +643,58 @@ describe("the review", () => {
       }
     });
 
+    it("is still drawn and posts {project} when the diff does not answer (T-133-S2-D1)", async () => {
+      const { sent } = await serve([task("T-1", { status: "conflict" })], {
+        "/api/tasks/T-1/diff": { status: 502, error: "git hung" },
+        "POST /api/tasks/T-1/resolve-conflict": { bare: QUEUED, status: 201 },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
+      expect(await screen.findByText("The diff could not be read")).toBeTruthy();
+      expect(screen.queryByTestId("verdict-form")).toBeNull();
+      expect(screen.queryByRole("button", { name: "approve" })).toBeNull();
+      expect((resolveButton() as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(resolveButton());
+      await waitFor(() =>
+        expect(toast.success).toHaveBeenCalledWith(expect.stringContaining("A-79")),
+      );
+      expect(sent.filter((x) => x.method !== "GET")).toEqual([
+        {
+          method: "POST",
+          path: "/api/tasks/T-1/resolve-conflict",
+          body: { project: "ia-harness" },
+        },
+      ]);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "resolve queued" })).toBeTruthy(),
+      );
+      expect((resolveButton() as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("toasts a refusal as the route's words when the diff does not answer", async () => {
+      await serve([task("T-1", { status: "conflict" })], {
+        "/api/tasks/T-1/diff": { status: 502, error: "git hung" },
+        "POST /api/tasks/T-1/resolve-conflict": {
+          status: 409,
+          error: "a resolve conflict is already queued",
+        },
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
+      await screen.findByText("The diff could not be read");
+      fireEvent.click(resolveButton());
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith("a resolve conflict is already queued"),
+      );
+      expect((resolveButton() as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("is not drawn on Awaiting review when the diff does not answer", async () => {
+      await serve([task("T-1", { status: "awaiting_review" })], {
+        "/api/tasks/T-1/diff": { status: 502, error: "git hung" },
+      });
+      await screen.findByText("The diff could not be read");
+      expect(screen.queryByRole("button", { name: /resolve conflict/ })).toBeNull();
+    });
+
     it("lists the dispatcher's resolve conflict outcome under outcomes", async () => {
       const outcome: TaskComment = {
         at: "2026-10-21T10:00:00Z",
