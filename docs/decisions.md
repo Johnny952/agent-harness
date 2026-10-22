@@ -14586,3 +14586,70 @@ with no warning.
   signature.
 - *A custom merge driver:* its definition lives in `.git/config`, which no
   clone carries.
+## ADR 294 — The learnings carry claims under a per-project `flock`, and leaves an entry a live carrier holds
+
+**Status:** accepted (2026-10-22), T-136's arquitecto. Builds on ADR 200
+for the per-project scope and on ADR 83 and ADR 252 for the parallel queue.
+
+**Context.** `dispatcher/learnings.py` `carry` reads the inbox, picks this
+project's unfiled entries and writes `carried_by: <task>` on each; the
+auditor then files the rows its prompt names as `carried_by` it. Under
+`run-queue --parallel N` two cycles of one project are threads of one
+process, and ADR 200, 7 has them share the queue's one project lock, so that
+lock does not keep their carries apart. Two carries interleaving can both
+read an entry free and both claim it. And a lock alone would not be enough:
+`carry` overwrites a `carried_by` naming another task, on purpose, so a
+second carry run after the first, however serialised, takes the first
+task's entries and its auditor files them again.
+
+**Decision.**
+1. **The lock.** `carry`'s read of the inbox through its last write runs
+   under an exclusive, blocking `flock` on
+   `<learnings root>/.carry-<project>.lock`, taken on a new descriptor per
+   call, as `adr_numbers._locked` takes its own, so two threads of one
+   process exclude each other too. Per project, the scope of ADR 200's lock:
+   two projects' carries never wait on each other. A project that is not
+   one path component is refused with `ValueError`, as
+   `project_lock.project_lock_path` refuses it. Nothing else is taken while
+   it is held, and it is held for file reads and atomic writes only, so it
+   never waits on a phase; the file is never removed.
+2. **The claim respects a live carrier.** An entry whose `carried_by` names
+   another task is left alone while that task is a live carrier, and taken
+   over, as before, when it is not. The carrier is live when its task card
+   reads and either names an `owner` (a cycle is running it; `open_cycle`'s
+   `reap_expired_locks` clears the owner of a dead one) or has status
+   `awaiting_review` or `conflict` (its auditor filed the entry and the
+   branch has not merged). A missing or unreadable card, or one in any other
+   state, is a dead carrier. The card is read with
+   `context_transfer.read_task_file`, without the task lock: a read of a
+   file written by `os.replace` needs none. The two status words are
+   literals in `learnings.py`, with a test pinning them to
+   `tasks.AWAITING_REVIEW_STATUS` and `tasks.CONFLICT_STATUS`, so the module
+   keeps importing nothing from the package but `context_transfer`.
+3. **The signature and the return do not change.** `carry(hive_dir, project,
+   task_id) -> list[str]`, the refs it claimed now; an entry left to a live
+   carrier is not in it, and one line is logged naming those entries and
+   their carriers.
+
+**Consequences.**
+- A second carry waits for the first and then sees its entries claimed by a
+  live task, so it claims none of them and its auditor files none.
+- An entry carried by a task that is awaiting review stays with that task
+  until the merge drops it, so a later serial cycle no longer re-files it
+  either. An entry whose carrier was reopened for changes and is not running
+  at that moment can be taken over and then taken back by the carrier's own
+  next carry; the second filing that allows is not closed here.
+- `mark_orphaned` and `drop_promoted` still rewrite or move entries without
+  this lock. They touch only the dying or merging task's own entries, which
+  a concurrent carry leaves alone while that task is live.
+- The lock lives in the hive, not in `state_dir`, because `carry` is handed
+  only `hive_dir`, and the dispatcher is its one taker.
+
+**Ruled out.**
+- *Reusing ADR 200's project lock:* the parallel queue holds it for all its
+  cycles at once, so it cannot order two of them.
+- *The lock without the liveness rule:* it serialises the two carries and
+  the second still overwrites the first's claim.
+- *Liveness by heartbeat age:* `carry` would need the TTL passed in, a
+  change at both call sites in `dispatcher/dispatcher.py`, and the reaper
+  already turns a stale heartbeat into a cleared owner before any carry.

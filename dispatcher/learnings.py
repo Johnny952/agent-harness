@@ -42,7 +42,9 @@ without destroying either the claim or the correction.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import fcntl
 import hashlib
 import logging
 import os
@@ -540,21 +542,75 @@ def _carried(entries: list[Entry], project: str) -> list[Entry]:
     ]
 
 
+CARRY_LOCK_PREFIX = ".carry-"
+CARRY_LOCK_SUFFIX = ".lock"
+
+# `tasks.AWAITING_REVIEW_STATUS` and `tasks.CONFLICT_STATUS`, as literals
+# because this module imports only `context_transfer`; a test pins them.
+_LIVE_CARRIER_STATUSES = frozenset({"awaiting_review", "conflict"})
+
+
+@contextlib.contextmanager
+def _carry_lock(hive_dir: str, project: str):
+    """The project's carry lock (ADR 294), per project as ADR 200's is.
+
+    A new descriptor per acquisition, as in `adr_numbers._locked`, so two
+    threads of one `run-queue` exclude each other too. The dot prefix and the
+    `.lock` suffix keep the file out of `read_dir`, which reads only `*.md`.
+    """
+    if not context_transfer._is_single_path_component(project):
+        raise ValueError(f"not a project slug: {project!r}")
+    root = root_dir(hive_dir)
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, f"{CARRY_LOCK_PREFIX}{project}{CARRY_LOCK_SUFFIX}")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _carrier_is_live(hive_dir: str, carrier: str) -> bool:
+    """Is the task that stamped an entry still going to file it?
+
+    Live means a worker owns the card, or it waits for review or a conflict
+    to be resolved. A crashed carrier has had its owner cleared by
+    `reap_expired_locks` before any carry runs, so it reads as dead here.
+    """
+    if not context_transfer._is_single_path_component(carrier):
+        return False
+    try:
+        task = context_transfer.read_task_file(context_transfer.task_file_path(hive_dir, carrier))
+    except (OSError, ValueError, KeyError, yaml.YAMLError):
+        return False
+    return task.owner is not None or task.status in _LIVE_CARRIER_STATUSES
+
+
 def carry(hive_dir: str, project: str, task_id: str) -> list[str]:
     """Hand this project's open entries to the task about to file them.
 
-    Called when the auditor is dispatched. The stamp is overwritten rather
-    than respected: an entry whose previous carrier died is exactly the one
-    the next task has to pick up, and the dead carrier is no longer around to
-    release it.
+    Called when the auditor is dispatched. Held under the project's carry
+    lock from the read through the last claim, so two parallel cycles never
+    claim the same entry (ADR 294). The stamp of a dead carrier is
+    overwritten rather than respected: it is exactly the entry the next task
+    has to pick up, and the dead carrier is no longer around to release it.
+    A live carrier's entries are left to it.
     """
     carried = []
-    for entry in _carried(read_inbox(hive_dir), project):
-        if entry.carried_by == task_id:
-            continue
-        entry.meta["carried_by"] = task_id
-        _write(entry)
-        carried.append(entry.ref)
+    held = []
+    with _carry_lock(hive_dir, project):
+        for entry in _carried(read_inbox(hive_dir), project):
+            if entry.carried_by == task_id:
+                continue
+            if entry.carried_by and _carrier_is_live(hive_dir, entry.carried_by):
+                held.append(f"{entry.ref} ({entry.carried_by})")
+                continue
+            entry.meta["carried_by"] = task_id
+            _write(entry)
+            carried.append(entry.ref)
+    if held:
+        logger.info("task %s leaves entries a live task carries: %s", task_id, ", ".join(held))
     if carried:
         logger.info("task %s carries inbox entries: %s", task_id, ", ".join(carried))
     return carried

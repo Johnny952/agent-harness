@@ -1,8 +1,11 @@
+import threading
+import time
 from pathlib import Path
 
+import pytest
 import yaml
 
-from dispatcher import learnings
+from dispatcher import learnings, tasks
 
 _SYMPTOM = "ECONNREFUSED 127.0.0.1:5432 (pid 4711)"
 
@@ -195,6 +198,85 @@ def test_carry_takes_over_an_entry_whose_carrier_died(tmp_path: Path) -> None:
 
     assert learnings.carry(str(hive), "myproj", "task-9") == ["inbox/stranded.md"]
     assert _meta(stranded)["carried_by"] == "task-9"
+
+
+def _live_card(hive: Path, task_id: str, *, owner: str | None = "worker", status: str = "in_progress") -> Path:
+    """A card as the dispatcher leaves it for a task that may still file."""
+    hive.mkdir(parents=True, exist_ok=True)
+    path = hive / f"{task_id}.md"
+    path.write_text(
+        "---\n"
+        + yaml.safe_dump({"task_id": task_id, "status": status, "owner": owner}, sort_keys=False)
+        + "---\n\n## implementador\n\nBuilt.\n"
+    )
+    return path
+
+
+def test_two_concurrent_carries_claim_each_entry_once(tmp_path: Path, monkeypatch) -> None:
+    """ADR 294: without the lock both carries read every entry as free and
+    both claim it; the slowed write makes that interleaving certain."""
+    hive = tmp_path / "hive"
+    paths = [_entry(hive, f"e{i}.md") for i in range(6)]
+    _live_card(hive, "task-A")
+    _live_card(hive, "task-B")
+    real_write = learnings._write
+
+    def slow_write(entry, path=None):
+        time.sleep(0.01)
+        real_write(entry, path)
+
+    monkeypatch.setattr(learnings, "_write", slow_write)
+    barrier = threading.Barrier(2)
+    results: dict[str, list[str]] = {}
+
+    def run(task: str) -> None:
+        barrier.wait()
+        results[task] = learnings.carry(str(hive), "myproj", task)
+
+    threads = [threading.Thread(target=run, args=(t,)) for t in ("task-A", "task-B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    both = results["task-A"] + results["task-B"]
+    assert sorted(both) == sorted(f"inbox/e{i}.md" for i in range(6))
+    for path in paths:
+        owner = "task-A" if f"inbox/{path.name}" in results["task-A"] else "task-B"
+        assert _meta(path)["carried_by"] == owner
+
+
+def test_carry_leaves_a_live_carriers_entries(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    owned = _entry(hive, "owned.md", carried_by="task-8")
+    waiting = _entry(hive, "waiting.md", carried_by="task-7")
+    _live_card(hive, "task-8")
+    _live_card(hive, "task-7", owner=None, status="awaiting_review")
+
+    assert learnings.carry(str(hive), "myproj", "task-9") == []
+    assert _meta(owned)["carried_by"] == "task-8"
+    assert _meta(waiting)["carried_by"] == "task-7"
+
+
+def test_carry_takes_over_from_a_carrier_with_no_owner(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    crashed = _entry(hive, "crashed.md", carried_by="task-8")
+    parked = _entry(hive, "parked.md", carried_by="task-7")
+    _live_card(hive, "task-8", owner=None)
+    _live_card(hive, "task-7", owner=None, status="blocked")
+
+    assert sorted(learnings.carry(str(hive), "myproj", "task-9")) == ["inbox/crashed.md", "inbox/parked.md"]
+    assert _meta(crashed)["carried_by"] == "task-9"
+    assert _meta(parked)["carried_by"] == "task-9"
+
+
+def test_live_carrier_statuses_match_the_task_constants() -> None:
+    assert learnings._LIVE_CARRIER_STATUSES == {tasks.AWAITING_REVIEW_STATUS, tasks.CONFLICT_STATUS}
+
+
+def test_carry_lock_refuses_a_slug_that_is_not_one_path_component(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        learnings.carry(str(tmp_path / "hive"), "a/b", "task-9")
 
 
 def test_drop_promoted_moves_only_what_the_merged_branch_filed(tmp_path: Path) -> None:

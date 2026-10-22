@@ -366,3 +366,8 @@ subagent, not a dispatched cycle, while T-134 held the project.
 T-137 resolved no earlier row and declared no debt. It moved these per-task
 paragraphs out of `README.md` into this file and made the index append-only
 (ADR 297): from here on a paragraph is appended here, never in `README.md`.
+
+T-136 resolved no earlier row and declared one, `introduced`: the two other
+inbox writers do not take the new carry lock. It is filed open as
+`T-136-D1`, impact `risk`: safe under today's ownership rule, but a lost
+update once two writers can reach one entry.
