@@ -14803,3 +14803,83 @@ stale-plan note that `run_task_cycle(scheduler=)` applies.
 - *A ceiling above the pool's slots, clamped silently at the worker:* a
   config that asks for more than can run is refused where it is loaded,
   as `--parallel` is refused where it is typed.
+
+## ADR 315 — A phase is handed only the learnings rows its task names, and today's table when it names none
+
+**Status:** accepted (2026-10-22), T-142's arquitecto. Narrows ADR 41,
+part 1 and the `in_phase_table` row of part 5; builds the *Format*
+sentence of the root `README.md` *Future work* item 1, *Shared learnings
+that survive a dead phase*.
+
+**Context.** `learnings.duties` renders `eligible(read_all(...), project)`
+into every phase's prompt, ordered and cut at `MAX_ROWS`. The rows a task
+needs are a few of those, and the rest cost every phase of every task.
+The README asks for the rows matching "the task's profile, labels, or the
+paths its plan names". The entry format is out of scope, so an entry has
+no tag or path field: what it names is in its `when` line and its body.
+No *profile* field exists on a task or a project.
+
+**Decision.**
+1. **The context.** `learnings.TaskContext`, a frozen dataclass of two
+   frozensets, `paths` and `tags`; it is *usable* when either is
+   non-empty. `learnings.task_context(hive_dir, task_id, task_file,
+   description)` builds it from what `_role_prompt` already holds:
+   - `paths`: `surface.parse(description)` over the whole description
+     text, plus the `path` of each item in the arquitecto's handoff
+     `paths` (`context_transfer.read_handoff(..., "arquitecto")`), each
+     cut at its first space, `:` or `#` and kept when
+     `surface.parse` of it in backticks keeps it;
+   - `tags`: the card's `tags` (`context_transfer.read_task_file`), the
+     string items only, stripped and lower-cased.
+   Anything unreadable — no card, no handoff, a malformed one — adds
+   nothing and never raises. *Profile* is the project: `eligible` already
+   applies it, and nothing finer exists to read.
+2. **The selector.** `learnings.select(entries, context)` is pure and
+   keeps input order. A row is *kept* when its scope is `harness` or it
+   is reviewed (under `harness/`). Any other row *matches* when its
+   `when` plus body names one of the context's paths — the path (a glob
+   up to its first glob character), or its last segment when that has an
+   extension, as a case-insensitive substring; or a backticked path in
+   the entry that `surface.covers` a context path — or one of its tags as
+   a whole word, case-insensitive, `-` and `_` counting as word
+   characters. The answer is the kept rows plus the matching ones; it is
+   `entries` unchanged when the context is not usable or no non-kept row
+   matches.
+3. **Filter, then cap.** `duties` hands `table` the selected rows and the
+   count the filter left out, `table(rows, harness, filtered=n)`, and
+   `table` orders and cuts as before. The trailer, with `filtered` above
+   zero, reads: "{n} more were filtered out because nothing in them
+   names this task's paths or tags[, and {m} more are past the
+   {MAX_ROWS}-row cap]; they are still in the directory, and the grep
+   finds them." With `filtered` zero it is today's line, byte for byte.
+4. **`dispatcher/dispatcher.py` changes in one call**: `_role_prompt`
+   passes `context=learnings.task_context(hive_dir, task_id, task_file,
+   description)` to `learnings.duties`, whose new keyword defaults to no
+   context, so every other caller and test is unchanged.
+5. **`/api/learnings` is not changed, and its `in_phase_table` now means
+   the unfiltered table.** The route answers per project and has no task;
+   `handed(eligible(...))` is `handed(select(eligible(...), no context))`,
+   so it still asks the same selectors and is exactly what a phase with
+   no usable context, or no match, is handed. A filtered phase is handed
+   a subset of `eligible` that may include a row this column marks
+   `false` for the cap. A per-task answer needs a `?task=` parameter and
+   is left as debt.
+
+**Consequences.**
+- Matching widens rather than narrows wherever it cannot tell: a path
+  every task names (`docs/decisions.md`) matches every row naming it, a
+  basename matches its namesakes anywhere. The cost is a bigger table,
+  never a missing row; the cap and the grep remain the backstop.
+- A trap whose text names nothing a task carries leaves that task's
+  table once another row matches; the trailer counts it and the grep
+  finds it. Harness rows, the shared environment's traps, always stay.
+- The arquitecto, with no plan yet, filters on its description and tags;
+  the phases after it also on the paths the plan cites.
+
+**Ruled out.**
+- *Tags or paths in the entry's frontmatter:* the format is out of scope,
+  and the inbox's existing entries would match nothing.
+- *The role as a profile:* role names are prose in many `when` lines,
+  and a context with only a role would always be "usable" and filter a
+  task that carries nothing.
+- *Changing the api to select per task:* it has no task to select for.
