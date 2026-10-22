@@ -376,3 +376,8 @@ T-138 resolved `T-136-D1` with a resolution row (ADR 297): both writers now
 take each entry project's carry lock (ADR 300). It declared no new debt;
 the writers ADR 300 leaves unlocked are named in its Consequences, safe
 because none of them races `carry` on `carried_by`.
+
+T-139 resolved `T-132-D1` with a resolution row (ADR 297): both
+`server-env.ts` comments now name the actions token's routes by `boardTarget`'s
+`action` and `forwardBoard`'s doc comment, with no count. It declared no new
+debt.
