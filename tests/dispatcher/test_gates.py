@@ -33,7 +33,9 @@ class _Worktree:
         added: dict[str, tuple[str, ...]] | None = None,
         tracked: tuple[str, ...] = (),
         ignored: tuple[str, ...] = (),
+        sizes: dict[str, int] | None = None,
     ) -> None:
+        self.sizes = sizes or {}
         self.branch = branch
         self.merge_base = merge_base
         self.diff = diff
@@ -123,6 +125,14 @@ class _Worktree:
                 f"ls: cannot access '{p}': No such file or directory\n" for p in missing
             )
             return _done(command, 2 if missing else 0, stderr=stderr)
+        if command[:3] == ["wc", "-l", "--"]:
+            named = command[3:]
+            out = "".join(f"{self.sizes[p]:>7} {p}\n" for p in named if p in self.sizes)
+            if len([p for p in named if p in self.sizes]) > 1:
+                out += f"{'999':>7} total\n"
+            missing = [p for p in named if p not in self.sizes]
+            stderr = "".join(f"wc: {p}: No such file or directory\n" for p in missing)
+            return _done(command, 1 if missing else 0, stdout=out, stderr=stderr)
         raise AssertionError(f"the gates ran a command no fake answers: {command}")
 
 
@@ -694,6 +704,71 @@ def test_a_contract_that_arrives_with_a_doc_says_nothing(monkeypatch) -> None:
     worktree = _Worktree(diff=("api/openapi.yaml", "docs/architecture.md")).install(monkeypatch)
 
     assert _findings(_run(worktree), gates.CONTRACT_DOCS) == []
+
+
+# --------------------------------------------------------------------------
+# Gate 5 — a touched source file past a size
+# --------------------------------------------------------------------------
+
+_BIG = gates.SIZE_NOTE_LINES + 1
+
+
+def test_a_touched_file_at_the_threshold_says_nothing(monkeypatch) -> None:
+    worktree = _Worktree(
+        diff=("pkg/mod.py",), sizes={"pkg/mod.py": gates.SIZE_NOTE_LINES},
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.SIZE) == []
+
+
+def test_a_touched_file_past_the_threshold_is_a_note_that_never_blocks(monkeypatch) -> None:
+    worktree = _Worktree(
+        diff=("pkg/mod.py", "tests/test_mod.py"), sizes={"pkg/mod.py": _BIG},
+    ).install(monkeypatch)
+
+    report = _run(worktree)
+    finding, = _findings(report, gates.SIZE)
+
+    assert finding.level == gates.NOTE
+    assert "`pkg/mod.py`" in finding.detail
+    assert str(_BIG) in finding.detail
+    assert not report.blocking
+    assert not report.needs_answer
+
+
+def test_a_large_file_the_diff_did_not_touch_is_never_measured(monkeypatch) -> None:
+    worktree = _Worktree(
+        diff=("pkg/small.py",), sizes={"pkg/small.py": 10, "pkg/huge.py": _BIG},
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.SIZE) == []
+    assert not any("pkg/huge.py" in command for command in worktree.commands)
+
+
+def test_a_deleted_file_is_silent(monkeypatch) -> None:
+    worktree = _Worktree(diff=("pkg/gone.py",), sizes={}).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.SIZE) == []
+
+
+def test_tests_and_non_python_files_are_not_measured(monkeypatch) -> None:
+    worktree = _Worktree(
+        diff=("tests/test_big.py", "web/app.ts"),
+        sizes={"tests/test_big.py": _BIG, "web/app.ts": _BIG},
+    ).install(monkeypatch)
+
+    assert _findings(_run(worktree), gates.SIZE) == []
+    assert not worktree.ran(["wc"])
+
+
+def test_a_new_untracked_file_past_the_threshold_counts(monkeypatch) -> None:
+    worktree = _Worktree(
+        untracked=("pkg/new.py",), sizes={"pkg/new.py": _BIG},
+    ).install(monkeypatch)
+
+    finding, = _findings(_run(worktree), gates.SIZE)
+
+    assert "`pkg/new.py`" in finding.detail
 
 
 # --------------------------------------------------------------------------
