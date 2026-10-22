@@ -14304,3 +14304,90 @@ that every layer refused, and the only way out was by hand.
   nothing reads yet, and refuses a choice the person may reasonably make.
 - *A separate verdict for a design conflict.* It would do exactly what
   request changes does.
+
+## ADR 285 — *Resolve conflict* from the board: a `resolve_conflict` action on the base key, with no verdict line, run as `dispatch resolve-conflict` and answered by one comment
+
+**Status:** accepted (2026-10-22), T-133-S1's arquitecto. Builds the board
+route and the worker side of ADR 277's first *Not built yet* item, on approve's
+route (ADR 267) and handler (ADR 264) shapes. C-12: *resolve conflict* is a
+verdict and spends quota. The console button is T-133's next sub-task.
+
+**Context.** ADR 277 built `dispatch resolve-conflict`: under the project's
+base lock, with the tree's owner restored, `dispatcher.resolve_conflict` runs
+the integrador (and the revisor, sometimes the auditor) on a `conflict` task and
+returns a `ResolveOutcome(resolved, detail)`. Only the CLI called it. Left
+open for the board: the body, how the person's ask is recorded, which serial
+key and locks, whether it waits for an account, and what the person reads.
+
+**Decision.**
+
+1. *The route.* `POST /api/tasks/<id>/resolve-conflict` in
+   `board_service/app.py`, in this order: `_bearer_guards(actions_token,
+   "action")` (Origin 403, no token 503, bearer 401, query 400, body not an
+   object 400); a field outside `{project}` is 400; `actions.check_new(
+   "resolve_conflict", project, task_id, params={}, actor OPERATOR)` (a bad
+   project is 400); the task file read through `context_transfer`: none is
+   404, one that does not parse is 400, `merged` is 400 "it is merged",
+   any status but `conflict` is 400 naming the status and that *resolve
+   conflict* takes only a task in `conflict`; then `actions.create`, whose
+   refusals answer as `_action`'s do (409, 503). A 201 answers the action
+   record alone. Nothing else is written and nothing starts.
+2. *Who asked is the action's `actor`*, `operator`, as a start records it.
+   There is no verdict line: `record_verdict` and `review_comments` tie a
+   verdict to the reviewed commit and count approve and request changes as
+   closing a review, and a resolution is neither; it makes a new tip the
+   person reviews again (ADR 277, 8). The outcome comment names the actor.
+3. *The kind.* `resolve_conflict` in `dispatcher/actions.py`: `params` is
+   `{}` (no commit: the worker merges the base into whatever tip the branch
+   holds, and ADR 277, 1 already refuses a writers' checkout not at it);
+   project and task required; serial key `base:<project>`, so it takes no
+   project `flock` and a second base operation of the project queued behind
+   it waits as `project`; `spends_quota` true, so it is claimed only while an
+   account is open and otherwise waits as `account` (each phase still picks
+   its own account through `dispatch_phase`); recovery `interrupt`, error
+   "interrupted during the resolution; the task's writers' checkout may hold
+   a half-made merge: look at it before resolving again". It joins
+   `_ONE_PER_TASK` and `_ONE_REVIEW_PER_TASK`, so one approve, request for
+   changes or resolve conflict per task is pending or claimed at a time, and
+   a second of any is 409 naming the one queued.
+4. *The handler.* `worker._resolve_conflict` reads the task first: no file,
+   merged, or a status other than `conflict` ends the action `failed` with
+   outcome `stale` and runs nothing. Otherwise it sets `started_at` and does
+   what the CLI verb does, as a module helper the tests can replace:
+   `core.cleanup_container`, `core._base_lock(cfg, slug,
+   "resolve-conflict").acquire()`, `docker_exec.read_owner`,
+   `core.resolve_conflict`, `docker_exec.restore_owner` in a `finally`. No
+   container, a base lock held past its wait, or an owner that cannot be read
+   is outcome `not_run`; an exception from `resolve_conflict` is
+   `not_resolved` with its words (it is written never to raise).
+5. *The outcome.* `result` is `{"outcome", "detail"}`, `outcome` one of
+   `resolved` (action `done`), `not_resolved`, `stale`, `not_run` (all
+   `failed`, `error` the comment's first line). Every outcome writes one
+   comment, author `dispatcher`, whose first line opens `resolve conflict,`
+   and names the actor (`resolve conflict, asked by operator: <detail>`); a
+   comment that cannot be written is logged, as approve's is. The task's
+   `## integrador` note from ADR 277 is written as before.
+6. *Cancel and stop.* A pending one is cancelled as any action; a running
+   one cannot be (the cancel handler's existing refusal), and a stopping
+   worker waits for it: `resolve_conflict` has no phase boundary to hold at.
+
+**Consequences.**
+- A resolution holds the project's base for its whole run, phases included,
+  as the CLI does: an approve of another task of the project waits behind it
+  in the queue, and a cycle's own merge waits on the base lock, then is
+  refused (ADR 80).
+- A cycle of another task of the project may run beside a resolution, as with
+  the CLI verb; neither touches the other's worktree.
+- The person reads the outcome as the comment and the task's status; the
+  console's button and how it shows the comment are the next sub-task's.
+
+**Ruled out.**
+- *A verdict line via `record_verdict`:* decision 2; it would also have
+  widened `dispatcher/tasks.py`, outside this task's surface.
+- *Serial key `project:`:* the integrador's phases would block every start
+  of the project, which the CLI does not, and an approve beside it would wait
+  on the base lock and be refused after five minutes instead of queuing.
+- *`params.commit` with a stale check:* the status recheck is what the task
+  asks, and the branch does not move while a task is in `conflict`.
+- *No account wait, as approve:* it runs phases, and phases spend quota
+  (C-12).

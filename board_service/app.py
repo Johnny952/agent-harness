@@ -13,7 +13,9 @@ dispatches. Three more routes, behind the `BOARD_ACTIONS_TOKEN` bearer, create a
 (ADR 142, ADR 151), and `POST /api/tasks/<id>/approve` writes the `approve`
 verdict line and then queues the `approve` action (ADR 258, ADR 267), and
 `POST /api/tasks/<id>/request-changes` does the same for `request_changes`
-(ADR 272); two behind the same bearer create a project record and
+(ADR 272); `POST /api/tasks/<id>/resolve-conflict` queues a `resolve_conflict`
+for a task in `conflict`, with no verdict line (ADR 285); two behind the same
+bearer create a project record and
 change its settings (ADR 203), through `dispatcher/projects.py`'s one writer.
 Four more queue a new project's `clone`, `init`, `keygen` and `check` for the
 worker (ADR 212); none carries a remote, the worker reads it from the record.
@@ -1019,6 +1021,47 @@ def create_app(config_path: str) -> Flask:
         # ADR 272: the verdict line closes the person's review comments;
         # the worker reopens the task's cycle at the arquitecto.
         return _review_action(task_id, "request_changes")
+
+    @app.post("/api/tasks/<task_id>/resolve-conflict")
+    def http_resolve_conflict(task_id: str):
+        # ADR 285: queue a `resolve_conflict` for a task in `conflict`. No
+        # verdict line: a resolution is neither an approve nor a request for
+        # changes. Nothing starts here; the worker runs it.
+        def make(body: dict):
+            unknown = sorted(set(body) - {"project"})
+            if unknown:
+                raise actions.ActionRefused(400, f"unknown field {unknown[0]!r}")
+            project = body.get("project")
+            actions.check_new(
+                "resolve_conflict", project=project, task_id=task_id, params={},
+                actor="operator",
+            )
+            try:
+                task = context_transfer.read_task_file(
+                    context_transfer.task_file_path(hive_dir, task_id)
+                )
+            except FileNotFoundError:
+                raise actions.ActionRefused(404, f"no task {task_id}") from None
+            except ValueError as exc:
+                raise actions.ActionRefused(
+                    400, f"the task file of {task_id} could not be read: {exc}"
+                ) from None
+            if task.merged:
+                raise actions.ActionRefused(
+                    400, f"task {task_id} is not in conflict: it is merged"
+                )
+            if task.status != task_store.CONFLICT_STATUS:
+                raise actions.ActionRefused(
+                    400,
+                    f"task {task_id} is {task.status}: resolve conflict takes only a "
+                    "task in conflict",
+                )
+            return actions.create(
+                state_dir, "resolve_conflict", project=project, task_id=task_id,
+                params={}, actor="operator",
+            )
+
+        return _action(actions_token, make)
 
     @app.post("/api/epics/<epic_id>/start")
     def http_epic_start(epic_id: str):

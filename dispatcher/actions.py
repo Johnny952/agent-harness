@@ -217,6 +217,12 @@ def _validate_request_changes(record: dict) -> list[str]:
     return _validate_approve(record)
 
 
+def _validate_resolve_conflict(record: dict) -> list[str]:
+    """A resolve conflict names the task and nothing else (ADR 285): the worker
+    merges the base into whatever tip the branch holds."""
+    return _both_required(record) + _extra_keys(record["params"], ())
+
+
 def _validate_turn(record: dict) -> list[str]:
     problems = []
     if record.get("task_id") is not None:
@@ -320,14 +326,27 @@ KINDS: dict[str, Kind] = {
             lambda r: f"project:{r['project']}", True, "requeue_unless_started",
             "interrupted after it started",
         ),
+        # A resolve conflict merges the base into the task's branch and runs
+        # the integrador (ADR 277, ADR 285): a base operation like an approve,
+        # so no project flock, but it runs agents, so it waits on an account.
+        # A half-made merge is a person's to look at, so it is not rerun.
+        Kind(
+            "resolve_conflict", _validate_resolve_conflict,
+            lambda r: f"base:{r['project']}", True, "interrupt",
+            "interrupted during the resolution; the task's writers' checkout may "
+            "hold a half-made merge: look at it before resolving again",
+        ),
     )
 }
 
 #: Kinds a second pending or claimed action for the same task is refused.
-_ONE_PER_TASK = ("start", "command_verdict", "approve", "request_changes")
-#: The verdicts that end a review: one of them at a time per task (ADR 272), so
-#: an approve and a request for changes never race on the same branch.
-_ONE_REVIEW_PER_TASK = ("approve", "request_changes")
+_ONE_PER_TASK = (
+    "start", "command_verdict", "approve", "request_changes", "resolve_conflict",
+)
+#: The answers to a task in review or in conflict: one of them at a time per
+#: task (ADR 272, ADR 285), so an approve, a request for changes and a
+#: resolve conflict never race on the same branch.
+_ONE_REVIEW_PER_TASK = ("approve", "request_changes", "resolve_conflict")
 #: Kinds a second pending or claimed action for the same project is refused.
 _ONE_PER_PROJECT = ("clone", "init", "keygen", "check")
 
@@ -567,7 +586,8 @@ def _new_record(kind, project, task_id, params, actor, note) -> dict:
 
 def _refuse_locked(root: Path, record: dict, ready) -> None:
     """The checks made under `write.lock`: one start (verdict, approve, request
-    for changes) per task, one approve or request for changes per task, one
+    for changes, resolve conflict) per task, one approve, request for changes
+    or resolve conflict per task, one
     setup action of each kind per project, and Ready."""
     kind, project, task_id = record["kind"], record["project"], record["task_id"]
     if kind in _ONE_PER_TASK:
