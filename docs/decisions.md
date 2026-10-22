@@ -15071,3 +15071,58 @@ the guard exists to stop.
   is how this debt happened.
 - *Printing the hold's source (event or cooldown):* the operator acts on the
   instant, not on where it came from.
+
+## ADR 321 — `/api/learnings?task=` answers `in_phase_table` for one task's phases
+
+**Status:** accepted (2026-10-22), T-144's arquitecto. Narrows ADR 315
+decision 5 and resolves `docs/debt/T-142-D1.md`; the answer without the
+parameter is unchanged.
+
+**Context.** Since ADR 315 a phase is handed
+`handed(select(eligible(...), task_context(...)))`, and the route's
+`in_phase_table` is `handed(eligible(...))`, the table of a task with no
+usable context. The route had no task to build a context from.
+
+**Decision.**
+1. **One optional parameter, `task`**, beside `project`; the allowed set
+   of `_reject_unknown_parameters` is `{"project", "task"}`. Absent or empty
+   is today's answer, byte for byte.
+2. **A non-bare id is a 400**: `task must name one task file, not '<id>'`,
+   checked with `_is_bare_task_id` before any read, as `/api/phases` does
+   for `task_id`. The 400 comes after the project check.
+3. **The context is the dispatcher's own.** `learnings.task_context(
+   cfg.hive_tasks_dir, task, context_transfer.task_file_path(
+   cfg.hive_tasks_dir, task), description)`, the call `_role_prompt` makes,
+   with `description` from `task_store.read_description`. That read raising
+   (`OSError`, `ValueError`, `UnmigratedTaskError` among them) passes `None`
+   and adds the warning `<description path>: unreadable task description:
+   <exc>`; the answer is still a 200.
+4. **The column**: `reaching` is `handed(select(eligible(served, slug),
+   context), harness)`. Nothing else in a row, the rows' order (`ordered`),
+   `phase_table_cap` or the `MAX_LEARNINGS` clamp changes.
+5. **An unknown task is not a 404.** No card at
+   `task_file_path` is a 200 whose column is the unfiltered one (no card,
+   handoff or description gives no context, so `select` returns `eligible`
+   unchanged), with the warning `no task '<id>' in <hive_tasks_dir>:
+   in_phase_table is the unfiltered table`. ADR 27's reason: a region on a
+   screen whose own read succeeded should not go *Broken*.
+6. **The project still comes from `project`.** When the card is readable
+   and its `project` is set and is not the answered slug, the warning
+   `task '<id>' belongs to project '<p>', not '<slug>'` is added and the
+   column is still computed; a card that will not parse adds nothing
+   beyond what `task_context` already tolerates.
+
+**Consequences.**
+- `in_phase_table` with `task` set reads "a phase of this task, dispatched
+  now, is handed this row"; without it, as before, the unfiltered table.
+- A row can be `true` with `task` and `false` without (a matching row the
+  cap cut from the unfiltered table), and the other way round.
+- The console sends no `task` yet; rendering the per-task column on the
+  task detail screen is a later task's (`docs/plans/front.md`).
+
+**Ruled out.**
+- *A 404 for an unknown task:* see 5.
+- *Taking the project from the card:* `project` is how every route here
+  picks a checkout (`_project`), and one rule is what keeps them agreeing.
+- *A field saying whether the filter applied:* nothing reads it, and
+  `select` falling back to `eligible` is already the dispatcher's rule.

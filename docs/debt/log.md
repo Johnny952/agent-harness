@@ -396,3 +396,7 @@ now takes a refusal's hold from `dispatcher._refusal_hold_until` (ADR 318), so
 `dispatch status` and `release-account`'s guard both honour a recorded
 `retry_at`. `docs/plans/balancer.md` still quotes the old "of cooldown left"
 text; it is a plan, a record, and left as written.
+
+T-144 resolved `T-142-D1` with a resolution row (ADR 297): `/api/learnings`
+takes `?task=` and answers `in_phase_table` through the dispatcher's own
+`select` and `task_context` for that task (ADR 321). It declared no new debt.
