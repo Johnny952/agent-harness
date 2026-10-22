@@ -332,7 +332,10 @@ def cycle(cfg, monkeypatch):
 
 def _scheduler(cfg, task_ids):
     queue = queue_mod.plan(cfg, "proj", task_ids, limit=10_000)
-    return queue_mod._Scheduler(cfg, queue, threading.Condition(threading.RLock()))
+    return queue_mod.WriteScheduler(
+        cfg, queue.project, f"queue {queue.queue_id}", threading.Condition(threading.RLock()),
+        [e.task_id for e in queue.entries],
+    )
 
 
 def test_the_implementador_hears_of_a_base_that_moved_under_the_plan(cfg, monkeypatch, cycle):

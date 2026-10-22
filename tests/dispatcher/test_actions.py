@@ -204,7 +204,7 @@ def test_kinds_carry_serial_key_and_quota(tmp_path):
     start = create(tmp_path, "start", **START)
     turn = create(tmp_path, "turn", **TURN)
     cancel = create(tmp_path, "cancel", params={"target": start["id"]})
-    assert actions.serial_key(start) == "project:proj"
+    assert actions.serial_key(start) == f"start:proj:{START['task_id']}"
     assert actions.serial_key(turn) == "thread:th"
     assert actions.serial_key(cancel) is None
     assert actions.KINDS["start"].spends_quota

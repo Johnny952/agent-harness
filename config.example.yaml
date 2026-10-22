@@ -305,6 +305,14 @@ merge_on_done: false
 #     - migrations/**
 #     - infra/
 
+# Per project, how many of its tasks the worker (the board's Start and Start
+# epic) runs at once (ADR 306). One project lock covers them all and their
+# write windows are ordered by the tasks' Surface sections, as `dispatch queue
+# --parallel` does. At most the pool's phase slots (the sum of the accounts'
+# max_concurrent_phases); a project not named runs one at a time. Optional.
+# project_parallel:
+#   my-project: 2
+
 # Whether a task fetches the project's remote and fast-forwards the project's
 # own checkout before its first phase runs, so the branch it cuts is not taken
 # from a base that went stale while nobody was looking. Runs once per task, at

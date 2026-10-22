@@ -862,6 +862,45 @@ def test_load_config_refuses_a_bad_push_task_branch(tmp_path: Path, extra: str) 
         load_config(str(config_path))
 
 
+def test_project_parallel_defaults_to_one_and_is_read_per_project(tmp_path: Path) -> None:
+    """ADR 306: a project not named runs one start at a time."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "project_parallel:\n  myproj: 2\n")
+
+    cfg = load_config(str(config_path))
+
+    assert cfg.parallel_for("myproj") == 2
+    assert cfg.parallel_for("other") == 1
+    assert Config.parallel_for(dataclasses.replace(cfg, project_parallel={}), "myproj") == 1
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "project_parallel: 2\n",
+        "project_parallel:\n  myproj: 3\n",  # CONFIG_YAML has two accounts of one slot
+        "project_parallel:\n  myproj: 0\n",
+        "project_parallel:\n  myproj: true\n",
+        "project_parallel:\n  myproj: '2'\n",
+    ],
+)
+def test_load_config_refuses_a_bad_project_parallel(tmp_path: Path, extra: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + extra)
+
+    with pytest.raises(ValueError, match="project_parallel"):
+        load_config(str(config_path))
+
+
+def test_the_ceiling_follows_the_slots_of_a_config_built_by_hand(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "project_parallel:\n  myproj: 2\n")
+    cfg = load_config(str(config_path))
+    cfg.accounts = cfg.accounts[:1]
+
+    assert cfg.parallel_for("myproj") == 1
+
+
 @pytest.mark.parametrize(
     "extra",
     [
@@ -1097,6 +1136,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "auto_approve": {"p": True},
         "protected_paths": {"p": ["docs/"]},
         "push_task_branch": {"p": True},
+        "project_parallel": {"p": 1},
     }
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(values))
@@ -1111,7 +1151,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         23,
-        20,
+        21,
         3,
     )
     for spec in CONFIG_KEYS.values():
