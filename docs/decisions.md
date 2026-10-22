@@ -14506,3 +14506,83 @@ the line a held lock printed already.
   and a raise would make each caller re-wrap the two steps to keep that.
 - *Taking the container as a parameter:* each caller would call
   `cleanup_container` again, the repetition this removes.
+
+## ADR 297 — the debt index is append-only and merges by union; a resolution is a row of its own, and a repeated entry stops the merge
+
+**Status:** accepted (2026-10-22), T-137's arquitecto. Extends ADR 81 to
+`docs/debt/`; leaves ADR 62 and ADR 131 as they are.
+
+**Context.** Every task that files or resolves debt edited
+`docs/debt/README.md` in three places: a row added at the end of the
+table, a row marked resolved by rewriting its **what** in place, and a
+paragraph appended to the per-task log after the table. Two branches merged
+one after the other then conflict there, and did on 2026-10-22: T-134 and
+T-135 resolved `T-133-S1-D1` and `T-133-S2-D1`, two adjacent rows, and
+the merge was resolved by hand. git conflicts on adjacent lines, and an
+append at a shared end always collides. `merge=union` alone is wrong for
+the table as it was written: an in-place edit of one row by both sides, or
+of adjacent rows, keeps both versions of each line and duplicates rows
+with no warning.
+
+**Decision.**
+1. **No row is edited after it is written.** The table in
+   `docs/debt/README.md` only grows, at its end. An entry is resolved by
+   appending a *resolution row*: its id, `**Resolved <date> by <task>.**`
+   as **what**, an empty **where**, how it was taken as **fix**, `none` as
+   **card** and **impact**. Rows already written, the ones resolved in
+   place included, stay exactly as they are.
+2. **The table is the README's last block**, so every append lands at end
+   of file. The prose that followed it moves: the paragraphs on the `card`
+   and `impact` columns go above the table, unchanged, and the per-task
+   paragraphs go verbatim, in order, to a new `docs/debt/log.md`
+   (`project_docs.DEBT_LOG`), which a task appends one paragraph to and
+   never edits. Its header says what "the first reason above" means there.
+3. **`.gitattributes` marks both files `merge=union`**, as ADR 81 did the
+   other append-only logs. `docs/debt/<id>.md` is not marked: one file per
+   entry already merges cleanly.
+4. **The reader folds.** `dispatcher/debt.py:index_rows` keeps the first
+   row of each id as the entry, in its place, and folds a later resolution
+   row with that id into it: **what** becomes the resolution's **what**, a
+   space, then the entry's; **fix** gets the resolution's **fix**
+   appended after a space when it has one; **impact** becomes `none`;
+   `resolved` is true. That is the shape a row resolved in place always
+   had, so `/api/debt`, the console, `import-debt`, the backlog mirror and
+   the fingerprints read both kinds alike and none of them changes. A later
+   row with the same id that is not a resolution row, and a resolution row
+   with no entry before it, are returned as they are: nothing is lost.
+5. **A repeated entry stops the merge.** `debt.duplicate_ids(text)` names
+   each id with more than one row that is not a resolution row — what a
+   union of two in-place edits leaves. `gates.debt_index(container,
+   workdir)` is a blocking finding on it, run beside `gates.decisions_log`
+   on the merged checkout in `pre_merge_check` and `_gate_resolution`, so a
+   union that duplicated a row sends the task to `conflict` instead of
+   landing. This repo's suite asserts the same of its own index.
+
+**Consequences.**
+- Two tasks that each resolve a different row and each append to the log
+  merge with no conflict; a test runs that merge in real git, with the
+  control that conflicts without the attribute.
+- An agent reading the table finds an open row and, further down, its
+  resolution row; the README's header says so. The auditor's prompt, the
+  implementador's prompt and the filing note say append, never edit.
+- A concurrent edit to the README's header prose, or to a paragraph of the
+  log, merges by union and can leave a sentence twice with no gate to
+  catch it — accepted, as ADR 81 accepted it for `docs/ROADMAP.md`: both
+  are rarely edited and a duplicated sentence loses nothing.
+- Moving the log out of the README takes its lines out of the present
+  docs (ADR 62): `docs/debt/log.md` is under `DEBT_DIR`, a record.
+- `docs/plans/board.md` still says an entry is marked resolved in place; it
+  is a record and is left alone.
+
+**Ruled out.**
+- *Union on the README as it was:* duplicates a row edited in place on
+  both sides, silently — the caution the task was filed with.
+- *Resolution only in `docs/debt/<id>.md`, the table generated:* a
+  generated file still conflicts when it is committed, and every reader
+  and every phase would have to open each entry file to learn what is
+  open.
+- *A separate `resolved.md`:* one more file every reader and agent must
+  join; a resolution row keeps the table one read and `index_rows` one
+  signature.
+- *A custom merge driver:* its definition lives in `.git/config`, which no
+  clone carries.
