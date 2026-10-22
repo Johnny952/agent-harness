@@ -13,7 +13,9 @@ new project up from the console (ADR 212), spending no quota. An `approve`
 merges and pushes the reviewed tip under the project's base lock, with no
 account and no project lock (ADR 258, ADR 264). A `request_changes` runs the
 task's cycle again from the arquitecto on its branch, holding the project and
-an account as a start does (ADR 272).
+an account as a start does (ADR 272). A `resolve_conflict` runs
+`dispatch resolve-conflict` on a `conflict` task under the project's base lock,
+holding an account but no project lock (ADR 285).
 Stdlib only.
 """
 
@@ -922,10 +924,73 @@ def _request_changes(worker: Worker, record: dict, cancelled: threading.Event) -
         actions.finish(sd, record["id"], "done", result=result)
 
 
+def _resolve_locked(cfg: Config, task_id: str, slug: str) -> tuple[str, str]:
+    """`dispatch resolve-conflict`'s body: (outcome, detail) (ADR 277, ADR 285).
+
+    The base lock, the tree's owner restored and `core.resolve_conflict`, as the
+    CLI verb does. Outcomes: `resolved`, `not_resolved`, `not_run` (nothing ran).
+    """
+    container = core.cleanup_container(cfg)
+    if container is None:
+        return "not_run", "no agent container to run it in"
+    try:
+        base = core._base_lock(cfg, slug, "resolve-conflict").acquire()
+    except tasks.BaseLockHeldError as exc:
+        return "not_run", str(exc)
+    with base:
+        project_dir = f"{cfg.projects_root}/{slug}"
+        try:
+            owner = docker_exec.read_owner(container, project_dir)
+        except Exception as exc:
+            return "not_run", f"the project could not be read: {exc}"
+        try:
+            resolved = core.resolve_conflict(cfg, container, task_id, slug)
+        except Exception as exc:
+            return "not_resolved", f"resolve conflict did not finish: {exc}"
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
+    return ("resolved" if resolved.resolved else "not_resolved"), resolved.detail
+
+
+def _resolve_conflict(worker: Worker, record: dict, _cancelled=None) -> None:
+    """Resolve a `conflict` task's merge conflict, or say why not (ADR 285).
+
+    The task is read again first: one no longer in `conflict` is `stale` and
+    nothing runs. Every outcome writes one dispatcher comment naming who asked;
+    a comment that cannot be written is logged, as an approve's is.
+    """
+    cfg, sd = worker.cfg, worker.state_dir
+    task_id, actor = record["task_id"], record["actor"]
+    task = _read_task(cfg, task_id)
+    if task is None or task.merged or task.status != tasks.CONFLICT_STATUS:
+        why = (
+            "it has no task file" if task is None
+            else "it is merged" if task.merged
+            else f"it is {task.status}"
+        )
+        outcome, detail = "stale", f"not run: task {task_id} is not in conflict: {why}"
+    else:
+        record["started_at"] = _utc_now().isoformat()
+        actions.rewrite(sd, record)
+        outcome, detail = _resolve_locked(cfg, task_id, record["project"])
+    comment = f"resolve conflict, asked by {actor}: {detail}"
+    try:
+        tasks.add_comment(cfg.hive_tasks_dir, task_id, "dispatcher", comment)
+    except tasks.BoardWriteError as exc:
+        logger.warning("task %s: the resolve conflict's comment was not written: %s", task_id, exc)
+    resolved = outcome == "resolved"
+    actions.finish(
+        sd, record["id"], "done" if resolved else "failed",
+        result={"outcome": outcome, "detail": detail},
+        error=None if resolved else _one_line(comment.splitlines()[0]),
+    )
+
+
 HANDLERS = {
     "start": _start, "cancel": _cancel, "command_verdict": _command_verdict, "turn": _turn,
     "clone": _clone, "init": _init, "keygen": _keygen, "check": _check,
     "approve": _approve, "request_changes": _request_changes,
+    "resolve_conflict": _resolve_conflict,
 }
 
 

@@ -1499,6 +1499,251 @@ def test_a_request_for_changes_interrupted_after_started_at_is_not_run_again(
     assert changes.calls == []
 
 
+# ---- resolve conflict (ADR 285) ---------------------------------------------
+
+
+class Resolve:
+    """A fake `worker._resolve_locked`, held and answering the way `Approve` is."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.entered = threading.Event()
+        self.gate: threading.Event | None = None
+        self.answer = ("resolved", "task T-1 resolved: back in awaiting_review")
+
+    def __call__(self, cfg, task_id, slug):
+        self.calls.append((task_id, slug))
+        self.entered.set()
+        if self.gate is not None:
+            assert self.gate.wait(WAIT)
+        return self.answer
+
+
+@pytest.fixture
+def resolves(monkeypatch):
+    fake = Resolve()
+    monkeypatch.setattr(worker_mod, "_resolve_locked", fake)
+    yield fake
+    if fake.gate is not None:
+        fake.gate.set()
+
+
+def resolve(cfg, task_id="T-1", project="proj", status=tasks.CONFLICT_STATUS):
+    _task(cfg, task_id)
+    if status == tasks.CONFLICT_STATUS:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, status, "## integrador\n\nBlocked.")
+    return actions.create(cfg.state_dir, "resolve_conflict", project=project,
+                          task_id=task_id, params={}, actor="operator")
+
+
+def test_a_resolve_comments_once_and_ends_done_with_its_result(cfg, worker, resolves):
+    rec = resolve(cfg)
+    worker.tick()
+    worker.join()
+    assert resolves.calls == [("T-1", "proj")]
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "done" and got["error"] is None
+    assert got["started_at"] is not None
+    assert got["result"] == {"outcome": "resolved", "detail": resolves.answer[1]}
+    [comment] = comments(cfg, "T-1")
+    assert comment["author"] == "dispatcher"
+    assert comment["text"] == f"resolve conflict, asked by operator: {resolves.answer[1]}"
+
+
+@pytest.mark.parametrize("outcome", ["not_resolved", "not_run"])
+def test_a_resolve_that_did_not_finish_fails_with_the_comments_first_line(
+    cfg, worker, resolves, outcome,
+):
+    resolves.answer = (outcome, "the reason\n  second   line")
+    rec = resolve(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed"
+    assert got["error"] == "resolve conflict, asked by operator: the reason"
+    assert got["result"] == {"outcome": outcome, "detail": "the reason\n  second   line"}
+    assert len(comments(cfg, "T-1")) == 1
+
+
+@pytest.mark.parametrize("make", ["not_conflict", "merged", "missing"])
+def test_a_resolve_on_a_task_not_in_conflict_is_stale_and_runs_nothing(
+    cfg, worker, resolves, make,
+):
+    rec = resolve(cfg, status="pending")
+    if make == "merged":
+        tasks.handoff(cfg.hive_tasks_dir, "T-1", tasks.CONFLICT_STATUS, "## integrador\n\nx")
+        tasks.mark_merged(cfg.hive_tasks_dir, "T-1", "main")
+    elif make == "missing":
+        os.remove(os.path.join(cfg.hive_tasks_dir, "T-1.md"))
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "failed"
+    assert got["result"]["outcome"] == "stale"
+    assert got["result"]["detail"].startswith("not run: task T-1 is not in conflict: ")
+    assert got["started_at"] is None
+    assert resolves.calls == []
+
+
+def test_a_resolve_whose_comment_cannot_be_written_still_ends_with_its_result(
+    cfg, worker, resolves, monkeypatch,
+):
+    def refuse(*args, **kwargs):
+        raise tasks.BoardWriteError("task T-1", ["no such task"])
+
+    monkeypatch.setattr(tasks, "add_comment", refuse)
+    rec = resolve(cfg)
+    worker.tick()
+    worker.join()
+    got = where(cfg, rec["id"])[1]
+    assert got["status"] == "done" and got["result"]["outcome"] == "resolved"
+
+
+def test_a_resolve_waits_for_an_account(cfg, worker, resolves, accounts):
+    accounts["open"] = False
+    rec = resolve(cfg)
+    worker.tick()
+    worker.join()
+    state, got = where(cfg, rec["id"])
+    assert state == "pending" and got["waiting"] == "account"
+    assert resolves.calls == []
+    accounts["open"] = True
+    worker.tick()
+    worker.join()
+    assert where(cfg, rec["id"])[1]["status"] == "done"
+
+
+def test_a_resolve_takes_no_project_lock(cfg, worker, resolves):
+    held = ProjectLock.take(cfg.state_dir, "proj", "T-9", "run-task")
+    try:
+        rec = resolve(cfg)
+        worker.tick()
+        worker.join()
+    finally:
+        held.release()
+    assert where(cfg, rec["id"])[1]["status"] == "done"
+
+
+def test_a_second_base_action_of_the_project_waits_as_project_while_a_resolve_runs(
+    cfg, worker, resolves, approves,
+):
+    resolves.gate = threading.Event()
+    first = resolve(cfg, "T-1")
+    second = approve(cfg, "T-2")
+    worker.tick()
+    assert resolves.entered.wait(WAIT)
+    state, got = where(cfg, second["id"])
+    assert state == "pending" and got["waiting"] == "project"
+    resolves.gate.set()
+    worker.join()
+    assert where(cfg, first["id"])[1]["status"] == "done"
+
+
+def test_a_claimed_resolve_is_interrupted_on_recovery_and_never_run_again(
+    cfg, worker, resolves,
+):
+    rec = resolve(cfg)
+    assert actions.claim(cfg.state_dir, rec["id"]) is not None
+    assert worker.recover() == [(rec["id"], "interrupted")]
+    worker.tick()
+    worker.join()
+    state, got = where(cfg, rec["id"])
+    assert state == "done" and got["status"] == "interrupted"
+    assert "half-made merge" in got["error"]
+    assert resolves.calls == [] and comments(cfg, "T-1") == []
+
+
+class Locked:
+    """The pieces `_resolve_locked` calls, replaced: the container, the base lock,
+    the owner and the resolution."""
+
+    def __init__(self, monkeypatch):
+        self.events: list[str] = []
+        self.container: str | None = "agent-cuenta1"
+        self.held: Exception | None = None
+        self.owner_error: Exception | None = None
+        self.raises: Exception | None = None
+        self.outcome = core.ResolveOutcome(True, "resolved it")
+        lock = self
+
+        class Base:
+            def acquire(self_inner):
+                if lock.held is not None:
+                    raise lock.held
+                lock.events.append("acquire")
+                return self_inner
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                lock.events.append("release")
+
+        monkeypatch.setattr(core, "cleanup_container", lambda cfg: self.container)
+        monkeypatch.setattr(core, "_base_lock", lambda cfg, slug, op: Base())
+        monkeypatch.setattr(core.docker_exec, "read_owner", self.read_owner)
+        monkeypatch.setattr(core.docker_exec, "restore_owner", self.restore_owner)
+        monkeypatch.setattr(core, "resolve_conflict", self.resolve)
+
+    def read_owner(self, container, project_dir):
+        if self.owner_error is not None:
+            raise self.owner_error
+        self.events.append("read_owner")
+        return "1000:1000"
+
+    def restore_owner(self, container, project_dir, owner):
+        self.events.append(f"restore {owner}")
+
+    def resolve(self, cfg, container, task_id, slug):
+        self.events.append("resolve")
+        if self.raises is not None:
+            raise self.raises
+        return self.outcome
+
+
+@pytest.fixture
+def locked(monkeypatch):
+    return Locked(monkeypatch)
+
+
+def test_the_helper_resolves_under_the_base_lock_and_restores_the_owner(cfg, locked):
+    got = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    assert got == ("resolved", "resolved it")
+    assert locked.events == ["acquire", "read_owner", "resolve", "restore 1000:1000", "release"]
+
+
+def test_the_helper_reports_a_resolution_that_did_not_land(cfg, locked):
+    locked.outcome = core.ResolveOutcome(False, "design conflict")
+    assert worker_mod._resolve_locked(cfg, "T-1", "proj") == ("not_resolved", "design conflict")
+
+
+def test_the_helper_restores_the_owner_when_the_resolution_raises(cfg, locked):
+    locked.raises = RuntimeError("boom")
+    outcome, detail = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    assert outcome == "not_resolved" and "boom" in detail
+    assert "restore 1000:1000" in locked.events
+
+
+def test_the_helper_with_no_container_is_not_run(cfg, locked):
+    locked.container = None
+    assert worker_mod._resolve_locked(cfg, "T-1", "proj")[0] == "not_run"
+    assert locked.events == []
+
+
+def test_the_helper_with_the_base_lock_held_is_not_run(cfg, locked):
+    locked.held = tasks.BaseLockHeldError("proj", {"owner": "x"}, "merge-task", 1.0)
+    outcome, detail = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    assert outcome == "not_run" and detail
+    assert locked.events == []
+
+
+def test_the_helper_with_an_unreadable_owner_is_not_run(cfg, locked):
+    locked.owner_error = OSError("no docker")
+    outcome, detail = worker_mod._resolve_locked(cfg, "T-1", "proj")
+    assert outcome == "not_run" and "no docker" in detail
+    assert "resolve" not in locked.events and locked.events[-1] == "release"
+
+
 # ---- heartbeat, shutdown ----------------------------------------------------
 
 

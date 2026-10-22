@@ -375,6 +375,53 @@ def test_an_approve_and_a_request_changes_for_a_task_refuse_each_other(tmp_path,
     create(tmp_path, then, **{**APPROVE, "task_id": "T-2"})
 
 
+RESOLVE = dict(project="proj", task_id="T-1", params={})
+
+
+@pytest.mark.parametrize(
+    "over",
+    [{"params": {"commit": "a" * 40}}, {"task_id": None}, {"project": None}, {"project": "../x"}],
+)
+def test_an_invalid_resolve_conflict_is_refused_400(tmp_path, over):
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, "resolve_conflict", **{**RESOLVE, **over})
+    assert err.value.status == 400
+
+
+def test_a_resolve_conflict_serialises_on_the_base_and_spends_quota(tmp_path):
+    rec = create(tmp_path, "resolve_conflict", **RESOLVE)
+    assert actions.validate(rec) == []
+    assert actions.serial_key(rec) == "base:proj"
+    assert actions.KINDS["resolve_conflict"].spends_quota
+    assert actions.KINDS["resolve_conflict"].recovery == "interrupt"
+
+
+@pytest.mark.parametrize("queued, then", [
+    ("resolve_conflict", "resolve_conflict"),
+    ("resolve_conflict", "approve"),
+    ("approve", "resolve_conflict"),
+    ("request_changes", "resolve_conflict"),
+    ("resolve_conflict", "request_changes"),
+])
+def test_one_approve_request_changes_or_resolve_conflict_per_task(tmp_path, queued, then):
+    params = RESOLVE["params"] if queued == "resolve_conflict" else APPROVE["params"]
+    create(tmp_path, queued, project="proj", task_id="T-1", params=params)
+    params = RESOLVE["params"] if then == "resolve_conflict" else APPROVE["params"]
+    with pytest.raises(ActionRefused) as err:
+        create(tmp_path, then, project="proj", task_id="T-1", params=params)
+    assert err.value.status == 409
+    assert f"a {queued} for task T-1 is already queued" in err.value.reason
+    create(tmp_path, then, project="proj", task_id="T-2", params=params)
+
+
+def test_recover_resolve_conflict_is_interrupted_with_the_half_made_merge_text(tmp_path):
+    aid = claimed(tmp_path, "resolve_conflict", params={})
+    actions.recover(tmp_path)
+    rec = read(tmp_path, "done", aid)
+    assert rec["status"] == "interrupted"
+    assert "half-made merge" in rec["error"]
+
+
 def test_recover_request_changes_not_started_goes_back_to_pending(tmp_path):
     aid = claimed(tmp_path, "request_changes", params=CHANGES["params"], claimed_at="t")
     assert actions.recover(tmp_path) == [(aid, "back to pending")]
