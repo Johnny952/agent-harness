@@ -371,3 +371,8 @@ T-136 resolved no earlier row and declared one, `introduced`: the two other
 inbox writers do not take the new carry lock. It is filed open as
 `T-136-D1`, impact `risk`: safe under today's ownership rule, but a lost
 update once two writers can reach one entry.
+
+T-138 resolved `T-136-D1` with a resolution row (ADR 297): both writers now
+take each entry project's carry lock (ADR 300). It declared no new debt;
+the writers ADR 300 leaves unlocked are named in its Consequences, safe
+because none of them races `carry` on `carried_by`.

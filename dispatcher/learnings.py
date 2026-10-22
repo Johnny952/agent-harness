@@ -671,6 +671,9 @@ def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
     drops, and only checking each ref against the merged tree answers that —
     and it is the proxy for the case that has actually fired, a cycle that
     never reached an auditor at all (`docs/decisions.md` ADR 34).
+
+    The gate runs once, outside any lock; the moves then take each entry
+    project's carry lock in turn (ADR 300).
     """
     entries = droppable(hive_dir, task_id)
     # `entries and`: a merge that filed nothing reads no card, so the ordinary
@@ -684,14 +687,11 @@ def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
         )
         return []
     dropped = []
-    for entry in entries:
-        # Made here rather than in `ensure_dirs`: nothing writes into it but
-        # this function, and an empty directory beside the two a phase is told
-        # to use is one more thing for a phase to wonder about.
-        os.makedirs(dropped_dir(hive_dir), exist_ok=True)
-        target = _free_path(os.path.join(dropped_dir(hive_dir), os.path.basename(entry.path)))
-        os.replace(entry.path, target)
-        dropped.append(entry.ref)
+    for project in _lockable_projects(entries):
+        with _carry_lock(hive_dir, project):
+            dropped += _move_dropped(hive_dir, task_id, project)
+    if any(not _lockable(entry.project) for entry in entries):
+        dropped += _move_dropped(hive_dir, task_id, None)
     if dropped:
         logger.info(
             "task %s merged: moved inbox entries to %s/: %s",
@@ -700,14 +700,71 @@ def drop_promoted(hive_dir: str, task_id: str) -> list[str]:
     return dropped
 
 
+def _move_dropped(hive_dir: str, task_id: str, project: str | None) -> list[str]:
+    """`drop_promoted`'s move for one project, on a fresh read (ADR 300).
+
+    `project` is the one whose carry lock the caller holds; `None` is the
+    entries whose project is no path component, which no `carry` can reach.
+    """
+    dropped = []
+    for entry in droppable(hive_dir, task_id):
+        if project is None:
+            if _lockable(entry.project):
+                continue
+        elif entry.project != project:
+            continue
+        # Made here rather than in `ensure_dirs`: nothing writes into it but
+        # this function, and an empty directory beside the two a phase is told
+        # to use is one more thing for a phase to wonder about.
+        os.makedirs(dropped_dir(hive_dir), exist_ok=True)
+        target = _free_path(os.path.join(dropped_dir(hive_dir), os.path.basename(entry.path)))
+        os.replace(entry.path, target)
+        dropped.append(entry.ref)
+    return dropped
+
+
 def mark_orphaned(hive_dir: str, task_id: str) -> list[str]:
     """Unpick a dead task's entries and leave them for the next one.
+
+    Each entry is rewritten under its own project's carry lock, one project
+    at a time, on a fresh read, so a `carry` stamping the same file cannot
+    lose a write (ADR 300; ADR 294 decision 1).
 
     A task that ended blocked, failed, or had its branch discarded filed
     nothing, so its entries have to stay — but they cannot keep claiming a
     carrier that is gone, and a status this task alone vouched for is back to
     being one phase's word. An entry a *different* task also reported keeps
     its confirmation: that sighting did not die with this task.
+    """
+    orphaned = []
+    first = [
+        entry
+        for entry in read_inbox(hive_dir)
+        if not entry.reviewed and task_id in (entry.task, entry.carried_by)
+    ]
+    for project in _lockable_projects(first):
+        with _carry_lock(hive_dir, project):
+            orphaned += _release(hive_dir, task_id, project)
+    if any(not _lockable(entry.project) for entry in first):
+        orphaned += _release(hive_dir, task_id, None)
+    if orphaned:
+        logger.info("task %s did not finish: released inbox entries %s", task_id, ", ".join(orphaned))
+    return orphaned
+
+
+def _lockable(project: str) -> bool:
+    return context_transfer._is_single_path_component(project)
+
+
+def _lockable_projects(entries: list[Entry]) -> list[str]:
+    return sorted({entry.project for entry in entries if _lockable(entry.project)})
+
+
+def _release(hive_dir: str, task_id: str, project: str | None) -> list[str]:
+    """`mark_orphaned`'s read-and-write for one project (ADR 300).
+
+    `project` is the one whose carry lock the caller holds; `None` is the
+    entries whose project is no path component, which no `carry` can reach.
     """
     entries = read_inbox(hive_dir)
     seen = _tasks_by_fingerprint(
@@ -718,6 +775,11 @@ def mark_orphaned(hive_dir: str, task_id: str) -> list[str]:
         if entry.reviewed:
             continue
         if task_id not in (entry.task, entry.carried_by):
+            continue
+        if project is None:
+            if _lockable(entry.project):
+                continue
+        elif entry.project != project:
             continue
         touched = False
         if entry.carried_by == task_id:
@@ -736,8 +798,6 @@ def mark_orphaned(hive_dir: str, task_id: str) -> list[str]:
         if touched:
             _write(entry)
             orphaned.append(entry.ref)
-    if orphaned:
-        logger.info("task %s did not finish: released inbox entries %s", task_id, ", ".join(orphaned))
     return orphaned
 
 

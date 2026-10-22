@@ -486,6 +486,126 @@ def test_mark_orphaned_keeps_a_confirmation_another_task_backed(tmp_path: Path) 
     assert _meta(mine)["status"] == learnings.CONFIRMED
 
 
+def _run_while_held(hive: Path, held: str, call) -> tuple[threading.Thread, list, object]:
+    """Start `call` in a thread while `held`'s carry lock is taken here."""
+    result: list = []
+    thread = threading.Thread(target=lambda: result.append(call()))
+    lock = learnings._carry_lock(str(hive), held)
+    lock.__enter__()
+    thread.start()
+    return thread, result, lock
+
+
+def test_mark_orphaned_waits_for_the_carry_lock(tmp_path: Path) -> None:
+    """ADR 300: the rewrite is one of the writers `carry`'s lock orders."""
+    hive = tmp_path / "hive"
+    entry = _entry(hive, "carried.md", task="task-1", carried_by="task-9")
+    thread, result, lock = _run_while_held(
+        hive, "myproj", lambda: learnings.mark_orphaned(str(hive), "task-9")
+    )
+    try:
+        time.sleep(0.05)
+        assert _meta(entry)["carried_by"] == "task-9"
+        assert result == []
+    finally:
+        lock.__exit__(None, None, None)
+    thread.join(5)
+    assert result == [["inbox/carried.md"]]
+    assert "carried_by" not in _meta(entry)
+
+
+def test_drop_promoted_waits_for_the_carry_lock(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _card(hive, "task-9")
+    entry = _entry(hive, "written.md", task="task-9")
+    thread, result, lock = _run_while_held(
+        hive, "myproj", lambda: learnings.drop_promoted(str(hive), "task-9")
+    )
+    try:
+        time.sleep(0.05)
+        assert entry.exists()
+        assert result == []
+    finally:
+        lock.__exit__(None, None, None)
+    thread.join(5)
+    assert result == [["inbox/written.md"]]
+    assert not entry.exists()
+
+
+def test_another_projects_lock_does_not_block_the_release(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _card(hive, "task-9")
+    _entry(hive, "carried.md", task="task-1", carried_by="task-9")
+    _entry(hive, "written.md", task="task-9", project="myproj")
+    thread, result, lock = _run_while_held(
+        hive, "otherproj", lambda: (
+            learnings.mark_orphaned(str(hive), "task-9"),
+            learnings.drop_promoted(str(hive), "task-9"),
+        )
+    )
+    try:
+        thread.join(5)
+        assert not thread.is_alive()
+    finally:
+        lock.__exit__(None, None, None)
+    assert len(result) == 1
+
+
+def test_mark_orphaned_and_carry_lose_neither_write(tmp_path: Path, monkeypatch) -> None:
+    """T-136-D1: both rewrite the whole file, so unlocked, the later write
+    erases the earlier one; the slowed write makes the overlap certain."""
+    hive = tmp_path / "hive"
+    entry = _entry(hive, "mine.md", task="task-9", status=learnings.CONFIRMED, carried_by="task-8")
+    _live_card(hive, "task-B")
+    real_write = learnings._write
+
+    def slow_write(e, path=None):
+        time.sleep(0.05)
+        real_write(e, path)
+
+    monkeypatch.setattr(learnings, "_write", slow_write)
+    barrier = threading.Barrier(2)
+
+    def orphan() -> None:
+        barrier.wait()
+        learnings.mark_orphaned(str(hive), "task-9")
+
+    def carry() -> None:
+        barrier.wait()
+        learnings.carry(str(hive), "myproj", "task-B")
+
+    threads = [threading.Thread(target=fn) for fn in (orphan, carry)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    meta = _meta(entry)
+    assert meta["carried_by"] == "task-B"
+    assert meta["status"] == learnings.UNCONFIRMED
+
+
+def test_an_entry_with_an_invalid_project_is_still_released(tmp_path: Path) -> None:
+    """No carry can reach it (ADR 294), so it is written unlocked, not refused."""
+    hive = tmp_path / "hive"
+    _card(hive, "task-9")
+    bad = _entry(hive, "bad.md", task="task-1", carried_by="task-9", project="a/b")
+    good = _entry(hive, "good.md", task="task-1", carried_by="task-9")
+
+    assert sorted(learnings.mark_orphaned(str(hive), "task-9")) == ["inbox/bad.md", "inbox/good.md"]
+    assert "carried_by" not in _meta(bad)
+    assert "carried_by" not in _meta(good)
+
+
+def test_an_entry_with_an_invalid_project_is_still_dropped(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _card(hive, "task-9")
+    bad = _entry(hive, "bad.md", task="task-9", project="a/b")
+
+    assert learnings.drop_promoted(str(hive), "task-9") == ["inbox/bad.md"]
+    assert not bad.exists()
+
+
 def test_promote_is_the_only_door_into_the_shared_store(tmp_path: Path) -> None:
     """No role and no dispatcher path calls this: it is one phase's word about
     every project at once."""

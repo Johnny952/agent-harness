@@ -14653,3 +14653,67 @@ task's entries and its auditor files them again.
 - *Liveness by heartbeat age:* `carry` would need the TTL passed in, a
   change at both call sites in `dispatcher/dispatcher.py`, and the reaper
   already turns a stale heartbeat into a cleared owner before any carry.
+
+## ADR 300 — `mark_orphaned` and `drop_promoted` take the carry lock of each entry's project, one at a time
+
+**Status:** accepted (2026-10-22), T-138's arquitecto. Extends ADR 294,
+decision 1, and closes the gap its Consequences name (`docs/debt/T-136-D1.md`).
+
+**Context.** `dispatcher/learnings.py` has three writers of inbox entries
+that race each other: `carry` stamps `carried_by`, `mark_orphaned` rewrites
+a dying task's entries (drops its `carried_by`, demotes a `status` it alone
+vouched for) and `drop_promoted` moves a merged task's entries to
+`dropped/`. Only `carry` holds ADR 294's lock. `mark_orphaned` already
+reaches an entry another task carries — one the dying task *wrote* — and a
+third task's `carry` can re-stamp that file at the same moment, so one of
+the two whole-file writes is lost. The two unlocked writers are called with
+a task id, not a project, and the entries a task wrote or carries can name
+more than one project.
+
+**Decision.**
+1. **The same lock, per entry project.** Both functions take
+   `_carry_lock(hive_dir, project)` for every project their entries name,
+   ADR 294's per-project `flock` unchanged; no lock per learnings root.
+   A project's carry still never waits on another project's writers.
+2. **One lock at a time, and a fresh read under it.** A first, unlocked
+   read of the inbox finds the projects; for each one, in sorted order, the
+   function takes that project's lock, reads the inbox again, and selects
+   and writes (or moves) only that project's entries before releasing it.
+   No two carry locks are ever held together, so no lock order can
+   deadlock, and ADR 294's "nothing else is taken while it is held" holds.
+   The selection rules do not change: `droppable`'s, and `mark_orphaned`'s
+   `task in (entry.task, entry.carried_by)`. `mark_orphaned` computes its
+   corroboration map (`seen`) from that same locked read.
+3. **An entry whose project is not one path component is written unlocked,**
+   as today, after the locked passes. `carry` refuses such a project
+   (ADR 294, 1), so no carry can ever reach that file; raising
+   `ValueError` instead would leave a dying task's other entries
+   unreleased.
+4. **`drop_promoted`'s gate stays outside the locks.** The
+   `has_phase_section` check reads the task card only; it runs once, on the
+   unlocked selection, before any lock is taken, and a gated call still
+   answers `[]` (ADR 33, ADR 34). `droppable(hive_dir, task_id)` keeps its
+   signature and stays the one selector, filtered by project inside the
+   locked pass.
+5. **Signatures and returns do not change.** Both still return the list of
+   refs they touched; the order may now follow the project passes.
+
+**Consequences.**
+- `carry`, `mark_orphaned` and `drop_promoted` never write one entry at
+  once, and an entry `drop_promoted` moves is never being re-stamped.
+- `stamp`, `reconcile`, `promote`, `set_status` and `delete` still write
+  inbox entries without the lock. They do not touch `carried_by` (except
+  `promote`, which moves an entry out of the inbox on a human's command);
+  a task that makes any of them race a carry takes the lock the same way.
+- A dying task's release waits for a concurrent carry of the same project,
+  which holds the lock for file reads and atomic writes only.
+
+**Ruled out.**
+- *One lock per learnings root for all three writers:* every project's
+  carry would then wait on every other project's, which ADR 294 chose
+  against, for a race that only ever involves one entry's project.
+- *Holding every project's lock at once, sorted:* safe, but it holds
+  several locks to do work that splits cleanly by project.
+- *Locking on the task's project from the caller:* `close_cycle` and
+  `merge-task` know it, but an entry the task wrote can name another
+  project, and that is exactly the file a carry of that project claims.
