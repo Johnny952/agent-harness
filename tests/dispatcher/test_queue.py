@@ -7,6 +7,7 @@ real phase would, so the limit is read from the same log it is in production.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -519,12 +520,12 @@ def test_cli_confirmation_and_no_start_without_yes(tmp_path, accounts, monkeypat
     fake = _install(monkeypatch, cfg, {"T-1": {}})
 
     code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
-                "--task-id", "T-1", "--limit", "500", stdin="n")
+                "--task-id", "T-1", "--limit", "500000", stdin="n")
 
     out = capsys.readouterr().out
     assert code == cli_mod.EXIT_BLOCKED
     assert fake.started == []
-    for shown in ("T-1", "Do T-1.", "arquitecto", "auditor", "Parallelism: 1", "Limit: 500",
+    for shown in ("T-1", "Do T-1.", "arquitecto", "auditor", "Parallelism: 1", "Limit: 500000",
                   "can pass it by that one phase"):
         assert shown in out
 
@@ -536,7 +537,7 @@ def test_cli_yes_runs_the_queue(tmp_path, accounts, monkeypatch, capsys):
     fake = _install(monkeypatch, cfg, {"T-1": {}, "T-2": {}})
 
     code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
-                "--task-id", "T-1", "T-2", "--limit", "500", "--yes")
+                "--task-id", "T-1", "T-2", "--limit", "500000", "--yes")
 
     assert code == 0
     assert fake.started == ["T-1", "T-2"]
@@ -551,7 +552,7 @@ def test_cli_ready_adds_tasks_in_ready_order(tmp_path, accounts, monkeypatch, ca
     fake = _install(monkeypatch, cfg, {t: {} for t in ("T-1", "T-2", "T-3")})
 
     code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
-                "--task-id", "T-2", "--ready", "2", "--limit", "500", "--yes")
+                "--task-id", "T-2", "--ready", "2", "--limit", "500000", "--yes")
 
     assert code == 0
     assert fake.started == ["T-2", "T-3", "T-1"]
@@ -559,8 +560,8 @@ def test_cli_ready_adds_tasks_in_ready_order(tmp_path, accounts, monkeypatch, ca
 
 
 @pytest.mark.parametrize("argv", [
-    ["--project", "proj", "--limit", "500"],
-    ["--project", "proj", "--ready", "-1", "--limit", "500"],
+    ["--project", "proj", "--limit", "500000"],
+    ["--project", "proj", "--ready", "-1", "--limit", "500000"],
     ["--resume", "q-20261017T000000Z-abcd", "--ready", "1"],
 ])
 def test_cli_ready_usage_errors(tmp_path, accounts, monkeypatch, argv):
@@ -571,7 +572,7 @@ def test_cli_refuses_parallel_above_one(tmp_path, accounts, monkeypatch):
     cfg = _make_config(tmp_path)
     _task(cfg, "T-1")
     code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
-                "--task-id", "T-1", "--limit", "500", "--parallel", "2", "--yes")
+                "--task-id", "T-1", "--limit", "500000", "--parallel", "2", "--yes")
     assert code == 2
 
 
@@ -579,11 +580,50 @@ def test_cli_limit_and_push_refused_exit_codes(tmp_path, accounts, monkeypatch):
     cfg = _make_config(tmp_path)
     _task(cfg, "T-1")
     _task(cfg, "T-2")
-    _install(monkeypatch, cfg, {"T-1": {"phases": [600]}, "T-2": {}})
+    _install(monkeypatch, cfg, {"T-1": {"phases": [600_000]}, "T-2": {}})
     assert _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
-                "--task-id", "T-1", "T-2", "--limit", "500", "--yes") == cli_mod.EXIT_LIMIT
+                "--task-id", "T-1", "T-2", "--limit", "500000", "--yes") == cli_mod.EXIT_LIMIT
 
     _task(cfg, "T-3")
     _install(monkeypatch, cfg, {"T-3": {"refuse_push": True}})
     assert _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
-                "--task-id", "T-3", "--limit", "500", "--yes") == cli_mod.EXIT_NOT_PUSHED
+                "--task-id", "T-3", "--limit", "500000", "--yes") == cli_mod.EXIT_NOT_PUSHED
+
+
+@pytest.mark.parametrize("limit", ["2", "99999"])
+def test_cli_refuses_a_limit_that_is_not_measured_tokens(
+    tmp_path, accounts, monkeypatch, capsys, limit
+):
+    cfg = _make_config(tmp_path)
+    _task(cfg, "T-1")
+    fake = _install(monkeypatch, cfg, {"T-1": {}})
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
+                "--task-id", "T-1", "--limit", limit, "--yes")
+
+    err = capsys.readouterr().err
+    assert code == 2
+    for shown in (f"--limit {limit}", "measured tokens", "not tasks", str(cli_mod.MIN_QUEUE_LIMIT)):
+        assert shown in err
+    assert fake.started == []
+    assert not os.path.isdir(queue_mod.queue_dir(cfg)) or not os.listdir(queue_mod.queue_dir(cfg))
+
+
+def test_cli_accepts_the_minimum_limit(tmp_path, accounts, monkeypatch):
+    cfg = _make_config(tmp_path)
+    _task(cfg, "T-1")
+    fake = _install(monkeypatch, cfg, {"T-1": {}})
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
+                "--task-id", "T-1", "--limit", str(cli_mod.MIN_QUEUE_LIMIT), "--yes")
+
+    assert code == 0
+    assert fake.started == ["T-1"]
+
+
+def test_cli_missing_limit_names_the_unit(tmp_path, accounts, monkeypatch, capsys):
+    cfg = _make_config(tmp_path)
+    _task(cfg, "T-1")
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj", "--task-id", "T-1", "--yes")
+    assert code == 2
+    assert "--limit TOKENS" in capsys.readouterr().err
