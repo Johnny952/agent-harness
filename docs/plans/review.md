@@ -390,8 +390,10 @@ After `board-service.md`'s steps, each a single surface:
    the revisor on the resolution, and runs the auditor when an edit fell
    outside the hunks. It ends in `awaiting_review`, or in `conflict` with a
    note when the integrador blocks on a design conflict.
-   Still open: the console button and the board route for *resolve
-   conflict*.
+   The board route and the console button followed **2026-10-22** (T-133,
+   ADR 288): the board's `resolve-conflict` action and its worker (T-133-S1),
+   and the *Resolve conflict* button on the console's Conflict lane
+   (T-133-S2).
 
 Steps 4, 6 and 9 start runs from the console under C-12.
 

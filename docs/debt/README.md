@@ -434,3 +434,8 @@ T-133-S2 resolved no earlier row and declared no debt. Its implementador,
 revisor and auditor all flagged a risk that no phase could file, because no
 debt id was handed to them: *Resolve conflict* sits in the diff-gated verdict
 form. The operator filed it at merge as `T-133-S2-D1`, impact `risk`.
+
+T-134 resolved `T-133-S1-D1` and declared no debt.
+
+T-135 resolved `T-133-S2-D1` and declared no debt. It ran as an operator
+subagent, not a dispatched cycle, while T-134 held the project.
