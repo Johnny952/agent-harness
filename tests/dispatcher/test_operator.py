@@ -239,7 +239,7 @@ def test_format_status_names_the_state_the_task_and_the_quota(tmp_path):
     )
 
     assert "cuenta1" in text and "BUSY" in text and "on T-008" in text
-    assert "COOLING_DOWN" in text and "of cooldown left" in text
+    assert "COOLING_DOWN" in text and "held until" in text
     assert "T-008" in text and "STALE" in text
     assert "--probe" in text  # says how to get the part it did not fetch
 
@@ -408,6 +408,29 @@ def test_release_refuses_inside_the_refusal_cooldown(tmp_path):
     assert "refused by the service" in outcome.detail
     assert "--clear-rate-limit" in outcome.detail
     assert get_state(cfg.state_dir, "cuenta1") is AccountState.COOLING_DOWN
+
+
+def test_a_recorded_retry_at_outranks_the_cooldown_in_status_and_release(tmp_path):
+    cfg = _make_config(tmp_path, quota_cooldown_seconds=1800)
+    now = time.time()
+    record_rate_limit(cfg.state_dir, "cuenta1", at=now - 4000, retry_at=now + 3600)
+    set_state(cfg.state_dir, "cuenta1", AccountState.COOLING_DOWN)
+
+    reports = operator_mod.account_reports(cfg, now=now)
+    report = {r.name: r for r in reports}["cuenta1"]
+    assert report.cooldown_remaining == pytest.approx(3600)
+    assert report.hold_until == pytest.approx(now + 3600)
+    text = operator_mod.format_status(cfg, reports, operator_mod.task_reports(cfg))
+    assert f"held until {operator_mod._instant(now + 3600)}" in text
+
+    outcome = operator_mod.release_account(cfg, "cuenta1", now=now)
+    assert outcome.refused is True
+    assert f"held until {operator_mod._instant(now + 3600)}" in outcome.detail
+    assert get_state(cfg.state_dir, "cuenta1") is AccountState.COOLING_DOWN
+
+    cleared = operator_mod.release_account(cfg, "cuenta1", clear_rate_limit=True, now=now)
+    assert cleared.refused is False
+    assert get_state(cfg.state_dir, "cuenta1") is AccountState.IDLE
 
 
 def test_release_goes_ahead_once_the_cooldown_has_elapsed(tmp_path):

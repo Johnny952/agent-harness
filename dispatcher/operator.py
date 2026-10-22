@@ -31,6 +31,7 @@ from dispatcher.state_machine import AccountState
 # growing a second number that can drift away from it.
 from dispatcher.dispatcher import (
     _USAGE_PROBE_TIMEOUT_SECONDS,
+    _refusal_hold_until,
     _threshold_for,
     is_auth_error,
     is_rate_limit_error,
@@ -46,9 +47,11 @@ class AccountReport:
     state: AccountState
     current_task_id: str | None
     rate_limited_at: float | None
-    #: Seconds of `quota_cooldown_seconds` still to run on the recorded
-    #: refusal; 0.0 when there is none or it has already elapsed.
+    #: Seconds left until `hold_until`; 0.0 when none or elapsed.
     cooldown_remaining: float
+    #: Epoch second the recorded refusal holds the account until (ADR 312
+    #: point 6, ADR 318); None when it was never refused.
+    hold_until: float | None = None
     #: Only filled by an explicit probe, which is the only part of this
     #: report that leaves the process.
     usage: quota.UsageInfo | None = None
@@ -96,10 +99,10 @@ def _account(cfg: Config, name: str) -> AccountConfig:
     raise ValueError(f"unknown account {name!r}; config.yaml has: {known}")
 
 
-def _cooldown_remaining(rate_limited_at: float | None, cooldown_seconds: int, now: float) -> float:
-    if rate_limited_at is None:
+def _cooldown_remaining(hold_until: float | None, now: float) -> float:
+    if hold_until is None:
         return 0.0
-    return max(0.0, rate_limited_at + cooldown_seconds - now)
+    return max(0.0, hold_until - now)
 
 
 def _heartbeat_age(task: context_transfer.TaskFile, now: dt.datetime) -> float | None:
@@ -176,15 +179,15 @@ def account_reports(cfg: Config, probe: bool = False, now: float | None = None) 
     reports = []
     for acc in cfg.accounts:
         rate_limited_at = state_machine.get_rate_limited_at(cfg.state_dir, acc.name)
+        hold = _refusal_hold_until(cfg, acc.name)
         report = AccountReport(
             name=acc.name,
             container=acc.container,
             state=state_machine.get_state(cfg.state_dir, acc.name),
             current_task_id=state_machine.get_current_task(cfg.state_dir, acc.name),
             rate_limited_at=rate_limited_at,
-            cooldown_remaining=_cooldown_remaining(
-                rate_limited_at, cfg.quota_cooldown_seconds, now
-            ),
+            cooldown_remaining=_cooldown_remaining(hold, now),
+            hold_until=hold,
             is_primary=acc.is_primary,
             task_ids=[
                 h.task_id for h in state_machine.get_holders(cfg.state_dir, acc.name)
@@ -265,7 +268,7 @@ def release_account(
     - A live lock means a dispatcher is still running the phase. Releasing
       then does not recover an account, it hands the same account to a second
       phase — one `docker exec` into one container, two writers.
-    - A refusal recorded inside `quota_cooldown_seconds` is the only evidence
+    - A refusal whose hold has not ended (ADR 312 point 6, ADR 318) is the only evidence
       the harness has that the *service* turned this account away; the local
       counters cannot see it (state_machine.record_rate_limit). Releasing over
       it queues the account straight back into a 429.
@@ -283,7 +286,8 @@ def release_account(
     now_dt = dt.datetime.fromtimestamp(now, dt.timezone.utc)
     state = state_machine.get_state(cfg.state_dir, name)
     rate_limited_at = state_machine.get_rate_limited_at(cfg.state_dir, name)
-    cooldown_left = _cooldown_remaining(rate_limited_at, cfg.quota_cooldown_seconds, now)
+    hold = _refusal_hold_until(cfg, name)
+    cooldown_left = _cooldown_remaining(hold, now)
 
     held = _held_task_ids(cfg, name)
     if task_id is not None:
@@ -314,7 +318,7 @@ def release_account(
     if cooldown_left > 0 and not clear_rate_limit:
         refusals.append(
             f"{name} was refused by the service {_duration(now - rate_limited_at)} ago and "
-            f"{_duration(cooldown_left)} of its {cfg.quota_cooldown_seconds}s cooldown is left. "
+            f"is held until {_instant(hold)} ({_duration(cooldown_left)} left). "
             "That refusal is the one thing /usage cannot see, so it outranks the counters. "
             "Pass --clear-rate-limit to forget it, or --force to release over it and keep it."
         )
@@ -376,6 +380,10 @@ def _duration(seconds: float) -> str:
     return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
+def _instant(epoch: float) -> str:
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def _quota_limits(cfg: Config, acc: AccountReport, now: dt.datetime) -> str:
     """What this account's probed numbers are measured against, as one phrase.
 
@@ -419,7 +427,10 @@ def format_status(
         if on:
             notes.append(f"on {', '.join(on)}")
         if acc.cooldown_remaining > 0:
-            notes.append(f"refused, {_duration(acc.cooldown_remaining)} of cooldown left")
+            notes.append(
+                f"refused, held until {_instant(acc.hold_until)} "
+                f"({_duration(acc.cooldown_remaining)} left)"
+            )
         elif acc.rate_limited_at is not None:
             notes.append("refused once, cooldown elapsed")
         if acc.state is AccountState.AUTH_EXPIRED and not acc.probe_auth_expired:
