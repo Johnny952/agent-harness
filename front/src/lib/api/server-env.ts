@@ -19,9 +19,11 @@
  * working without it, so its absence is the settings forward's 503 rather than
  * the whole console's crash.
  *
- * ADR 136 adds `BOARD_SERVICE_URL`, for the board-service's four backlog writes.
- * Those carry no token: the board-service takes none there, and refuses any
- * request carrying a browser `Origin` instead (`board_service/app.py:_http`).
+ * ADR 136 adds `BOARD_SERVICE_URL`, for the board-service's writes: the backlog
+ * writes (`POST /api/backlog`, and a task's `PATCH`, comment, accept and
+ * verdict) and every write `forward.ts`'s `boardTarget` sends there since. The
+ * backlog writes carry no token: the board-service takes none there, and refuses
+ * any request carrying a browser `Origin` instead (`board_service/app.py:_http`).
  *
  * ADR 157 adds `BOARD_ACTIONS_TOKEN`, the bearer of the board-service's two action
  * routes (ADR 151). Like the writer's token it is not a refusal to boot: unset,
@@ -87,11 +89,12 @@ export const CONFIG_WRITER_TOKEN = process.env["CONFIG_WRITER_TOKEN"]?.trim() ||
 export const CONFIG_WRITER_TIMEOUT_MS = 5000;
 
 /**
- * Where the board-service answers its four console writes (`docs/decisions.md`
- * ADR 136). The default is the compose service name and its port, 8792, the way
- * `API_BASE_URL`'s is. Trimmed as the others are, so a trailing slash in the
- * environment cannot become `//api/backlog`. No `VITE_` prefix: the address is
- * the server half's topology, and a failure body names the service, never it.
+ * Where the board-service answers the console's writes (`docs/decisions.md`
+ * ADR 136; `forward.ts`'s `boardTarget` names them). The default is the
+ * compose service name and its port, 8792, the way `API_BASE_URL`'s is.
+ * Trimmed as the others are, so a trailing slash in the environment cannot
+ * become `//api/backlog`. No `VITE_` prefix: the address is the server half's
+ * topology, and a failure body names the service, never it.
  */
 export const BOARD_SERVICE_URL = (
   process.env["BOARD_SERVICE_URL"] || "http://board-service:8792"
