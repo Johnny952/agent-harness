@@ -2381,3 +2381,81 @@ def test_turn_command_keeps_a_dash_leading_message_after_the_end_of_options() ->
     )
     assert command[-2:] == ["--", text]
     assert command.count(text) == 1
+
+
+# --- a streamed phase keeps its rate_limit_event (ADR 312) -------------------
+
+_EVENT = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1792709400}}
+_RESULT = {"type": "result", "session_id": "s-1", "result": "done", "is_error": False}
+
+
+def _stdout(monkeypatch, text, captured=None):
+    def fake_run(cmd, capture_output, text_mode, timeout=None):
+        if captured is not None:
+            captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
+
+    monkeypatch.setattr(
+        docker_exec_mod.subprocess, "run",
+        lambda cmd, capture_output, text, timeout=None: fake_run(cmd, capture_output, text, timeout),
+    )
+
+
+def _lines(*objs):
+    return "\n".join(json.dumps(o) for o in objs) + "\n"
+
+
+def test_exec_claude_streams_only_when_asked(monkeypatch) -> None:
+    captured = {}
+    _stdout(monkeypatch, json.dumps(_RESULT), captured)
+
+    exec_claude("c", "/wd", "hi", stream=True)
+    assert captured["cmd"][-5:] == ["-p", "hi", "--output-format", "stream-json", "--verbose"]
+
+    exec_claude("c", "/wd", "hi")
+    assert captured["cmd"][-4:] == ["-p", "hi", "--output-format", "json"]
+
+
+def test_a_stream_keeps_the_event_whole_and_the_result_line_as_raw(monkeypatch) -> None:
+    _stdout(monkeypatch, _lines({"type": "system"}, _EVENT, _RESULT))
+
+    result = exec_claude("c", "/wd", "hi", stream=True)
+
+    assert result.rate_limit_event == _EVENT
+    assert result.raw == _RESULT
+    assert (result.session_id, result.result_text) == ("s-1", "done")
+
+
+def test_a_stream_keeps_the_last_of_two_events_and_skips_junk_lines(monkeypatch) -> None:
+    later = {**_EVENT, "rate_limit_info": {"resetsAt": 5}}
+    _stdout(monkeypatch, "warming up\n" + _lines(_EVENT, later, [1], _RESULT) + "{broken\n")
+
+    result = exec_claude("c", "/wd", "hi", stream=True)
+
+    assert result.rate_limit_event == later
+    assert result.raw == _RESULT
+
+
+def test_a_stream_with_no_event_has_none(monkeypatch) -> None:
+    _stdout(monkeypatch, _lines(_RESULT))
+
+    assert exec_claude("c", "/wd", "hi", stream=True).rate_limit_event is None
+
+
+def test_a_stream_with_no_result_line_is_the_no_json_diagnostic(monkeypatch) -> None:
+    _stdout(monkeypatch, _lines(_EVENT))
+
+    result = exec_claude("c", "/wd", "hi", stream=True)
+
+    assert "produced no JSON result" in result.result_text
+    assert result.raw == {}
+    assert result.rate_limit_event is None
+
+
+def test_a_single_object_still_reads_as_before(monkeypatch) -> None:
+    _stdout(monkeypatch, json.dumps(_RESULT))
+
+    result = exec_claude("c", "/wd", "hi", stream=True)
+
+    assert result.raw == _RESULT
+    assert result.rate_limit_event is None

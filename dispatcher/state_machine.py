@@ -158,6 +158,9 @@ def _write_account(
         data["busy_since"] = holders[0].busy_since
     if existing.get("rate_limited_at") is not None and not forget_rate_limit:
         data["rate_limited_at"] = existing["rate_limited_at"]
+        # `retry_at` (ADR 312, 6) lives and dies with the refusal it belongs to.
+        if existing.get("retry_at") is not None:
+            data["retry_at"] = existing["retry_at"]
     # `last_probe` is carried for the same reason and by the same rule: it is a
     # fact about the account, not about the transition, and the gate writes it
     # one line before the `set_state` that parks the account on it
@@ -299,7 +302,10 @@ def _derived_state(data: dict) -> AccountState:
     return _state_of(_parked_of(data), _holders_of(data))
 
 
-def record_rate_limit(state_dir: str, account_name: str, at: float | None = None) -> None:
+def record_rate_limit(
+    state_dir: str, account_name: str, at: float | None = None,
+    retry_at: float | None = None,
+) -> None:
     """Remember that the service itself turned this account away, and when.
 
     The `/usage` probe the quota gate runs is a local slash command: measured
@@ -308,12 +314,19 @@ def record_rate_limit(state_dir: str, account_name: str, at: float | None = None
     cannot see a refusal, which is a property of the account and not of the
     disk. The one moment that truth is observable is the 429 itself, and this
     is where it is kept so the probe can be overruled by it later.
+
+    `retry_at` is the epoch second the CLI's own `rate_limit_event` says the
+    window reopens (docs/decisions.md ADR 312); None removes any earlier one.
     """
     with _locked(state_dir):
         data = _read_state(state_dir, account_name) or {
             "state": AccountState.IDLE.value, "current_task_id": None,
         }
         data["rate_limited_at"] = time.time() if at is None else at
+        if retry_at is None:
+            data.pop("retry_at", None)
+        else:
+            data["retry_at"] = retry_at
         _write_state(state_dir, account_name, data)
 
 
@@ -323,6 +336,17 @@ def get_rate_limited_at(state_dir: str, account_name: str) -> float | None:
     if data is None:
         return None
     return data.get("rate_limited_at")
+
+
+def get_retry_at(state_dir: str, account_name: str) -> float | None:
+    """When the refusal said the account reopens, or None if it gave no time."""
+    data = _read_state(state_dir, account_name)
+    if data is None:
+        return None
+    retry_at = data.get("retry_at")
+    if isinstance(retry_at, bool) or not isinstance(retry_at, (int, float)):
+        return None
+    return float(retry_at)
 
 
 def clear_rate_limit(state_dir: str, account_name: str) -> None:
@@ -336,6 +360,7 @@ def clear_rate_limit(state_dir: str, account_name: str) -> None:
         if data is None or data.get("rate_limited_at") is None:
             return
         del data["rate_limited_at"]
+        data.pop("retry_at", None)
         _write_state(state_dir, account_name, data)
 
 

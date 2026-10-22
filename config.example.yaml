@@ -84,7 +84,9 @@ fallback_roles:
 # dispatcher runs is the CLI's local `/usage`, which reads counters on this
 # machine and cannot see a refusal at all, so without this floor a refused
 # account is recovered on healthy local numbers and handed straight back the
-# work it was just refused. Optional; defaults to 1800 (half an hour).
+# work it was just refused. Optional; defaults to 1800 (half an hour). It is
+# the fallback: a refusal whose stream carried a `resetsAt` holds the account
+# until then instead (docs/decisions.md ADR 312).
 quota_cooldown_seconds: 1800
 
 # How long a heartbeat is considered fresh before a lock is treated as

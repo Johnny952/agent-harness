@@ -18,6 +18,42 @@ class ClaudeResult:
     session_id: str | None
     result_text: str
     raw: dict
+    #: The last `rate_limit_event` of a streamed run, whole and unparsed
+    #: (docs/decisions.md ADR 312); `quota.usage_from_rate_limit_event` reads it.
+    rate_limit_event: dict | None = None
+
+
+def _parse_stream(stdout: str) -> tuple[dict | None, dict | None]:
+    """(result object, last rate_limit_event) of a `claude -p` stdout.
+
+    Stdout that is one JSON object is the `json` format and is read as before.
+    Otherwise it is stream-json lines: non-object lines are skipped, `raw` is
+    the last `type == "result"` object."""
+    if not stdout.strip():
+        return None, None
+    try:
+        whole = json.loads(stdout)
+    except json.JSONDecodeError:
+        whole = None
+    # A one-line stream is also one object, so a typed non-result is a line.
+    if isinstance(whole, dict) and whole.get("type", "result") == "result":
+        return whole, None
+    result = event = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "result":
+            result = obj
+        elif obj.get("type") == "rate_limit_event":
+            event = obj
+    return result, event
 
 
 def run_docker_exec(
@@ -91,6 +127,7 @@ def exec_claude(
     add_dirs: Sequence[str] | None = None,
     allowed_tools: Sequence[str] | None = None,
     mcp_config: str | None = None,
+    stream: bool = False,
 ) -> ClaudeResult:
     if timeout_seconds is not None and timeout_seconds <= 0:
         # coreutils `timeout 0` disables the in-container timeout entirely, so
@@ -163,7 +200,11 @@ def exec_claude(
     # same reason: the list stops at the next dash-prefixed token.
     if allowed_tools:
         command += ["--allowed-tools", *allowed_tools]
-    command += ["-p", prompt, "--output-format", "json"]
+    # `stream` prints the transcript as lines, with the service's
+    # `rate_limit_event` before the `result` line (ADR 312).
+    command += ["-p", prompt, "--output-format", "stream-json", "--verbose"] if stream else [
+        "-p", prompt, "--output-format", "json",
+    ]
     if timeout_seconds is not None:
         # Killing the host `docker exec` client does not kill the process inside
         # the container, so the real timeout has to run in-container via
@@ -182,14 +223,7 @@ def exec_claude(
             raw={},
         )
 
-    parsed = None
-    if proc.stdout.strip():
-        try:
-            candidate = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            candidate = None
-        if isinstance(candidate, dict):
-            parsed = candidate
+    parsed, rate_limit_event = _parse_stream(proc.stdout)
 
     if parsed is None:
         # --kill-after sends SIGKILL when claude ignores SIGTERM, so coreutils
@@ -200,7 +234,10 @@ def exec_claude(
             diagnostic = f"claude produced no JSON result (exit {proc.returncode}): {_output_tail(proc)}"
         return ClaudeResult(session_id=None, result_text=diagnostic, raw={})
 
-    return ClaudeResult(session_id=parsed.get("session_id"), result_text=parsed.get("result") or "", raw=parsed)
+    return ClaudeResult(
+        session_id=parsed.get("session_id"), result_text=parsed.get("result") or "",
+        raw=parsed, rate_limit_event=rate_limit_event,
+    )
 
 
 #: The first line a turn prints is the pid of the in-container `timeout` (the
