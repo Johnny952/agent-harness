@@ -640,6 +640,32 @@ other services still do. On plain `http://localhost` the credential travels in
 clear, so use the domain when the console is reachable from outside. This is a
 stopgap: the sign-in of `docs/plans/server-deployment.md` replaces it.
 
+### Backups and restore
+
+`bash scripts/backup.sh` copies the hive and the dispatcher's state into a
+timestamped directory under `BACKUP_DIR` (default `.data/backups`), keeping
+the newest `BACKUP_KEEP` copies (default 7) and deleting the oldest past that.
+`COMPOSE_FILE` picks the compose file (the Coolify one, say). A copy never
+holds a credential: no users store, no `claude_creds_*`, `claude_shared`,
+`.data/projects`, deploy key, or push subscription. It is refused with exit
+75 while any project's cycle runs; the next run retries.
+
+Nightly is a host crontab line (not wired by the repo):
+
+```
+15 3 * * * cd /srv/ia-harness && bash scripts/backup.sh
+```
+
+"Once before each merge" is a documented follow-up: the worker would need
+`BACKUP_DIR` mounted, which is a compose change awaiting approval.
+
+`bash scripts/restore.sh <name>|latest` stops the worker, puts the copy back
+in place and starts the worker again if it was running. Files the copy lacks
+are moved to `.pre-restore-<time>/` inside the hive and the state, never
+deleted; delete those directories once the restore is trusted. Afterwards:
+each account signs in again from `/pool`, the first user is recreated, and
+push is turned on again on each device.
+
 ### 5. Run a task
 
 Bootstrap a project directory on an account's container, then run a task
