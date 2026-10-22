@@ -386,3 +386,7 @@ debt.
 wrong status text; the auditor filed it as `risk` because the same
 `_cooldown_remaining` also drives `release-account`'s refusal guard, which
 lapses at `quota_cooldown_seconds` even when `retry_at` is later.
+T-142 resolved no earlier row and declared one, `introduced`: the read api's
+`in_phase_table` still answers for the unfiltered learnings table now that a
+phase is handed only the rows its task names (ADR 315 decision 5). Filed open
+as `T-142-D1`, impact `cost`: a misleading column, nothing lost.

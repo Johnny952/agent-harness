@@ -1328,7 +1328,10 @@ def _role_prompt(
     # Read fresh on every phase, not once per task: an entry the implementador
     # wrote in round 2 is in the revisor's table in the same round, which is
     # the earliest anyone can be warned off a trap.
-    traps = learnings.duties(role, task_id, slug, hive_dir, harness)
+    traps = learnings.duties(
+        role, task_id, slug, hive_dir, harness,
+        context=learnings.task_context(hive_dir, task_id, task_file, description),
+    )
     if traps:
         prompt += f"\n\n{traps}"
     # Something this one call has to be told that no rule covers: today, the

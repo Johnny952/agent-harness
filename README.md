@@ -1408,7 +1408,8 @@ number and title.
      **built**: `_BUDGET_BYTES` in `dispatcher/handoff.py`, `MAX_ROWS` and
      `_CELL_CHARS` in `dispatcher/learnings.py`.
    - *Limits go on what travels*, a gate that notes a touched source file
-     past a size — **open**.
+     past a size — **built**: the `size` gate and `SIZE_NOTE_LINES` in
+     `dispatcher/gates.py`, `docs/decisions.md` ADR 309.
    - *Indexes and pointers* — **built**: the duties and `_ANCHORS` in
      `dispatcher/project_docs.py`, the `pointers` gate in
      `dispatcher/gates.py`, `docs/learnings/README.md` and
@@ -1425,7 +1426,10 @@ number and title.
    - *Shared learnings that survive a dead phase* — **built**:
      `dispatcher/learnings.py`, and `docs/decisions.md` ADR 33 and ADR 34.
    - *Shared learnings*, handing a phase only the index rows that match its
-     task — **open**.
+     task — **built**: `select` and `task_context` in
+     `dispatcher/learnings.py`, `docs/decisions.md` ADR 315. Harness rows
+     always stay, and a task that names nothing, or matches nothing, is
+     handed the whole table.
 2. **Token economy.** The measurement the item asked for is
    `docs/plans/token-economy.md` *What the transcripts show*.
    - *Record usage per phase* — **built**: `append_usage` in
