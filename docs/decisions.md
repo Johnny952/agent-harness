@@ -14363,7 +14363,7 @@ key and locks, whether it waits for an account, and what the person reads.
 5. *The outcome.* `result` is `{"outcome", "detail"}`, `outcome` one of
    `resolved` (action `done`), `not_resolved`, `stale`, `not_run` (all
    `failed`, `error` the comment's first line). Every outcome writes one
-   comment, author `dispatcher`, whose first line opens `resolve conflict:`
+   comment, author `dispatcher`, whose first line opens `resolve conflict,`
    and names the actor (`resolve conflict, asked by operator: <detail>`); a
    comment that cannot be written is logged, as approve's is. The task's
    `## integrador` note from ADR 277 is written as before.

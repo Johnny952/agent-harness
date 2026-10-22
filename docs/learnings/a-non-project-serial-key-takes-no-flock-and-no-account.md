@@ -3,10 +3,13 @@
 **When it applies:** you add an action kind to `actions.KINDS` whose serial key
 is not `project:<…>` (such as `approve`'s `base:<project>`), or whose
 `spends_quota` is False, and are about to edit `worker.Worker._consider` to
-keep it off the project flock or the account check.
+keep it off the project flock or the account check. It also holds for a
+`base:<project>` key with `spends_quota` True (`resolve_conflict`, ADR 285): it
+waits on an account and takes no project flock.
 
-**Status:** unconfirmed. T-125-S1's architect and implementer both reported it,
-checked against the code by its auditor; still one task.
+**Status:** confirmed. T-125-S1 reported it; T-133-S1 relied on it for
+`resolve_conflict` and its worker tests (`test_a_resolve_waits_for_an_account`,
+`test_a_resolve_takes_no_project_lock`) pass with no `_consider` edit.
 
 ## Why
 
