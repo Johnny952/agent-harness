@@ -555,11 +555,11 @@ def test_resolve_conflict_cli_runs_the_resolution(tmp_path, monkeypatch, capsys)
     cfg = _config(tmp_path, str(tmp_path / "projects"))
     seen = []
     monkeypatch.setattr(cli_mod, "load_config", lambda path: cfg)
-    monkeypatch.setattr(cli_mod, "cleanup_container", lambda c: _CONTAINER)
-    monkeypatch.setattr(cli_mod.docker_exec, "read_owner", lambda *a, **k: None)
-    monkeypatch.setattr(cli_mod.docker_exec, "restore_owner", lambda *a, **k: None)
+    monkeypatch.setattr(dispatcher_mod, "cleanup_container", lambda c: _CONTAINER)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "read_owner", lambda *a, **k: None)
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "restore_owner", lambda *a, **k: None)
     monkeypatch.setattr(
-        cli_mod, "resolve_conflict",
+        dispatcher_mod, "resolve_conflict",
         lambda c, container, task_id, slug: seen.append((container, task_id, slug))
         or dispatcher_mod.ResolveOutcome(False, "task T-1: blocked"),
     )
@@ -574,3 +574,30 @@ def test_resolve_conflict_cli_runs_the_resolution(tmp_path, monkeypatch, capsys)
     assert exc.value.code == 1
     assert seen == [(_CONTAINER, "T-1", "myproj")]
     assert "blocked" in capsys.readouterr().err
+
+
+def _run_resolve_cli(tmp_path, monkeypatch, outcome):
+    from dispatcher import cli as cli_mod
+
+    cfg = _config(tmp_path, str(tmp_path / "projects"))
+    monkeypatch.setattr(cli_mod, "load_config", lambda path: cfg)
+    monkeypatch.setattr(cli_mod, "resolve_conflict_locked", lambda c, task_id, slug: outcome)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["dispatch", "--config", "config.yaml", "resolve-conflict", "--task-id", "T-1", "--project", "myproj"],
+    )
+    cli_mod.main()
+
+
+def test_resolve_conflict_cli_prints_the_detail_when_resolved(tmp_path, monkeypatch, capsys) -> None:
+    _run_resolve_cli(tmp_path, monkeypatch, ("resolved", "task T-1: resolved"))
+
+    assert capsys.readouterr().out.strip() == "task T-1: resolved"
+
+
+def test_resolve_conflict_cli_says_not_resolved_when_nothing_ran(tmp_path, monkeypatch, capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _run_resolve_cli(tmp_path, monkeypatch, ("not_run", "no agent container to run it in"))
+
+    assert exc.value.code == 1
+    assert "task T-1: not resolved: no agent container to run it in" in capsys.readouterr().err

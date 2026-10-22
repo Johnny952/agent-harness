@@ -3111,6 +3111,36 @@ def _back_in_review(
     return ResolveOutcome(True, f"task {task_id}: resolved; back in awaiting_review")
 
 
+def resolve_conflict_locked(cfg: Config, task_id: str, slug: str) -> tuple[str, str]:
+    """`resolve_conflict` under the base lock: (outcome, detail) (ADR 277, 285, 291).
+
+    The cleanup container, the base lock named `resolve-conflict` and the tree's
+    owner restored around `resolve_conflict`; the CLI verb and the worker's
+    handler both call it. Outcomes: `resolved`, `not_resolved` (it said no, or
+    raised), `not_run` (no container, the lock held or the owner unreadable).
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return "not_run", "no agent container to run it in"
+    try:
+        base = _base_lock(cfg, slug, "resolve-conflict").acquire()
+    except tasks.BaseLockHeldError as exc:
+        return "not_run", str(exc)
+    with base:
+        project_dir = f"{cfg.projects_root}/{slug}"
+        try:
+            owner = docker_exec.read_owner(container, project_dir)
+        except Exception as exc:
+            return "not_run", f"the project could not be read: {exc}"
+        try:
+            resolved = resolve_conflict(cfg, container, task_id, slug)
+        except Exception as exc:
+            return "not_resolved", f"resolve conflict did not finish: {exc}"
+        finally:
+            docker_exec.restore_owner(container, project_dir, owner)
+    return ("resolved" if resolved.resolved else "not_resolved"), resolved.detail
+
+
 def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
     """Offer a finished task's branch to the branch the project sits on.
 
