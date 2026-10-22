@@ -30,7 +30,9 @@
  * task leaving the list and returning at a new tip. *Resolve conflict* (ADR
  * 288) posts `{project}` to `/resolve-conflict` (`resolveConflictMutation`); it
  * is drawn on the conflict lane only, and its outcome is a dispatcher comment
- * opening `resolve conflict,`. The verdict panel still names the CLI.
+ * opening `resolve conflict,`. Its body needs no tip, so when the diff fails to
+ * load it is drawn alone under the error (T-133-S2-D1). The verdict panel still
+ * names the CLI.
  */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -217,18 +219,26 @@ function Review({ task, lane }: { task: Task; lane: Tab }) {
       <div className="space-y-3 px-4 pt-3">
         <VerdictPanel task={task} lane={lane} />
         {diffQ.isError ? (
-          <ErrorState
-            title="The diff could not be read"
-            body={`/api/tasks/${task.task_id}/diff did not answer${
-              diffQ.error instanceof Error && diffQ.error.message ? `: ${diffQ.error.message}` : ""
-            }.`}
-          />
+          <>
+            <ErrorState
+              title="The diff could not be read"
+              body={`/api/tasks/${task.task_id}/diff did not answer${
+                diffQ.error instanceof Error && diffQ.error.message
+                  ? `: ${diffQ.error.message}`
+                  : ""
+              }.`}
+            />
+            {lane === "conflict" && <ResolveWithoutDiff task={task} />}
+          </>
         ) : diffQ.isLoading ? (
           <p className="text-xs text-muted-foreground">Reading the diff…</p>
         ) : diff === null ? (
-          <p className="text-xs italic text-muted-foreground">
-            There is no diff to show; the reason is in the warning above.
-          </p>
+          <>
+            <p className="text-xs italic text-muted-foreground">
+              There is no diff to show; the reason is in the warning above.
+            </p>
+            {lane === "conflict" && <ResolveWithoutDiff task={task} />}
+          </>
         ) : (
           <>
             <BranchLine diff={diff} />
@@ -536,6 +546,57 @@ function Verdicts({
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * *Resolve conflict* (ADR 288) when the diff did not load (T-133-S2-D1): its
+ * body is `{project}` alone, so it needs no tip, and it is the one action left
+ * on the conflict lane without one. With no tip to wait on, it stays queued
+ * until the task leaves the list.
+ */
+function ResolveWithoutDiff({ task }: { task: Task }) {
+  const taskId = task.task_id;
+  const qc = useQueryClient();
+  const resolve = useMutation(resolveConflictMutation(qc));
+  const [queued, setQueued] = useState(false);
+  const refusal = resolveConflictRefusal(task);
+  const off = refusal !== null || resolve.isPending || queued;
+
+  const send = () => {
+    if (off) return;
+    resolve.mutate(
+      { taskId, body: typeof task.project === "string" ? { project: task.project } : {} },
+      {
+        onSuccess: (res) => {
+          setQueued(true);
+          toast.success(`resolve conflict queued as ${res.id}; the outcome comes as a comment`);
+        },
+        onError: (err) =>
+          toast.error(
+            err instanceof Error ? err.message : `the resolve conflict on ${taskId} was not sent`,
+          ),
+      },
+    );
+  };
+
+  return (
+    <div className="flex justify-end text-[11px]" data-testid="resolve-without-diff">
+      <button
+        type="button"
+        onClick={send}
+        disabled={off}
+        title={
+          refusal ??
+          (queued
+            ? "Resolve conflict is queued; the outcome comes as a comment"
+            : "Have the integrador merge the base into the branch and resolve the conflict")
+        }
+        className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
+      >
+        {resolve.isPending ? "resolving…" : queued ? "resolve queued" : "resolve conflict"}
+      </button>
     </div>
   );
 }
