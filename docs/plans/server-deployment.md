@@ -342,6 +342,12 @@ Each step is a single surface:
 1. The users store, password and TOTP, the sessions, the CSRF check and the
    audit log, in the board service. An ADR supersedes the human half of
    ADR 7.
+
+   **Built 2026-10-22** by T-146 (`docs/decisions.md` ADR 324):
+   `board_service/signin.py`, installed by `create_app` when `BOARD_AUTH_DIR`
+   is set. Stdlib scrypt and TOTP instead of argon2 and an opaque server-side
+   session id instead of a signed cookie; the cookie, CSRF and role checks
+   bind only requests that carry the cookie, so Basic auth stays until step 2.
 2. The console's sign-in screen and the first-user setup command. A front
    task, behind its own ask for a build.
 3. TLS: the proxy in the plain compose, and the Coolify notes in the README.

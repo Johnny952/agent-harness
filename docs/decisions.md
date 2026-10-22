@@ -15279,3 +15279,123 @@ would leave that mount on the old inode.
 - *Deleting what the copy lacks:* a wrong `--from` would lose it for good.
 - *Restarting the worker after a failed restore:* it would dispatch over a
   half-restored hive.
+## ADR 324 — A person signs in to the board service: users, password and TOTP, server-side sessions, CSRF and an audit log
+
+**Status:** accepted (2026-10-22), T-146's arquitecto. Supersedes the human
+half of ADR 7 (a person's Basic credential); ADR 7's bearer half, and every
+machine bearer since (`BOARD_ACTIONS_TOKEN`, ADR 151; `API_TOKEN`), stand
+unchanged. Builds step 1 of `docs/plans/server-deployment.md` *How it would
+be built* (*Decisions*, 1 and 2).
+
+**Context.** The console is about to leave `localhost`, and a person reaches
+it with one shared Basic password (`observability/auth.py`, ADR 7; Caddy's,
+ADR 103). The plan wants users with two factors, sessions, CSRF and an audit
+log in the board service's own state, never in the hive the agents mount.
+The browser never calls the board service: every route refuses a browser
+`Origin`, and the console's server half forwards to it. The stack pins no
+argon2 or bcrypt package, and the agent image has no `cryptography`.
+
+**Decision.**
+1. **One module, one directory.** `board_service/signin.py` holds the users
+   store, the hashes, TOTP, the sessions and the audit log, in the directory
+   `BOARD_AUTH_DIR` names (mode 0700, files 0600, created at the first write,
+   never by `create_app`). Unset or empty, sign-in is off: the three session
+   routes answer 503 `sign-in is off: no BOARD_AUTH_DIR is set`, and a cookie
+   is ignored, so the service behaves exactly as before. Not under
+   `state_dir` (backed up, *Decisions*, 8) and not the hive.
+2. **The users store** is `users.json`, one document written atomically
+   (temp file and `os.replace`) under an `flock` on `.lock` in the same
+   directory, as are the sessions. Per user: `role` (`owner` or `reviewer`),
+   `password` (the hash string), `totp_secret` (base32, 20 random bytes),
+   `totp_last_step`, `failures`, `locked_until`, `created_at`. Users are made
+   by `create_user(auth_dir, name, password, role)`, which returns the TOTP
+   secret once; no route makes one (the first-user command is step 2's).
+   Names match `[a-z0-9][a-z0-9_.-]{0,63}`; a password is 12 to 1024
+   characters.
+3. **The hash is stdlib scrypt**, not argon2 or bcrypt as the plan named:
+   `hashlib.scrypt`, a 16-byte random salt, `n=2**14, r=8, p=5`, 64 bytes,
+   stored as `scrypt$<n>$<r>$<p>$<salt b64>$<hash b64>` so the parameters
+   travel with the hash and a later raise does not break old ones. It is
+   salted, slow and memory-hard, which is what the plan asked argon2 or
+   bcrypt for, and it adds no dependency. Compared with `hmac.compare_digest`.
+   An unknown name still runs one scrypt against a fixed dummy, so it does
+   not answer faster than a wrong password.
+4. **TOTP is RFC 6238**: HMAC-SHA1, 6 digits, 30-second steps, accepting the
+   current step and one either side. A code whose step is at or below
+   `totp_last_step` is a replay and refused; a good sign-in stores its step.
+5. **Sign-in is `POST /api/session`**, body `{name, password, code}`, all
+   strings, no other field (400 otherwise). Password first, then the code.
+   Every failure — unknown name, wrong password, wrong or replayed code — is
+   the same 401 `{"error": "sign-in failed"}`; only the audit line says
+   which. Five failures in a row lock the user for 15 minutes: 429 `too many
+   failed sign-ins; try again after <ISO time>`, checked before the password,
+   and a good sign-in resets the count. Success is 200 `{user, role,
+   csrf_token, expires_at}` and the cookie.
+6. **A session is an opaque id held server-side.** 32 bytes from `secrets`,
+   sent only as the cookie `harness_session` (`HttpOnly`, `Secure`,
+   `SameSite=Strict`, `Path=/`, `Max-Age` the time to its fixed end). The
+   store keys it by its sha256, so `sessions.json` holds no live id. Each
+   session has a fixed lifetime of 12 hours and an idle timeout of 1 hour,
+   measured from its last request; past either it is deleted and refused.
+   `GET /api/session` answers the signed-in `{user, role, csrf_token,
+   expires_at}` or 401; `DELETE /api/session` signs out, 204, and clears the
+   cookie. The plan's "signed cookie" is replaced by this: an opaque id that
+   the server can revoke needs no signature.
+7. **One hook checks every `/api/` request that carries the cookie**, a
+   `before_request` installed by `signin`, `POST /api/session` excepted. An
+   unknown or expired session is 401 `the session has expired or does not
+   exist` and clears the cookie. A `POST`, `PUT`, `PATCH` or `DELETE` must
+   carry `X-CSRF-Token` equal to the session's token, compared timing-safe,
+   or it is 403 `a CSRF token is required`. A request with no cookie passes
+   the hook untouched: the machine path, the bearer routes and every test
+   that sends no cookie behave as before. The CSRF token is served to the
+   console's server half by design; it is not one of the credentials below.
+8. **Roles gate writes, not reads.** An `owner` session may make any
+   request. A `reviewer` session may make any `GET`, and of the writes only
+   `DELETE /api/session` and `POST /api/tasks/<id>/comments`; any other write
+   is 403 `this needs the owner's role`. A reviewer's *approve* as a
+   recommendation (*Decisions*, 2) needs the *Awaiting owner's approval*
+   state, which does not exist yet, so it is refused rather than half-built.
+   A session never stands in for a bearer: a bearer route still needs its
+   bearer, which the console's server half keeps (ADR 7).
+9. **The audit log is `audit.jsonl`**, appended with `O_APPEND`, one JSON
+   object a line, never rewritten, read by a reader that skips a line that
+   will not parse. Each line: `at` (ISO UTC), `event`, `user` (a name only
+   when it names a user, else null), `addr` (`remote_addr`), `forwarded_for`
+   (the first `X-Forwarded-For` hop, when sent), and as they apply `reason`,
+   `method`, `path`. Events: `sign_in`; `sign_in_failed` with reason
+   `unknown_user`, `wrong_password`, `wrong_code`, `replayed_code` or
+   `locked`; `sign_out`; `session_refused` with `expired` or `unknown`;
+   `csrf_refused` with `missing` or `mismatch`; `role_refused`; and
+   `action`, each write a session was allowed to make.
+10. **Never logged, never served:** a password, a code, a password hash, a
+    TOTP secret, a session id. A test reads every response body and the whole
+    audit file of the flows above for each of them.
+11. **One clock seam.** `signin._now()` is the only clock in the module, the
+    one tests replace (`docs/learnings/one-clock-seam-per-module-and-a-now-parameter-is-the-other-half.md`).
+
+**Consequences.**
+- Basic auth does not retire in this task: `observability/auth.py` and
+  Caddy's Basic auth (ADR 103) stay until step 2 puts the sign-in screen in
+  front of the console, makes its server half forward the cookie, the
+  `X-CSRF-Token` header and `X-Forwarded-For`, and refuse a request with no
+  session. That task also wires `BOARD_AUTH_DIR` to a volume in both compose
+  files and builds the first-user command on `create_user`.
+- The board service enforces roles only on requests that carry the cookie;
+  until step 2 the console sends none, so nothing changes for it.
+- A restore recreates the first user (*Decisions*, 8): the directory is not
+  in any backup.
+- Failed sign-ins are throttled per user only; per address waits for
+  `forwarded_for` to be sent (step 2). Verdicts still record `operator` as
+  their author: the `by` of *Decisions*, 2 is in the audit line, not yet on
+  the verdict. No route serves the audit log.
+
+**Ruled out.**
+- *Adding argon2 or bcrypt:* a new compiled dependency in two images for what
+  stdlib scrypt already gives.
+- *A signed cookie carrying the user:* it cannot be revoked by sign-out
+  short of rotating a key for everyone.
+- *Requiring a session on every `/api/` route now:* the console sends none
+  until step 2, so it would lock the console out the day this merged.
+- *Users in the hive or `state_dir`:* the agents read the first, and the
+  second is backed up.
