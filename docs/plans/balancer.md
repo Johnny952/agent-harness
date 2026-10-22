@@ -76,8 +76,11 @@ the state machine already carries both halves of it.
 An account parked over the local threshold self-heals: `_recheck_cooling_accounts`
 re-probes every `PRE_COOLDOWN` account whenever none is `IDLE` and flips it
 back on clearing the line. That can come back in minutes and costs nothing to
-wait for. An account with `rate_limited_at` set inside `quota_cooldown_seconds`
-(1800) will not come back on a probe — `record_rate_limit`'s docstring says why:
+wait for. An account refused by the service is held until the refusal's
+`retry_at` when one was recorded, else `rate_limited_at` plus
+`quota_cooldown_seconds` (1800) — `dispatcher._refusal_hold_until`, the one
+copy of that rule (ADR 318). It will not come back on a probe before then —
+`record_rate_limit`'s docstring says why:
 `/usage` is a local slash command reading counters this machine wrote, so it
 cannot see a refusal, and the refusal outranks it.
 
@@ -179,9 +182,9 @@ distinction made operational, and `status` prints the two differently on
 purpose. A worker parked `PRE_COOLDOWN` with no note beside it is parked on a
 counter: it self-heals, `_recheck_cooling_accounts` re-probes it the next time
 nothing is `IDLE`, the picker holds rather than falling back while any such
-worker is waitable, and waiting costs nothing. A worker showing `refused, Nm
-of cooldown left` will not come back on a probe, because the probe cannot see
-what the service did. That is the one case where the primary's reserve is the
+worker is waitable, and waiting costs nothing. A worker showing `refused, held
+until <instant> (<d> left)` will not come back on a probe, because the probe
+cannot see what the service did. That is the one case where the primary's reserve is the
 honest answer, and `run-phase` reaches for it by itself — for the roles
 `fallback_roles` names, under `reserve_pct`. When it refuses instead and says
 the pool is dry for this phase, the fix is in `config.yaml`, not at the call
