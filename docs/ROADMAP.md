@@ -1985,6 +1985,12 @@ starts, not in stage 0.
     carries `utilization` and `resetsAt`.
   - If it does: drop the `/usage` probe and read the final `result`
     message from the stream.
+  - Run note, 2026-10-22: **PASS**. The stream printed
+    `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1792709400,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0,"resetsAt":1792709400},"seven_day":{"utilization":0.48,"resetsAt":1792861200}}}}`
+    before `result`; `utilization` is a 0 to 1 fraction and `resetsAt`
+    epoch seconds. Acted on in `docs/decisions.md` ADR 312: phases stream,
+    the last event stands in for a fresh `/usage` probe, and a refused
+    phase retries at its `resetsAt`. The probe stays as the fallback.
 - **D3 — The caveman wrap** (item 2, minimal quota).
   - Run: V1.1 and V5.1 through the wrap on one account.
   - Pass: identical JSON shape, `usage` figures present, and `--resume`

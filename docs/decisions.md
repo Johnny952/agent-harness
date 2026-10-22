@@ -14804,6 +14804,90 @@ stale-plan note that `run_task_cycle(scheduler=)` applies.
   config that asks for more than can run is refused where it is loaded,
   as `--parallel` is refused where it is typed.
 
+## ADR 312 — A phase streams, its last `rate_limit_event` stands in for the `/usage` probe while fresh, and a refused phase retries at its `resetsAt`
+
+**Status:** accepted (2026-10-22), T-143's arquitecto. Narrows ADR 48 (which
+reset the week is paced against), ADR 49 (what the probe record holds) and
+ADR 71 (what runs after the claim); keeps ADR 52's exit codes.
+
+**Context.** `docs/ROADMAP.md` *Deferred gates*, D2 passed on 2026-10-22: a
+`claude -p --output-format stream-json --verbose` run prints a
+`rate_limit_event` before its `result` line, whose `rate_limit_info` carries
+`status`, `resetsAt`, `rateLimitType` and `unifiedWindows.five_hour` and
+`.seven_day`, each `{utilization, resetsAt}` — `utilization` a 0–1 fraction,
+`resetsAt` epoch seconds. The event comes from the service; the `/usage`
+probe reads local counters and cannot see a refusal (`dispatcher/state_machine.py`
+`record_rate_limit`). Every phase ran with `--output-format json`, which prints
+the `result` object alone, so no phase ever saw the event.
+
+**Decision.**
+1. **Phases stream.** `docker_exec.exec_claude` takes `stream: bool = False`.
+   With it, the argv ends `-p <prompt> --output-format stream-json --verbose`.
+   The phase call and the four resumes in `dispatcher/dispatcher.py`
+   (`_resume_missing_handoff`, `_shrink_over_budget`, `_run_gates`,
+   `_refuse_review_writes`) pass `stream=True`; the `/usage` probes and every
+   other caller keep `json`, because `/usage` under `stream-json` was never run.
+2. **What `exec_claude` keeps.** Stdout that parses whole as one JSON object
+   is read as before. Otherwise it is read as lines: a line that is not a JSON
+   object is skipped, `raw` is the last object whose `type` is `"result"`, and
+   `ClaudeResult.rate_limit_event` (a new field, default None) is the last
+   object whose `type` is `"rate_limit_event"`, kept whole and not parsed. No
+   `result` line is the existing "produced no JSON result" diagnostic.
+3. **The reading.** `quota.usage_from_rate_limit_event(event)` returns a
+   `UsageInfo` or None. Percentages are `round(utilization * 100)`; a window's
+   reset is its `resetsAt` written as the `/usage` clause shape,
+   `%b %d, %I:%M%p (UTC)` in UTC, so `quota.parse_reset` and `week_ceiling`
+   read it unchanged. None — and the probe answers — when the event is not an
+   object of that `type`, has no `rate_limit_info` or `unifiedWindows` object,
+   or **either** window is missing or has a `utilization` that is not a
+   non-negative number (a bool is not one): a missing week is never read as
+   0%. A window whose own `resetsAt` is missing or not a positive number keeps
+   its percentage with a None reset, as a 0% `/usage` line does.
+   `quota.retry_at_from_event(event)` is `rate_limit_info.resetsAt` as a float
+   when it is a positive number, else None, read independently of the windows.
+4. **Recorded after every phase.** Once the phase's calls are done, the
+   dispatcher takes the last call's event, or the first call's when the last
+   carried none, and records its reading for the phase's account through
+   `_quota_decision` — on every outcome, refused included, never parking on
+   it and never failing the phase on a bad record. The probe record (ADR 49)
+   gains two keys: `source`, `"usage"` or `"rate_limit_event"`, and `read_at`,
+   the epoch seconds the numbers were read (the probe time for `/usage`).
+5. **Fresh means 15 minutes.** `quota.STREAM_READING_FRESH_SECONDS = 900`, a
+   constant beside ADR 48's. A last probe record with `source`
+   `"rate_limit_event"` and `read_at` younger than that is the account's usage:
+   `check_quota_ok` and `primary_free_pct` decide on it with no `/usage` exec,
+   and `_recheck_cooling_accounts` does too when it was read after the
+   account's recorded refusal, if any. Deciding on it records it again with
+   its original `read_at`, so freshness never renews itself. A record that is
+   absent, unreadable, stale or from `/usage` sends the caller to the probe.
+6. **Retry at the reset.** A phase that ends rate-limited records the refusal
+   with `retry_at = retry_at_from_event(event)`. `state_machine` keeps
+   `retry_at` beside `rate_limited_at`: written by `record_rate_limit` (and
+   removed when it is None), carried and forgotten with it, removed by
+   `clear_rate_limit`, read by `get_retry_at`. A refusal holds the account
+   until `retry_at` when one is recorded, else for `quota_cooldown_seconds`,
+   in `_waitable_workers` and `_recheck_cooling_accounts` alike. A refused
+   probe records no `retry_at`.
+
+**Consequences.**
+- A healthy pool runs no `/usage` turn before a phase on an account that ran
+  one in the last 15 minutes; the probe still runs on a first use, after a
+  quiet spell, and whenever the event is absent or malformed.
+- A phase's stdout is the whole transcript, held in memory as `raw` was; only
+  the `result` line is kept on `raw`, so the usage log (ADR 53) is unchanged.
+- An account refused on its week stays parked until that week's reset, which
+  may be days, instead of being re-probed every 30 minutes and refused again.
+- `operator.py`'s status line still counts the cooldown from
+  `quota_cooldown_seconds` and does not read `retry_at`.
+
+**Ruled out.**
+- *Treating a missing window as 0%:* it would wave through an account whose
+  week is spent; the probe is cheap and knows.
+- *A new top-level key in the account state for the reading:* the probe
+  record already holds exactly a `UsageInfo`, is carried across every write
+  and is served on the account row; two more keys are additive.
+- *Streaming the probe too:* unmeasured, and the probe is the fallback.
+- *A config key for freshness:* like ADR 48's ramp it is a decision, not a dial.
 ## ADR 315 — A phase is handed only the learnings rows its task names, and today's table when it names none
 
 **Status:** accepted (2026-10-22), T-142's arquitecto. Narrows ADR 41,

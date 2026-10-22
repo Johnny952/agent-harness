@@ -58,6 +58,64 @@ def _reset_clause(match: re.Match[str]) -> str | None:
     return clause.strip() if clause else None
 
 
+#: How long a reading taken from a phase's `rate_limit_event` stands in for the
+#: `/usage` probe (docs/decisions.md ADR 312, 5).
+STREAM_READING_FRESH_SECONDS = 900
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _event_info(event: object) -> dict | None:
+    if not isinstance(event, dict) or event.get("type") != "rate_limit_event":
+        return None
+    info = event.get("rate_limit_info")
+    return info if isinstance(info, dict) else None
+
+
+def _window(windows: dict, name: str) -> tuple[int, str | None] | None:
+    window = windows.get(name)
+    if not isinstance(window, dict):
+        return None
+    utilization = window.get("utilization")
+    if not _is_number(utilization) or utilization < 0:
+        return None
+    resets_at = window.get("resetsAt")
+    reset = None
+    if _is_number(resets_at) and resets_at > 0:
+        stamp = dt.datetime.fromtimestamp(resets_at, dt.timezone.utc)
+        reset = stamp.strftime("%b %d, %I:%M%p") + " (UTC)"
+    return round(utilization * 100), reset
+
+
+def usage_from_rate_limit_event(event: object) -> UsageInfo | None:
+    """A phase's `rate_limit_event` as the `UsageInfo` `/usage` would give.
+
+    None when the event is malformed or either window is missing: a missing
+    week is never read as 0%, the probe answers instead (ADR 312, 3). Resets
+    are written in the `/usage` clause shape so `parse_reset` reads them."""
+    info = _event_info(event)
+    windows = info.get("unifiedWindows") if info else None
+    if not isinstance(windows, dict):
+        return None
+    session = _window(windows, "five_hour")
+    week = _window(windows, "seven_day")
+    if session is None or week is None:
+        return None
+    return UsageInfo(
+        session_pct=session[0], session_reset=session[1],
+        week_pct=week[0], week_reset=week[1],
+    )
+
+
+def retry_at_from_event(event: object) -> float | None:
+    """The event's `resetsAt` (epoch seconds) when it is a positive number."""
+    info = _event_info(event)
+    resets_at = info.get("resetsAt") if info else None
+    return float(resets_at) if _is_number(resets_at) and resets_at > 0 else None
+
+
 def exceeds_threshold(usage: UsageInfo, threshold_pct: int) -> bool:
     """One number against both windows. Still the whole rule for a worker, and
     for the primary when `pace_primary_week` is off — see `week_ceiling` for

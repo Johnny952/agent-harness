@@ -482,3 +482,21 @@ def test_an_unreadable_neighbour_is_no_dry_and_the_park_stands(tmp_path: Path) -
 
     assert park(d, "a", AccountState.COOLING_DOWN, pool=["a", "b"]) is False
     assert get_state(d, "a") == AccountState.COOLING_DOWN
+
+
+def test_retry_at_lives_and_dies_with_its_refusal(tmp_path: Path) -> None:
+    from dispatcher.state_machine import get_retry_at
+
+    d = str(tmp_path)
+    record_rate_limit(d, "a", at=100.0, retry_at=900.0)
+    assert get_retry_at(d, "a") == 900.0
+    # Carried across the writes that rewrite the document.
+    set_state(d, "a", AccountState.COOLING_DOWN)
+    assert get_retry_at(d, "a") == 900.0
+    # A refusal that names no time removes the old one.
+    record_rate_limit(d, "a", at=200.0)
+    assert get_retry_at(d, "a") is None
+    record_rate_limit(d, "a", at=300.0, retry_at=950.0)
+    clear_rate_limit(d, "a")
+    assert get_retry_at(d, "a") is None
+    assert get_rate_limited_at(d, "a") is None

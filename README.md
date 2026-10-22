@@ -1435,7 +1435,10 @@ number and title.
    - *Record usage per phase* — **built**: `append_usage` in
      `dispatcher/context_transfer.py`. The collector as its home is
      **superseded** by `docs/decisions.md` ADR 53 and ADR 54.
-   - *Stop probing quota* (`rate_limit_event`) — **planned**:
+   - *Stop probing quota* (`rate_limit_event`) — **built**: a phase's last
+     `rate_limit_event` stands in for the `/usage` probe while fresh, which
+     stays as the fallback. `usage_from_rate_limit_event` in
+     `dispatcher/quota.py`, `docs/decisions.md` ADR 312, and
      [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*, D2.
    - *Pace the primary's weekly spend* — **built**: `weekly_ceiling_pct` in
      `dispatcher/quota.py`, `docs/decisions.md` ADR 48.
@@ -1463,9 +1466,11 @@ number and title.
      (`docs/decisions.md` ADR 60).
    - Telling quota-blocked apart from failed — **built**: a held cycle
      exits 75 (`docs/decisions.md` ADR 52), and `_recheck_cooling_accounts`
-     in `dispatcher/dispatcher.py` brings an account back. Retrying at the
-     CLI's own reset time is **planned**:
-     [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*, D2.
+     in `dispatcher/dispatcher.py` brings an account back. *Retry at the
+     CLI's reset time* is **built**: a refused phase holds its account until
+     the event's `resetsAt` (`retry_at_from_event` in `dispatcher/quota.py`,
+     `docs/decisions.md` ADR 312; [`docs/ROADMAP.md`](docs/ROADMAP.md)
+     *Deferred gates*, D2).
    - A single-instance guard — **built** as a lock on each account claim
      rather than on the whole run (`docs/decisions.md` ADR 71).
    - A reaper for accounts left `BUSY` — **built**:

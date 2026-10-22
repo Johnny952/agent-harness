@@ -240,3 +240,83 @@ def test_week_ceiling_paces_the_recorded_week_that_was_parked_unspent() -> None:
     assert ceiling.pct == pytest.approx(90.0)
     assert usage.week_pct < ceiling.pct
     assert exceeds_threshold(usage, 60) is True
+
+
+# --- the stream's rate_limit_event (ADR 312) --------------------------------
+
+import copy  # noqa: E402
+
+from dispatcher.quota import retry_at_from_event, usage_from_rate_limit_event  # noqa: E402
+
+D2_EVENT = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+        "status": "allowed", "resetsAt": 1792709400, "rateLimitType": "five_hour",
+        "overageStatus": "rejected", "isUsingOverage": False,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0, "resetsAt": 1792709400},
+            "seven_day": {"utilization": 0.48, "resetsAt": 1792861200},
+        },
+    },
+}
+
+
+def _event(**windows):
+    event = copy.deepcopy(D2_EVENT)
+    event["rate_limit_info"]["unifiedWindows"].update(windows)
+    return event
+
+
+def test_the_d2_event_becomes_a_usage_info_with_both_resets() -> None:
+    usage = usage_from_rate_limit_event(D2_EVENT)
+
+    assert (usage.session_pct, usage.week_pct) == (0, 48)
+    assert usage.session_reset == "Oct 22, 10:50PM (UTC)"
+    assert usage.week_reset == "Oct 24, 05:00PM (UTC)"
+    # Read back by the parser the week ceiling uses, to the minute.
+    assert parse_reset(usage.week_reset, _utc(2026, 10, 22, 19)) == _utc(2026, 10, 24, 17)
+
+
+def test_the_d2_event_names_its_retry_time() -> None:
+    assert retry_at_from_event(D2_EVENT) == 1792709400.0
+
+
+@pytest.mark.parametrize("event", [
+    None, "x", [], {}, {"type": "result"}, {"type": "rate_limit_event"},
+    {"type": "rate_limit_event", "rate_limit_info": []},
+    {"type": "rate_limit_event", "rate_limit_info": {}},
+    {"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": "x"}},
+])
+def test_a_malformed_or_missing_event_reads_as_none(event) -> None:
+    assert usage_from_rate_limit_event(event) is None
+    assert retry_at_from_event(event) is None
+
+
+@pytest.mark.parametrize("window", ["five_hour", "seven_day"])
+def test_one_window_missing_reads_as_none_never_as_zero(window) -> None:
+    event = copy.deepcopy(D2_EVENT)
+    del event["rate_limit_info"]["unifiedWindows"][window]
+
+    assert usage_from_rate_limit_event(event) is None
+    # The refusal time is read independently of the windows.
+    assert retry_at_from_event(event) == 1792709400.0
+
+
+@pytest.mark.parametrize("bad", [True, "0.5", None, -0.1, {}])
+def test_a_window_with_a_bad_utilization_reads_as_none(bad) -> None:
+    assert usage_from_rate_limit_event(_event(seven_day={"utilization": bad, "resetsAt": 1})) is None
+
+
+def test_a_window_without_its_own_reset_keeps_its_percentage() -> None:
+    usage = usage_from_rate_limit_event(_event(five_hour={"utilization": 0.5}))
+
+    assert (usage.session_pct, usage.session_reset) == (50, None)
+    assert usage.week_reset is not None
+
+
+@pytest.mark.parametrize("bad", [0, -5, "soon", True, None])
+def test_a_retry_time_that_is_not_a_positive_number_is_none(bad) -> None:
+    event = copy.deepcopy(D2_EVENT)
+    event["rate_limit_info"]["resetsAt"] = bad
+
+    assert retry_at_from_event(event) is None
