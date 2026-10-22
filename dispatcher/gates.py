@@ -4,11 +4,11 @@
 A revisor call costs quota, and the cheapest findings are the ones no model has
 to make: whether a change that touched code touched a test, whether the
 project's own test command still passes, whether a contract moved without its
-documentation, whether a pointer in `docs/` still lands on a file, and a note when a touched
-Python file is past `SIZE_NOTE_LINES`. All five run
-through `docker exec` with no `claude` in the loop, so they spend nothing, they
-are out of reach of the phase they judge — a role cannot talk its way past a
-shell — and they check the claim that the tests pass instead of believing it.
+documentation, whether a pointer in `docs/` still lands on a file, and a note
+when a touched Python file is past `SIZE_NOTE_LINES`. All five run through
+`docker exec` with no `claude` in the loop, so they spend nothing, they are out
+of reach of the phase they judge — a role cannot talk its way past a shell —
+and they check the claim that the tests pass instead of believing it.
 
 Findings come at three levels, because the answers are not equally cheap:
 
@@ -508,52 +508,7 @@ def _contracts_without_docs(changed: list[str]) -> list[Finding]:
 
 
 # --------------------------------------------------------------------------
-# Gate 5 — a touched source file past a size
-# --------------------------------------------------------------------------
-
-# Provisional (ADR 309): a signal, never a cap. Measure how often it fires
-# before moving it.
-SIZE_NOTE_LINES = 800
-
-
-def _measured(path: str) -> bool:
-    return is_code(path) and group_of(path) == "Python" and not is_test(path)
-
-
-def _line_counts(container: str, workdir: str, paths: list[str]) -> dict[str, int]:
-    """Line counts of the paths that exist; a missing one (deleted) is absent."""
-    counts: dict[str, int] = {}
-    for start in range(0, len(paths), _POINTER_CHUNK):
-        chunk = paths[start:start + _POINTER_CHUNK]
-        proc = docker_exec.run_docker_exec(
-            container, workdir, ["wc", "-l", "--", *chunk], env=_C_LOCALE,
-        )
-        for line in proc.stdout.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2 and parts[1] in chunk and parts[0].isdigit():
-                counts[parts[1]] = int(parts[0])
-    return counts
-
-
-def _oversized(container: str, workdir: str, changed: list[str]) -> list[Finding]:
-    measured = [p for p in changed if _measured(p)]
-    if not measured:
-        return []
-    counts = _line_counts(container, workdir, measured)
-    return [
-        Finding(
-            SIZE,
-            f"`{p}` is {counts[p]} lines, past the {SIZE_NOTE_LINES} this gate "
-            "notes. A signal, not a cap: nothing has to change because of it.",
-            NOTE,
-        )
-        for p in measured
-        if counts.get(p, 0) > SIZE_NOTE_LINES
-    ]
-
-
-# --------------------------------------------------------------------------
-# Gate 4— the pointers in docs/ still land somewhere
+# Gate 4 — the pointers in docs/ still land somewhere
 # --------------------------------------------------------------------------
 
 #: Backticked spans and markdown link targets. Everything the roles are told to
@@ -896,6 +851,51 @@ def _broken_pointers(
         "; ".join(shown) + " — those paths are not there. Fix the pointer or the path.",
         NOTE,
     )]
+
+
+# --------------------------------------------------------------------------
+# Gate 5 — a touched source file past a size
+# --------------------------------------------------------------------------
+
+# Provisional (ADR 309): a signal, never a cap. Measure how often it fires
+# before moving it.
+SIZE_NOTE_LINES = 800
+
+
+def _measured(path: str) -> bool:
+    return is_code(path) and group_of(path) == "Python" and not is_test(path)
+
+
+def _line_counts(container: str, workdir: str, paths: list[str]) -> dict[str, int]:
+    """Line counts of the paths that exist; a missing one (deleted) is absent."""
+    counts: dict[str, int] = {}
+    for start in range(0, len(paths), _POINTER_CHUNK):
+        chunk = paths[start:start + _POINTER_CHUNK]
+        proc = docker_exec.run_docker_exec(
+            container, workdir, ["wc", "-l", "--", *chunk], env=_C_LOCALE,
+        )
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and parts[1] in chunk and parts[0].isdigit():
+                counts[parts[1]] = int(parts[0])
+    return counts
+
+
+def _oversized(container: str, workdir: str, changed: list[str]) -> list[Finding]:
+    measured = [p for p in changed if _measured(p)]
+    if not measured:
+        return []
+    counts = _line_counts(container, workdir, measured)
+    return [
+        Finding(
+            SIZE,
+            f"`{p}` is {counts[p]} lines, past the {SIZE_NOTE_LINES} this gate "
+            "notes. A signal, not a cap: nothing has to change because of it.",
+            NOTE,
+        )
+        for p in measured
+        if counts.get(p, 0) > SIZE_NOTE_LINES
+    ]
 
 
 # --------------------------------------------------------------------------
