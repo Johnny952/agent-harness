@@ -312,7 +312,8 @@ Exits: 0, 2 (a backup error: `BACKUP_DIR` unset or unusable, a bad `BACKUP_KEEP`
 
 Puts a copy back over the hive and `<state_dir>` in place: files the copy holds are
 written over the live ones, files the copy lacks are set aside (ADR 328). Then prints
-that each account must sign in again and the first user must be recreated.
+that each account must sign in again, the first user must be recreated and push must
+be turned on again on each device (`dispatcher/backup.py` `RESTORE_LINES`).
 
 | Argument | Unit | Default | What it does |
 |---|---|---|---|
