@@ -15624,3 +15624,85 @@ ceilings. A resumed `limit_reached` task re-spends its arquitecto phase, and
 can spend more than the phases the limit stopped it before; the confirmation
 does not estimate that. Out of scope and unchanged: adding or removing a
 queue's tasks, and how spend is measured.
+
+## ADR 339 — The dispatcher merges the base before every implementador, in every cycle path, and a conflict is left in progress for the implementador to resolve by editing
+
+**Status:** accepted (2026-10-22), T-155. Amends ADR 83, 4.
+
+**Context.** ADR 83, 4 merged the base into a task branch only when
+`run_task_cycle` was given a `scheduler`, which only the parallel queue and a
+worker start group pass. A request for changes rerun (ADR 272), an ungrouped
+worker start and the CLI `run-task` passed none, so their implementador could
+start on a branch behind the base. T-147 did: its arquitecto planned "merge
+main", its implementador filed `git merge main` as a command request, and the
+task blocked on a command no phase may run. Where the merge did run, a conflict
+was aborted and only told to the implementador, who cannot merge either; the
+pre-merge check then stopped the task in `conflict`.
+
+**Decision.**
+1. *Every path.* `_cycle_from_arquitecto` runs `merge_base_at_write_window`
+   after the arquitecto and before the first implementador whether or not
+   there is a scheduler. A scheduler still decides *when*: with one, the
+   cycle enters its write window first, as ADR 83, 2 says. A verdict's resume
+   of an implementador (ADR 119, `command_run._resume`) runs the same merge
+   before resuming the session. The merge is under the base lock and logged
+   as before ("write window: ... already contains ..." / "merged ...").
+2. *A clean merge* is unchanged: built in the detached pre-merge checkout and
+   adopted (`premerge_base`, `adopt_premerge`), with the stale-plan note when
+   it touched what the plan names.
+3. *A conflict is kept.* When the pre-merge conflicts, the dispatcher starts
+   the same merge in the writers' checkout and leaves it in progress
+   (`docker_exec.merge_base_into_writer`, ADR 277): `MERGE_HEAD` set, markers
+   in the files. `BaseMove.in_progress` says so, and the round-1 implementador
+   always gets a note naming the conflicted paths, telling it to resolve them
+   by editing the files and never to run git. The dispatcher's round commit
+   (`commit_worktree`, after `git add -A`) is then the merge commit, with both
+   parents.
+4. *No markers are committed.* Before a phase's commit, when the writers'
+   checkout has a merge in progress, the dispatcher reads each still-unmerged
+   path; one that holds a conflict marker (`docker_exec._MARKER_RE`) stops the
+   commit: nothing is staged, the merge stays in progress, and the result
+   carries the paths. The cycle sends that round back with a note naming them,
+   before the gates' verdict and the revisor, and a task note records it. When
+   the rounds run out the task ends blocked as any round-exhausted task does,
+   the note saying why.
+5. *The fallback: abort and tell.* Only where the merge cannot be kept in the
+   writers' checkout — `merge_base_into_writer` refuses because that checkout
+   holds uncommitted work, is not at the branch tip, or git would not start the
+   merge — is the conflict aborted and named in the stale-plan note as
+   ADR 83, 4 had it; the pre-merge check stops on it later.
+6. *A merge left over from a run that stopped* is aborted when the next
+   `run_task_cycle` opens, before any phase (`git merge --abort` in the
+   writers' checkout); the base merge after the arquitecto starts it again.
+   A verdict's resume keeps it: the session it resumes is the one resolving it.
+
+**Consequences.** No path reaches an implementador on a branch behind its
+base, and a conflict costs an implementador round, not a person. The gates run
+on the checkout with the merge in progress, so their notes may name paths the
+base brought in. A stopped run's partial resolution is thrown away by the
+abort in 6. Out of scope and unchanged: the pre-merge check at `merge-task` and
+at review, and `dispatch resolve-conflict`.
+
+## ADR 340 — The denylist refuses a phase's `git merge`, `git rebase` and `git pull`: the base merge is the dispatcher's
+
+**Status:** accepted (2026-10-22), T-155. Amends ADR 118's list.
+
+**Context.** ADR 339 makes the base merge the dispatcher's in every path. A
+command request that merges or pulls into the task branch would otherwise
+block the task on a person's verdict (ADR 117) for something the dispatcher
+already does, and `git merge --abort` or `--continue` would undo or end a merge
+ADR 339, 3 left in progress for the round commit.
+
+**Decision.** `command_targets.DENYLIST` gains the rule `base-merge`: any `git`
+item in the argv whose subcommand (after git's global options, as
+`_remote_git` reads it) is `merge`, `rebase` or `pull` is refused, whatever its
+arguments. Its reason says that the dispatcher owns the base merge, merges the
+base before every implementador, and that a conflict is resolved by editing
+the files. A refused request never blocks (ADR 117), so the cycle goes on and
+the reason is in the phase's envelope. The phases' standing git rule
+(`_REMOTE_IS_NOT_YOURS`) says the same, so the arquitecto never plans a merge
+and the implementador never attempts one.
+
+**Consequences.** A phase cannot merge any branch through a command request,
+not only the base; no task has needed to. `git pull` is refused by two rules,
+and the reason names both.
