@@ -14815,11 +14815,11 @@ not on what exists*, rejects a line cap on source files — a cap produces
 signal instead: a fifth gate in `dispatcher/gates.py`, at `NOTE` level,
 looking only at files the diff touched. It proposed 800 lines for Python,
 which on its day named `dispatcher/dispatcher.py` alone. On this task's base
-that is no longer so: 11 of the 20 modules directly under `dispatcher/` are
+that is no longer so: 12 of the 35 modules directly under `dispatcher/` are
 past 800 (`dispatcher.py` 5041, `tasks.py` 3186, `docker_exec.py` 2189,
 `cli.py` 1363, `config.py` 1092, `worker.py` 1072, `actions.py` 1034,
 `learnings.py` 1032, `handoff.py` 984, `gates.py` 954,
-`context_transfer.py` 845, by `wc -l`).
+`context_transfer.py` 845, `queue.py` 845, by `wc -l`).
 
 **Decision.**
 1. **The gate.** `size`, run by `gates.run` beside `tests-in-diff` and
