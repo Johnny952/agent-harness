@@ -1242,7 +1242,9 @@ def mark_awaiting_review(hive_dir: str, task_id: str) -> bool:
 
 @_locked
 def reopen_for_changes(hive_dir: str, task_id: str) -> bool:
-    """Move an `awaiting_review` task not on main back to `pending` (ADR 272).
+    """Move an `awaiting_review` or `conflict` task not on main to `pending`.
+
+    ADR 272, and ADR 278 for `conflict`.
 
     The `request_changes` action calls it before the cycle runs again from
     the arquitecto: the task is no longer waiting for review, so an approve
@@ -1254,7 +1256,7 @@ def reopen_for_changes(hive_dir: str, task_id: str) -> bool:
     """
     path = context_transfer.task_file_path(hive_dir, task_id)
     task = context_transfer.read_task_file(path)
-    if task.status != AWAITING_REVIEW_STATUS or task.merged:
+    if task.status not in (AWAITING_REVIEW_STATUS, CONFLICT_STATUS) or task.merged:
         return False
     task.status = "pending"
     _write_task_file(path, task)
@@ -2934,8 +2936,9 @@ def record_verdict(
     `conflict` or `done` and not merged: a verdict on a task not finished, or
     already merged, reviewed nothing. An approve is refused on `conflict` too,
     which waits on resolve conflict. A request for changes is taken on
-    `awaiting_review` alone (ADR 272): it reopens the cycle the task came out
-    of, and a `conflict` waits on resolve conflict first.
+    `awaiting_review` and `conflict` (ADR 272, ADR 278): it reopens the cycle
+    the task came out of, and on a `conflict` it is how the person answers a
+    design conflict the integrador will not settle.
     Returns `add_comment`'s `{"id", "comment", "comment_count"}`.
     """
     task_id = _check_id(task_id)
@@ -2968,18 +2971,14 @@ def record_verdict(
         if (
             kind == "request_changes"
             and not task.merged
-            and task.status != AWAITING_REVIEW_STATUS
+            and task.status not in (AWAITING_REVIEW_STATUS, CONFLICT_STATUS)
         ):
-            reason = (
-                "it is conflict: a request for changes waits on resolve conflict"
-                if task.status == CONFLICT_STATUS
-                else f"it is {task.status}, not awaiting_review: a request for changes "
-                "reopens a cycle that ended in review"
+            raise BoardWriteError(
+                f"task {task_id}",
+                [f"it is {task.status}, not awaiting_review or conflict: a request for "
+                 "changes reopens a cycle that ended in review"],
             )
-            raise BoardWriteError(f"task {task_id}", [reason])
-        if task.status in REVIEW_STATUSES and not (
-            task.status in ("done", AWAITING_REVIEW_STATUS) and task.merged
-        ):
+        if task.status in REVIEW_STATUSES and not task.merged:
             return
         state = "merged" if task.merged else task.status
         raise BoardWriteError(

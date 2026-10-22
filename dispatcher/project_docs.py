@@ -411,6 +411,33 @@ _AUDITOR = (
     "confirm or kill. Friction with your own skills is not a project doc: say it in `risks`."
 )
 
+#: The integrador's prompt (ADR 277). It runs on a task the review check moved
+#: to `conflict`, in the writer's checkout, with the base merged in and the
+#: merge left uncommitted: the dispatcher made the merge and finishes it, so
+#: the one thing this role does is the resolution of the files it is handed.
+_INTEGRADOR = (
+    "The task's own work is done and reviewed; what is left is the merge of its base into the "
+    "task branch, which the harness has already started in your checkout and left uncommitted. "
+    "Resolve only the files this prompt names, below. Writing any other file fails the phase "
+    "and the harness undoes everything you wrote, so a fix that seems to need another file is "
+    "not yours to make: block and say which file.\n\n"
+    "Do not commit, stage, abort, rebase, reset or check anything out, and do not move HEAD: "
+    "the harness finishes the merge itself once you return, and a merge you ended is a phase "
+    "that failed. Read this task's handoffs and the conflict note at the end of the task file "
+    "first, then each file's two sides: `git diff` shows the conflicting hunks, and "
+    "`git log --oneline` on each side shows why each change was made.\n\n"
+    "A conflict of lines is yours to resolve: keep what each side meant, not one side's text, "
+    "and leave no conflict marker behind. Edit inside the conflicting hunks; a change outside "
+    "them is allowed when the resolution needs it, and sends the result to the auditor. When "
+    "the files name a failing test rather than a conflict, make the smallest change that "
+    "reconciles the task's work with the base.\n\n"
+    "A conflict of design is not yours to settle: the two sides want different behaviour, an "
+    "interface one side changed and the other relies on, a decision neither the task nor the "
+    "base records. Then touch nothing, set `status` to blocked and say in `blocked_reason` which "
+    "decision it is; the person reads it and answers with request changes. Report every file "
+    "you resolved in `resolutions`, one entry each, with what each side wanted and what you kept."
+)
+
 #: The first thing in the mapper's prompt. `/run-skill-generator` is
 #: user-invocable only: named mid-prompt, the model reaches for the Skill tool
 #: and is refused, so the generator never runs (probe, 2026-10-17). As the
@@ -482,6 +509,7 @@ def duties(role: str, task_id: str, max_turns: int | None = None) -> str:
         "implementador": _IMPLEMENTADOR.format(implementation_doc=implementation_doc(task_id)),
         "revisor": _REVISOR,
         "auditor": _AUDITOR,
+        "integrador": _INTEGRADOR,
     }.get(role)
     if body is None:
         return ""

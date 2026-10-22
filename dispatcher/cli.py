@@ -37,6 +37,7 @@ from dispatcher.dispatcher import (
     push_base,
     recheck_awaiting_review,
     record_merge,
+    resolve_conflict,
     run_draft_specs,
     run_single_phase,
     run_task_cycle,
@@ -682,6 +683,21 @@ def main() -> None:
         f"error; a refused push keeps the merge local and exits {EXIT_NOT_PUSHED}.",
     )
 
+    resolve_parser = sub.add_parser(
+        "resolve-conflict",
+        help="Resolve a task the pre-merge check moved to `conflict`. The base is "
+        "merged into the task branch again (a merge, never a rebase) in the writers' "
+        "checkout; the integrador resolves the conflicting files, or for a red gate "
+        "the files the failure names, and writing any other file fails it. Then the "
+        "merge commit, the test gate and the revisor on the resolution alone, and the "
+        "auditor only when an edit fell outside the conflicting hunks. Success moves "
+        "the task to awaiting_review, and no earlier approval carries over; a design "
+        "conflict leaves it in `conflict` with a note, for request changes "
+        "(docs/decisions.md ADR 277).",
+    )
+    resolve_parser.add_argument("--task-id", required=True)
+    resolve_parser.add_argument("--project", required=True, help="Project slug")
+
     learnings_parser = sub.add_parser(
         "learnings",
         help="Read and rule on the traps the phases filed. With no flag it prints "
@@ -1039,6 +1055,28 @@ def main() -> None:
         print(f"branch {branch} kept; `git worktree add <path> {branch}` checks it out again")
     elif args.command == "close-task":
         _run_close_task(cfg, args)
+    elif args.command == "resolve-conflict":
+        container = cleanup_container(cfg)
+        if container is None:
+            parser.error("no accounts configured: nothing to run the resolution in")
+        # The resolution merges the base into the task branch and may push it:
+        # a base operation, under the same lock as merge-task (ADR 80, ADR 277).
+        try:
+            base = _base_lock(cfg, args.project, "resolve-conflict").acquire()
+        except tasks.BaseLockHeldError as exc:
+            print(f"task {args.task_id}: not resolved: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        with base:
+            project_dir = f"{cfg.projects_root}/{args.project}"
+            owner = docker_exec.read_owner(container, project_dir)
+            try:
+                resolved = resolve_conflict(cfg, container, args.task_id, args.project)
+            finally:
+                docker_exec.restore_owner(container, project_dir, owner)
+        if not resolved.resolved:
+            print(resolved.detail, file=sys.stderr)
+            raise SystemExit(1)
+        print(resolved.detail)
     elif args.command == "merge-task":
         container = cleanup_container(cfg)
         if container is None:

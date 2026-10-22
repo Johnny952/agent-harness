@@ -667,20 +667,21 @@ def test_an_approve_on_a_merged_task_is_refused(tmp_path: Path, status) -> None:
     assert not os.path.exists(tasks.comments_path(hive, "T-001"))
 
 
-def test_a_request_for_changes_is_taken_on_a_task_awaiting_review(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", ["awaiting_review", "conflict"])
+def test_a_request_for_changes_is_taken_on_a_task_under_review(tmp_path: Path, status) -> None:
     hive = _hive(tmp_path)
-    _task(hive, "T-001", status="awaiting_review")
+    _task(hive, "T-001", status=status)
     result = tasks.record_verdict(hive, "T-001", "operator", "request_changes", "Rename it.", _COMMIT)
     assert result["comment"]["verdict"] == {"kind": "request_changes", "commit": _COMMIT}
     assert _comments(hive, "T-001") == [result["comment"]]
-    assert _read(hive, "T-001").status == "awaiting_review"  # the action moves it, not the line
+    assert _read(hive, "T-001").status == status  # the action moves it, not the line
 
 
 @pytest.mark.parametrize(
     "status, merged, needle",
     [
-        ("conflict", None, "waits on resolve conflict"),
-        ("done", None, "it is done, not awaiting_review"),
+        ("done", None, "it is done, not awaiting_review or conflict"),
+        ("conflict", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged"),
         ("awaiting_review", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged"),
         ("done", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}, "it is merged"),
         ("merged", None, "it is merged"),
@@ -699,17 +700,19 @@ def test_a_request_for_changes_not_awaiting_review_is_refused(tmp_path: Path, st
 # -- reopen_for_changes and review_comments (ADR 272) -------------------------
 
 
-def test_reopen_for_changes_moves_awaiting_review_to_pending(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", ["awaiting_review", "conflict"])
+def test_reopen_for_changes_moves_a_task_under_review_to_pending(tmp_path: Path, status) -> None:
     hive = _hive(tmp_path)
-    _task(hive, "T-001", status="awaiting_review")
+    _task(hive, "T-001", status=status)
     assert tasks.reopen_for_changes(hive, "T-001") is True
     assert _read(hive, "T-001").status == "pending"
 
 
 @pytest.mark.parametrize(
     "status, merged",
-    [("done", None), ("conflict", None), ("in_progress", None), ("pending", None),
-     ("awaiting_review", {"into": "main", "at": "2026-10-11T16:00:36+00:00"})],
+    [("done", None), ("in_progress", None), ("pending", None),
+     ("awaiting_review", {"into": "main", "at": "2026-10-11T16:00:36+00:00"}),
+     ("conflict", {"into": "main", "at": "2026-10-11T16:00:36+00:00"})],
 )
 def test_reopen_for_changes_leaves_any_other_task_alone(tmp_path: Path, status, merged) -> None:
     hive = _hive(tmp_path)

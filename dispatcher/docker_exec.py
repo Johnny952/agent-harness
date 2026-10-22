@@ -253,6 +253,13 @@ _GIT_ENV = {"LC_ALL": "C"}
 # imports this module: the mapping phase writes the project's docs, so it
 # needs the same shared checkout the other writers get.
 WRITER_ROLES = frozenset({"cartografo", "arquitecto", "implementador", "auditor"})
+
+#: The role that resolves a conflict the review check found (ADR 277). It
+#: works in the writers' checkout, because the merge it finishes is the task
+#: branch's own, but it is not in WRITER_ROLES: the dispatcher commits the
+#: merge for it, after checking that it wrote only the files it was given, so
+#: the per-phase commit the writers get would be the wrong commit.
+INTEGRADOR_ROLE = "integrador"
 """Roles that change the tree, and so share one worktree on the task branch.
 
 Everyone else reviews what they produced and gets a throwaway detached
@@ -399,7 +406,7 @@ def create_worktree(
     if at_base:
         return _add_review_worktree(container, project_dir, task_id, role, "HEAD")
     branch = task_branch(task_id)
-    if role in WRITER_ROLES:
+    if role in WRITER_ROLES or role == INTEGRADOR_ROLE:
         return _add_writer_worktree(container, project_dir, task_id, branch)
     return _add_review_worktree(container, project_dir, task_id, role, branch)
 
@@ -829,6 +836,262 @@ def premerge_base(
         f"merged {base} at {base_commit[:7]} into {branch} cleanly",
         merged_tip=merged_tip, workdir=workdir,
     )
+
+
+def merge_base_into_writer(
+    container: str,
+    projects_root: str,
+    slug: str,
+    task_id: str,
+    author_name: str = "ia-harness dispatcher",
+    author_email: str = "dispatcher@ia-harness.invalid",
+) -> PreMergeOutcome:
+    """Start merging the base into the task branch, in the writers' checkout.
+
+    The resolve-conflict counterpart of `premerge_base` (ADR 277), and the
+    same refusals. Where that one merges in a throwaway checkout and aborts on
+    a conflict, this one leaves the merge in progress where the integrador can
+    finish it: `--no-commit`, so a clean merge is uncommitted too and the test
+    gate can run on it before anything lands on the branch. A real merge,
+    never a rebase.
+
+    A writer checkout holding anything uncommitted, or not at the branch tip,
+    is refused rather than merged into: the resolution has to be the only
+    thing in the commit that finishes it, and undoing a failed one resets the
+    checkout, which would take that work with it.
+    """
+    _require_non_empty(projects_root=projects_root, slug=slug, task_id=task_id)
+    project_dir = f"{projects_root}/{slug}"
+    branch = task_branch(task_id)
+
+    if not _branch_exists(container, project_dir, branch):
+        return PreMergeOutcome(REFUSED, None, None, None, f"there is no branch {branch} to merge into")
+    base = current_branch(container, project_dir)
+    if base is None:
+        return PreMergeOutcome(
+            REFUSED, None, None, None,
+            f"{project_dir} is on a detached HEAD, so there is no base to merge in",
+        )
+    if base == branch:
+        return PreMergeOutcome(
+            REFUSED, base, None, None, f"{project_dir} is checked out on {branch} itself",
+        )
+    base_commit = resolve_commit(container, project_dir, base)
+    tip = resolve_commit(container, project_dir, branch)
+    if base_commit is None or tip is None:
+        return PreMergeOutcome(
+            REFUSED, base, base_commit, tip, f"could not resolve {base} or {branch} to a commit",
+        )
+
+    workdir = _add_writer_worktree(container, project_dir, task_id, branch)
+    status = run_docker_exec(
+        container, workdir, ["git", "status", "--porcelain", "--untracked-files=all"],
+        env=_GIT_ENV,
+    )
+    if status.returncode != 0:
+        return PreMergeOutcome(
+            REFUSED, base, base_commit, tip,
+            f"could not read the state of {workdir}: {_output_tail(status)}",
+        )
+    if status.stdout.strip() or merge_in_progress(container, workdir):
+        return PreMergeOutcome(
+            REFUSED, base, base_commit, tip,
+            f"{workdir} holds uncommitted work; commit or drop it before resolving",
+        )
+    if resolve_commit(container, workdir, "HEAD") != tip:
+        return PreMergeOutcome(
+            REFUSED, base, base_commit, tip,
+            f"{workdir} is not at the tip of {branch}, which holds uncommitted history",
+        )
+
+    proc = run_docker_exec(
+        container, project_dir,
+        ["git", "merge-base", "--is-ancestor", base_commit, tip],
+        env=_GIT_ENV,
+    )
+    if proc.returncode == 0:
+        return PreMergeOutcome(
+            UP_TO_DATE, base, base_commit, tip,
+            f"{branch} already contains {base} at {base_commit[:7]}",
+            merged_tip=tip, workdir=workdir,
+        )
+
+    proc = run_docker_exec(
+        container, workdir,
+        [
+            "git",
+            "-c", f"user.name={author_name}",
+            "-c", f"user.email={author_email}",
+            "merge", "--no-ff", "--no-commit",
+            "-m", f"Merge {base} ({base_commit[:7]}) into {branch}",
+            base_commit,
+        ],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        conflicts = unmerged_paths(container, workdir)
+        if not conflicts:
+            # git refused to start the merge at all: nothing to resolve.
+            reset_writer(container, workdir, tip)
+            return PreMergeOutcome(
+                REFUSED, base, base_commit, tip,
+                f"merging {base} into {branch} did not start: {_output_tail(proc)}",
+            )
+        return PreMergeOutcome(
+            PREMERGE_CONFLICT, base, base_commit, tip,
+            f"merging {base} at {base_commit[:7]} into {branch} conflicts: {', '.join(conflicts)}",
+            conflicts=conflicts, workdir=workdir,
+        )
+    return PreMergeOutcome(
+        PREMERGE_CLEAN, base, base_commit, tip,
+        f"merged {base} at {base_commit[:7]} into {branch} cleanly, not yet committed",
+        workdir=workdir,
+    )
+
+
+def unmerged_paths(container: str, workdir: str) -> tuple[str, ...]:
+    """The files a merge in progress still has in conflict."""
+    proc = run_docker_exec(
+        container, workdir, ["git", "diff", "--name-only", "--diff-filter=U"], env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        return ()
+    return tuple(line.strip() for line in proc.stdout.splitlines() if line.strip())
+
+
+def merge_in_progress(container: str, workdir: str) -> bool:
+    """Whether this checkout has a merge started and not yet committed."""
+    proc = run_docker_exec(
+        container, workdir, ["git", "rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
+        env=_GIT_ENV,
+    )
+    return proc.returncode == 0
+
+
+def tracked_files(container: str, workdir: str) -> list[str]:
+    """Every path the checkout's index tracks, relative to its root."""
+    proc = run_docker_exec(container, workdir, ["git", "ls-files"], env=_GIT_ENV)
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line]
+
+
+def read_file(container: str, workdir: str, path: str) -> str | None:
+    """A file's text in the checkout, or None when it is not there to read."""
+    proc = run_docker_exec(container, workdir, ["cat", "--", path], env=_GIT_ENV)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def worktree_fingerprint(container: str, workdir: str) -> dict[str, tuple[str, str | None]]:
+    """Path -> (status, content hash) for everything that differs from HEAD.
+
+    Taken before and after a phase, the two say which paths the phase wrote,
+    even in a checkout that already differs from HEAD (a merge in progress):
+    a path whose status or content changed was written, one that kept both
+    was not. The hash is of the bytes on disk, so an edit that leaves the
+    status as it was (`UU` before and after) still shows.
+    """
+    proc = run_docker_exec(
+        container, workdir,
+        ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git status failed in {workdir}: {_output_tail(proc)}")
+    entries: dict[str, str] = {}
+    records = proc.stdout.split("\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
+            continue
+        code, path = record[:2], record[3:]
+        entries[path] = code
+        if "R" in code or "C" in code:
+            # A rename's source follows as its own record.
+            if index < len(records) and records[index]:
+                entries[records[index]] = code
+            index += 1
+    fingerprint: dict[str, tuple[str, str | None]] = {}
+    for path, code in entries.items():
+        hashed = run_docker_exec(
+            container, workdir, ["git", "hash-object", "--no-filters", "--", path],
+            env=_GIT_ENV,
+        )
+        digest = hashed.stdout.strip() if hashed.returncode == 0 else None
+        fingerprint[path] = (code, digest or None)
+    return fingerprint
+
+
+_MARKER_RE = re.compile(r"^(<{7}|>{7})( |$)", re.MULTILINE)
+
+
+def finish_merge_commit(
+    container: str,
+    workdir: str,
+    paths: Sequence[str],
+    message: str,
+    author_name: str = "ia-harness dispatcher",
+    author_email: str = "dispatcher@ia-harness.invalid",
+) -> str:
+    """Stage the resolved `paths` and commit the merge in progress; the new HEAD.
+
+    Refuses a file that still holds a conflict marker, and a merge that still
+    has an unmerged path after staging: either is a resolution that is not
+    finished, and committing it would put the markers on the branch. Works
+    for a clean merge too (MERGE_HEAD present, nothing to stage), which is
+    what makes the commit a merge commit with both parents.
+    """
+    for path in paths:
+        text = read_file(container, workdir, path)
+        if text is not None and _MARKER_RE.search(text):
+            raise RuntimeError(f"{path} still holds a conflict marker")
+    if paths:
+        proc = run_docker_exec(
+            container, workdir, ["git", "add", "-A", "--", *paths], env=_GIT_ENV,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"git add failed: {_output_tail(proc)}")
+    left = unmerged_paths(container, workdir)
+    if left:
+        raise RuntimeError(f"still unmerged after the resolution: {', '.join(left)}")
+    proc = run_docker_exec(
+        container, workdir,
+        [
+            "git",
+            "-c", f"user.name={author_name}",
+            "-c", f"user.email={author_email}",
+            "commit", "-q", "--no-edit", "-m", message,
+        ],
+        env=_GIT_ENV,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git commit failed: {_output_tail(proc)}")
+    head = resolve_commit(container, workdir, "HEAD")
+    if head is None:
+        raise RuntimeError(f"the merge commit left no HEAD in {workdir}")
+    return head
+
+
+def reset_writer(container: str, workdir: str, tip: str) -> None:
+    """Put the writers' checkout back at `tip`, with nothing in progress.
+
+    Undoes a resolution that failed, wherever it stopped: a merge still in
+    progress is aborted, a merge commit already made is reset away (the
+    checkout is on the task branch, so the branch moves back with it), and
+    whatever the phase wrote is cleaned. Only ever called on a checkout that
+    `merge_base_into_writer` found clean at `tip`, so nothing of the task's
+    own is lost.
+    """
+    # Allowed to fail: there may be no merge in progress to abort.
+    run_docker_exec(container, workdir, ["git", "merge", "--abort"], env=_GIT_ENV)
+    proc = run_docker_exec(container, workdir, ["git", "reset", "-q", "--hard", tip], env=_GIT_ENV)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git reset --hard {tip[:7]} failed in {workdir}: {_output_tail(proc)}")
+    run_docker_exec(container, workdir, ["git", "clean", "-fdq"], env=_GIT_ENV)
 
 
 def adopt_premerge(

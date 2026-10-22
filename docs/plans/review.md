@@ -275,6 +275,15 @@ The integrador (steps 2 and 3) is not built, so for now the operator
 resolves a conflict: they merge the base into the branch, never rebasing,
 and run `merge-task` again.
 
+*Built* 2026-10-21 (ADR 277): `dispatch resolve-conflict --task-id
+--project` merges the base into the task branch in the writers' checkout and
+hands the conflicting files, or for a red gate the files the failure names,
+to the integrador. It may write only those. The dispatcher finishes the merge
+commit and runs the test gate and the revisor on the resolution, and the
+auditor only for edits outside the conflicting hunks. Success moves the task
+to `awaiting_review` with no approval carried over. A design conflict leaves
+it in `conflict` with a note, answered with *request changes* (ADR 278).
+
 ## The flow
 
 1. **A state between `done` and merged: awaiting review.** The cycle ends
@@ -334,8 +343,9 @@ After `board-service.md`'s steps, each a single surface:
 6. The *request changes* verdict: the cycle reopened at the arquitecto.
    **Built 2026-10-21** (ADR 272, T-128): a bearer route `POST
    /api/tasks/<id>/request-changes`, approve's with the kind swapped, takes
-   it on an `awaiting_review` task only (a `conflict` waits on *resolve
-   conflict*), writes the verdict line and queues a `request_changes` action;
+   it on an `awaiting_review` task, and since ADR 278 on a `conflict` one,
+   which is how a design conflict the integrador blocks on is answered;
+   it writes the verdict line and queues a `request_changes` action;
    it starts nothing, and `/verdict` refuses it. One approve or request for
    changes per task is queued at a time. The worker, holding the project and
    an account, moves the task to `pending` and runs the cycle unauthorized
@@ -371,6 +381,17 @@ After `board-service.md`'s steps, each a single surface:
    check builds and keeps it at merge time.
 9. The integrador role: its prompt, handoff schema, profile and write limit,
    and the *resolve conflict* verdict. Under an ADR, since it adds a role.
+   **Built 2026-10-21** (ADR 277): `dispatch resolve-conflict`, which merges
+   the base into the writers' checkout (never a rebase) and dispatches the
+   `integrador`. The role writes only the conflicting files, or the files a
+   red gate names, and reports each file's resolution. The model is the
+   implementador's unless `role_model.integrador` says otherwise. After the
+   phase the dispatcher finishes the merge commit, runs the test gate and
+   the revisor on the resolution, and runs the auditor when an edit fell
+   outside the hunks. It ends in `awaiting_review`, or in `conflict` with a
+   note when the integrador blocks on a design conflict.
+   Still open: the console button and the board route for *resolve
+   conflict*.
 
 Steps 4, 6 and 9 start runs from the console under C-12.
 
@@ -385,7 +406,10 @@ Steps 4, 6 and 9 start runs from the console under C-12.
   choice. A lighter path for a wording fix would be its own ADR.
 - **The integrador's model.** A cheaper model for textual conflicts, or the
   implementador's; set by its profile when step 9 is built, and measured
-  against the first conflicts it resolves.
+  against the first conflicts it resolves. *Answered* by step 9 (ADR 277):
+  the implementador's model by default. `role_model.integrador` sets another
+  in config. Its budget and turns are unmeasured until the first
+  conflicts it resolves.
 
 ## What it is not
 

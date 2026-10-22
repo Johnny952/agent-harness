@@ -35,8 +35,9 @@ def nothing_written(hive, state):
     assert pending(state) == []
 
 
-def test_a_request_writes_the_line_and_queues_the_action(client, hive, state):
-    task(hive, "T-1", status="awaiting_review")
+@pytest.mark.parametrize("status", ["awaiting_review", "conflict"])
+def test_a_request_writes_the_line_and_queues_the_action(client, hive, state, status):
+    task(hive, "T-1", status=status)
     res = request_changes(client)
     assert res.status_code == 201
     body = res.get_json()
@@ -101,8 +102,8 @@ def test_a_query_parameter_is_400(client, hive, state):
 @pytest.mark.parametrize(
     "status, merged, needle",
     [
-        ("conflict", None, "resolve conflict"),
-        ("done", None, "not awaiting_review"),
+        ("done", None, "not awaiting_review or conflict"),
+        ("conflict", MERGED, "it is merged"),
         ("awaiting_review", MERGED, "it is merged"),
         ("merged", None, "it is merged"),
         ("pending", None, "not awaiting_review"),

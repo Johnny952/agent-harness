@@ -200,8 +200,9 @@ def test_the_unknown_role_message_lists_the_phase_roles_and_not_the_cartografo(
         load_config(str(config_path))
 
     listed = str(excinfo.value).split("roles are: ")[1]
-    # The four phase roles, and the arquitecto's draft mode (ADR 82).
-    assert listed == "arquitecto, arquitecto-draft, auditor, implementador, revisor"
+    # The four phase roles, the arquitecto's draft mode (ADR 82), and the
+    # integrador that resolves a conflict (ADR 277).
+    assert listed == "arquitecto, arquitecto-draft, auditor, implementador, integrador, revisor"
 
 
 def test_a_phase_is_resumed_twice_for_its_handoff_by_default(tmp_path: Path) -> None:
