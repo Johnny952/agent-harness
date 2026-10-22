@@ -6,7 +6,8 @@
 **Status:** confirmed. T-064's arquitecto and implementador both reported it
 (one source, one task). The auditor checked it against the test. T-109 hit it
 again adding the editable `thread_models` (ADR 169): the editable count went
-22 to 23 and the key joined the test's `values` dict.
+22 to 23 and the key joined the test's `values` dict. T-140 hit it adding
+the read-only `project_parallel` (ADR 306): the counts read 23/21/3 after it.
 
 ## What fails
 
