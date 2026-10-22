@@ -14803,3 +14803,62 @@ stale-plan note that `run_task_cycle(scheduler=)` applies.
 - *A ceiling above the pool's slots, clamped silently at the worker:* a
   config that asks for more than can run is refused where it is loaded,
   as `--parallel` is refused where it is typed.
+
+## ADR 309 — A `size` gate notes a touched Python source file past 800 lines; a signal, never a cap
+
+**Status:** accepted (2026-10-22), T-141's arquitecto. The threshold is
+provisional.
+
+**Context.** `docs/plans/backlog.md` item 1, *Limits go on what travels,
+not on what exists*, rejects a line cap on source files — a cap produces
+`utils2.py` and splits coherent modules to meet a number — and asks for a
+signal instead: a fifth gate in `dispatcher/gates.py`, at `NOTE` level,
+looking only at files the diff touched. It proposed 800 lines for Python,
+which on its day named `dispatcher/dispatcher.py` alone. On this task's base
+that is no longer so: 11 of the 20 modules directly under `dispatcher/` are
+past 800 (`dispatcher.py` 5041, `tasks.py` 3186, `docker_exec.py` 2189,
+`cli.py` 1363, `config.py` 1092, `worker.py` 1072, `actions.py` 1034,
+`learnings.py` 1032, `handoff.py` 984, `gates.py` 954,
+`context_transfer.py` 845, by `wc -l`).
+
+**Decision.**
+1. **The gate.** `size`, run by `gates.run` beside `tests-in-diff` and
+   `contract-docs`, so only when a fork point exists, over
+   `changed_paths`. It always reports at `NOTE` and never `BLOCKING` or
+   `ASK`, so it costs no `--resume` and stops no round.
+2. **What it measures.** A changed path that is Python source: suffix
+   `.py`, `is_code` (so not under `docs/`) and not `is_test`. Tests are
+   left out because a test module grows by cases rather than by
+   responsibilities, and its size is not the signal item 1 is after.
+   Every other language is out of scope. A deleted path is not measured:
+   it has no lines in the worktree.
+3. **How it measures.** One `wc -l -- <paths>` in the worktree per
+   hundred paths, under the C locale, its exit code not consulted: a
+   deleted path is a line on stderr and costs only itself. A count is
+   newlines, so a file with no trailing newline counts one short.
+4. **What it says.** One finding per file whose count is strictly greater
+   than the threshold, naming the path and its count. Nothing at all
+   when none is.
+5. **The threshold** is the module constant `SIZE_NOTE_LINES = 800` in
+   `dispatcher/gates.py`, not a `config.yaml` key: a key costs three
+   documented homes (`docs/learnings/a-config-key-has-three-homes.md`)
+   for a number nobody has asked to tune per pool yet. It is provisional
+   by construction; moving it is an edit to that constant plus a narrowing
+   ADR naming the measurement that moved it.
+
+**Consequences.**
+- With the numbers above, most tasks that edit `dispatcher/` will carry a
+  `size` note, this one included (`gates.py`). That is the cost of keeping
+  the item's 800 and the first thing to measure if the note turns out to be
+  noise the roles learn to skip — the reason gates err toward silence.
+- The note carries no instruction to split anything; a revisor or auditor
+  weighs it. Splitting `dispatcher/dispatcher.py` stays
+  `docs/plans/balancer.md`'s.
+- The pre-merge check and a conflict resolution run `gates.run` too, and
+  read only `blocking`, so the new gate changes neither.
+
+**Ruled out.**
+- *A blocking or `ASK` level:* that is the cap item 1 rejects.
+- *Reporting untouched files:* limits go on what travels; a file this
+  task did not touch is not this task's to answer for.
+- *Counting tests:* see decision 2; a later ADR can bring them in.
