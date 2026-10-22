@@ -390,3 +390,9 @@ T-142 resolved no earlier row and declared one, `introduced`: the read api's
 `in_phase_table` still answers for the unfiltered learnings table now that a
 phase is handed only the rows its task names (ADR 315 decision 5). Filed open
 as `T-142-D1`, impact `cost`: a misleading column, nothing lost.
+
+T-145 resolved `T-143-D1` and declared no new debt: `dispatcher/operator.py`
+now takes a refusal's hold from `dispatcher._refusal_hold_until` (ADR 318), so
+`dispatch status` and `release-account`'s guard both honour a recorded
+`retry_at`. `docs/plans/balancer.md` still quotes the old "of cooldown left"
+text; it is a plan, a record, and left as written.
