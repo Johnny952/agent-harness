@@ -312,17 +312,8 @@ def _impact_cell(cells: list[str], header: list[str]) -> str:
     return _column(cells, header, "impact", len(cells))
 
 
-def index_rows(text: str) -> list[dict]:
-    """Every row of the index, by column name, in the order it is written.
-
-    The path-based way in. `read_index` reaches a project's index through
-    `docker exec` and the row parsing behind it was private, so anything that
-    already has the text — Phase 1's read API, reading a mounted checkout —
-    had no way to it but a second parser. This is that way, and the two readers
-    below go through it so there is still only one.
-
-    `resolved` is best-effort by construction: see `_RESOLVED_RE`.
-    """
+def _raw_rows(text: str) -> list[dict]:
+    """Every row as written, one dict per table line, nothing folded."""
     return [
         {
             "id": _column(cells, header, "id", 0),
@@ -335,6 +326,74 @@ def index_rows(text: str) -> list[dict]:
         }
         for cells, header in _rows(text)
     ]
+
+
+def _is_resolution(row: dict) -> bool:
+    """A row appended to resolve an entry (ADR 297): resolved, with no **where**.
+
+    A row resolved in place keeps the entry's **where**, so it is never taken
+    for one.
+    """
+    return bool(row["id"]) and row["resolved"] and not row["where"]
+
+
+def _fold(entry: dict, resolution: dict) -> dict:
+    """The entry with its resolution row folded in: the shape a row resolved in
+    place always had, so no reader has to know there were two rows."""
+    fix = " ".join(part for part in (entry["fix"], resolution["fix"]) if part)
+    return {
+        **entry,
+        "what": f"{resolution['what']} {entry['what']}".strip(),
+        "fix": fix,
+        "impact": NO_IMPACT,
+        "resolved": True,
+    }
+
+
+def index_rows(text: str) -> list[dict]:
+    """Every row of the index, by column name, in the order it is written.
+
+    The path-based way in. `read_index` reaches a project's index through
+    `docker exec` and the row parsing behind it was private, so anything that
+    already has the text — Phase 1's read API, reading a mounted checkout —
+    had no way to it but a second parser. This is that way, and the two readers
+    below go through it so there is still only one.
+
+    A resolution row (ADR 297) is folded into the first row with its id and
+    does not appear on its own. A later row with the same id that is not a
+    resolution, and a resolution with no entry before it, are returned as
+    written: nothing is lost.
+
+    `resolved` is best-effort by construction: see `_RESOLVED_RE`.
+    """
+    rows: list[dict] = []
+    first: dict[str, int] = {}
+    for row in _raw_rows(text):
+        position = first.get(row["id"]) if row["id"] else None
+        if position is not None and _is_resolution(row):
+            rows[position] = _fold(rows[position], row)
+            continue
+        if row["id"] and position is None:
+            first[row["id"]] = len(rows)
+        rows.append(row)
+    return rows
+
+
+def duplicate_ids(text: str) -> list[str]:
+    """The ids with more than one row that is not a resolution row.
+
+    What a union merge of two in-place edits of one row leaves behind, and
+    what `gates.debt_index` stops (ADR 297). In the order of the first repeat.
+    """
+    seen: set[str] = set()
+    repeated: list[str] = []
+    for row in _raw_rows(text):
+        if not row["id"] or _is_resolution(row):
+            continue
+        if row["id"] in seen and row["id"] not in repeated:
+            repeated.append(row["id"])
+        seen.add(row["id"])
+    return repeated
 
 
 def open_rows(text: str) -> list[dict]:
@@ -379,7 +438,7 @@ def backlog_item(row: dict) -> tuple[str, str, str]:
         f"`{project_docs.DEBT_DIR}/{entry}.md`."
     )
     fix = _one_line(row.get("fix", "")) or (
-        f"The entry `{entry}` is marked resolved in `{project_docs.DEBT_INDEX}`."
+        f"The entry `{entry}` has a resolution row in `{project_docs.DEBT_INDEX}`."
     )
     description = "## Goal\n\n" + "\n".join(goal) + "\n\n## Done when\n\n" + fix + "\n"
     return title, description, priority_for(row.get("impact", NO_IMPACT))
@@ -439,8 +498,8 @@ def filing_note(filed: list[tuple[str, Declaration]]) -> str:
         return ""
     columns = " | ".join(COLUMNS)
     lines = [
-        "The debt the revisor accepted in this task already has its ids. File one row per "
-        f"entry in `{project_docs.DEBT_INDEX}`, with these columns in this order: {columns}. "
+        "The debt the revisor accepted in this task already has its ids. Append one row per "
+        f"entry at the end of the table in `{project_docs.DEBT_INDEX}`, with these columns in this order: {columns}. "
         "Use the id given here, and write `none` in the `card` column. In the `impact` "
         "column write one of `risk` (left as it is, it can break or lose something), "
         "`cost` (it slows or costs work) or `cosmetic` (wording or polish): the dispatcher "
@@ -451,6 +510,8 @@ def filing_note(filed: list[tuple[str, Declaration]]) -> str:
     ]
     for entry, declaration in filed:
         lines.append(f"- `{entry}` — {declaration.what}")
+    lines.append("")
+    lines.append("Resolve an entry by appending a resolution row, never by editing a row (ADR 297).")
     lines.append("")
     lines.append(
         "Do not file anything else as debt: work the revisor did not accept is not an entry, "

@@ -338,7 +338,7 @@ def test_the_implementador_is_told_what_resolved_debt_does() -> None:
     duties = project_docs.duties("implementador", "task-1")
 
     assert "`resolved_debt`" in duties
-    assert "the auditor marks" in duties
+    assert "the auditor appends a resolution row" in duties
 
 
 def test_the_auditor_s_duties_and_the_filing_note_agree_about_the_card_column() -> None:

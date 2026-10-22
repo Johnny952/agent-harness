@@ -32,7 +32,7 @@ import re
 import subprocess
 import time
 
-from dispatcher import adr_numbers, docker_exec, project_docs
+from dispatcher import adr_numbers, debt, docker_exec, project_docs
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ LINT = "lint"
 CONTRACT_DOCS = "contract-docs"
 POINTERS = "pointers"
 DECISIONS_LOG = "decisions-log"
+DEBT_INDEX_GATE = "debt-index"
 
 # git's tolerated-error checks elsewhere in the harness match English messages,
 # and so does the `ls` parsing below. Every command whose *output* this module
@@ -895,6 +896,29 @@ def decisions_log(container: str, workdir: str) -> list[Finding]:
         DECISIONS_LOG,
         f"`{project_docs.DECISIONS}` holds {_sample(duplicates)} more than once "
         "after the merge — renumber or drop the repeated entry on the branch.",
+        BLOCKING,
+    )]
+
+
+def debt_index(container: str, workdir: str) -> list[Finding]:
+    """A blocking finding when the checkout's debt index repeats an entry that
+    is not a resolution row; nothing when it is clean or not there.
+
+    The same shape as `decisions_log`, for the same reason (ADR 297): the index
+    merges by union, and a union of two in-place edits of one row keeps both.
+    """
+    proc = docker_exec.run_docker_exec(
+        container, workdir, ["cat", "--", project_docs.DEBT_INDEX], env=_C_LOCALE,
+    )
+    if proc.returncode != 0:
+        return []
+    duplicates = debt.duplicate_ids(proc.stdout)
+    if not duplicates:
+        return []
+    return [Finding(
+        DEBT_INDEX_GATE,
+        f"`{project_docs.DEBT_INDEX}` holds a row for {_sample(duplicates)} more than once "
+        "after the merge — keep one row per entry and resolve it with a resolution row.",
         BLOCKING,
     )]
 
