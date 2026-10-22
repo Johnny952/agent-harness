@@ -5,10 +5,12 @@ import logging
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dispatcher import (
     allowlist,
+    backup as backup_mod,
     command_run,
     context_transfer,
     debt,
@@ -870,6 +872,22 @@ def build_parser() -> argparse.ArgumentParser:
         "one at a time (ADR 142)",
     )
 
+    sub.add_parser(
+        "backup",
+        help="Copy the hive and the state into a timestamped directory under "
+        "BACKUP_DIR, keeping BACKUP_KEEP copies (ADR 327). Refuses (75) while any "
+        "project's cycle runs; never copies a credential.",
+    )
+    restore_parser = sub.add_parser(
+        "restore",
+        help="Put a copy back over the hive and the state, in place, setting aside "
+        "what it replaces (ADR 328). Refuses (75) while the worker or a cycle runs.",
+    )
+    restore_parser.add_argument(
+        "--from", dest="copy", required=True, metavar="NAME|latest",
+        help="A copy under BACKUP_DIR, or the newest",
+    )
+
     migrate_parser = sub.add_parser(
         "migrate",
         help="Move the description out of every task file that still carries it "
@@ -920,7 +938,9 @@ def main() -> None:
     args = parser.parse_args()
     cfg = load_config(args.config)
 
-    if args.command == "migrate":
+    if args.command in ("backup", "restore"):
+        _run_backup(args, cfg)
+    elif args.command == "migrate":
         _run_migrate(cfg, args.project)
     elif args.command == "import-debt":
         _run_import_debt(args, cfg, parser)
@@ -1216,6 +1236,36 @@ def main() -> None:
     elif args.command == "accept-drafts":
         _require_migrated(cfg, parser)
         _run_accept_drafts(args, cfg)
+
+
+def _run_backup(args: argparse.Namespace, cfg: Config) -> None:
+    """`backup` and `restore`: exit 2 on a refusal, 75 while something dispatches."""
+    now = datetime.now(timezone.utc)
+    hive = context_transfer.hive_root(cfg.hive_tasks_dir)
+    try:
+        backup_dir, keep = backup_mod.settings_from_env(os.environ)
+        if args.command == "backup":
+            result = backup_mod.backup(hive, cfg.state_dir, backup_dir, keep, now=now)
+        else:
+            result = backup_mod.restore(hive, cfg.state_dir, backup_dir, args.copy, now=now)
+    except backup_mod.BackupError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2)
+    except (ProjectBusy, worker_mod.WorkerLocked) as exc:
+        print(f"{exc}; nothing was {args.command}d", file=sys.stderr)
+        raise SystemExit(EXIT_HELD)
+    if args.command == "backup":
+        print(
+            f"backup {result.name}: {result.files} files, {result.skipped_symlinks} symlinks "
+            f"skipped, pruned {', '.join(result.pruned) or 'none'}"
+        )
+        return
+    print(
+        f"restored {result.name}: {result.files} files; set aside in "
+        f"{', '.join(result.asides) or 'nowhere (nothing was replaced)'}"
+    )
+    for line in backup_mod.RESTORE_LINES:
+        print(line)
 
 
 def _draft_line(draft: tasks.Draft) -> str:

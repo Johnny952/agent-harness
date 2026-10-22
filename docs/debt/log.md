@@ -407,6 +407,11 @@ failure throttle that is per user and not per address until the console
 forwards `X-Forwarded-For`, and `T-146-D2`, verdicts still authored by
 `operator` rather than the signed-in user. It resolved none.
 
+T-147 built step 8 of `docs/plans/server-deployment.md`, backup and restore
+(ADR 327, 328), and filed one entry its revisor accepted: `T-147-D1`, no
+backup before a merge and no wired nightly schedule, pending a `BACKUP_DIR`
+mount in the worker. The scripts' missing executable bit, also accepted, was
+fixed inside the task by the operator's `chmod +x` and is not an entry. It
 T-152 let `run-queue --resume` take a new `--limit` and `--parallel` (ADR 336)
 and filed one entry its revisor accepted: `T-152-D1`, a `limit_reached` task
 that re-runs from the arquitecto because no cycle starts at a later phase. It

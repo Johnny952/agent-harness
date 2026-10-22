@@ -374,6 +374,15 @@ Each step is a single surface:
 7. The phone fits, inside each screen's own task (*Decisions*, 6).
 8. The backup and restore commands, `BACKUP_DIR` and the copy cap
    (*Decisions*, 8).
+
+   **Built 2026-10-22** by T-147 (`docs/decisions.md` ADR 327 and 328):
+   `dispatcher/backup.py`, the `backup` and `restore` verbs, and
+   `scripts/backup.sh` / `scripts/restore.sh`. A copy is a plain directory
+   taken with every project lock held; the cap is `BACKUP_KEEP` (default 7).
+   Restore syncs in place: a file the copy holds is written over the live
+   one, and what the copy lacks is set aside, never deleted. Not built: the
+   nightly and before-merge scheduling (the worker has no `BACKUP_DIR` mount,
+   a compose change awaiting approval) and an off-server destination.
 9. The dind modes (*Decisions*, 9): the per-account key, the compose
    variants for `remote`, `none` and `privileged`, the installer's check,
    and the README's requirement turned into a preference. Under an ADR.

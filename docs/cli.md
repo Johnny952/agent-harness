@@ -22,11 +22,11 @@ the compose `dispatcher` service (README, *5. Run a task*).
 |---|---|---|---|
 | `0` | | all | Done. |
 | `1` | `EXIT_BLOCKED` | most | A run that stopped and needs a person: a blocked task, a refused merge, an entry that is not there, a queue that was not confirmed or has a failed task. An uncaught exception is also 1, with a traceback. |
-| `2` | | all | Usage error from argparse (`--limit` below the floor included). `worker` also exits 2 when another worker holds `worker.lock`. |
+| `2` | | all | Usage error from argparse (`--limit` below the floor included). `worker` also exits 2 when another worker holds `worker.lock`. `backup` and `restore` exit 2 on a backup error. |
 | `3` | `EXIT_SPLIT` | `run-task`, `command-verdict`, `command-resume` | The arquitecto split the task and the split was filed (ADR 60). |
 | `4` | `EXIT_NOT_PUSHED` | `merge-task --push`, `run-queue` | Merged, but the push was refused (ADR 78). |
 | `5` | `EXIT_LIMIT` | `run-queue` | The queue stopped on its token limit with tasks left (ADR 79). |
-| `75` | `EXIT_HELD` | `run-task`, `run-phase`, `command-verdict`, `command-resume`, `draft-specs` | No account could take the next phase, or the project is busy; try again later (ADR 52, ADR 200). |
+| `75` | `EXIT_HELD` | `run-task`, `run-phase`, `command-verdict`, `command-resume`, `draft-specs`, `backup`, `restore` | No account could take the next phase, or the project is busy; try again later (ADR 52, ADR 200). |
 
 ## One cycle per project
 
@@ -297,6 +297,30 @@ Drains the action queue under `<state_dir>/actions` until signalled, one at a
 time (ADR 142). No arguments.
 
 Exits: 0, 2 (another worker holds `worker.lock`).
+
+### `backup`
+
+Copies the hive and `<state_dir>` into a timestamped directory under `BACKUP_DIR`,
+keeping the newest `BACKUP_KEEP` copies and deleting the oldest past the cap; never
+copies a credential (ADR 327). Takes every project lock while it copies. No arguments
+beyond the global ones.
+
+Exits: 0, 2 (a backup error: `BACKUP_DIR` unset or unusable, a bad `BACKUP_KEEP`),
+75 (a project's cycle holds its lock).
+
+### `restore`
+
+Puts a copy back over the hive and `<state_dir>` in place: files the copy holds are
+written over the live ones, files the copy lacks are set aside (ADR 328). Then prints
+that each account must sign in again, the first user must be recreated and push must
+be turned on again on each device (`dispatcher/backup.py` `RESTORE_LINES`).
+
+| Argument | Unit | Default | What it does |
+|---|---|---|---|
+| `--from` | `NAME` or `latest` | required | The copy to restore: a name listed in `BACKUP_DIR`, or `latest` for the newest. |
+
+Exits: 0, 2 (a backup error: no such copy, `BACKUP_DIR` unset), 75 (the worker lock or
+a project lock is held).
 
 ### `migrate`
 

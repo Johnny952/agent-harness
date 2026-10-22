@@ -15192,6 +15192,158 @@ account's config — today fails the phase like any error.
   session whose transcript holds no briefing to continue; the full prompt
   costs what it costs today.
 
+## ADR 327 — A backup is a plain directory copy of the hive and `/state`, taken between cycles, named by its UTC time, capped by `BACKUP_KEEP`, and never holding a credential
+
+**Status:** accepted (2026-10-22), T-147's arquitecto. Builds
+`docs/plans/server-deployment.md` *Decisions*, 8, step 8 of *How it would be
+built*.
+
+**Context.** *Decisions*, 8 settles what a backup holds (the hive and the
+dispatcher's state), what it never holds (the users store, `claude_creds_*`,
+`claude_shared`, `.data/projects`), where it goes (`BACKUP_DIR`), that a
+second variable caps the copies, and that the copy is taken between phases
+or with the dispatcher's writes paused. It leaves open the copy's shape, the
+pause's mechanism, where the command runs, and how "never a credential" is
+enforced rather than merely intended. The hive and `/state` are bind mounts
+(the repo's own hive and `dispatcher_state` directories) in both compose files, mounted
+read-write into the one-off `dispatcher` service, which has no `BACKUP_DIR`.
+
+**Decision.**
+1. **`dispatcher/backup.py`, and a `dispatch backup` verb.** The sources are
+   `context_transfer.hive_root(cfg.hive_tasks_dir)` and `cfg.state_dir`;
+   nothing else is ever a source, so `claude_shared`, the `claude_creds_*`
+   volumes, `.data/projects` and the deploy keys under `/run/secrets` cannot
+   be reached by construction.
+2. **The copy is a directory**, `<BACKUP_DIR>/<YYYYMMDDTHHMMSSZ>/` holding
+   `hive/`, `state/` and `manifest.json` (`{"format": 1, "created_at",
+   "hive_root", "state_dir", "files"}`), not an archive: the records are
+   small, and a directory is read and restored with no tool. It is built
+   under `<BACKUP_DIR>/.partial-<name>/` and renamed to its name only once
+   complete, so a crashed backup is never counted, pruned or restored as a
+   copy. A name that already exists is refused, not overwritten.
+3. **`BACKUP_DIR`** is read from the environment and required: unset or
+   empty exits 2 and writes nothing. A `BACKUP_DIR` inside either source, or
+   either source inside it, is refused (exit 2) before anything is written.
+4. **`BACKUP_KEEP`**, the cap, from the environment, default 7 (a week of
+   nightly copies). Not a positive integer exits 2. After a copy completes,
+   the completed copies — directories whose name matches the timestamp shape,
+   nothing else in `BACKUP_DIR` — are sorted by name and the oldest deleted
+   until `BACKUP_KEEP` remain. The copy just made is never the one deleted.
+5. **Consistency is "between cycles".** The backup takes every project lock
+   (ADR 200), non-blocking, for the slugs in `projects.slugs(hive_root)` and
+   every `<state_dir>/project-locks/*.lock` already on disk, holds them for
+   the copy and the rename, and gives them back. One busy project releases
+   the ones taken and exits 75 (`EXIT_HELD`) with the `ProjectBusy` line;
+   nothing is written. A cycle holds its project's lock across all its
+   phases, so this is stricter than "between phases" and needs no new pause
+   in the dispatcher. Writes outside a cycle — the board service's comments
+   and descriptions, a thread turn's log line, an account's state — are not
+   paused: each is one atomic replace or one appended line, so a copy holds
+   whole files and at worst one record newer than its neighbours.
+6. **What is never copied**, matched by `fnmatch` against every path
+   component at every depth of both sources, in one named constant
+   `NEVER_COPIED`: `users`, `users.*`, `sessions`, `sessions.*` (the users
+   store and its sessions, *Decisions*, 1, whose path step 1 has not chosen),
+   `claude_creds_*`, `claude_shared`, `.credentials.json` (a Claude login),
+   `push-subscriptions.json` (each holds a browser's `auth` secret), `*.pem`,
+   `id_ed25519*`, `.data`. **Runtime coordination** is also skipped, in a
+   second constant `NOT_RECORDS`: every name ending `.lock`, and the
+   `surface-locks` directory, whose leases mean nothing after the process
+   that held them. **Symlinks are never followed or copied**; each one
+   skipped is counted in the summary line. The task that places the users
+   store must put it outside both sources or add its name to `NEVER_COPIED`.
+7. **Where it runs.** In the dispatcher image, by `scripts/backup.sh` on the
+   host: `docker compose run --rm -v <host BACKUP_DIR>:/backups -e
+   BACKUP_DIR=/backups -e BACKUP_KEEP dispatcher --config /app/config.yaml
+   backup`. The mount is given on the `run` line, so **no compose file
+   changes**. The script defaults `BACKUP_DIR` to `<repo>/.data/backups` and
+   `COMPOSE_FILE` to `docker/compose/docker-compose.yml`; `docker compose`
+   reads `COMPOSE_FILE` itself, so the Coolify file is one variable away.
+8. **Output**: one stdout line naming the copy, its file count, the skipped
+   symlinks and the copies pruned; exit 0.
+
+**Consequences.**
+- Scheduling is not wired. Nightly is a host crontab line calling
+  `scripts/backup.sh`, documented in the root `README.md`; a refused (75)
+  night is retried by the next. "Once before each merge" needs the worker to
+  see `BACKUP_DIR`, which is a compose mount, so it is a follow-up for
+  approval, not built here.
+- An off-server destination stays deferred: a copy is a plain directory
+  any later tool can ship.
+- A backup taken while a long cycle runs is refused, not waited for; a
+  `--wait` is not built.
+
+**Ruled out.**
+- *A tar or zip archive:* a second format to read back, for records that
+  are small and already files.
+- *An allowlist of hive and state subdirectories:* a new record directory
+  would silently fall out of every backup; a denylist of credential names
+  over the two sources fails the other way, and the sources themselves are
+  the allowlist.
+- *Pausing the dispatcher with a new flag or lock:* the project locks
+  already mean "no cycle is writing this project".
+- *Running on the host's Python:* `config.yaml`'s paths are the containers'.
+
+## ADR 328 — A restore syncs a copy back in place under the worker's and every project's lock, sets aside what it replaces, and is wrapped by `scripts/restore.sh`, which stops and restarts the worker
+
+**Status:** accepted (2026-10-22), T-147's arquitecto. Builds the restore
+half of `docs/plans/server-deployment.md` *Decisions*, 8, beside ADR 327.
+
+**Context.** *Decisions*, 8 and 7: restore is a shell command that stops the
+dispatcher, puts back the hive and the state, starts it again, and then
+each account signs in again and the owner recreates the first user. Both
+roots are mount points, and the board service bind-mounts
+`dispatcher_state/actions` on its own, so a restore that renamed a directory
+would leave that mount on the old inode.
+
+**Decision.**
+1. **`dispatch restore --from <name>|latest`**, in `dispatcher/backup.py`.
+   `<name>` is a completed copy under `BACKUP_DIR`; `latest` is the newest by
+   name. No copy, an unknown name, or a copy without `manifest.json` of
+   `format` 1 and both `hive/` and `state/` exits 2 and touches nothing.
+2. **It refuses while anything dispatches.** It takes the worker lock
+   (`worker.acquire`) and every project lock as ADR 327 does; a held one
+   exits 75 with the holder's line and touches nothing. The locks are held
+   for the whole restore.
+3. **In place, never by renaming a directory.** For each root, against the
+   copy's tree: a file in the copy is written over the live one (temp file
+   in the target directory, `os.replace`); a live file or directory the copy
+   does not have is moved into `<root>/.pre-restore-<YYYYMMDDTHHMMSSZ>/` at
+   the same relative path; a directory is created when missing and otherwise
+   kept, inode and all. Names matching `NEVER_COPIED` or `NOT_RECORDS` are
+   left exactly as they are, live or absent, and so is every
+   `.pre-restore-*` directory; ADR 327's backup skips `.pre-restore-*` and
+   `.partial-*` too. Nothing is deleted.
+4. **Output**: one line naming the copy restored and each `.pre-restore-*`
+   directory written, then exactly these three lines, in order:
+   `each account must sign in again from /pool: no Claude login is in a backup`,
+   `recreate the first user: the users store is not in a backup`,
+   `turn push on again on each device: push subscriptions are not in a backup`.
+   Exit 0.
+5. **`scripts/restore.sh <name>|latest`**, on the host, under the same
+   `BACKUP_DIR` and `COMPOSE_FILE` defaults as `scripts/backup.sh`: asks
+   `docker compose ps --status running -q worker` whether the worker runs,
+   `docker compose stop worker`, runs `restore` in the one-off `dispatcher`
+   service with `BACKUP_DIR` mounted read-only, and only when that exits 0
+   and the worker was running, `docker compose --profile worker up -d
+   worker`. A failed restore leaves the worker stopped and says so, exiting
+   with the restore's code.
+
+**Consequences.**
+- The board service is not stopped. Its writes during a restore's seconds
+  are single-record atomic writes, and one landing between the sync and the
+  restart can survive or be set aside; documented, not prevented.
+- `.pre-restore-*` directories are never pruned; the operator deletes one
+  once the restore is trusted. The README says so.
+- A restored `actions/claimed/` record is recovered by the worker on start
+  (`worker.run_worker` recovers first).
+
+**Ruled out.**
+- *Renaming the live roots aside:* they are mount points, and `actions/` is
+  a second mount.
+- *Deleting what the copy lacks:* a wrong `--from` would lose it for good.
+- *Restarting the worker after a failed restore:* it would dispatch over a
+  half-restored hive.
 ## ADR 324 — A person signs in to the board service: users, password and TOTP, server-side sessions, CSRF and an audit log
 
 **Status:** accepted (2026-10-22), T-146's arquitecto. Supersedes the human
