@@ -963,12 +963,15 @@ def create_app(
     @app.get("/api/learnings")
     @requires_auth
     def learnings_index():
-        rejected = _reject_unknown_parameters(frozenset({"project"}))
+        rejected = _reject_unknown_parameters(frozenset({"project", "task"}))
         if rejected is not None:
             return rejected
         slug, rejected = _project(cfg, request.args.get("project") or None)
         if rejected is not None:
             return rejected
+        task_id = request.args.get("task") or None
+        if task_id is not None and not _is_bare_task_id(task_id):
+            return _error(f"task must name one task file, not {task_id!r}", 400)
         root = learnings.root_dir(cfg.hive_tasks_dir)
         if not os.path.isdir(root):
             # `ensure_dirs` makes this tree on every `run-task`, so its absence
@@ -1010,13 +1013,21 @@ def create_app(
         # subject: everything a human promoted into `harness/`, plus everything
         # this project discovered itself. ADR 41 part 2.
         served = learnings.applicable(entries, slug)
+        context = learnings.NO_CONTEXT
+        if task_id is not None:
+            context = _learnings_task_context(cfg, task_id, slug, warnings)
         # Not an index into the order below: whether a row reaches a running
-        # phase is `handed(eligible(…))`, the dispatcher's own two selectors, so
-        # a refuted row and a row past the cap are both `false` for their own
-        # reason and neither is a fact a client could derive.
+        # phase is `handed(select(eligible(…), context))`, the dispatcher's own
+        # selectors, so a refuted row, a row the task's paths and tags filter
+        # out and a row past the cap are each `false` for their own reason and
+        # none is a fact a client could derive. With no `task` the context is
+        # `NO_CONTEXT` and `select` returns `eligible` unchanged: the unfiltered
+        # table. ADR 321.
         reaching = {
             entry.ref
-            for entry in learnings.handed(learnings.eligible(served, slug), harness)
+            for entry in learnings.handed(
+                learnings.select(learnings.eligible(served, slug), context), harness
+            )
         }
         # No per-row `try` and no `app.json.dumps` round, unlike `/api/tasks` and
         # `/api/phases`. That is a property of the row and not a relaxation of
@@ -1495,6 +1506,39 @@ def _is_bare_task_id(task_id: str) -> bool:
     """
     name = f"{task_id}.md"
     return bool(task_id) and os.path.basename(name) == name and os.sep not in name
+
+
+def _learnings_task_context(
+    cfg: Config, task_id: str, slug: str, warnings: list[str]
+) -> learnings.TaskContext:
+    """What `_role_prompt` would build for this task, or nothing, with the reason.
+
+    The dispatcher's own `task_context`, fed the same card path and description,
+    so the column cannot disagree with the table a phase is handed. A task that
+    does not exist, or a description that will not read, is a warning and an
+    unfiltered column rather than an error. ADR 321.
+    """
+    path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    if not os.path.exists(path):
+        warnings.append(
+            f"no task {task_id!r} in {cfg.hive_tasks_dir}: in_phase_table is the unfiltered table"
+        )
+        return learnings.NO_CONTEXT
+    description = None
+    try:
+        description = task_store.read_description(cfg.hive_tasks_dir, task_id)
+    except _UNREADABLE as exc:
+        warnings.append(
+            f"{task_store.description_path(cfg.hive_tasks_dir, task_id)}: "
+            f"unreadable task description: {exc}"
+        )
+    try:
+        card_project = context_transfer.read_task_file(path).project
+    except _UNREADABLE:
+        card_project = None
+    if isinstance(card_project, str) and card_project and card_project != slug:
+        warnings.append(f"task {task_id!r} belongs to project {card_project!r}, not {slug!r}")
+    return learnings.task_context(cfg.hive_tasks_dir, task_id, path, description)
 
 
 def _int_parameter(name: str, default: int | None, positive: bool = False):

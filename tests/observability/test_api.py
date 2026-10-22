@@ -2807,6 +2807,116 @@ def test_reading_the_learnings_route_writes_nothing(tmp_path: Path) -> None:
     assert sorted(path.name for path in root.iterdir()) == ["harness", "inbox"]
 
 
+def _pool_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **task_fields):
+    """Two rows that sort first and say nothing of pools, one past a cap of two
+    that does: the table with a task naming `pool` and the one without differ."""
+    monkeypatch.setattr(learnings, "MAX_ROWS", 2)
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "a.md")
+    _learning(harness.tasks_dir, "b.md")
+    _learning(harness.tasks_dir, "z.md", when="the connection pool leaks")
+    _task(harness.tasks_dir, "T-9", **task_fields)
+    return harness
+
+
+def _reaching(harness, query: str = "") -> dict[str, bool]:
+    body = _get(harness, f"/api/learnings{query}").get_json()
+    return {row["ref"]: row["in_phase_table"] for row in body["data"]}
+
+
+def test_task_makes_in_phase_table_the_table_that_task_is_handed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR 321: `handed(select(eligible(…), task_context(…)))`. The matching row
+    # the cap cuts from the unfiltered table is `true` for the task, and the
+    # rows the filter drops are `false` for it.
+    harness = _pool_table(tmp_path, monkeypatch, tags=["pool"])
+
+    assert _reaching(harness) == {"inbox/a.md": True, "inbox/b.md": True, "inbox/z.md": False}
+    assert _reaching(harness, "?task=T-9") == {
+        "inbox/a.md": False,
+        "inbox/b.md": False,
+        "inbox/z.md": True,
+    }
+
+
+def test_task_naming_nothing_matching_keeps_the_unfiltered_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _pool_table(tmp_path, monkeypatch, tags=["unrelated"])
+
+    assert _reaching(harness, "?task=T-9") == _reaching(harness)
+
+
+def test_learnings_task_must_be_one_task_file_and_comes_after_the_project_check(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    learnings.ensure_dirs(harness.tasks_dir)
+
+    resp = _get(harness, "/api/learnings?task=../T-9")
+
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "task must name one task file, not '../T-9'"
+    assert _get(harness, "/api/learnings?task=").status_code == 200
+
+
+def test_an_unknown_task_is_a_200_with_the_unfiltered_column_and_a_warning(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    _learning(harness.tasks_dir, "a.md")
+
+    body = _get(harness, "/api/learnings?task=T-404").get_json()
+
+    assert [row["in_phase_table"] for row in body["data"]] == [True]
+    assert body["warnings"] == [
+        f"no task 'T-404' in {harness.tasks_dir}: in_phase_table is the unfiltered table"
+    ]
+
+
+def test_a_task_description_that_will_not_read_is_a_warning_and_not_a_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _pool_table(tmp_path, monkeypatch, tags=["pool"])
+
+    def refuse(hive_dir: str, task_id: str):
+        raise OSError("denied")
+
+    monkeypatch.setattr(task_store, "read_description", refuse)
+    resp = _get(harness, "/api/learnings?task=T-9")
+
+    assert resp.status_code == 200
+    warnings = resp.get_json()["warnings"]
+    assert len(warnings) == 1
+    assert "unreadable task description: denied" in warnings[0]
+    # The tags still filter: only the description was lost.
+    assert _reaching(harness, "?task=T-9")["inbox/z.md"] is True
+
+
+def test_a_task_of_another_project_is_a_warning_and_the_column_is_still_computed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _pool_table(tmp_path, monkeypatch, tags=["pool"], project="scratch")
+
+    body = _get(harness, "/api/learnings?project=ia-harness&task=T-9").get_json()
+
+    assert body["warnings"] == ["task 'T-9' belongs to project 'scratch', not 'ia-harness'"]
+    assert {row["ref"]: row["in_phase_table"] for row in body["data"]}["inbox/z.md"] is True
+
+
+def test_reading_the_learnings_route_for_a_task_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _pool_table(tmp_path, monkeypatch, tags=["pool"], description=_DESCRIPTION)
+    hive = Path(harness.tasks_dir).parent
+    before = {path: path.read_bytes() for path in hive.rglob("*") if path.is_file()}
+
+    _get(harness, "/api/learnings?task=T-9")
+
+    assert {path: path.read_bytes() for path in hive.rglob("*") if path.is_file()} == before
+
+
 # --- what this service must never do --------------------------------------
 
 
