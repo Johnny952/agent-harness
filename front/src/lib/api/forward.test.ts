@@ -1166,6 +1166,68 @@ describe("the board-service request-changes route (ADR 276)", () => {
   });
 });
 
+describe("the board-service resolve-conflict route (ADR 288)", () => {
+  function post(path: string, body: string, method = "POST"): Request {
+    return get(path, {
+      method,
+      body: method === "GET" ? null : body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+      },
+    });
+  }
+
+  const PATH = "/api/tasks/T-014/resolve-conflict";
+  const HEADERS = { "Content-Type": "application/json", Authorization: "Bearer actions-token" };
+
+  it("forwards {project} with the bearer", async () => {
+    const fetchMock = stubApi('{"id":"A-1"}', 201);
+    const answer = await forwardApiRequest(post(PATH, '{"project":"other-proj"}'));
+    expect(answer?.status).toBe(201);
+    expect(target(fetchMock)).toBe(`${BOARD}/api/tasks/T-014/resolve-conflict`);
+    const init = fetchMock.mock.calls[0]![1]!;
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual(HEADERS);
+    expect(init.body).toBe('{"project":"other-proj"}');
+  });
+
+  it("sends CONSOLE_PROJECT when the body names no project", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post(PATH, "{}"));
+    expect(fetchMock.mock.calls[0]![1]!.body).toBe('{"project":"ia-harness"}');
+  });
+
+  it("400s a bad slug, an unknown field or a body that is not an object, sending nothing", async () => {
+    const fetchMock = stubApi();
+    for (const body of [
+      '{"project":"../x"}',
+      '{"project":3}',
+      '{"commit":"a"}',
+      "[]",
+      "null",
+      "not json",
+    ]) {
+      const answer = await forwardApiRequest(post(PATH, body));
+      expect(answer?.status).toBe(400);
+      expect((await answer!.json()).error).toMatch(/resolve conflict/i);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps GET and other methods as they were, and 404s an undecodable id", async () => {
+    const none = stubApi();
+    expect((await forwardApiRequest(post(PATH, "", "GET")))?.status).toBe(404);
+    expect((await forwardApiRequest(post(PATH, "{}", "PATCH")))?.status).toBe(405);
+    expect((await forwardApiRequest(post("/api/tasks/%zz/resolve-conflict", "{}")))?.status).toBe(
+      404,
+    );
+    expect(none).not.toHaveBeenCalled();
+  });
+});
+
 describe("the board-service turn route", () => {
   function post(path: string, body: string, headers = {}, method = "POST"): Request {
     return get(path, {
@@ -1683,6 +1745,26 @@ describe("the action routes without their configuration", () => {
     expect((await missing!.json()).error).toContain("a request for changes is for");
     expect(fetchMock).not.toHaveBeenCalled();
     expect((await noProject(request(withProject)))?.status).toBe(200);
+  });
+
+  it("503s a resolve conflict without the token, and without any project, but forwards one that names its own", async () => {
+    const request = (b: string) =>
+      get("/api/tasks/T-014/resolve-conflict", {
+        method: "POST",
+        body: b,
+        headers: { "content-type": "application/json" },
+      });
+    const noToken = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    const refused = await noToken(request('{"project":"other"}'));
+    expect(refused?.status).toBe(503);
+    expect((await refused!.json()).error).toContain("BOARD_ACTIONS_TOKEN is not set");
+    const noProject = await configured({ CONSOLE_PROJECT: null });
+    const missing = await noProject(request("{}"));
+    expect(missing?.status).toBe(503);
+    expect((await missing!.json()).error).toContain("a resolve conflict is for");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await noProject(request('{"project":"other"}')))?.status).toBe(200);
   });
 
   it("still 415s before the token, and still forwards the backlog writes", async () => {

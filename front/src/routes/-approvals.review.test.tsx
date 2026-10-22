@@ -212,6 +212,7 @@ describe("the review", () => {
     await serve([task("T-1", { status: "conflict" })]);
     fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
     const verdict = await screen.findByTestId("review-verdict");
+    expect(verdict.textContent).toMatch(/Resolve conflict, below, has the integrador merge/);
     expect(verdict.textContent).toMatch(/merge the base into the task branch/i);
     expect(within(verdict).getByText("dispatch merge-task T-1 --project ia-harness")).toBeTruthy();
   });
@@ -551,6 +552,112 @@ describe("the review", () => {
       await type("fix it");
       fireEvent.click(requestButton());
       await waitFor(() => expect(toast.error).toHaveBeenCalledWith("text is blank"));
+    });
+  });
+
+  describe("the resolve conflict button (ADR 288)", () => {
+    const QUEUED = { id: "A-79" };
+    const resolveButton = () =>
+      screen.getByRole("button", { name: /^(resolve conflict|resolving…|resolve queued)$/ });
+    const openConflict = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
+      await screen.findByTestId("verdict-form");
+    };
+
+    it("is not drawn on Awaiting review", async () => {
+      await serve([task("T-1", { status: "awaiting_review" })]);
+      await screen.findByTestId("verdict-form");
+      expect(screen.queryByRole("button", { name: /resolve conflict/ })).toBeNull();
+    });
+
+    it("posts {project} on the Conflict lane and toasts the action id", async () => {
+      const { sent } = await serve([task("T-1", { status: "conflict" })], {
+        "POST /api/tasks/T-1/resolve-conflict": { bare: QUEUED, status: 201 },
+      });
+      await openConflict();
+      expect((resolveButton() as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(resolveButton());
+      await waitFor(() =>
+        expect(toast.success).toHaveBeenCalledWith(expect.stringContaining("A-79")),
+      );
+      expect(sent.filter((x) => x.method !== "GET")).toEqual([
+        {
+          method: "POST",
+          path: "/api/tasks/T-1/resolve-conflict",
+          body: { project: "ia-harness" },
+        },
+      ]);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "resolve queued" })).toBeTruthy(),
+      );
+      expect((resolveButton() as HTMLButtonElement).disabled).toBe(true);
+      expect((resolveButton() as HTMLButtonElement).title).toMatch(/Resolve conflict is queued/);
+    });
+
+    it("is disabled on a merged task, with the reason as its title", async () => {
+      await serve([task("T-1", { status: "conflict", merged: true })]);
+      await screen.findByRole("button", { name: "Conflict · 1" });
+      fireEvent.click(screen.getByRole("button", { name: "Conflict · 1" }));
+      await screen.findByTestId("verdict-form");
+      const button = resolveButton() as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.title).toBe("Already merged into main");
+    });
+
+    it("is disabled while another verdict is queued at the tip", async () => {
+      await serve([task("T-1", { status: "conflict" })], {
+        "POST /api/tasks/T-1/request-changes": {
+          bare: {
+            verdict: { id: "T-1", comment: VERDICT_AT_TIP, comment_count: 1 },
+            action: { id: "A-78" },
+          },
+          status: 201,
+        },
+      });
+      await openConflict();
+      fireEvent.change(await screen.findByLabelText("comment verdict on T-1"), {
+        target: { value: "redo it" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "request changes" }));
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "changes requested" })).toBeTruthy(),
+      );
+      const button = resolveButton() as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      expect(button.title).toMatch(/Changes were requested at this tip/);
+    });
+
+    it("toasts a 409 and a 400 as the route's words alone", async () => {
+      for (const [status, error] of [
+        [409, "a resolve conflict is already queued"],
+        [400, "the task is not in conflict"],
+      ] as const) {
+        cleanup();
+        await serve([task("T-1", { status: "conflict" })], {
+          "POST /api/tasks/T-1/resolve-conflict": { status, error },
+        });
+        await openConflict();
+        fireEvent.click(resolveButton());
+        await waitFor(() => expect(toast.error).toHaveBeenCalledWith(error));
+        expect((resolveButton() as HTMLButtonElement).disabled).toBe(false);
+      }
+    });
+
+    it("lists the dispatcher's resolve conflict outcome under outcomes", async () => {
+      const outcome: TaskComment = {
+        at: "2026-10-21T10:00:00Z",
+        author: "dispatcher",
+        text: "resolve conflict, asked by operator: queued as A-79",
+      };
+      await serve([task("T-1", { status: "conflict" })], {
+        "/api/tasks/T-1/comments": {
+          data: { task_id: "T-1", comments: [outcome] },
+          warnings: [],
+        },
+      });
+      await openConflict();
+      const box = await screen.findByTestId("review-outcomes");
+      expect(within(box).getByText(outcome.text as string)).toBeTruthy();
     });
   });
 

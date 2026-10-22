@@ -38,14 +38,30 @@ export function reviewVerdicts(comments: TaskComment[]): TaskComment[] {
 }
 
 /**
- * The dispatcher's answers to an approve (ADR 264, ADR 270): comments it wrote
- * whose text opens `approve at `, in the order stored.
+ * The dispatcher's answers to an approve or a resolve conflict (ADR 264, ADR
+ * 270, ADR 288): comments it wrote whose text opens `approve at ` or
+ * `resolve conflict,`, in the order stored.
  */
-export function approveOutcomes(comments: TaskComment[]): TaskComment[] {
+export function reviewOutcomes(comments: TaskComment[]): TaskComment[] {
   return comments.filter(
     (c) =>
-      c.author === "dispatcher" && typeof c.text === "string" && c.text.startsWith("approve at "),
+      c.author === "dispatcher" &&
+      typeof c.text === "string" &&
+      (c.text.startsWith("approve at ") || c.text.startsWith("resolve conflict,")),
   );
+}
+
+/**
+ * Why a conflict cannot be handed to the integrador from the console, or `null`
+ * when it can (ADR 285, ADR 288): only a `conflict` task whose work is not on
+ * main. The sentence is the button's title. `merged` must be `false`, not just
+ * absent, as in `requestChangesRefusal`.
+ */
+export function resolveConflictRefusal(t: Pick<Task, "status" | "merged">): string | null {
+  if (t.merged === true) return "Already merged into main";
+  if (t.status !== "conflict") return `A task in ${t.status} is not in conflict`;
+  if (t.merged !== false) return "Not yet known whether it is on main";
+  return null;
 }
 
 /**

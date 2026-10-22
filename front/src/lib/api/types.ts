@@ -674,6 +674,11 @@ export interface RequestChangesResult {
   action: ActionRecord;
 }
 
+/** `POST /api/tasks/<id>/resolve-conflict`'s body (ADR 285, ADR 288): the project and nothing else. */
+export interface ResolveConflictBody {
+  project?: string;
+}
+
 export interface AcceptTaskBody {
   /** Where the item goes; `pending` (on the board) when absent. */
   to?: "pending" | "deferred" | "dropped";
