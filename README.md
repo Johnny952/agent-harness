@@ -647,7 +647,10 @@ stopgap: the sign-in of `docs/plans/server-deployment.md` replaces it.
 Bootstrap a project directory on an account's container, then run a task
 through the full role cycle. Every command, argument, unit, default and exit
 code is in [docs/cli.md](docs/cli.md); note that `run-queue --limit` is in
-measured tokens, not tasks.
+measured tokens, not tasks. A queue its limit stopped goes on with
+`run-queue --resume QUEUE_ID --limit TOKENS` (and/or `--parallel N`); the limit
+must be above what the queue already spent, and the project and tasks stay the
+queue's own.
 
 ```bash
 python -m dispatcher.cli --config config.yaml bootstrap-project \

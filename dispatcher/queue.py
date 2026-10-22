@@ -22,7 +22,9 @@ follows `depends_on`:
 The queue is a file in `state_dir/queues/`, rewritten atomically on every
 change of state, so a kill at any point leaves it readable. A task is marked
 `running` before its cycle starts; `--resume` finds it that way, records it
-`interrupted` and never starts it again.
+`interrupted` and never starts it again. A resume may raise the limit and
+change the parallelism, recorded in `changes`; the tasks the limit stopped then
+run again, from the arquitecto (ADR 336, amending ADR 79, 5).
 
 The listed tasks can be topped up from the board's *Ready* order (ADR 130,
 ADR 132): `plan(..., ready=n)` adds the first `n` ready tasks after the
@@ -128,6 +130,8 @@ class Queue:
     # Ready tasks the pick passed over, each with the reason `plan` would
     # have refused it, for the confirmation screen (ADR 132).
     passed_over: list[str] = dataclasses.field(default_factory=list)
+    # One record per resume that changed the limit or the parallelism (ADR 336).
+    changes: list[dict] = dataclasses.field(default_factory=list)
 
     def entry(self, task_id: str) -> Entry:
         return next(e for e in self.entries if e.task_id == task_id)
@@ -352,6 +356,15 @@ def confirmation(cfg: Config, queue: Queue) -> str:
         "finishes and the spend can pass it by that one phase.",
         f"Automatic approve: {approve}",
     ]
+    if queue.changes:
+        lines += ["", "Changed on resume:"]
+        for change in queue.changes:
+            moved = [
+                f"{name} {change[key]['from']} -> {change[key]['to']}"
+                for key, name in (("limit", "limit"), ("parallel", "parallelism"))
+                if key in change
+            ]
+            lines.append(f"  {change['at']}: {', '.join(moved)}")
     return "\n".join(lines)
 
 
@@ -433,13 +446,23 @@ def _waits(cfg: Config, entry: Entry) -> bool:
     return bool(tasks.unmet_dependencies(cfg.hive_tasks_dir, task))
 
 
-def resume(cfg: Config, queue_id: str) -> Queue:
-    """Load a queue to go on with, settling what a kill left `running`.
+def reopen(
+    cfg: Config,
+    queue_id: str,
+    limit: int | None = None,
+    parallel: int | None = None,
+    now: dt.datetime | None = None,
+) -> Queue:
+    """Load a queue to go on with, settling what a kill left `running`. Writes nothing.
 
     A task found `running` may have spent, may hold a live lock in a container
     still at work, and may be half merged: it is recorded `interrupted` with
     what its log says it spent, and neither started again nor touched on the
     board. Its dependents are skipped like any failed task's.
+
+    A new `limit` must be above the spend; it and a new `parallel` are recorded
+    in `changes` (ADR 336). While the spend is below the limit, a task the limit
+    stopped goes back to `pending`, keeping its `usage_offset`.
     """
     queue = load(cfg, queue_id)
     for entry in queue.entries:
@@ -448,8 +471,34 @@ def resume(cfg: Config, queue_id: str) -> Queue:
             entry.state = INTERRUPTED
             entry.note = "the queue was killed during its cycle; not started again"
             logger.warning("queue %s: task %s was interrupted", queue_id, entry.task_id)
+    change: dict = {}
+    if limit is not None and limit != queue.limit:
+        if limit <= queue.spent:
+            raise QueueError(
+                f"--limit {limit}: queue {queue_id} has already spent {queue.spent} "
+                "measured tokens; a new limit must be above it"
+            )
+        change["limit"] = {"from": queue.limit, "to": limit}
+        queue.limit = limit
+    if parallel is not None and parallel != queue.parallel:
+        change["parallel"] = {"from": queue.parallel, "to": parallel}
+        queue.parallel = parallel
+    if change:
+        at = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        queue.changes.append({"at": at, **change})
+    if queue.spent < queue.limit:
+        for entry in queue.entries:
+            if entry.state == STOPPED:
+                entry.state = PENDING
+                entry.note = ""
     if queue.status != Q_PUSH_REFUSED:
         queue.status = Q_RUNNING
+    return queue
+
+
+def resume(cfg: Config, queue_id: str, **changes) -> Queue:
+    """`reopen` and save: the queue as the next run finds it."""
+    queue = reopen(cfg, queue_id, **changes)
     save(cfg, queue)
     return queue
 
@@ -515,7 +564,8 @@ def _run_serial(
             return queue
 
         wait_for_account(cfg, sleep)
-        entry.usage_offset = len(_usage_lines(cfg, entry.task_id))
+        if entry.usage_offset is None:  # a task the limit stopped keeps its first (ADR 336)
+            entry.usage_offset = len(_usage_lines(cfg, entry.task_id))
         entry.state = RUNNING
         save(cfg, queue)
 
@@ -726,7 +776,8 @@ def _run_parallel(
                     running.pop(entry.task_id, None)
                     cond.notify_all()
 
-        entry.usage_offset = len(_usage_lines(cfg, entry.task_id))
+        if entry.usage_offset is None:
+            entry.usage_offset = len(_usage_lines(cfg, entry.task_id))
         entry.state = RUNNING
         save(cfg, queue)
         thread = threading.Thread(target=work, name=f"queue-{entry.task_id}", daemon=True)
