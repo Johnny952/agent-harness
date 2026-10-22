@@ -362,3 +362,7 @@ T-134 resolved `T-133-S1-D1` and declared no debt.
 
 T-135 resolved `T-133-S2-D1` and declared no debt. It ran as an operator
 subagent, not a dispatched cycle, while T-134 held the project.
+
+T-137 resolved no earlier row and declared no debt. It moved these per-task
+paragraphs out of `README.md` into this file and made the index append-only
+(ADR 297): from here on a paragraph is appended here, never in `README.md`.
