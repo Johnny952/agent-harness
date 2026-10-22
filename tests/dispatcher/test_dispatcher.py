@@ -9418,6 +9418,11 @@ def test_a_streamed_refusal_records_its_reset_as_the_retry_time(tmp_path, monkey
         lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
     )
 
+    # The recheck drops a hold whose retry time has passed; keep the fixture's
+    # reset in the future so the test does not expire with the calendar.
+    monkeypatch.setattr(dispatcher_mod, "_utc_now", lambda: _D2_NOW)
+    monkeypatch.setattr(dispatcher_mod.time, "time", lambda: _D2_NOW.timestamp())
+
     dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
 
     assert get_retry_at(cfg.state_dir, "cuenta1") == 1792709400.0
