@@ -30,6 +30,7 @@ from dispatcher.state_machine import (
     get_current_task,
     get_last_probe,
     get_rate_limited_at,
+    get_retry_at,
     get_state,
     record_rate_limit,
     set_state,
@@ -5739,6 +5740,8 @@ def test_the_gate_records_a_paced_primarys_probe_and_both_its_ceilings(
         "week_reset": _RESET_IN_5_DAYS,
         "exceeds": True,
         "session_ceiling_pct": 60,
+        "source": "usage",
+        "read_at": _PACE_NOW.timestamp(),
         "week_ceiling": {
             "paced": True,
             "pct": pytest.approx(19.1667, abs=1e-3),
@@ -9059,3 +9062,173 @@ def test_run_task_cycle_without_a_request_gives_the_arquitecto_no_note(tmp_path,
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert "requested changes" not in prompts["arquitecto"]
+
+
+# --- the stream's rate_limit_event stands in for the probe (ADR 312) --------
+
+_D2_EVENT = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+        "status": "allowed", "resetsAt": 1792709400, "rateLimitType": "five_hour",
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0, "resetsAt": 1792709400},
+            "seven_day": {"utilization": 0.48, "resetsAt": 1792861200},
+        },
+    },
+}
+_D2_NOW = dt.datetime.fromtimestamp(1792709400 - 3600, dt.timezone.utc)
+
+
+def _stream_env(monkeypatch, now=_D2_NOW):
+    """Clock fixed; every `/usage` exec is counted and answers 5% / 5%."""
+    probes = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        probes.append(prompt)
+        return ClaudeResult(
+            session_id=None,
+            result_text="Current session: 5% used\nCurrent week (all models): 5% used",
+            raw={},
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(dispatcher_mod, "_utc_now", lambda: now)
+    return probes
+
+
+def test_a_fresh_event_reading_answers_for_the_probe(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    dispatcher_mod._record_stream_usage(cfg, "cuenta2", _D2_EVENT)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
+
+    assert probes == []
+    record = get_last_probe(cfg.state_dir, "cuenta2")
+    assert (record["source"], record["session_pct"], record["week_pct"]) == ("rate_limit_event", 0, 48)
+    assert record["read_at"] == _D2_NOW.timestamp()
+
+
+def test_reusing_a_reading_does_not_renew_its_freshness(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    dispatcher_mod._record_stream_usage(cfg, "cuenta2", _D2_EVENT)
+    later = _D2_NOW + dt.timedelta(seconds=600)
+    monkeypatch.setattr(dispatcher_mod, "_utc_now", lambda: later)
+
+    dispatcher_mod.check_quota_ok(cfg, "cuenta2")
+    assert get_last_probe(cfg.state_dir, "cuenta2")["read_at"] == _D2_NOW.timestamp()
+
+    monkeypatch.setattr(dispatcher_mod, "_utc_now", lambda: _D2_NOW + dt.timedelta(seconds=901))
+    dispatcher_mod.check_quota_ok(cfg, "cuenta2")
+    assert len(probes) == 1
+
+
+def test_a_stale_reading_falls_back_to_the_probe(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    dispatcher_mod._record_stream_usage(cfg, "cuenta2", _D2_EVENT)
+    monkeypatch.setattr(dispatcher_mod, "_utc_now", lambda: _D2_NOW + dt.timedelta(seconds=901))
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
+
+    assert probes == ["/usage"]
+    assert get_last_probe(cfg.state_dir, "cuenta2")["source"] == "usage"
+
+
+def test_no_event_for_the_account_falls_back_to_the_probe(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is True
+
+    assert probes == ["/usage"]
+
+
+@pytest.mark.parametrize("event", [None, {}, {"type": "rate_limit_event"}, "junk"])
+def test_a_malformed_event_records_nothing_and_the_probe_answers(tmp_path, monkeypatch, event) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    dispatcher_mod._record_stream_usage(cfg, "cuenta2", event)
+    assert get_last_probe(cfg.state_dir, "cuenta2") is None
+
+    dispatcher_mod.check_quota_ok(cfg, "cuenta2")
+
+    assert probes == ["/usage"]
+
+
+def test_an_event_with_one_window_missing_is_not_recorded(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    event = json.loads(json.dumps(_D2_EVENT))
+    del event["rate_limit_info"]["unifiedWindows"]["seven_day"]
+    dispatcher_mod._record_stream_usage(cfg, "cuenta2", event)
+
+    dispatcher_mod.check_quota_ok(cfg, "cuenta2")
+
+    assert probes == ["/usage"]
+
+
+def test_a_probe_record_from_usage_never_stands_in(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    dispatcher_mod.check_quota_ok(cfg, "cuenta2")
+    dispatcher_mod.check_quota_ok(cfg, "cuenta2")
+
+    assert probes == ["/usage", "/usage"]
+
+
+def test_a_streamed_reading_over_the_threshold_parks_the_account(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    probes = _stream_env(monkeypatch)
+    event = json.loads(json.dumps(_D2_EVENT))
+    event["rate_limit_info"]["unifiedWindows"]["seven_day"]["utilization"] = 0.99
+    dispatcher_mod._record_stream_usage(cfg, "cuenta2", event)
+
+    assert dispatcher_mod.check_quota_ok(cfg, "cuenta2") is False
+
+    assert get_state(cfg.state_dir, "cuenta2") == AccountState.PRE_COOLDOWN
+    assert probes == []
+
+
+def test_a_refused_phase_holds_the_account_until_the_events_reset(tmp_path, monkeypatch) -> None:
+    cfg = _make_pool_config(tmp_path)
+    retry_at = 1792709400.0
+    record_rate_limit(cfg.state_dir, "cuenta2", at=retry_at - 20000, retry_at=retry_at)
+    set_state(cfg.state_dir, "cuenta2", AccountState.COOLING_DOWN)
+    # Well past quota_cooldown_seconds, still before the reset.
+    assert retry_at - 3600 - (retry_at - 20000) > cfg.quota_cooldown_seconds
+    probes = _stream_env(monkeypatch)
+    monkeypatch.setattr(dispatcher_mod.time, "time", lambda: retry_at - 3600)
+
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == []
+    assert dispatcher_mod._waitable_workers(cfg, now=retry_at - 3600) == []
+    assert probes == []
+
+    monkeypatch.setattr(dispatcher_mod.time, "time", lambda: retry_at + 1)
+    assert dispatcher_mod._recheck_cooling_accounts(cfg) == ["cuenta2"]
+    assert get_rate_limited_at(cfg.state_dir, "cuenta2") is None
+
+
+def test_a_streamed_refusal_records_its_reset_as_the_retry_time(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path)
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        assert kwargs["stream"] is True
+        return ClaudeResult(
+            session_id="s", result_text="usage limit reached", raw={"is_error": True},
+            rate_limit_event=_D2_EVENT,
+        )
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert get_retry_at(cfg.state_dir, "cuenta1") == 1792709400.0
+    assert get_last_probe(cfg.state_dir, "cuenta1")["source"] == "rate_limit_event"

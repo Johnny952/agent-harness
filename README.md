@@ -1408,7 +1408,8 @@ number and title.
      **built**: `_BUDGET_BYTES` in `dispatcher/handoff.py`, `MAX_ROWS` and
      `_CELL_CHARS` in `dispatcher/learnings.py`.
    - *Limits go on what travels*, a gate that notes a touched source file
-     past a size — **open**.
+     past a size — **built**: the `size` gate and `SIZE_NOTE_LINES` in
+     `dispatcher/gates.py`, `docs/decisions.md` ADR 309.
    - *Indexes and pointers* — **built**: the duties and `_ANCHORS` in
      `dispatcher/project_docs.py`, the `pointers` gate in
      `dispatcher/gates.py`, `docs/learnings/README.md` and
@@ -1425,13 +1426,19 @@ number and title.
    - *Shared learnings that survive a dead phase* — **built**:
      `dispatcher/learnings.py`, and `docs/decisions.md` ADR 33 and ADR 34.
    - *Shared learnings*, handing a phase only the index rows that match its
-     task — **open**.
+     task — **built**: `select` and `task_context` in
+     `dispatcher/learnings.py`, `docs/decisions.md` ADR 315. Harness rows
+     always stay, and a task that names nothing, or matches nothing, is
+     handed the whole table.
 2. **Token economy.** The measurement the item asked for is
    `docs/plans/token-economy.md` *What the transcripts show*.
    - *Record usage per phase* — **built**: `append_usage` in
      `dispatcher/context_transfer.py`. The collector as its home is
      **superseded** by `docs/decisions.md` ADR 53 and ADR 54.
-   - *Stop probing quota* (`rate_limit_event`) — **planned**:
+   - *Stop probing quota* (`rate_limit_event`) — **built**: a phase's last
+     `rate_limit_event` stands in for the `/usage` probe while fresh, which
+     stays as the fallback. `usage_from_rate_limit_event` in
+     `dispatcher/quota.py`, `docs/decisions.md` ADR 312, and
      [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*, D2.
    - *Pace the primary's weekly spend* — **built**: `weekly_ceiling_pct` in
      `dispatcher/quota.py`, `docs/decisions.md` ADR 48.
@@ -1459,9 +1466,11 @@ number and title.
      (`docs/decisions.md` ADR 60).
    - Telling quota-blocked apart from failed — **built**: a held cycle
      exits 75 (`docs/decisions.md` ADR 52), and `_recheck_cooling_accounts`
-     in `dispatcher/dispatcher.py` brings an account back. Retrying at the
-     CLI's own reset time is **planned**:
-     [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*, D2.
+     in `dispatcher/dispatcher.py` brings an account back. *Retry at the
+     CLI's reset time* is **built**: a refused phase holds its account until
+     the event's `resetsAt` (`retry_at_from_event` in `dispatcher/quota.py`,
+     `docs/decisions.md` ADR 312; [`docs/ROADMAP.md`](docs/ROADMAP.md)
+     *Deferred gates*, D2).
    - A single-instance guard — **built** as a lock on each account claim
      rather than on the whole run (`docs/decisions.md` ADR 71).
    - A reaper for accounts left `BUSY` — **built**:

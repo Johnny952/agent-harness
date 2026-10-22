@@ -14803,3 +14803,225 @@ stale-plan note that `run_task_cycle(scheduler=)` applies.
 - *A ceiling above the pool's slots, clamped silently at the worker:* a
   config that asks for more than can run is refused where it is loaded,
   as `--parallel` is refused where it is typed.
+
+## ADR 312 — A phase streams, its last `rate_limit_event` stands in for the `/usage` probe while fresh, and a refused phase retries at its `resetsAt`
+
+**Status:** accepted (2026-10-22), T-143's arquitecto. Narrows ADR 48 (which
+reset the week is paced against), ADR 49 (what the probe record holds) and
+ADR 71 (what runs after the claim); keeps ADR 52's exit codes.
+
+**Context.** `docs/ROADMAP.md` *Deferred gates*, D2 passed on 2026-10-22: a
+`claude -p --output-format stream-json --verbose` run prints a
+`rate_limit_event` before its `result` line, whose `rate_limit_info` carries
+`status`, `resetsAt`, `rateLimitType` and `unifiedWindows.five_hour` and
+`.seven_day`, each `{utilization, resetsAt}` — `utilization` a 0–1 fraction,
+`resetsAt` epoch seconds. The event comes from the service; the `/usage`
+probe reads local counters and cannot see a refusal (`dispatcher/state_machine.py`
+`record_rate_limit`). Every phase ran with `--output-format json`, which prints
+the `result` object alone, so no phase ever saw the event.
+
+**Decision.**
+1. **Phases stream.** `docker_exec.exec_claude` takes `stream: bool = False`.
+   With it, the argv ends `-p <prompt> --output-format stream-json --verbose`.
+   The phase call and the four resumes in `dispatcher/dispatcher.py`
+   (`_resume_missing_handoff`, `_shrink_over_budget`, `_run_gates`,
+   `_refuse_review_writes`) pass `stream=True`; the `/usage` probes and every
+   other caller keep `json`, because `/usage` under `stream-json` was never run.
+2. **What `exec_claude` keeps.** Stdout that parses whole as one JSON object
+   is read as before. Otherwise it is read as lines: a line that is not a JSON
+   object is skipped, `raw` is the last object whose `type` is `"result"`, and
+   `ClaudeResult.rate_limit_event` (a new field, default None) is the last
+   object whose `type` is `"rate_limit_event"`, kept whole and not parsed. No
+   `result` line is the existing "produced no JSON result" diagnostic.
+3. **The reading.** `quota.usage_from_rate_limit_event(event)` returns a
+   `UsageInfo` or None. Percentages are `round(utilization * 100)`; a window's
+   reset is its `resetsAt` written as the `/usage` clause shape,
+   `%b %d, %I:%M%p (UTC)` in UTC, so `quota.parse_reset` and `week_ceiling`
+   read it unchanged. None — and the probe answers — when the event is not an
+   object of that `type`, has no `rate_limit_info` or `unifiedWindows` object,
+   or **either** window is missing or has a `utilization` that is not a
+   non-negative number (a bool is not one): a missing week is never read as
+   0%. A window whose own `resetsAt` is missing or not a positive number keeps
+   its percentage with a None reset, as a 0% `/usage` line does.
+   `quota.retry_at_from_event(event)` is `rate_limit_info.resetsAt` as a float
+   when it is a positive number, else None, read independently of the windows.
+4. **Recorded after every phase.** Once the phase's calls are done, the
+   dispatcher takes the last call's event, or the first call's when the last
+   carried none, and records its reading for the phase's account through
+   `_quota_decision` — on every outcome, refused included, never parking on
+   it and never failing the phase on a bad record. The probe record (ADR 49)
+   gains two keys: `source`, `"usage"` or `"rate_limit_event"`, and `read_at`,
+   the epoch seconds the numbers were read (the probe time for `/usage`).
+5. **Fresh means 15 minutes.** `quota.STREAM_READING_FRESH_SECONDS = 900`, a
+   constant beside ADR 48's. A last probe record with `source`
+   `"rate_limit_event"` and `read_at` younger than that is the account's usage:
+   `check_quota_ok` and `primary_free_pct` decide on it with no `/usage` exec,
+   and `_recheck_cooling_accounts` does too when it was read after the
+   account's recorded refusal, if any. Deciding on it records it again with
+   its original `read_at`, so freshness never renews itself. A record that is
+   absent, unreadable, stale or from `/usage` sends the caller to the probe.
+6. **Retry at the reset.** A phase that ends rate-limited records the refusal
+   with `retry_at = retry_at_from_event(event)`. `state_machine` keeps
+   `retry_at` beside `rate_limited_at`: written by `record_rate_limit` (and
+   removed when it is None), carried and forgotten with it, removed by
+   `clear_rate_limit`, read by `get_retry_at`. A refusal holds the account
+   until `retry_at` when one is recorded, else for `quota_cooldown_seconds`,
+   in `_waitable_workers` and `_recheck_cooling_accounts` alike. A refused
+   probe records no `retry_at`.
+
+**Consequences.**
+- A healthy pool runs no `/usage` turn before a phase on an account that ran
+  one in the last 15 minutes; the probe still runs on a first use, after a
+  quiet spell, and whenever the event is absent or malformed.
+- A phase's stdout is the whole transcript, held in memory as `raw` was; only
+  the `result` line is kept on `raw`, so the usage log (ADR 53) is unchanged.
+- An account refused on its week stays parked until that week's reset, which
+  may be days, instead of being re-probed every 30 minutes and refused again.
+- `operator.py`'s status line still counts the cooldown from
+  `quota_cooldown_seconds` and does not read `retry_at`.
+
+**Ruled out.**
+- *Treating a missing window as 0%:* it would wave through an account whose
+  week is spent; the probe is cheap and knows.
+- *A new top-level key in the account state for the reading:* the probe
+  record already holds exactly a `UsageInfo`, is carried across every write
+  and is served on the account row; two more keys are additive.
+- *Streaming the probe too:* unmeasured, and the probe is the fallback.
+- *A config key for freshness:* like ADR 48's ramp it is a decision, not a dial.
+## ADR 315 — A phase is handed only the learnings rows its task names, and today's table when it names none
+
+**Status:** accepted (2026-10-22), T-142's arquitecto. Narrows ADR 41,
+part 1 and the `in_phase_table` row of part 5; builds the *Format*
+sentence of the root `README.md` *Future work* item 1, *Shared learnings
+that survive a dead phase*.
+
+**Context.** `learnings.duties` renders `eligible(read_all(...), project)`
+into every phase's prompt, ordered and cut at `MAX_ROWS`. The rows a task
+needs are a few of those, and the rest cost every phase of every task.
+The README asks for the rows matching "the task's profile, labels, or the
+paths its plan names". The entry format is out of scope, so an entry has
+no tag or path field: what it names is in its `when` line and its body.
+No *profile* field exists on a task or a project.
+
+**Decision.**
+1. **The context.** `learnings.TaskContext`, a frozen dataclass of two
+   frozensets, `paths` and `tags`; it is *usable* when either is
+   non-empty. `learnings.task_context(hive_dir, task_id, task_file,
+   description)` builds it from what `_role_prompt` already holds:
+   - `paths`: `surface.parse(description)` over the whole description
+     text, plus the `path` of each item in the arquitecto's handoff
+     `paths` (`context_transfer.read_handoff(..., "arquitecto")`), each
+     cut at its first space, `:` or `#` and kept when
+     `surface.parse` of it in backticks keeps it;
+   - `tags`: the card's `tags` (`context_transfer.read_task_file`), the
+     string items only, stripped and lower-cased.
+   Anything unreadable — no card, no handoff, a malformed one — adds
+   nothing and never raises. *Profile* is the project: `eligible` already
+   applies it, and nothing finer exists to read.
+2. **The selector.** `learnings.select(entries, context)` is pure and
+   keeps input order. A row is *kept* when its scope is `harness` or it
+   is reviewed (under `harness/`). Any other row *matches* when its
+   `when` plus body names one of the context's paths — the path (a glob
+   up to its first glob character), or its last segment when that has an
+   extension, as a case-insensitive substring; or a backticked path in
+   the entry that `surface.covers` a context path — or one of its tags as
+   a whole word, case-insensitive, `-` and `_` counting as word
+   characters. The answer is the kept rows plus the matching ones; it is
+   `entries` unchanged when the context is not usable or no non-kept row
+   matches.
+3. **Filter, then cap.** `duties` hands `table` the selected rows and the
+   count the filter left out, `table(rows, harness, filtered=n)`, and
+   `table` orders and cuts as before. The trailer, with `filtered` above
+   zero, reads: "{n} more were filtered out because nothing in them
+   names this task's paths or tags[, and {m} more are past the
+   {MAX_ROWS}-row cap]; they are still in the directory, and the grep
+   finds them." With `filtered` zero it is today's line, byte for byte.
+4. **`dispatcher/dispatcher.py` changes in one call**: `_role_prompt`
+   passes `context=learnings.task_context(hive_dir, task_id, task_file,
+   description)` to `learnings.duties`, whose new keyword defaults to no
+   context, so every other caller and test is unchanged.
+5. **`/api/learnings` is not changed, and its `in_phase_table` now means
+   the unfiltered table.** The route answers per project and has no task;
+   `handed(eligible(...))` is `handed(select(eligible(...), no context))`,
+   so it still asks the same selectors and is exactly what a phase with
+   no usable context, or no match, is handed. A filtered phase is handed
+   a subset of `eligible` that may include a row this column marks
+   `false` for the cap. A per-task answer needs a `?task=` parameter and
+   is left as debt.
+
+**Consequences.**
+- Matching widens rather than narrows wherever it cannot tell: a path
+  every task names (`docs/decisions.md`) matches every row naming it, a
+  basename matches its namesakes anywhere. The cost is a bigger table,
+  never a missing row; the cap and the grep remain the backstop.
+- A trap whose text names nothing a task carries leaves that task's
+  table once another row matches; the trailer counts it and the grep
+  finds it. Harness rows, the shared environment's traps, always stay.
+- The arquitecto, with no plan yet, filters on its description and tags;
+  the phases after it also on the paths the plan cites.
+
+**Ruled out.**
+- *Tags or paths in the entry's frontmatter:* the format is out of scope,
+  and the inbox's existing entries would match nothing.
+- *The role as a profile:* role names are prose in many `when` lines,
+  and a context with only a role would always be "usable" and filter a
+  task that carries nothing.
+- *Changing the api to select per task:* it has no task to select for.
+## ADR 309 — A `size` gate notes a touched Python source file past 800 lines; a signal, never a cap
+
+**Status:** accepted (2026-10-22), T-141's arquitecto. The threshold is
+provisional.
+
+**Context.** `docs/plans/backlog.md` item 1, *Limits go on what travels,
+not on what exists*, rejects a line cap on source files — a cap produces
+`utils2.py` and splits coherent modules to meet a number — and asks for a
+signal instead: a fifth gate in `dispatcher/gates.py`, at `NOTE` level,
+looking only at files the diff touched. It proposed 800 lines for Python,
+which on its day named `dispatcher/dispatcher.py` alone. On this task's base
+that is no longer so: 12 of the 35 modules directly under `dispatcher/` are
+past 800 (`dispatcher.py` 5041, `tasks.py` 3186, `docker_exec.py` 2189,
+`cli.py` 1363, `config.py` 1092, `worker.py` 1072, `actions.py` 1034,
+`learnings.py` 1032, `handoff.py` 984, `gates.py` 954,
+`context_transfer.py` 845, `queue.py` 845, by `wc -l`).
+
+**Decision.**
+1. **The gate.** `size`, run by `gates.run` beside `tests-in-diff` and
+   `contract-docs`, so only when a fork point exists, over
+   `changed_paths`. It always reports at `NOTE` and never `BLOCKING` or
+   `ASK`, so it costs no `--resume` and stops no round.
+2. **What it measures.** A changed path that is Python source: suffix
+   `.py`, `is_code` (so not under `docs/`) and not `is_test`. Tests are
+   left out because a test module grows by cases rather than by
+   responsibilities, and its size is not the signal item 1 is after.
+   Every other language is out of scope. A deleted path is not measured:
+   it has no lines in the worktree.
+3. **How it measures.** One `wc -l -- <paths>` in the worktree per
+   hundred paths, under the C locale, its exit code not consulted: a
+   deleted path is a line on stderr and costs only itself. A count is
+   newlines, so a file with no trailing newline counts one short.
+4. **What it says.** One finding per file whose count is strictly greater
+   than the threshold, naming the path and its count. Nothing at all
+   when none is.
+5. **The threshold** is the module constant `SIZE_NOTE_LINES = 800` in
+   `dispatcher/gates.py`, not a `config.yaml` key: a key costs three
+   documented homes (`docs/learnings/a-config-key-has-three-homes.md`)
+   for a number nobody has asked to tune per pool yet. It is provisional
+   by construction; moving it is an edit to that constant plus a narrowing
+   ADR naming the measurement that moved it.
+
+**Consequences.**
+- With the numbers above, most tasks that edit `dispatcher/` will carry a
+  `size` note, this one included (`gates.py`). That is the cost of keeping
+  the item's 800 and the first thing to measure if the note turns out to be
+  noise the roles learn to skip — the reason gates err toward silence.
+- The note carries no instruction to split anything; a revisor or auditor
+  weighs it. Splitting `dispatcher/dispatcher.py` stays
+  `docs/plans/balancer.md`'s.
+- The pre-merge check and a conflict resolution run `gates.run` too, and
+  read only `blocking`, so the new gate changes neither.
+
+**Ruled out.**
+- *A blocking or `ASK` level:* that is the cap item 1 rejects.
+- *Reporting untouched files:* limits go on what travels; a file this
+  task did not touch is not this task's to answer for.
+- *Counting tests:* see decision 2; a later ADR can bring them in.

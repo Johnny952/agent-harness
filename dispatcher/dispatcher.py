@@ -281,6 +281,58 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
     return reaped
 
 
+def _refusal_hold_until(cfg: Config, account: str) -> float | None:
+    """Epoch second a service refusal holds `account` until, None if not refused.
+
+    The `retry_at` the refused phase's `rate_limit_event` named when one was
+    recorded, else `quota_cooldown_seconds` after the refusal (ADR 312, 6)."""
+    refused_at = state_machine.get_rate_limited_at(cfg.state_dir, account)
+    if refused_at is None:
+        return None
+    retry_at = state_machine.get_retry_at(cfg.state_dir, account)
+    return retry_at if retry_at is not None else refused_at + cfg.quota_cooldown_seconds
+
+
+def _fresh_stream_usage(
+    cfg: Config, account: str, now: float,
+) -> tuple[quota.UsageInfo, float] | None:
+    """The account's last stream reading and when it was read, if still fresh.
+
+    From the recorded probe: `source` `"rate_limit_event"` and a `read_at`
+    younger than `quota.STREAM_READING_FRESH_SECONDS`. Anything absent,
+    unreadable or malformed is None, and the caller probes `/usage` (ADR 312, 5)."""
+    try:
+        probe = state_machine.get_last_probe(cfg.state_dir, account)
+    except (ValueError, OSError):
+        return None
+    if probe is None or probe.get("source") != "rate_limit_event":
+        return None
+    read_at = probe.get("read_at")
+    if isinstance(read_at, bool) or not isinstance(read_at, (int, float)):
+        return None
+    if not 0 <= now - read_at < quota.STREAM_READING_FRESH_SECONDS:
+        return None
+    pcts = (probe.get("session_pct"), probe.get("week_pct"))
+    if any(isinstance(p, bool) or not isinstance(p, int) for p in pcts):
+        return None
+    resets = (probe.get("session_reset"), probe.get("week_reset"))
+    if any(r is not None and not isinstance(r, str) for r in resets):
+        return None
+    return quota.UsageInfo(pcts[0], resets[0], pcts[1], resets[1]), float(read_at)
+
+
+def _record_stream_usage(cfg: Config, account: str, event: object) -> None:
+    """Record a phase's `rate_limit_event` reading for its account (ADR 312, 4).
+
+    Never parks and never raises: a missing or malformed event records nothing."""
+    try:
+        usage = quota.usage_from_rate_limit_event(event)
+        if usage is not None:
+            _quota_decision(cfg, account, usage, source="rate_limit_event")
+    except Exception as exc:
+        logger.warning("could not record account %s's rate_limit_event: %s", account, exc)
+
+
 def _waitable_workers(
     cfg: Config, exclude: set[str] | None = None, now: float | None = None,
 ) -> list[str]:
@@ -315,8 +367,8 @@ def _waitable_workers(
             continue
         if state not in (AccountState.PRE_COOLDOWN, AccountState.COOLING_DOWN):
             continue
-        refused_at = state_machine.get_rate_limited_at(cfg.state_dir, acc.name)
-        if refused_at is not None and now - refused_at < cfg.quota_cooldown_seconds:
+        hold = _refusal_hold_until(cfg, acc.name)
+        if hold is not None and now < hold:
             continue
         waitable.append(f"{acc.name} is {state.value} on a counter, not on a refusal")
     return waitable
@@ -444,7 +496,10 @@ class _QuotaDecision:
     limit_phrase: str
 
 
-def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _QuotaDecision:
+def _quota_decision(
+    cfg: Config, account: str, usage: quota.UsageInfo, *,
+    source: str = "usage", read_at: float | None = None,
+) -> _QuotaDecision:
     """The only place in this module a probe is compared with a ceiling.
 
     `check_quota_ok` and `_recheck_cooling_accounts` both come through here, so
@@ -461,6 +516,10 @@ def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _Quota
     It is also the one place that records the probe, for the same reason: both
     readers pass through here, so neither can forget to (ADR 49). The record is
     written after the decision is made and cannot change it.
+
+    `source` says where the numbers came from, `"usage"` or `"rate_limit_event"`
+    (ADR 312); `read_at` is when they were read, the probe time unless a fresh
+    stream reading is being decided on again.
     """
     threshold = _threshold_for(cfg, account)
     now = _utc_now()
@@ -473,7 +532,9 @@ def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _Quota
             "paced": False, "pct": threshold, "days_left": None, "reset": None,
             "fallback_reason": None,
         }
-        _record_probe(cfg, account, _probe_record(usage, now, decision, threshold, week))
+        _record_probe(cfg, account, _probe_record(
+            usage, now, decision, threshold, week, source=source, read_at=read_at,
+        ))
         return decision
     ceiling = quota.week_ceiling(usage.week_reset, now, cfg.reserve_pct)
     exceeds = usage.session_pct >= threshold or usage.week_pct >= ceiling.pct
@@ -505,7 +566,9 @@ def _quota_decision(cfg: Config, account: str, usage: quota.UsageInfo) -> _Quota
                 f"{ceiling.reset.strftime('%Y-%m-%d %H:%M %Z')} reset it read)"
             ),
         )
-    _record_probe(cfg, account, _probe_record(usage, now, decision, threshold, week))
+    _record_probe(cfg, account, _probe_record(
+        usage, now, decision, threshold, week, source=source, read_at=read_at,
+    ))
     return decision
 
 
@@ -515,6 +578,9 @@ def _probe_record(
     decision: _QuotaDecision,
     session_ceiling_pct: int,
     week_ceiling: dict,
+    *,
+    source: str = "usage",
+    read_at: float | None = None,
 ) -> dict:
     """One probe as `state_machine.record_probe` keeps it and `/api/accounts`
     serves it (ADR 49).
@@ -535,6 +601,8 @@ def _probe_record(
         "exceeds": decision.exceeds,
         "session_ceiling_pct": session_ceiling_pct,
         "week_ceiling": week_ceiling,
+        "source": source,
+        "read_at": now.timestamp() if read_at is None else read_at,
     }
 
 
@@ -807,10 +875,15 @@ def _read_usage(cfg: Config, account: str) -> tuple[str, object]:
     """Run `/usage` on `account` and say what came back, without acting on it.
 
     One of ("exec_failed", exc), ("refused", result), ("auth", result),
-    ("unparsed", exc) or ("usage", UsageInfo). `check_quota_ok` and
+    ("unparsed", exc), ("usage", UsageInfo) or ("stream", (UsageInfo, read_at)),
+    the last when a phase's `rate_limit_event` reading is still fresh and no
+    probe was run (ADR 312). `check_quota_ok` and
     `primary_free_pct` both read through here, so there is one reader of the
     probe and each caller decides what an answer means to it.
     """
+    fresh = _fresh_stream_usage(cfg, account, _utc_now().timestamp())
+    if fresh is not None:
+        return "stream", fresh
     container = container_for(cfg, account)
     try:
         result = docker_exec.exec_claude(
@@ -866,8 +939,12 @@ def check_quota_ok(cfg: Config, account: str) -> bool:
             "waving it through unverified", account, got,
         )
         return True
-    usage = got
-    decision = _quota_decision(cfg, account, usage)
+    if what == "stream":
+        usage, read_at = got
+        decision = _quota_decision(cfg, account, usage, source="rate_limit_event", read_at=read_at)
+    else:
+        usage = got
+        decision = _quota_decision(cfg, account, usage)
     if decision.exceeds:
         logger.warning(
             "account %s is at %d%% of its session and %d%% of its week, over %s; "
@@ -895,7 +972,9 @@ def primary_free_pct(cfg: Config) -> int | None:
     if account is None:
         return None
     what, got = _read_usage(cfg, account)
-    if what == "usage":
+    if what in ("usage", "stream"):
+        if what == "stream":
+            got = got[0]
         return max(0, 100 - max(got.session_pct, got.week_pct))
     if what == "refused":
         return 0
@@ -938,12 +1017,29 @@ def _recheck_cooling_accounts(cfg: Config) -> list[str]:
         # Holding it costs nothing; the alternative spends a phase to relearn
         # what the last one already found out.
         refused_at = state_machine.get_rate_limited_at(cfg.state_dir, acc.name)
-        if refused_at is not None and now - refused_at < cfg.quota_cooldown_seconds:
+        hold = _refusal_hold_until(cfg, acc.name)
+        if hold is not None and now < hold:
             logger.warning(
                 "account %s was refused %ds ago and stays %s: the /usage probe reads local "
-                "counters and cannot see that refusal, so it waits out the %ds cooldown",
-                acc.name, int(now - refused_at), state.value, cfg.quota_cooldown_seconds,
+                "counters and cannot see that refusal, so it waits until the hold ends in %ds",
+                acc.name, int(now - refused_at), state.value, int(hold - now),
             )
+            continue
+        # A stream reading taken after the refusal answers for the probe.
+        fresh = _fresh_stream_usage(cfg, acc.name, now)
+        if fresh is not None and (refused_at is None or fresh[1] > refused_at):
+            exceeds = _quota_decision(
+                cfg, acc.name, fresh[0], source="rate_limit_event", read_at=fresh[1],
+            ).exceeds
+            if not exceeds:
+                logger.info("account %s came back from %s and is IDLE again", acc.name, state.value)
+                if state_machine.unpark(cfg.state_dir, acc.name, forget_rate_limit=True):
+                    recovered.append(acc.name)
+                    notifications.append(
+                        cfg.hive_tasks_dir, "pool", account=acc.name,
+                        title=f"account {acc.name} is available again",
+                        url=notifications.POOL_URL,
+                    )
             continue
         container = container_for(cfg, acc.name)
         # Same free-text format drift risk as check_quota_ok: a probe failure
@@ -1232,7 +1328,10 @@ def _role_prompt(
     # Read fresh on every phase, not once per task: an entry the implementador
     # wrote in round 2 is in the revisor's table in the same round, which is
     # the earliest anyone can be warned off a trap.
-    traps = learnings.duties(role, task_id, slug, hive_dir, harness)
+    traps = learnings.duties(
+        role, task_id, slug, hive_dir, harness,
+        context=learnings.task_context(hive_dir, task_id, task_file, description),
+    )
     if traps:
         prompt += f"\n\n{traps}"
     # Something this one call has to be told that no rule covers: today, the
@@ -1553,6 +1652,7 @@ def _resume_missing_handoff(
             # The session already read its skills; the schema has to travel,
             # or the return it is being asked for comes back as prose.
             json_schema=handoff.schema_for(role),
+            stream=True,
             **_phase_permission_flags(cfg, role, slug),
         )
         recorder.record("handoff-resume", retry)
@@ -1640,6 +1740,7 @@ def _shrink_over_budget(
         # schema does travel — without it the shorter answer comes back as
         # prose and the parse falls through to the clamp.
         json_schema=handoff.schema_for(role),
+        stream=True,
         # A resume is a new `claude` process and inherits no flags, so the
         # permissions have to be restated here too.
         **_phase_permission_flags(cfg, role, slug),
@@ -1770,6 +1871,7 @@ def _run_gates(
         # none: the session has already read them. The schema does travel —
         # the retry's return is the one that lands in the task file.
         json_schema=handoff.schema_for(role),
+        stream=True,
         # Restated for the same reason as the shrink retry's: new process,
         # no inherited flags.
         **_phase_permission_flags(cfg, role, slug),
@@ -1854,6 +1956,7 @@ def _refuse_review_writes(
         # as the shrink retry's, and the corrected return is the one that has
         # to land in the task file.
         json_schema=handoff.schema_for(role),
+        stream=True,
         **_phase_permission_flags(cfg, role, slug),
     )
     # Recorded whether or not it is kept, for the shrink retry's reason.
@@ -2000,8 +2103,10 @@ def dispatch_phase(
                     plugin_dirs=role_skills.plugin_dirs(role),
                     append_system_prompt=_phase_system_prompt(role),
                     json_schema=handoff.schema_for(role),
+                    stream=True,
                     **_phase_permission_flags(cfg, role, slug),
                 )
+                first_event = result.rate_limit_event
                 # Here, before the retries: each of them *replaces* `result`,
                 # so a record taken afterwards would describe the last retry
                 # and not the phase. Written before the gates, too, so that a
@@ -2069,6 +2174,11 @@ def dispatch_phase(
             # to the tree.
             docker_exec.restore_owner(container, project_dir, owner)
 
+        # The last call's event, or the first's when a resume carried none, is
+        # the account's newest reading; recorded on every outcome (ADR 312, 4).
+        event = result.rate_limit_event or first_event
+        _record_stream_usage(cfg, account, event)
+
         if is_rate_limit_error(result):
             logger.warning(
                 "task %s: account %s refused the %s phase as rate-limited; it goes COOLING_DOWN, "
@@ -2079,7 +2189,9 @@ def dispatch_phase(
             # that the service is turning the account away, and the /usage
             # recheck cannot reproduce it. Write it down before parking the
             # account, or the next recheck recovers it on stale local numbers.
-            state_machine.record_rate_limit(cfg.state_dir, account)
+            state_machine.record_rate_limit(
+                cfg.state_dir, account, retry_at=quota.retry_at_from_event(event),
+            )
             _park(cfg, account, AccountState.COOLING_DOWN)
             state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)

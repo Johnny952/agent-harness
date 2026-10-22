@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from dispatcher import learnings, tasks
+from dispatcher import context_transfer, learnings, tasks
 
 _SYMPTOM = "ECONNREFUSED 127.0.0.1:5432 (pid 4711)"
 
@@ -907,3 +907,134 @@ def test_the_table_cuts_the_retired_rows_first_and_flags_the_stale_ones() -> Non
     assert order == ["inbox/d.md", "inbox/c.md", "inbox/b.md", "inbox/a.md"]
     assert "| unconfirmed (stale) |" in learnings.table(rows, "newnewnewnew")
     assert "(stale)" not in learnings.table(rows)
+
+
+def _named(ref: str, when: str, **meta) -> learnings.Entry:
+    return learnings.Entry(path="", ref=ref, meta={"when": when, **meta}, body="")
+
+
+def _ctx(*, paths: tuple = (), tags: tuple = ()) -> learnings.TaskContext:
+    return learnings.TaskContext(paths=frozenset(paths), tags=frozenset(tags))
+
+
+def _refs(rows: list[learnings.Entry]) -> list[str]:
+    return [row.ref for row in rows]
+
+
+def test_select_keeps_the_row_that_names_a_path_of_the_task() -> None:
+    rows = [
+        _named("inbox/a.md", "you edit `dispatcher/learnings.py` and run the suite"),
+        _named("inbox/b.md", "the front build needs a variable"),
+    ]
+
+    chosen = learnings.select(rows, _ctx(paths=("dispatcher/learnings.py",)))
+
+    assert _refs(chosen) == ["inbox/a.md"]
+
+
+def test_select_matches_a_directory_the_entry_names_and_a_bare_basename() -> None:
+    rows = [
+        _named("inbox/a.md", "anything under `dispatcher/` is imported by the cli"),
+        _named("inbox/b.md", "learnings.py is read by two containers"),
+        _named("inbox/c.md", "unrelated"),
+    ]
+
+    chosen = learnings.select(rows, _ctx(paths=("dispatcher/learnings.py",)))
+
+    assert _refs(chosen) == ["inbox/a.md", "inbox/b.md"]
+
+
+def test_select_matches_a_tag_as_a_whole_word() -> None:
+    rows = [
+        _named("inbox/a.md", "the token-economy gate rejects a long prompt"),
+        _named("inbox/b.md", "learningsx is not the learnings tag"),
+        _named("inbox/c.md", "unrelated"),
+    ]
+
+    assert _refs(learnings.select(rows, _ctx(tags=("token-economy",)))) == ["inbox/a.md"]
+    assert _refs(learnings.select(rows, _ctx(tags=("learnings",)))) == ["inbox/b.md"]
+    # "learning" is a word of none of them: no match, so the table is unchanged.
+    assert learnings.select(rows, _ctx(tags=("learning",))) == rows
+
+
+def test_select_always_keeps_harness_scoped_and_reviewed_rows() -> None:
+    rows = [
+        _named("inbox/a.md", "you edit `dispatcher/learnings.py`"),
+        _named("inbox/b.md", "the container drops env", scope=learnings.SCOPE_HARNESS),
+        _named("harness/c.md", "the cli refuses a heredoc"),
+        _named("inbox/d.md", "unrelated"),
+    ]
+
+    chosen = learnings.select(rows, _ctx(paths=("dispatcher/learnings.py",)))
+
+    assert _refs(chosen) == ["inbox/a.md", "inbox/b.md", "harness/c.md"]
+
+
+def test_select_falls_back_to_the_full_table_when_nothing_matches() -> None:
+    rows = [_named("inbox/a.md", "one thing"), _named("inbox/b.md", "another")]
+
+    assert learnings.select(rows, _ctx(paths=("front/src/x.tsx",), tags=("ui",))) == rows
+
+
+def test_select_falls_back_when_only_a_kept_row_matches() -> None:
+    """A harness row matching is not a match: it was going to stay anyway."""
+    rows = [
+        _named("inbox/a.md", "one thing"),
+        _named("inbox/b.md", "touches `dispatcher/learnings.py`", scope=learnings.SCOPE_HARNESS),
+    ]
+
+    assert learnings.select(rows, _ctx(paths=("dispatcher/learnings.py",))) == rows
+
+
+def test_select_falls_back_to_the_full_table_with_no_context() -> None:
+    rows = [_named("inbox/a.md", "one thing"), _named("inbox/b.md", "another")]
+
+    assert learnings.select(rows, learnings.NO_CONTEXT) == rows
+    assert not learnings.NO_CONTEXT.usable
+
+
+def test_duties_trailer_says_rows_were_filtered_and_points_at_the_grep(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _entry(hive, "task-2-a.md", task="task-2", when="you edit `dispatcher/learnings.py`")
+    _entry(hive, "task-3-b.md", task="task-3", when="the front build needs a variable")
+
+    plain = learnings.duties("implementador", "task-9", "myproj", str(hive))
+    text = learnings.duties(
+        "implementador", "task-9", "myproj", str(hive),
+        context=_ctx(paths=("dispatcher/learnings.py",)),
+    )
+
+    assert "task-3-b.md" in plain and "filtered out" not in plain
+    assert "task-2-a.md" in text and "task-3-b.md" not in text
+    assert "1 more were filtered out" in text
+    assert "the grep finds them." in text
+    assert learnings.duties(
+        "implementador", "task-9", "myproj", str(hive), context=learnings.NO_CONTEXT
+    ) == plain
+
+
+def test_task_context_reads_description_handoff_and_card_tags(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    card = _card(hive, "task-9")
+    card.write_text(
+        card.read_text().replace("status: done", "status: done\ntags:\n- Token-Economy\n- 7")
+    )
+    context_transfer.save_handoff(
+        str(hive), "task-9", "arquitecto",
+        {"paths": [{"path": "docs/decisions.md ADR 315", "holds": "x"}, {"path": 3}, "junk"]},
+    )
+
+    context = learnings.task_context(
+        str(hive), "task-9", str(card), "Edit `dispatcher/learnings.py` only."
+    )
+
+    assert context.paths == {"dispatcher/learnings.py", "docs/decisions.md"}
+    assert context.tags == {"token-economy"}
+
+
+def test_task_context_of_nothing_readable_is_not_usable(tmp_path: Path) -> None:
+    context = learnings.task_context(
+        str(tmp_path / "hive"), "task-9", str(tmp_path / "missing.md"), None
+    )
+
+    assert not context.usable
