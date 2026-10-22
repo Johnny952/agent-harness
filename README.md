@@ -98,7 +98,9 @@ Observability collector (SQLite/WAL) → read API → authenticated console (Tai
   revives them instead of spawning replacements it would have to brief
   again; and one telling it that the session-start `gitStatus` block is
   the snapshot from *before* its own edits, so it re-reads the worktree
-  instead of redoing work already sitting in it. Every step of a
+  instead of redoing work already sitting in it. After a rate limit the
+  resumed prompt is a short "continue where you left off" line rather
+  than the role prompt, which the session already holds (ADR 330). Every step of a
   hand-over is logged by name — the refusal and the session being handed
   on, the account going `COOLING_DOWN`, each account that comes back
   `IDLE`, and the account every phase runs on — so a run that changed
@@ -669,7 +671,12 @@ push is turned on again on each device.
 ### 5. Run a task
 
 Bootstrap a project directory on an account's container, then run a task
-through the full role cycle:
+through the full role cycle. Every command, argument, unit, default and exit
+code is in [docs/cli.md](docs/cli.md); note that `run-queue --limit` is in
+measured tokens, not tasks. A queue its limit stopped goes on with
+`run-queue --resume QUEUE_ID --limit TOKENS` (and/or `--parallel N`); the limit
+must be above what the queue already spent, and the project and tasks stay the
+queue's own.
 
 ```bash
 python -m dispatcher.cli --config config.yaml bootstrap-project \
@@ -1506,7 +1513,8 @@ number and title.
      [`docs/ROADMAP.md`](docs/ROADMAP.md) only sizes the race.
    - Logging setup — **built**: `main` in `dispatcher/cli.py` configures it.
    - A short "continue where you left off" prompt after a rate limit —
-     **open**.
+     **built**: `_CONTINUE_PROMPT` in `dispatcher/dispatcher.py`,
+     `docs/decisions.md` ADR 330.
 4. **Per-role model selection and richer effort escalation.**
    - Effort only on escalation — **superseded**: `docs/decisions.md`
      ADR 57 sets an effort per role.

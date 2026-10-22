@@ -15126,6 +15126,71 @@ usable context. The route had no task to build a context from.
   picks a checkout (`_project`), and one rule is what keeps them agreeing.
 - *A field saying whether the filter applied:* nothing reads it, and
   `select` falling back to `eligible` is already the dispatcher's rule.
+## ADR 330 — A phase handed on by a rate limit resumes on a short "continue" prompt; a refused resume restarts it with the full briefing
+
+**Status:** accepted (2026-10-22), T-148's arquitecto. Narrows the README
+*Core* paragraph on rate-limit failover (V5.1, V5.2) and keeps both of
+`_with_resume_notes`'s notes; closes README *Prioritized*, item 3, *A short
+"continue where you left off" prompt after a rate limit*.
+
+**Context.** `dispatch_phase` in `dispatcher/dispatcher.py` hands a
+rate-limited phase to the next account with `--resume <session_id>` and
+re-sends the whole role prompt, the notes appended. The resumed session
+already holds that prompt, so the second copy is quota spent on context the
+session has. A resume the CLI cannot serve — no transcript for that id in the
+account's config — today fails the phase like any error.
+
+**Decision.**
+1. **When the short prompt is sent.** An attempt of `dispatch_phase` resumes
+   on the fixed text `_CONTINUE_PROMPT`, with `_with_resume_notes` appended
+   exactly as on any resume (stale-context note always, revive note when the
+   session left subagents), only when all hold: the previous attempt ended
+   `is_rate_limit_error`; a session id is being resumed; and some rate-limited
+   attempt on that session served a turn — its `raw["num_turns"]` an `int`,
+   not a `bool`, above 0. Once a session has served a turn it stays briefed:
+   a later refusal with no turn keeps the short prompt.
+2. **Everything else is today's prompt.** No session id: the full prompt in a
+   new session. A rate-limited session with no served turn: the full prompt
+   with the notes, on `--resume`. A handover by an auth failure, and a
+   `resume_session_id` a caller passed in (a command verdict, ADR 119): the
+   full prompt with the notes, as now — out of scope here.
+3. **A refused resume restarts the phase.** On an attempt that follows a
+   rate-limit handover (either prompt of 1 or 2), a call that is not
+   `_exec_succeeded`, not a rate limit, not an auth error, and whose
+   `result_text` contains `no conversation found` (case-insensitive, the
+   CLI's wording for an unknown `--resume` id) is followed at once, on the
+   same account and inside the same claim, by one call with the full prompt
+   in a new session and no notes. It replaces the result, is recorded in the
+   usage log as call `"phase-restart"` (the refused call stays `"phase"`),
+   and the retries after it run on it as on any phase call. A second refusal
+   is not possible: the restart resumes nothing. Any other resume failure
+   fails the phase as today.
+4. **The cycle log says which.** The existing INFO line `task %s: %s goes to
+   account %s, resuming session %s` gains a suffix: `with the short continue
+   prompt`, or `with the full prompt (<reason>)`, the reason one of `no turn
+   served before the rate limit`, `handed on by a login failure`, `resumed by
+   the caller`. A refused resume logs one WARNING naming the account, the
+   session and that the phase restarts with the full prompt in a new session.
+
+**Consequences.**
+- A phase cut by a rate limit after it started working pays for one short
+  user turn on the resume instead of its whole briefing again.
+- The briefing a resumed phase acts on is the one its session opened with;
+  a task description edited between the cut and the resume is not seen,
+  as a resumed session never saw it anyway beside the copy it held.
+- A restart loses the session's context but not the worktree; the restart's
+  prompt has no stale-context note, since its session opens on today's tree.
+
+**Ruled out.**
+- *Probing the account's transcript before resuming:* one more `docker
+  exec` per handover for a case the CLI already reports on the call itself,
+  at no turn's cost.
+- *Short prompt on every resume:* the auth handover and the verdict resume
+  are other tasks' rules (out of scope in T-148), and the shrink, gate and
+  review retries already send their own short prompts.
+- *Trusting the session id alone:* a refusal before any turn may leave a
+  session whose transcript holds no briefing to continue; the full prompt
+  costs what it costs today.
 
 ## ADR 327 — A backup is a plain directory copy of the hive and `/state`, taken between cycles, named by its UTC time, capped by `BACKUP_KEEP`, and never holding a credential
 
@@ -15399,3 +15464,163 @@ argon2 or bcrypt package, and the agent image has no `cryptography`.
   until step 2, so it would lock the console out the day this merged.
 - *Users in the hive or `state_dir`:* the agents read the first, and the
   second is backed up.
+
+## ADR 333 — `run-queue` refuses a `--limit` below 100000 measured tokens
+
+**Status:** accepted (2026-10-22), T-151.
+
+**Context.** `run-queue --limit` is a ceiling in measured tokens: input +
+output + cache creation + cache read per usage line, checked before each
+phase, a started phase let finish (ADR 79, 2 and 3). The parser took any
+positive integer and named it only as a bare `--limit`, and nothing but
+`--help` said the unit. An operator read `--limit 2` as "two tasks": the queue
+was saved, its first phase ran and measured 6.3M tokens, and the queue stopped
+`limit_reached` at 6.3M of 2. Cache reads dominate the measure, so a single
+phase measures in the hundreds of thousands at the least and usually in the
+millions. A limit below one phase's cost therefore means "run exactly one
+phase and stop", which nobody asks for, while every value small enough to be
+a task count is far below that cost.
+
+**Decision.**
+1. `dispatcher/cli.py` holds `MIN_QUEUE_LIMIT = 100_000` measured tokens.
+   `run-queue` without `--resume` refuses `--limit N` with `N` below it as a
+   usage error (exit 2, `parser.error`) that names the number given, says the
+   limit is in measured tokens (input + output + cache, ADR 79) and not a
+   number of tasks, and names the minimum. The refusal comes before
+   `queue.plan`, so no queue file is written, no confirmation is printed and
+   no phase starts.
+2. The option is shown as `--limit TOKENS` (argparse `metavar`), and the
+   message for a missing argument reads `--limit TOKENS` rather than a bare
+   `--limit`.
+3. The floor is the command line's only. `queue.plan` keeps its own refusal of
+   a non-positive limit and nothing more; `--resume` runs under the limit its
+   queue file already holds and is not re-checked; the console's start limit
+   (`dispatcher/actions.py` `_limit_ok`, ADR 230) is a different path and is
+   unchanged.
+4. 100000 is a floor against a misread unit, not a budget: it is well under
+   any phase measured so far and far above any plausible task count. Raising
+   it is a new ADR, not an edit of the constant alone.
+
+**Consequences.** A `run-queue` limit that cannot cover one phase now fails
+before anything is written. Tests that drove the CLI with small limits
+(`tests/dispatcher/test_queue.py`, `tests/dispatcher/test_drafts.py`,
+`tests/dispatcher/test_parallel_queue.py`) move to limits at or above the
+floor, with any fake spend they compare against scaled to match; tests that
+call `queue.plan` directly keep their small limits. ADR 79's measure, its
+check before each phase and its exit 5 are untouched.
+
+**Ruled out.**
+- *Accepting a count and converting it:* a task's cost varies by an order of
+  magnitude, so any tokens-per-task factor is a guess the owner did not
+  confirm.
+- *A warning and a second confirmation:* `--yes` skips the prompt, and the
+  run that went wrong was exactly an unattended one.
+- *The floor in `queue.plan`:* it would bind the worker's and the console's
+  paths too, which have their own limit rule and did not misread anything.
+
+## ADR 334 — The command line has one reference, `docs/cli.md`, checked against the parser
+
+**Status:** accepted (2026-10-22), T-151.
+
+**Context.** The root `README.md` describes `run-task` and `merge-task` and a
+few other verbs in prose; `run-queue` had no description outside its `--help`.
+`dispatcher/cli.py` builds its whole parser inside `main()`, so no test could
+look at it without running a command.
+
+**Decision.**
+1. `dispatcher/cli.py` gains `build_parser() -> argparse.ArgumentParser`,
+   which builds and returns the parser `main()` used to build inline; `main()`
+   calls it. Nothing else about any subcommand changes, except ADR 333.
+2. `docs/cli.md` is the reference: the global options, the exit codes and the
+   commands that give each, the whole-project lock (ADR 200: a second cycle
+   start on a busy project exits 75, a queue waits), that more than one cycle
+   of a project at once runs from the command line only through
+   `run-queue --parallel` (ADR 200, 7; the worker's start group is the other
+   path, ADR 306), and one `### \`<subcommand>\`` section per subcommand under
+   `## Commands`, each with a table whose first cell is the argument in
+   backticks (`` `--limit TOKENS` ``, or a positional's `metavar` or `dest`)
+   and whose other columns give its unit, its default and what it does.
+3. `tests/dispatcher/test_cli_reference.py` builds the parser with
+   `build_parser()` and compares, both ways, the subcommands with the
+   `### \`…\`` headings under `## Commands`, each subcommand's arguments
+   (`-h` excluded) with its table's first cells, the top-level options with
+   the `## Global options` table, and the `EXIT_*` codes plus 0 and 2 with
+   the exit-code table. A missing or an extra entry on either side fails
+   with its name.
+4. The root `README.md` links `docs/cli.md` and keeps its prose; where the two
+   differ, the reference is the one the suite checks.
+
+**Consequences.** Adding, renaming or removing a subcommand or an option, or
+an exit code, now fails the suite until `docs/cli.md` says the same. What an
+argument *does* is still prose and can still drift; only the names and the
+codes are checked.
+
+## ADR 336 — `run-queue --resume` takes a new `--limit` and `--parallel`; the project and the tasks stay the queue's own
+
+**Status:** accepted (2026-10-22), T-152.
+
+**Context.** ADR 79, 5 made `--resume <id>` reload a saved queue and go on
+under the file's own project, tasks, limit and parallelism, and the CLI
+refused every other option with it. ADR 333, 3 repeated that a resume is not
+re-checked against the floor. A queue that stopped `limit_reached` therefore
+stops again at once on a resume: its spend already reached the same limit.
+The owner's only way on was a new queue over the same tasks, which loses the
+record that ties the runs together. Nothing today ever runs a task the queue
+recorded `limit_reached` again, plain resume or not: `_next` takes only
+`pending` tasks. Charter C-4 (*Amended* 2026-10-15) makes the limit the
+ceiling of the owner's authorization and the parallelism part of what was
+confirmed, so changing either is a new authorization by a person.
+
+**Decision.**
+1. *What a resume takes.* `run-queue --resume QUEUE_ID` accepts `--limit
+   TOKENS`, `--parallel N` and `--yes`. `--project`, `--task-id` and `--ready`
+   with `--resume` are a usage error (exit 2) whose message names what a
+   resume takes: `--limit`, `--parallel` and `--yes`, the project and tasks
+   being the queue's own. `--parallel` loses its parser default (`None`, so a
+   given value can be told from an absent one); a new queue still runs at 1
+   when it is not given.
+2. *The checks.* A new limit is refused as a usage error, with nothing
+   written and nothing run, when it is below `MIN_QUEUE_LIMIT` (ADR 333's
+   message), or when it is at or below the queue's spend — the sum of its
+   entries' tokens after a task found `running` was settled `interrupted`
+   (ADR 79, 5); the message names the limit given and that spend. A new
+   `--parallel` goes through the same checks as a new queue's (at least 1, at
+   most the pool's phase slots, ADR 252). A value equal to the file's is not
+   a change. Lowering the limit to a value still above the spend is allowed.
+3. *The record.* `Queue` gains `changes`, a list saved in
+   `<state_dir>/queues/<id>.json`, one object per resume that changed
+   something: `{"at": <UTC ISO-8601>, "limit": {"from": old, "to": new},
+   "parallel": {"from": old, "to": new}}`, carrying only the keys that
+   changed. A file written before this ADR loads with an empty list. `limit`
+   and `parallel` on the queue are the effective values, so the next resume
+   and every reader see them without replaying `changes`.
+4. *The yes.* Every resume prints the queue's plan (`queue.confirmation`)
+   with its effective limit and parallelism and, under it, each recorded
+   change. A resume that changes something asks the same yes a new queue
+   does, unless `--yes`; a no exits 1 and saves nothing. A plain resume asks
+   nothing, as before: it authorizes nothing new.
+5. *What goes on.* Tasks in `merged`, `finished` or any failed state are not
+   run again. When a resume leaves the queue's spend below its limit, a task
+   it had recorded `limit_reached` goes back to `pending`, keeping its
+   `usage_offset`, so its tokens keep counting from its first start and the
+   queue's spend never drops; when its cycle starts again the offset is not
+   reset. Its cycle is `run_task_cycle` as for any task, which starts at the
+   arquitecto on the task's branch as it stands (the same re-run ADR 272 makes
+   for a request for changes): there is no entry into a cycle at a later phase,
+   and adding one is `dispatcher/dispatcher.py`'s, not this ADR's. A task the
+   limit stopped is the one task ADR 79, 4's "no task is started twice" lets
+   start again, because the limit, not the task, ended its cycle.
+6. *Why the project and the tasks stay fixed.* The tasks are what the owner's
+   yes covered (C-4, *What it covers*), the queue's id names that list, and
+   its order, its skips and its spend are computed over exactly those
+   entries. Adding a task is a new authorization over a different list, so it
+   is a new queue; a different project is a different lock (ADR 200) and a
+   different set of task files, so nothing in the old record would still hold.
+
+**Consequences.** This amends ADR 79, 5 (a resume no longer runs only under
+the file's own limit and parallelism) and ADR 333, 3 (a resume's new limit
+is held to the floor). A queue's file now carries its own history of
+ceilings. A resumed `limit_reached` task re-spends its arquitecto phase, and
+can spend more than the phases the limit stopped it before; the confirmation
+does not estimate that. Out of scope and unchanged: adding or removing a
+queue's tasks, and how spend is measured.

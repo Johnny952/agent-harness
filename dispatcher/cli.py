@@ -77,6 +77,10 @@ EXIT_NOT_PUSHED = 4
 #: whose push did not land; a queue stopped on a refused push exits 4 as
 #: `merge-task --push` does (`docs/decisions.md` ADR 79).
 EXIT_LIMIT = 5
+#: The smallest `run-queue --limit`, in measured tokens. One phase alone
+#: measures more, so a smaller number is a task count misread as a limit
+#: (`docs/decisions.md` ADR 333).
+MIN_QUEUE_LIMIT = 100_000
 
 
 def _epic_line(cfg: Config, task_id: str) -> str:
@@ -495,14 +499,8 @@ def _run_allowlist(args: argparse.Namespace, cfg: Config, parser: argparse.Argum
     print("\n".join(lines))
 
 
-def main() -> None:
-    # Before the parser, so that even an unparseable invocation logs the way
-    # a real run does.
-    bad_level = _configure_logging()
-    if bad_level:
-        logging.getLogger(__name__).warning(
-            "%s=%r is not a log level; using INFO", _LOG_LEVEL_ENV, bad_level
-        )
+def build_parser() -> argparse.ArgumentParser:
+    """The dispatcher's whole argument parser; `docs/cli.md` is checked against it."""
     parser = argparse.ArgumentParser(prog="ia-harness-dispatcher")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -824,12 +822,15 @@ def main() -> None:
         "the listed order is kept (ADR 132)",
     )
     queue_parser.add_argument(
-        "--limit", type=int,
-        help="The ceiling in measured tokens from the usage log (ADR 79)",
+        "--limit", type=int, metavar="TOKENS",
+        help="The ceiling in measured tokens (input + output + cache, from the "
+        "usage log, ADR 79), checked before each phase; not a number of tasks. "
+        f"At least {MIN_QUEUE_LIMIT} (ADR 333)",
     )
     queue_parser.add_argument(
-        "--parallel", type=int, default=1,
-        help="Cycles at a time, at most the pool's phase slots (sum of "
+        "--parallel", type=int, default=None,
+        help="Cycles at a time (1 for a new queue; a --resume may change the queue's, "
+        "ADR 336), at most the pool's phase slots (sum of "
         "max_concurrent_phases, ADR 252); overlapping surfaces "
         "never write at once (docs/plans/autonomy.md, B-3, ADR 83)",
     )
@@ -839,7 +840,8 @@ def main() -> None:
     )
     queue_parser.add_argument(
         "--resume", metavar="QUEUE_ID",
-        help="Go on with a queue a kill or a stop left, under its own tasks and limit",
+        help="Go on with a queue a kill or a stop left, under its own project and "
+        "tasks; --limit and --parallel may change (ADR 336)",
     )
 
     draft_parser = sub.add_parser(
@@ -921,7 +923,18 @@ def main() -> None:
     import_debt_parser.add_argument(
         "--dry-run", action="store_true", help="Print what would be filed; write nothing",
     )
+    return parser
 
+
+def main() -> None:
+    # Before the parser, so that even an unparseable invocation logs the way
+    # a real run does.
+    bad_level = _configure_logging()
+    if bad_level:
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a log level; using INFO", _LOG_LEVEL_ENV, bad_level
+        )
+    parser = build_parser()
     args = parser.parse_args()
     cfg = load_config(args.config)
 
@@ -1325,41 +1338,15 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
     only one: each cycle is passed `authorized=True` because of it, and a
     resume carries the same, since it adds nothing that was not confirmed.
     """
-    if args.parallel < 1:
-        parser.error("--parallel: at least 1")
-    slots = sum(a.max_concurrent_phases for a in cfg.accounts)
-    if args.parallel > slots:
-        # One cycle per phase slot (ADR 88, ADR 252): a slot no account can
-        # serve only holds its cycle at the next phase.
-        parser.error(
-            f"--parallel: at most {slots}, the pool's phase slots "
-            "(the sum of max_concurrent_phases, ADR 252)"
-        )
-    if args.resume:
-        if (
-            args.task_ids or args.ready or args.limit is not None or args.project
-            or args.parallel != 1
-        ):
-            parser.error("--resume takes the queue's own project, tasks, limit and parallelism")
-        try:
-            queue = queue_mod.resume(cfg, args.resume)
-        except queue_mod.QueueError as exc:
-            parser.error(str(exc))
-    else:
-        if args.ready < 0:
-            parser.error("--ready: at least 0")
-        if not args.project or not (args.task_ids or args.ready) or args.limit is None:
+    def check_floor() -> None:
+        if args.limit < MIN_QUEUE_LIMIT:
             parser.error(
-                "run-queue needs --project, --task-id or --ready, and --limit, or --resume"
+                f"--limit {args.limit}: the limit is in measured tokens "
+                "(input + output + cache, ADR 79), not tasks; "
+                f"at least {MIN_QUEUE_LIMIT}, since one phase alone measures more"
             )
-        try:
-            queue = queue_mod.plan(
-                cfg, args.project, args.task_ids, args.limit, ready=args.ready
-            )
-        except queue_mod.QueueError as exc:
-            parser.error(str(exc))
-        queue.parallel = args.parallel
-        print(queue_mod.confirmation(cfg, queue))
+
+    def confirm() -> None:
         if not args.yes:
             try:
                 answer = input("Start this queue? [y/N] ")
@@ -1368,6 +1355,53 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
             if answer.strip().lower() not in ("y", "yes"):
                 print("not started", file=sys.stderr)
                 raise SystemExit(EXIT_BLOCKED)
+
+    if args.parallel is not None:
+        if args.parallel < 1:
+            parser.error("--parallel: at least 1")
+        slots = sum(a.max_concurrent_phases for a in cfg.accounts)
+        if args.parallel > slots:
+            # One cycle per phase slot (ADR 88, ADR 252): a slot no account can
+            # serve only holds its cycle at the next phase.
+            parser.error(
+                f"--parallel: at most {slots}, the pool's phase slots "
+                "(the sum of max_concurrent_phases, ADR 252)"
+            )
+    if args.resume:
+        if args.task_ids or args.ready or args.project:
+            parser.error(
+                "--resume takes only --limit, --parallel and --yes: "
+                "the project and tasks are the queue's own (ADR 336)"
+            )
+        if args.limit is not None:
+            check_floor()
+        try:
+            known = len(queue_mod.load(cfg, args.resume).changes)
+            queue = queue_mod.reopen(cfg, args.resume, limit=args.limit, parallel=args.parallel)
+        except queue_mod.QueueError as exc:
+            parser.error(str(exc))
+        print(queue_mod.confirmation(cfg, queue))
+        if len(queue.changes) > known:
+            confirm()  # a new ceiling or parallelism is a new yes (C-4, ADR 336)
+        queue_mod.save(cfg, queue)
+    else:
+        if args.ready < 0:
+            parser.error("--ready: at least 0")
+        if not args.project or not (args.task_ids or args.ready) or args.limit is None:
+            parser.error(
+                "run-queue needs --project, --task-id or --ready, and --limit TOKENS, "
+                "or --resume QUEUE_ID"
+            )
+        check_floor()
+        try:
+            queue = queue_mod.plan(
+                cfg, args.project, args.task_ids, args.limit, ready=args.ready
+            )
+        except queue_mod.QueueError as exc:
+            parser.error(str(exc))
+        queue.parallel = 1 if args.parallel is None else args.parallel
+        print(queue_mod.confirmation(cfg, queue))
+        confirm()
         queue.authorized = True
         path = queue_mod.save(cfg, queue)
         print(f"queue {queue.queue_id} saved in {path}; `--resume {queue.queue_id}` goes on from it")

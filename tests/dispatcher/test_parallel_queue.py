@@ -469,7 +469,7 @@ def test_cli_runs_a_parallel_queue_up_to_the_accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         ["dispatch", "--config", str(config), "run-queue", "--project", "proj",
-         "--limit", "10000", "--parallel", "2", "--yes", "--task-id", "T-1", "T-2"],
+         "--limit", "1000000", "--parallel", "2", "--yes", "--task-id", "T-1", "T-2"],
     )
     try:
         cli_mod.main()
@@ -480,7 +480,7 @@ def test_cli_runs_a_parallel_queue_up_to_the_accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         ["dispatch", "--config", str(config), "run-queue", "--project", "proj",
-         "--limit", "10000", "--parallel", "3", "--yes", "--task-id", "T-1"],
+         "--limit", "1000000", "--parallel", "3", "--yes", "--task-id", "T-1"],
     )
     with pytest.raises(SystemExit) as exit_:
         cli_mod.main()
@@ -511,7 +511,7 @@ def test_cli_caps_parallel_at_the_pool_s_phase_slots(
     monkeypatch.setattr(
         "sys.argv",
         ["dispatch", "--config", str(config), "run-queue", "--project", "proj",
-         "--limit", "10000", "--parallel", str(parallel), "--yes", "--task-id", "T-1"],
+         "--limit", "1000000", "--parallel", str(parallel), "--yes", "--task-id", "T-1"],
     )
     if accepted:
         try:
