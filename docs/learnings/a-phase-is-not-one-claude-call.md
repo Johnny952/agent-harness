@@ -51,6 +51,10 @@ fields and `num_turns`, and take cost from the attempt's last line, never a
 sum — see
 [a-resumed-calls-cost-is-the-sessions-running-total](a-resumed-calls-cost-is-the-sessions-running-total.md).
 
+Since T-148 (`docs/decisions.md` ADR 330) a fifth name exists: `phase-restart`,
+the full-prompt call made when a resume after a rate-limit handover is refused —
+see [dispatch-phases-handover-state-is-loop-locals](dispatch-phases-handover-state-is-loop-locals.md).
+
 ## Evidence
 
 `dispatcher/dispatcher.py`: the account loop in `dispatch_phase` and its 429

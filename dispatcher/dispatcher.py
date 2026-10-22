@@ -1568,6 +1568,9 @@ _STALE_CONTEXT_NOTE = (
 def _with_resume_notes(container: str, prompt: str, session_id: str | None) -> str:
     """The prompt, plus what a phase picking a session back up needs to know.
 
+    The prompt is the role prompt, or `_CONTINUE_PROMPT` after a rate limit
+    (ADR 330).
+
     Only ever called on a `--resume`, and both notes are here for the same
     reason: neither is true of a fresh session, and the role's system prompt is
     paid for on every call.
@@ -1589,6 +1592,34 @@ def _with_resume_notes(container: str, prompt: str, session_id: str | None) -> s
     if revive:
         notes.append(revive)
     return "\n\n".join([prompt, *notes])
+
+
+# What a phase handed on by a rate limit is told on `--resume` instead of its
+# briefing, which the session already holds (`docs/decisions.md` ADR 330).
+_CONTINUE_PROMPT = (
+    "Your session was cut off by a rate limit and has now been resumed, on this account or "
+    "another. Your briefing, and everything you did before the cut, are earlier in this session; "
+    "the briefing is not sent again. Continue the interrupted work from where it stopped, and "
+    "finish by returning the structured handoff your briefing asked for."
+)
+
+# The CLI's wording for a `--resume` id it holds no transcript for.
+_RESUME_REFUSED_MARKER = "no conversation found"
+
+
+def _served_a_turn(result: docker_exec.ClaudeResult) -> bool:
+    turns = (result.raw or {}).get("num_turns")
+    # bool is an int; `True` is not a turn count.
+    return isinstance(turns, int) and not isinstance(turns, bool) and turns > 0
+
+
+def _resume_refused(result: docker_exec.ClaudeResult) -> bool:
+    return (
+        not _exec_succeeded(result)
+        and not is_rate_limit_error(result)
+        and not is_auth_error(result)
+        and _RESUME_REFUSED_MARKER in (result.result_text or "").lower()
+    )
 
 
 def _phase_handoff(container: str, result: docker_exec.ClaudeResult) -> dict | None:
@@ -1994,6 +2025,11 @@ def dispatch_phase(
     tried: set[str] = (
         {a.name for a in cfg.accounts if a.name != only_account} if only_account else set()
     )
+    # Handover state, ADR 330: the last attempt ended on a rate limit, and a
+    # rate-limited attempt on the session being resumed served a turn.
+    handed_on_by_limit = False
+    session_briefed = False
+    prior_auth_handover = False
     while True:
         # Exclude `tried` up front rather than picking idle[0] and bailing
         # when it's already been tried: a recheck can recover the very
@@ -2049,10 +2085,23 @@ def dispatch_phase(
         # One per attempt, built once the account is known: a failover is a
         # different account paying for a different call, and gets its own.
         recorder = _UsageRecorder(cfg, task_id, role, round_num, account, model)
+        # Decided here so the cycle log can say which prompt goes (ADR 330).
+        short_prompt = bool(resume_session_id) and handed_on_by_limit and session_briefed
+        if not resume_session_id:
+            how = "in a new session"
+        elif short_prompt:
+            how = f"resuming session {resume_session_id} with the short continue prompt"
+        else:
+            if handed_on_by_limit:
+                reason = "no turn served before the rate limit"
+            elif prior_auth_handover:
+                reason = "handed on by a login failure"
+            else:
+                reason = "resumed by the caller"
+            how = f"resuming session {resume_session_id} with the full prompt ({reason})"
         logger.info(
             "task %s: %s%s goes to account %s, %s",
-            task_id, role, f" round {round_num}" if round_num is not None else "", account,
-            f"resuming session {resume_session_id}" if resume_session_id else "in a new session",
+            task_id, role, f" round {round_num}" if round_num is not None else "", account, how,
         )
         lock_acquired = False
         project_dir = f"{cfg.projects_root}/{slug}"
@@ -2088,13 +2137,16 @@ def dispatch_phase(
                 # fails over twice gets one note about the session it is
                 # actually picking up, not two stacked from earlier accounts.
                 phase_prompt = (
-                    _with_resume_notes(container, prompt, resume_session_id)
+                    _with_resume_notes(
+                        container, _CONTINUE_PROMPT if short_prompt else prompt, resume_session_id,
+                    )
                     if resume_session_id
                     else prompt
                 )
-                result = docker_exec.exec_claude(
-                    container, workdir, phase_prompt,
-                    resume_session_id=resume_session_id, model=model, effort=effort,
+                # One set of arguments for the call and for its restart below,
+                # so the two cannot drift.
+                exec_kwargs = dict(
+                    model=model, effort=effort,
                     timeout_seconds=cfg.phase_timeout_seconds,
                     max_turns=max_turns,
                     # Chosen from the role here rather than passed in by the
@@ -2106,12 +2158,29 @@ def dispatch_phase(
                     stream=True,
                     **_phase_permission_flags(cfg, role, slug),
                 )
+                result = docker_exec.exec_claude(
+                    container, workdir, phase_prompt,
+                    resume_session_id=resume_session_id, **exec_kwargs,
+                )
                 first_event = result.rate_limit_event
                 # Here, before the retries: each of them *replaces* `result`,
                 # so a record taken afterwards would describe the last retry
                 # and not the phase. Written before the gates, too, so that a
                 # crash in one cannot cost the phase's own numbers.
                 recorder.record("phase", result)
+                if handed_on_by_limit and resume_session_id and _resume_refused(result):
+                    # This account holds no transcript for the session
+                    # (ADR 330, 3): start over with the full prompt, no notes.
+                    logger.warning(
+                        "task %s: account %s has no conversation for session %s; the %s phase "
+                        "restarts with the full prompt in a new session",
+                        task_id, account, resume_session_id, role,
+                    )
+                    result = docker_exec.exec_claude(
+                        container, workdir, prompt, resume_session_id=None, **exec_kwargs,
+                    )
+                    first_event = result.rate_limit_event
+                    recorder.record("phase-restart", result)
                 # First of the retries: the gates, the review check and the
                 # shrink all work on a handoff, and this is what makes one.
                 result = _resume_missing_handoff(
@@ -2195,7 +2264,12 @@ def dispatch_phase(
             _park(cfg, account, AccountState.COOLING_DOWN)
             state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
+            session_briefed = bool(result.session_id or resume_session_id) and (
+                session_briefed or _served_a_turn(result)
+            )
             resume_session_id = result.session_id or resume_session_id
+            handed_on_by_limit = True
+            prior_auth_handover = False
             continue
 
         if is_auth_error(result):
@@ -2209,6 +2283,8 @@ def dispatch_phase(
             state_machine.release(cfg.state_dir, account, task_id)
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             resume_session_id = result.session_id or resume_session_id
+            handed_on_by_limit = False
+            prior_auth_handover = True
             continue
 
         if not _exec_succeeded(result):
