@@ -6,10 +6,11 @@
 import { describe, expect, it } from "vitest";
 import type { Task, TaskComment } from "@/lib/api/types";
 import {
-  approveOutcomes,
   parseDiff,
   requestChangesRefusal,
+  resolveConflictRefusal,
   reviewLane,
+  reviewOutcomes,
   reviewVerdicts,
 } from "./review";
 
@@ -105,17 +106,33 @@ describe("reviewVerdicts", () => {
   });
 });
 
-describe("approveOutcomes", () => {
+describe("reviewOutcomes", () => {
   const base: TaskComment = { at: "2026-10-21T10:00:00Z", author: "dispatcher", text: "x" };
-  it("keeps the dispatcher's comments that open `approve at `, in order", () => {
+  it("keeps the dispatcher's comments that open `approve at ` or `resolve conflict,`, in order", () => {
     const merged = { ...base, text: "approve at abc: merged" };
     const refused = { ...base, text: "approve at def: push refused" };
+    const resolved = { ...base, text: "resolve conflict, asked by operator: queued" };
     const operator = { ...merged, author: "operator" };
+    const operatorResolve = { ...resolved, author: "operator" };
     const other = { ...base, text: "started" };
     const textless = { ...base, text: undefined } as unknown as TaskComment;
-    expect(approveOutcomes([merged, operator, other, textless, refused])).toEqual([
-      merged,
-      refused,
-    ]);
+    expect(
+      reviewOutcomes([merged, operator, operatorResolve, other, textless, resolved, refused]),
+    ).toEqual([merged, resolved, refused]);
+  });
+});
+
+describe("resolveConflictRefusal", () => {
+  it("allows only a conflict task known not to be on main", () => {
+    expect(resolveConflictRefusal({ status: "conflict", merged: false })).toBeNull();
+    expect(resolveConflictRefusal({ status: "conflict", merged: true })).toBe(
+      "Already merged into main",
+    );
+    expect(resolveConflictRefusal({ status: "awaiting_review", merged: false })).toBe(
+      "A task in awaiting_review is not in conflict",
+    );
+    expect(
+      resolveConflictRefusal({ status: "conflict", merged: undefined as unknown as boolean }),
+    ).toBe("Not yet known whether it is on main");
   });
 });

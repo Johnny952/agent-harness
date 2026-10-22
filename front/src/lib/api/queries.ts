@@ -5,6 +5,7 @@ import type {
   ApiResult,
   ApproveTaskBody,
   RequestChangesBody,
+  ResolveConflictBody,
   CommandRequestState,
   CommentTaskBody,
   CreateThreadBody,
@@ -189,6 +190,19 @@ export const requestChangesMutation = (qc: QueryClient) =>
     mutationKey: ["board", "request-changes"],
     mutationFn: ({ taskId, body }: { taskId: string; body: RequestChangesBody }) =>
       api.requestChanges(taskId, body),
+    onSettled: (_data, _error, { taskId }) =>
+      Promise.all([
+        invalidateBoard(qc, taskId),
+        qc.invalidateQueries({ queryKey: ["action-queue"] }),
+      ]),
+  });
+
+/** A resolve conflict queues an action and stores no verdict (ADR 288). */
+export const resolveConflictMutation = (qc: QueryClient) =>
+  mutationOptions({
+    mutationKey: ["board", "resolve-conflict"],
+    mutationFn: ({ taskId, body }: { taskId: string; body: ResolveConflictBody }) =>
+      api.resolveConflict(taskId, body),
     onSettled: (_data, _error, { taskId }) =>
       Promise.all([
         invalidateBoard(qc, taskId),

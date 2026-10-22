@@ -97,6 +97,7 @@ import type {
   ApproveTaskResult,
   RequestChangesBody,
   RequestChangesResult,
+  ResolveConflictBody,
   EpicStartResult,
   EpicStopResult,
   ApiResult,
@@ -545,6 +546,18 @@ export function requestChanges(
     `/api/tasks/${encodeURIComponent(taskId)}/request-changes`,
     { method: "POST", body },
   );
+}
+
+/**
+ * Have the integrador resolve a task's merge conflict: `POST
+ * /api/tasks/<id>/resolve-conflict` (ADR 285, ADR 288). The 201 is the queued
+ * action record itself, with no verdict beside it.
+ */
+export function resolveConflict(taskId: string, body: ResolveConflictBody): Promise<ActionRecord> {
+  return readBare<ActionRecord>(`/api/tasks/${encodeURIComponent(taskId)}/resolve-conflict`, {
+    method: "POST",
+    body,
+  });
 }
 
 /**

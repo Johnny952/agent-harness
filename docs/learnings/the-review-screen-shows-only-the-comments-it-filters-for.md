@@ -11,15 +11,17 @@ tree by its auditor.
 `front/src/routes/approvals.tsx` does not list a task's comments: it draws the
 verdicts (`front/src/lib/review.ts` `reviewVerdicts`), the comments pinned to a
 line, and since T-125-S3 the dispatcher's `approve at <commit>:` comments
-(`approveOutcomes`, ADR 264, ADR 270). Any other plain comment lives only on the
-task page.
+(`reviewOutcomes`, ADR 264, ADR 270), which since T-133-S2 also keeps the
+`resolve conflict,` comments (ADR 288). Any other plain comment lives only on
+the task page.
 
 ## Rule
 
 Give the new comment a filter in `front/src/lib/review.ts` beside
-`approveOutcomes` and draw it in `Verdicts`; do not expect it to appear on its own.
+`reviewOutcomes` and draw it in `Verdicts`; do not expect it to appear on its own.
 
 ## Evidence
 
-`docs/decisions.md` ADR 270 (the outcomes list) and `approveOutcomes` with its
-test in `front/src/lib/review.test.ts`, T-125-S3.
+`docs/decisions.md` ADR 270 (the outcomes list) and `reviewOutcomes` (named
+`approveOutcomes` until ADR 288 renamed it) with its test in
+`front/src/lib/review.test.ts`, T-125-S3.

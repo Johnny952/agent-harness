@@ -27,8 +27,10 @@
  * (ADR 276) posts the same body to `/request-changes`
  * (`requestChangesMutation`) with the typed words required and no default; it
  * is on only for an `awaiting_review` task not on main, and its outcome is the
- * task leaving the list and returning at a new tip. There is no resolve route
- * yet, so the verdict panel names the CLI.
+ * task leaving the list and returning at a new tip. *Resolve conflict* (ADR
+ * 288) posts `{project}` to `/resolve-conflict` (`resolveConflictMutation`); it
+ * is drawn on the conflict lane only, and its outcome is a dispatcher comment
+ * opening `resolve conflict,`. The verdict panel still names the CLI.
  */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -53,6 +55,7 @@ import {
   commentTaskMutation,
   commentsQuery,
   requestChangesMutation,
+  resolveConflictMutation,
   taskDiffQuery,
   tasksQuery,
   verdictTaskMutation,
@@ -60,10 +63,11 @@ import {
 import type { Task, TaskComment, TaskDiff } from "@/lib/api/types";
 import { MAX_COMMENT_CHARS, commentAnchor, commentLength, commentProblem } from "@/lib/comments";
 import {
-  approveOutcomes,
   parseDiff,
   requestChangesRefusal,
+  resolveConflictRefusal,
   reviewLane,
+  reviewOutcomes,
   reviewVerdicts,
   type ReviewLane as Tab,
 } from "@/lib/review";
@@ -251,7 +255,7 @@ function VerdictPanel({ task, lane }: { task: Task; lane: Tab }) {
     <div className="panel space-y-1.5 px-3 py-2 text-xs" data-testid="review-verdict">
       <p className="text-muted-foreground">
         {lane === "conflict"
-          ? "The merge stopped on a conflict. Merge the base into the task branch, resolve it there, then merge again:"
+          ? "The merge stopped on a conflict. Resolve conflict, below, has the integrador merge the base into the branch; to do it by hand, merge the base into the task branch, resolve it there, then merge again:"
           : "If the push an approve queued was refused, merge from the CLI (add --push to push too):"}
       </p>
       <Mono className="block select-all text-[11px]">{merge}</Mono>
@@ -304,23 +308,27 @@ function Verdicts({
   const post = useMutation(verdictTaskMutation(qc));
   const approve = useMutation(approveTaskMutation(qc));
   const requestChanges = useMutation(requestChangesMutation(qc));
+  const resolve = useMutation(resolveConflictMutation(qc));
   const [text, setText] = useState("");
-  // The tip and the kind of the review-ending verdict queued from this screen; both
-  // buttons wait for the tip to move (ADR 276).
+  // The tip and the kind of the review-ending verdict queued from this screen; every
+  // button waits for the tip to move (ADR 276, ADR 288).
   const [queuedAt, setQueuedAt] = useState<{
     commit: string;
-    kind: "approve" | "request_changes";
+    kind: "approve" | "request_changes" | "resolve_conflict";
   } | null>(null);
   const given = reviewVerdicts(comments);
-  const outcomes = approveOutcomes(comments);
+  const outcomes = reviewOutcomes(comments);
   const problem = commentProblem(text);
   const over = commentLength(text) > MAX_COMMENT_CHARS;
   const queued = queuedAt?.commit === diff.commit ? queuedAt.kind : null;
-  const anyPending = post.isPending || approve.isPending || requestChanges.isPending;
+  const anyPending =
+    post.isPending || approve.isPending || requestChanges.isPending || resolve.isPending;
   const approveOff =
     lane === "conflict" || task.merged !== false || over || anyPending || queued !== null;
   const refusal = requestChangesRefusal(task);
   const requestOff = refusal !== null || problem !== null || anyPending || queued !== null;
+  const resolveRefusal = resolveConflictRefusal(task);
+  const resolveOff = resolveRefusal !== null || anyPending || queued !== null;
 
   // A refusal carrying `verdict` was recorded and queued nothing; any other is its words.
   const refused = (what: string, err: unknown) => {
@@ -380,6 +388,20 @@ function Verdicts({
           );
         },
         onError: (err) => refused("request for changes", err),
+      },
+    );
+  };
+
+  const sendResolve = () => {
+    if (resolveOff) return;
+    resolve.mutate(
+      { taskId, body: typeof task.project === "string" ? { project: task.project } : {} },
+      {
+        onSuccess: (res) => {
+          setQueuedAt({ commit: diff.commit, kind: "resolve_conflict" });
+          toast.success(`resolve conflict queued as ${res.id}; the outcome comes as a comment`);
+        },
+        onError: (err) => refused("resolve conflict", err),
       },
     );
   };
@@ -470,6 +492,30 @@ function Verdicts({
                   ? "changes requested"
                   : "request changes"}
             </button>
+            {lane === "conflict" && (
+              <button
+                type="button"
+                onClick={sendResolve}
+                disabled={resolveOff}
+                title={
+                  resolveRefusal ??
+                  (queued === "request_changes"
+                    ? "Changes were requested at this tip; the task leaves the list while its cycle reruns"
+                    : queued === "resolve_conflict"
+                      ? "Resolve conflict is queued; the outcome comes as a comment"
+                      : queued === "approve"
+                        ? "An approve is queued at this tip"
+                        : "Have the integrador merge the base into the branch and resolve the conflict")
+                }
+                className="rounded-sm border border-border-strong px-2 py-0.5 hover:text-foreground disabled:opacity-40"
+              >
+                {resolve.isPending
+                  ? "resolving…"
+                  : queued === "resolve_conflict"
+                    ? "resolve queued"
+                    : "resolve conflict"}
+              </button>
+            )}
             <button
               type="submit"
               disabled={problem !== null || anyPending}

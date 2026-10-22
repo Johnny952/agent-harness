@@ -13,7 +13,8 @@ checked against `dispatcher/worker.py` `_request_changes` by its auditor.
 through `tasks.reopen_for_changes`, runs the cycle from the arquitecto and
 finishes the action record with `{commit, outcome, blocked_reason}`. It never
 calls `tasks.add_comment`, so the task's comments carry nothing a filter like
-`front/src/lib/review.ts` `approveOutcomes` could pick up.
+`front/src/lib/review.ts` `reviewOutcomes` (`approveOutcomes` before ADR 288)
+could pick up.
 
 ## Rule
 

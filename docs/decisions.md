@@ -14391,3 +14391,77 @@ key and locks, whether it waits for an account, and what the person reads.
   asks, and the branch does not move while a task is in `conflict`.
 - *No account wait, as approve:* it runs phases, and phases spend quota
   (C-12).
+
+## ADR 288 — The console's *Resolve conflict*: a forward whose body is `{project}` alone, a button in the verdict form on the Conflict lane only, and its comment listed with the outcomes
+
+**Status:** accepted (2026-10-22), T-133-S2's arquitecto. Builds ADR 285's
+last consequence (the console's button and how it shows the comment), on ADR
+270's and ADR 276's shape.
+
+**Context.** ADR 285 serves `POST /api/tasks/<id>/resolve-conflict` behind
+the `BOARD_ACTIONS_TOKEN` bearer: body `{project}` and nothing else, taken
+only on a `conflict` task not merged, a 201 answering the action record alone
+(no verdict, no `{action}` wrapper), refusals `{error}` with no `verdict`
+(409 when an approve, a request for changes or another resolution is queued
+for the task). The worker answers with one dispatcher comment whose text
+opens `resolve conflict,`. Left open: the forward's body, where the button
+sits and when it is off, and where the comment shows.
+
+**Decision.**
+
+1. *The forward.* A seventeenth board pair, `TASK_RESOLVE_CONFLICT`
+   (`/^\/api\/tasks\/([^/]+)\/resolve-conflict$/`), an `actionRoutes` entry
+   with `action: "resolve_conflict"`: the actions bearer, the CSRF checks,
+   the token's 503, the 413 cap, then its own body reader `resolveBody`:
+   a JSON object holding only `project` (else 400, its words opening *A
+   resolve conflict's*), `project` shaped like a slug (`PROJECT_SLUG`, else
+   400); absent, it is `CONSOLE_PROJECT`, and with neither a 503 naming it.
+   The upstream body is rebuilt as `{project}`. A `GET` keeps the api's 404.
+   Board pairs go from sixteen to seventeen, bearer-carrying ones from nine
+   to ten, board writes from twenty-three to twenty-four; the api read
+   count does not move. `reviewBody` is not widened: its fields and words
+   are a review's.
+2. *The client.* `resolveConflict(taskId, body: ResolveConflictBody):
+   Promise<ActionRecord>` over `readBare`, `ResolveConflictBody` being
+   `{project?: string}`, and `resolveConflictMutation` refetching what
+   approve's does (the board, the task's comments, the action queue).
+3. *The button* sits in the verdict form beside *request changes*, and is
+   drawn only when the lane is `conflict`; on *Awaiting review* it is not
+   in the DOM. It posts `{project: task.project}` (omitted when null) — no
+   commit, no text: the typed words stay in the form. It is off, its title
+   saying why, when `resolveConflictRefusal(task)` (`front/src/lib/review.ts`)
+   is not `null` — merged true *Already merged into main*; a status other
+   than `conflict` *A task in <status> is not in conflict*; `merged` not
+   `false` *Not yet known whether it is on main* — while any of the four
+   posts is pending, and once any review-ending verdict was queued at this
+   tip from this screen: the shared `queuedAt` gains the kind
+   `resolve_conflict`, and its title then names the queued one (*Changes
+   were requested at this tip…*, *Resolve conflict is queued…*). Queued, it
+   reads *resolve queued*; a queued resolution turns *request changes* off
+   too, as either review-ending verdict does.
+4. *Its answers.* A 201 is a toast naming the queued action id and saying
+   the outcome comes as a comment. Any refusal — the 409, a 400, the
+   console's 503, a 502 or 504 — is a toast of its words alone through the
+   screen's `refused`: the body carries no `verdict`, so nothing says a
+   verdict was recorded.
+5. *The outcome.* `approveOutcomes` becomes `reviewOutcomes`: the
+   dispatcher's comments opening `approve at ` or `resolve conflict,`, in
+   the order stored, under *outcomes*. The panel's conflict sentence names
+   the button first and keeps the CLI merge line for doing it by hand.
+
+**Consequences.**
+- Like approve, the button is not drawn when the diff did not load, though
+  the route needs no tip: the form it sits in needs one.
+- The *queued* memory is the screen's and lost on reload; the route's 409
+  stops a second one then, and its words name the action queued.
+- A resolution's success is read twice: the comment under *outcomes* and the
+  task leaving the Conflict lane for *Awaiting review* at a new tip.
+
+**Ruled out.**
+- *The button in the verdict panel, drawn without a diff:* it would hold its
+  own pending and queued state apart from the form's, and the shared state
+  is what stops two review-ending verdicts from one screen.
+- *Widening `reviewBody` with a field set:* its errors name a commit and a
+  text, and a resolution sends neither.
+- *Reading the action's `result.outcome`:* the comment says it, as ADR 270
+  ruled for approve.
