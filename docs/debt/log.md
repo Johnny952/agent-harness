@@ -406,3 +406,8 @@ service (ADR 324), and filed two entries its revisor accepted: `T-146-D1`, the
 failure throttle that is per user and not per address until the console
 forwards `X-Forwarded-For`, and `T-146-D2`, verdicts still authored by
 `operator` rather than the signed-in user. It resolved none.
+
+T-152 let `run-queue --resume` take a new `--limit` and `--parallel` (ADR 336)
+and filed one entry its revisor accepted: `T-152-D1`, a `limit_reached` task
+that re-runs from the arquitecto because no cycle starts at a later phase. It
+resolved none.
