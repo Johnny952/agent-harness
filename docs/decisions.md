@@ -15126,6 +15126,71 @@ usable context. The route had no task to build a context from.
   picks a checkout (`_project`), and one rule is what keeps them agreeing.
 - *A field saying whether the filter applied:* nothing reads it, and
   `select` falling back to `eligible` is already the dispatcher's rule.
+## ADR 330 — A phase handed on by a rate limit resumes on a short "continue" prompt; a refused resume restarts it with the full briefing
+
+**Status:** accepted (2026-10-22), T-148's arquitecto. Narrows the README
+*Core* paragraph on rate-limit failover (V5.1, V5.2) and keeps both of
+`_with_resume_notes`'s notes; closes README *Prioritized*, item 3, *A short
+"continue where you left off" prompt after a rate limit*.
+
+**Context.** `dispatch_phase` in `dispatcher/dispatcher.py` hands a
+rate-limited phase to the next account with `--resume <session_id>` and
+re-sends the whole role prompt, the notes appended. The resumed session
+already holds that prompt, so the second copy is quota spent on context the
+session has. A resume the CLI cannot serve — no transcript for that id in the
+account's config — today fails the phase like any error.
+
+**Decision.**
+1. **When the short prompt is sent.** An attempt of `dispatch_phase` resumes
+   on the fixed text `_CONTINUE_PROMPT`, with `_with_resume_notes` appended
+   exactly as on any resume (stale-context note always, revive note when the
+   session left subagents), only when all hold: the previous attempt ended
+   `is_rate_limit_error`; a session id is being resumed; and some rate-limited
+   attempt on that session served a turn — its `raw["num_turns"]` an `int`,
+   not a `bool`, above 0. Once a session has served a turn it stays briefed:
+   a later refusal with no turn keeps the short prompt.
+2. **Everything else is today's prompt.** No session id: the full prompt in a
+   new session. A rate-limited session with no served turn: the full prompt
+   with the notes, on `--resume`. A handover by an auth failure, and a
+   `resume_session_id` a caller passed in (a command verdict, ADR 119): the
+   full prompt with the notes, as now — out of scope here.
+3. **A refused resume restarts the phase.** On an attempt that follows a
+   rate-limit handover (either prompt of 1 or 2), a call that is not
+   `_exec_succeeded`, not a rate limit, not an auth error, and whose
+   `result_text` contains `no conversation found` (case-insensitive, the
+   CLI's wording for an unknown `--resume` id) is followed at once, on the
+   same account and inside the same claim, by one call with the full prompt
+   in a new session and no notes. It replaces the result, is recorded in the
+   usage log as call `"phase-restart"` (the refused call stays `"phase"`),
+   and the retries after it run on it as on any phase call. A second refusal
+   is not possible: the restart resumes nothing. Any other resume failure
+   fails the phase as today.
+4. **The cycle log says which.** The existing INFO line `task %s: %s goes to
+   account %s, resuming session %s` gains a suffix: `with the short continue
+   prompt`, or `with the full prompt (<reason>)`, the reason one of `no turn
+   served before the rate limit`, `handed on by a login failure`, `resumed by
+   the caller`. A refused resume logs one WARNING naming the account, the
+   session and that the phase restarts with the full prompt in a new session.
+
+**Consequences.**
+- A phase cut by a rate limit after it started working pays for one short
+  user turn on the resume instead of its whole briefing again.
+- The briefing a resumed phase acts on is the one its session opened with;
+  a task description edited between the cut and the resume is not seen,
+  as a resumed session never saw it anyway beside the copy it held.
+- A restart loses the session's context but not the worktree; the restart's
+  prompt has no stale-context note, since its session opens on today's tree.
+
+**Ruled out.**
+- *Probing the account's transcript before resuming:* one more `docker
+  exec` per handover for a case the CLI already reports on the call itself,
+  at no turn's cost.
+- *Short prompt on every resume:* the auth handover and the verdict resume
+  are other tasks' rules (out of scope in T-148), and the shrink, gate and
+  review retries already send their own short prompts.
+- *Trusting the session id alone:* a refusal before any turn may leave a
+  session whose transcript holds no briefing to continue; the full prompt
+  costs what it costs today.
 
 ## ADR 324 — A person signs in to the board service: users, password and TOTP, server-side sessions, CSRF and an audit log
 
