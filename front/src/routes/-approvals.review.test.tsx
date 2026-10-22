@@ -510,14 +510,21 @@ describe("the review", () => {
 
     const approveButtonByName = () => screen.getByRole("button", { name: /^approve/ });
 
-    it("is off on the Conflict lane and on a done task, with the reason as its title", async () => {
+    it("is on in the Conflict lane, where it answers a blocked integrador (ADR 278)", async () => {
       await serve([task("T-1", { status: "conflict" })]);
       fireEvent.click(await screen.findByRole("button", { name: "Conflict · 1" }));
       await screen.findByTestId("verdict-form");
       await type("x");
+      expect((requestButton() as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("is off on a done task, with the reason as its title", async () => {
+      await serve([task("T-1", { status: "done" })]);
+      await screen.findByTestId("verdict-form");
+      await type("x");
       const button = requestButton() as HTMLButtonElement;
       expect(button.disabled).toBe(true);
-      expect(button.title).toMatch(/resolve conflict/);
+      expect(button.title).toMatch(/Finished before review/);
     });
 
     it("shows a 409 naming the other queued verdict, with the verdict recorded", async () => {

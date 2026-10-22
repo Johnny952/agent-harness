@@ -45,14 +45,13 @@ describe("reviewLane", () => {
 });
 
 describe("requestChangesRefusal", () => {
-  it("is null on an awaiting_review task not on main", () => {
+  it("is null on an awaiting_review or conflict task not on main", () => {
     expect(requestChangesRefusal({ status: "awaiting_review", merged: false })).toBeNull();
+    expect(requestChangesRefusal({ status: "conflict", merged: false })).toBeNull();
   });
 
-  it("says why for conflict, done, merged and any other status", () => {
-    expect(requestChangesRefusal({ status: "conflict", merged: false })).toMatch(
-      /resolve conflict/,
-    );
+  it("says why for done, merged and any other status", () => {
+    expect(requestChangesRefusal({ status: "conflict", merged: true })).toMatch(/merged/);
     expect(requestChangesRefusal({ status: "done", merged: false })).toMatch(
       /Finished before review/,
     );

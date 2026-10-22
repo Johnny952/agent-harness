@@ -860,22 +860,28 @@ def _request_changes(worker: Worker, record: dict, cancelled: threading.Event) -
     The person's request for changes is on the task's comments, written by
     the board service before this was queued; it and their review comments
     before it go to the arquitecto as its note. The task moves from
-    `awaiting_review` to `pending` first, so the cycle takes it as any start
-    does and an approve on the old tip reads as stale. Not authorized: the
+    `awaiting_review` (or `conflict`) to `pending` first, so the cycle takes it as any start
+    does and an approve on the old tip reads as stale. A `conflict` task is
+    taken too (ADR 278): the person's answer to a design conflict the
+    integrador would not settle. Not authorized: the
     cycle ends in `awaiting_review` again, for the person to review the new
     tip. Ended like a start: cancelled or stopped while held, done otherwise.
     """
     cfg, sd = worker.cfg, worker.state_dir
     task_id, commit = record["task_id"], record["params"]["commit"]
     task = _read_task(cfg, task_id)
-    if task is None or task.status != tasks.AWAITING_REVIEW_STATUS or task.merged:
+    if (
+        task is None
+        or task.status not in (tasks.AWAITING_REVIEW_STATUS, tasks.CONFLICT_STATUS)
+        or task.merged
+    ):
         why = (
             "it has no task file" if task is None
             else "it is merged" if task.merged
             else f"it is {task.status}"
         )
         actions.finish(sd, record["id"], "failed",
-                       error=f"task {task_id} is not awaiting review: {why}")
+                       error=f"task {task_id} is not under review: {why}")
         return
     try:
         comments = tasks.review_comments(cfg.hive_tasks_dir, task_id, commit)
@@ -891,7 +897,7 @@ def _request_changes(worker: Worker, record: dict, cancelled: threading.Event) -
     actions.rewrite(sd, record)
     if not tasks.reopen_for_changes(cfg.hive_tasks_dir, task_id):
         actions.finish(sd, record["id"], "failed",
-                       error=f"task {task_id} left awaiting review before it was reopened")
+                       error=f"task {task_id} left review before it was reopened")
         return
     outcome = core.run_task_cycle(
         cfg, task_id, record["project"], authorized=False,

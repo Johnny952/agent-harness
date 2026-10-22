@@ -77,6 +77,12 @@ PHASE_ROLES = frozenset(role_skills.ROLE_SKILLS) | {project_docs.MAPPER_ROLE}
 #: model. Not a role: the phase runs as the arquitecto, with its skills and
 #: its effort. Unset, the run takes the arquitecto's model.
 DRAFT_ROLE = "arquitecto-draft"
+#: The role that resolves a merge conflict on a task branch (ADR 277). Not in
+#: PHASE_ROLES: it is not a step of the cycle, nothing on the board writes as
+#: it, and `run-phase` does not dispatch it; only `resolve-conflict` does. But
+#: `role_model` and `role_effort` take it, and unset it runs on the
+#: implementador's model, whose code it is merging.
+INTEGRADOR_ROLE = "integrador"
 
 EDITABLE = "editable"
 READ_ONLY = "read-only"
@@ -333,7 +339,8 @@ class Config:
     #: `{"implementador": "claude-sonnet-5-5"}` (`docs/decisions.md` ADR 65).
     #: A model the phase call names itself, the cartografo's `mapping_model`,
     #: still wins over both. The effort escalation does not touch it. Also
-    #: takes `DRAFT_ROLE`, the arquitecto's `draft-specs` run (ADR 82).
+    #: takes `DRAFT_ROLE`, the arquitecto's `draft-specs` run (ADR 82), and
+    #: `INTEGRADOR_ROLE`, which falls back to the implementador's (ADR 277).
     role_model: dict[str, str] = dataclasses.field(default_factory=dict)
     #: How many times a phase that ended without its handoff is resumed with
     #: one "continue" line before it counts as failed. Unattended, a model can
@@ -413,10 +420,13 @@ class Config:
     def model_for(self, role: str) -> str:
         """The `--model` a phase of `role` runs on, every call of it included.
 
-        `DRAFT_ROLE` falls back to the arquitecto's model before the default.
+        `DRAFT_ROLE` falls back to the arquitecto's model before the default,
+        and `INTEGRADOR_ROLE` to the implementador's (ADR 277).
         """
         if role == DRAFT_ROLE and role not in self.role_model:
             return self.model_for("arquitecto")
+        if role == INTEGRADOR_ROLE and role not in self.role_model:
+            return self.model_for("implementador")
         return self.role_model.get(role, self.default_model)
 
 
@@ -501,11 +511,12 @@ def _load_role_effort(raw: dict) -> dict[str, str]:
     block = raw.get("role_effort") or {}
     if not isinstance(block, dict):
         raise ValueError("role_effort must be a mapping of role to effort level")
-    unknown = sorted(set(block) - PHASE_ROLES)
+    accepted = PHASE_ROLES | {INTEGRADOR_ROLE}
+    unknown = sorted(set(block) - accepted)
     if unknown:
         raise ValueError(
             f"role_effort names unknown roles {unknown}; "
-            f"roles are: {', '.join(sorted(PHASE_ROLES))}"
+            f"roles are: {', '.join(sorted(accepted))}"
         )
     return {role: _check_effort(f"role_effort.{role}", level) for role, level in block.items()}
 
@@ -523,7 +534,7 @@ def _load_role_model(raw: dict) -> dict[str, str]:
             f"by mapping_model, which wins over role_model; remove it from "
             f"role_model and set mapping_model instead"
         )
-    accepted = (PHASE_ROLES - {project_docs.MAPPER_ROLE}) | {DRAFT_ROLE}
+    accepted = (PHASE_ROLES - {project_docs.MAPPER_ROLE}) | {DRAFT_ROLE, INTEGRADOR_ROLE}
     unknown = sorted(set(block) - accepted)
     if unknown:
         raise ValueError(

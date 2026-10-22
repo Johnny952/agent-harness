@@ -1389,6 +1389,19 @@ def test_a_request_for_changes_reruns_the_cycle_unauthorized_with_the_comments(
     assert worker_mod._read_task(cfg, "T-1").status == "awaiting_review"
 
 
+def test_a_request_for_changes_on_a_conflict_reopens_it_and_reruns_the_cycle(
+    cfg, worker, changes,
+):
+    rec = request_changes(cfg)
+    tasks.handoff(cfg.hive_tasks_dir, "T-1", tasks.CONFLICT_STATUS, "## integrador\n\nBlocked.")
+    worker.tick()
+    worker.join()
+    [call] = changes.calls
+    assert call["status"] == "pending"
+    assert "- operator: Rename it." in call["changes_requested"]
+    assert where(cfg, rec["id"])[1]["status"] == "done"
+
+
 def test_a_request_for_changes_waits_for_an_account(cfg, worker, changes, accounts):
     accounts["open"] = False
     rec = request_changes(cfg)
@@ -1416,9 +1429,9 @@ def test_a_request_for_changes_waits_for_a_start_on_its_project(cfg, worker, cyc
 
 
 @pytest.mark.parametrize("status, why", [
-    ("pending", "it is pending"), ("conflict", "it is conflict"), ("done", "it is done"),
+    ("pending", "it is pending"), ("done", "it is done"),
 ])
-def test_a_request_for_changes_on_a_task_not_awaiting_review_fails_and_runs_nothing(
+def test_a_request_for_changes_on_a_task_not_under_review_fails_and_runs_nothing(
     cfg, worker, changes, status, why,
 ):
     rec = request_changes(cfg)
@@ -1427,7 +1440,7 @@ def test_a_request_for_changes_on_a_task_not_awaiting_review_fails_and_runs_noth
     worker.join()
     got = where(cfg, rec["id"])[1]
     assert got["status"] == "failed"
-    assert got["error"] == f"task T-1 is not awaiting review: {why}"
+    assert got["error"] == f"task T-1 is not under review: {why}"
     assert got["started_at"] is None
     assert changes.calls == []
 

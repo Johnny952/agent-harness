@@ -129,14 +129,18 @@ default_model: claude-opus-5-5
 
 # A model per role over default_model, on every call that role's phase makes,
 # its handoff resumes included. Roles: arquitecto, implementador, revisor,
-# auditor, and arquitecto-draft for the arquitecto's `draft-specs` run (which
+# auditor, integrador, and arquitecto-draft for the arquitecto's `draft-specs` run (which
 # takes the arquitecto's model when unset). A cartografo entry is refused at
 # load: the cartografo's model is mapping_model, below. An unknown role, or a value that is not a non-empty
 # model ID, is refused at load too. Precedence: role_model, then
 # default_model. The effort escalation changes the effort, never the model.
 # Optional; defaults to none.
+# The integrador (`dispatch resolve-conflict`, docs/decisions.md ADR 277)
+# takes the implementador's entry when it has none of its own, then
+# default_model.
 # role_model:
 #   implementador: claude-sonnet-5-5
+#   integrador: claude-sonnet-5-5
 
 # The models a console thread may pick (docs/decisions.md ADR 169): a
 # non-empty list of model IDs in default_model's form, no duplicate. Optional;

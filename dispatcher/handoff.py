@@ -286,6 +286,32 @@ _COMMAND_REQUESTS_PROPERTY = {
     },
 }
 
+#: The integrador's report (ADR 277): how it resolved each file it was given,
+#: so the revisor and the person read the resolution's intent and not only its
+#: diff; and, when the two sides disagree on the design rather than on lines,
+#: why it stopped. A design conflict is not its to settle: it ends `blocked`
+#: with this reason, touches nothing, and the person answers with request
+#: changes.
+_INTEGRADOR_PROPERTY = {
+    "resolutions": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "A file you were given, relative to the worktree root."},
+                "how": {"type": "string", "description": "What each side wanted there and what the resolution keeps, in one line."},
+            },
+            "required": ["path", "how"],
+            "additionalProperties": False,
+        },
+        "description": "One entry per file you resolved. Empty when blocked.",
+    },
+    "blocked_reason": {
+        "type": "string",
+        "description": "Empty unless status is blocked. Then: the design decision the two sides disagree on, in one or two lines.",
+    },
+}
+
 #: The roles that hand off at all. A role outside this gets no schema, which
 #: means no `--json-schema` flag and the free-text fallback below — the same
 #: way an unknown role gets no skills rather than an error.
@@ -295,6 +321,7 @@ _ROLE_EXTRAS: dict[str, dict] = {
     "implementador": {**_RESOLVED_DEBT_PROPERTY, **_COMMAND_REQUESTS_PROPERTY},
     "revisor": {**_VERDICT_PROPERTY, **_FINDINGS_PROPERTY, **_DEBT_RULINGS_PROPERTY},
     "auditor": {},
+    "integrador": _INTEGRADOR_PROPERTY,
 }
 
 #: What one entry costs: a line a later phase reads, plus the quoting and the
@@ -355,6 +382,11 @@ _BUDGET_BYTES: dict[str, int] = {
     # the rewrite was 27 entries, which is what this pays for at its p90 of
     # 126 bytes an entry.
     "auditor": 4608,
+    # Not measured: no run has resolved a conflict yet. Its work is the files
+    # it was given, and its report is a line per file plus the common fields;
+    # half the default holds a dozen files and keeps the phase short, which a
+    # conflict resolution should be (ADR 277).
+    "integrador": 2048,
 }
 
 _DEFAULT_BUDGET_BYTES = 4096
@@ -922,6 +954,14 @@ def render(payload: dict) -> str:
     paths = _pairs(payload, "paths", "path", "holds")
     if paths:
         parts.append("\n".join(["**Detail**", *(f"- {item}" for item in paths)]))
+
+    resolutions = _pairs(payload, "resolutions", "path", "how")
+    if resolutions:
+        parts.append("\n".join(["**Resolutions**", *(f"- {item}" for item in resolutions)]))
+
+    reason = str(payload.get("blocked_reason") or "").strip()
+    if reason:
+        parts.append(f"**Blocked:** {reason}")
 
     return "\n\n".join(parts)
 

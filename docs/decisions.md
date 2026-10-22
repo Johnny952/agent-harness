@@ -14170,3 +14170,137 @@ what lands.
 - *Running the sweep inside `record_merge`.* It has neither the slug nor a
   container, and it also runs for merges recorded by hand.
 - *A model call.* Git and the test gate decide it.
+
+## ADR 277 — The integrador: `dispatch resolve-conflict` merges the base into the writers' checkout, the role writes only the files it is given, and a design conflict blocks
+
+**Status:** accepted (2026-10-21). Builds `docs/plans/review.md` step 9, the
+dispatcher side, over ADR 274's `conflict` state.
+
+**Context.** ADR 274 moves a task whose branch no longer merges, or whose
+merge turns the test gate red, to `conflict`, and leaves the branch at the
+reviewed tip. Until now the operator resolved it: they merged the base into
+the branch by hand and ran `dispatch merge-task`. The plan names a role for
+this, the integrador, and leaves open its model, how far it may write, and
+what it does when the two sides disagree on the design rather than on lines.
+
+**Decision.**
+
+1. *The verb.* `dispatch resolve-conflict --task-id --project`, under the
+   project's base lock (`resolve-conflict`), with the tree's owner restored
+   after it. It refuses a task that is not in `conflict`, and a writers'
+   checkout holding uncommitted work or not at the branch tip: undoing a
+   failed resolution resets that checkout.
+2. *A merge, never a rebase.* `docker_exec.merge_base_into_writer` merges
+   the base into the task branch with `--no-ff --no-commit` in the writers'
+   checkout. The merge stays in progress, so nothing lands on the branch
+   until the resolution passes.
+   - *Conflicting files* go to the integrador.
+   - *A clean merge* is gated first. Green needs no phase: the dispatcher
+     makes the merge commit and the task is reviewable. Red hands the
+     integrador the tracked files the failure names. A failure that names
+     none is not resolved: the task stays in `conflict`.
+3. *The role.* `integrador`: its own prompt (`project_docs`), and a handoff
+   whose `resolutions` say, per file, what each side wanted and what was
+   kept, plus a `blocked_reason`. Its budget is 2048 characters, half the
+   default, and not measured yet. Its turns are capped at 30. It works in
+   the writers' checkout but is not in `WRITER_ROLES`: the dispatcher, not
+   the per-phase commit, finishes the merge.
+4. *Default: the model is the implementador's.* `model_for("integrador")`
+   falls back to `role_model.implementador` before `default_model`.
+   `role_model.integrador` and `role_effort.integrador` override it.
+5. *Default: the write limit.* The integrador may write only the files it
+   was given: the conflicting files, or for a red gate the files the failure
+   names. The worktree is fingerprinted before and after the phase. Any
+   other path written, a moved HEAD, or a merge ended by the phase fails it.
+   So does a conflict marker left in a file, or a path still unmerged when
+   the dispatcher stages and commits.
+6. *Default: a design conflict blocks.* When the two sides want different
+   behaviour, the integrador touches nothing and ends `blocked` with the
+   decision in `blocked_reason`. The task stays in `conflict`, and its
+   `## integrador` note names the decision and points to request changes.
+   It is not the integrador's to settle.
+7. *Checked as a resolution, not as a task.* After the merge commit
+   (`Merge <base> (<sha>) into agent/task/<id>`):
+   - the decisions-log gate and the test gate run on it;
+   - the revisor reviews only the resolution (`git show --remerge-diff
+     HEAD`);
+   - the auditor runs only when an edit fell outside the conflicting hunks.
+     A file with no markers to anchor to, such as one a failing test named,
+     counts as outside.
+
+   Any failure puts the branch back at its tip (`reset_writer`) and leaves
+   the task in `conflict` with a note saying why.
+8. *Success.* The branch is pushed when `push_task_branch` is on (ADR 271),
+   and the task moves to `awaiting_review` with an `## integrador` note.
+   That note carries the rendered handoff and says that no approval given
+   before the conflict carries over, because the resolution is new code.
+   Review worktrees are dropped.
+
+**Consequences.**
+- A conflict no longer needs the operator's hands unless it is one of
+  design. The resolution lands as one merge commit on the task branch, so
+  the approve's own pre-merge check finds the base already in it.
+- The tip moves, so comments anchored to the old tip go outdated. That is
+  intended: the person reviews the task again.
+- One resolution costs up to three phases (integrador, revisor and
+  sometimes auditor) and two gate runs.
+- Not built yet:
+  - the console button and the board route for *resolve conflict*;
+  - the integrador in `config_writer`'s role list.
+- A blocked integrador is answered with request changes, which ADR 278
+  opens to `conflict`.
+
+**Ruled out.**
+- *A rebase onto the base.* It rewrites the reviewed commits, and every
+  anchored comment with them.
+- *Resolving in the pre-merge scratch checkout.* That checkout is thrown
+  away. The resolution has to be on the branch the person reviews.
+- *A cheaper model by default.* No conflict has been measured yet. The
+  implementador's model is the one that wrote the code on both sides, and
+  the key makes the choice reversible.
+- *Letting the integrador commit.* The dispatcher checks the write limit
+  before anything lands, which a phase-made commit would get ahead of.
+- *Re-running the whole review.* The task was reviewed. Only the resolution
+  is new, and the person reviews the task again anyway.
+
+## ADR 278 — *Request changes* is taken on a `conflict` task too: it answers a design conflict the integrador will not settle
+
+**Status:** accepted (2026-10-21). Supersedes the "`awaiting_review` only"
+part of ADR 272 and ADR 276's refusal of a `conflict` task. Decided by the
+user on 2026-10-21.
+
+**Context.** ADR 277's integrador blocks on a design conflict: it touches
+nothing, the task stays in `conflict`, and its note tells the person to send
+the task back with *request changes*. ADR 272's route, the worker's
+`_request_changes` and ADR 276's console button all refused a `conflict`
+task, saying it waits on *resolve conflict*. So the note pointed at a verdict
+that every layer refused, and the only way out was by hand.
+
+**Decision.**
+
+1. *`conflict` is under review for a request for changes.*
+   `tasks.record_verdict`, `tasks.reopen_for_changes`, the worker's guard
+   and the console's `requestChangesRefusal` take an `awaiting_review` or a
+   `conflict` task whose work is not on main. The flow is ADR 272's
+   unchanged: the verdict line, the queued action, the task to `pending`
+   and the cycle rerun from the arquitecto on the task branch.
+2. *Any merged task is refused*, `conflict` included, with "it is merged".
+3. *Always, not only after a blocked integrador.* The person may prefer a
+   rerun to a resolution for any conflict. Nothing records why a task is in
+   `conflict`, so telling the two apart would need a new field for no gain.
+
+**Consequences.**
+- The integrador's blocked note now points at a verdict that is taken.
+- Reopening is safe: an integrador that fails or blocks resets the writers'
+  checkout to the branch tip (`reset_writer`), and a review check never
+  touched the branch, so the cycle starts from the reviewed tip.
+- *Approve* on a `conflict` task is unchanged: it waits on *resolve
+  conflict*, then a new approve.
+- The rerun costs the four roles that ADR 277 avoids for a plain textual
+  conflict. That is the person's choice to make per task.
+
+**Ruled out.**
+- *Only after a blocked integrador.* It needs a record of the block that
+  nothing reads yet, and refuses a choice the person may reasonably make.
+- *A separate verdict for a design conflict.* It would do exactly what
+  request changes does.

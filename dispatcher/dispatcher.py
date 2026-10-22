@@ -1817,7 +1817,10 @@ def _refuse_review_writes(
     construction, costs one turn in a session that is already warm, and is
     only spent when the reviewer actually wrote something.
     """
-    if role in docker_exec.WRITER_ROLES:
+    if role in docker_exec.WRITER_ROLES or role == docker_exec.INTEGRADOR_ROLE:
+        # The integrador writes the writers' checkout on purpose; what it
+        # may write is checked by resolve_conflict, against the files it
+        # was given (ADR 277).
         return result
     if not _exec_succeeded(result) or is_rate_limit_error(result):
         # A phase that did not finish has no handoff to correct, and a
@@ -2528,8 +2531,9 @@ def left_behind_report(cfg: Config, task_id: str, role: str | None = None) -> li
 
 
 #: The status a task gets when the pre-merge check stops its merge
-#: (`docs/plans/autonomy.md` *Decisions*, 2). The integrador resolves it once
-#: that role exists; until then, the operator.
+#: (`docs/plans/autonomy.md` *Decisions*, 2). `dispatch resolve-conflict`
+#: hands it to the integrador (ADR 277); the operator can still resolve it by
+#: hand.
 CONFLICT_STATUS = tasks.CONFLICT_STATUS
 
 #: The heading of the note the pre-merge check appends to the task file.
@@ -2760,6 +2764,351 @@ def _passed(cfg: Config, task_id: str, detail: str) -> PreMergeVerdict:
         except Exception as exc:
             logger.warning("task %s: could not clear its conflict status: %s", task_id, exc)
     return PreMergeVerdict(True, detail)
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolveOutcome:
+    """Whether resolve conflict put the task back in review, and the line that says why."""
+
+    resolved: bool
+    detail: str
+
+
+#: The heading of the note resolve conflict appends to the task file (ADR 277).
+INTEGRADOR_HEADING = "## integrador"
+
+#: The integrador's turn budget: a resolution is a few files, not a task.
+INTEGRADOR_MAX_TURNS = 30
+
+_HUNK_START = "<<<<<<<"
+_HUNK_END = ">>>>>>>"
+
+
+def _edits_outside_hunks(marked: str | None, resolved: str | None) -> bool:
+    """Whether `resolved` changed `marked` anywhere outside its conflicting hunks.
+
+    `marked` is the file as the merge left it, markers and all. Every line
+    outside a `<<<<<<<` ... `>>>>>>>` block has to be in `resolved`, in order,
+    with only the hunks' replacements between them. A file with no markers to
+    anchor to (one a failing test named, a modify/delete conflict, a file the
+    resolution removed) is counted as edited outside: there is no hunk that
+    says where the edit was allowed, so the auditor reads it (ADR 277).
+    """
+    if marked is None or resolved is None:
+        return True
+    segments: list[list[str]] = [[]]
+    inside = found = False
+    for line in marked.splitlines(keepends=True):
+        if line.startswith(_HUNK_START):
+            inside = found = True
+            continue
+        if inside:
+            if line.startswith(_HUNK_END):
+                inside = False
+                segments.append([])
+            continue
+        segments[-1].append(line)
+    if not found or inside:
+        return True
+    texts = ["".join(segment) for segment in segments]
+    head, tail = texts[0], texts[-1]
+    if not resolved.startswith(head) or not resolved.endswith(tail):
+        return True
+    pos, end = len(head), len(resolved) - len(tail)
+    if end < pos:
+        return True
+    for middle in texts[1:-1]:
+        found_at = resolved.find(middle, pos, end)
+        if found_at < 0:
+            return True
+        pos = found_at + len(middle)
+    return False
+
+
+def _paths_named(text: str, paths: list[str]) -> list[str]:
+    """The tracked `paths` that `text` names, each as a whole path."""
+    named = []
+    for path in paths:
+        pattern = r"(?<![\w./-])" + re.escape(path) + r"(?![\w/-]|\.\w)"
+        if re.search(pattern, text):
+            named.append(path)
+    return named
+
+
+def _gate_resolution(
+    cfg: Config, container: str, workdir: str, project_dir: str, task_id: str,
+) -> str | None:
+    """The decisions-log gate and the test gate on the writers' checkout.
+
+    None when both pass, otherwise the failure as one line. A gate that could
+    not finish raises: there is nothing to resolve, only something to run again.
+    """
+    duplicated = gates.decisions_log(container, workdir)
+    if duplicated:
+        return f"`{duplicated[0].gate}` {duplicated[0].detail}"
+    if not cfg.gates_enabled:
+        return None
+    log_path = os.path.join(
+        context_transfer.ensure_scratch_dir(cfg.hive_tasks_dir, task_id),
+        "gates-resolve.log",
+    )
+    report = gates.run(
+        container, workdir, project_dir,
+        test_timeout_seconds=cfg.gates_test_timeout_seconds,
+        test_log_path=log_path,
+    )
+    if not report.blocking:
+        return None
+    failed = "; ".join(
+        f"`{f.gate}` {f.detail}" for f in report.findings if f.level == gates.BLOCKING
+    )
+    return f"{failed} (log: {log_path})"
+
+
+def _still_in_conflict(cfg: Config, task_id: str, detail: str, why: str) -> ResolveOutcome:
+    """Leave the task in `conflict` with a note saying why the resolution did not land."""
+    note = (
+        f"{INTEGRADOR_HEADING}\n\nNot resolved: {why}. The branch was put back where it "
+        "was; the task waits on resolve conflict again, or on request changes when the "
+        "two sides disagree on the design."
+    )
+    try:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, CONFLICT_STATUS, note)
+    except Exception as exc:
+        logger.warning("task %s: could not record the resolution on the task: %s", task_id, exc)
+    return ResolveOutcome(False, detail)
+
+
+_NO_CARRY_OVER = (
+    "An approval given before the conflict does not carry over: review the task again."
+)
+
+
+def resolve_conflict(cfg: Config, container: str, task_id: str, slug: str) -> ResolveOutcome:
+    """Resolve a task the review check moved to `conflict`, and put it back in review.
+
+    `docs/plans/review.md` step 9 and ADR 277. The base is merged into the
+    task branch again, in the writers' checkout and never by rebase, and
+    left uncommitted:
+
+    - Conflicting files go to the integrador, which may write only those.
+    - A clean merge is gated first. Green needs no phase: the merge commit is
+      made and the task is reviewable. Red hands the integrador the tracked
+      files the failure names, and only those.
+
+    After the phase the dispatcher checks what it wrote against that set,
+    finishes the merge commit, runs the test gate and the revisor on the
+    resolution alone, and the auditor only when an edit fell outside the
+    conflicting hunks. Any step that fails puts the branch back at its tip
+    and leaves the task in `conflict` with a note; a `blocked` integrador (a
+    design conflict, not its to settle) does the same, naming the decision.
+    Success moves the task to `awaiting_review`: the resolution is new code,
+    so no approval from before carries over.
+    """
+    status = _task_status(cfg, task_id)
+    if status != CONFLICT_STATUS:
+        return ResolveOutcome(False, f"task {task_id} is {status}, not {CONFLICT_STATUS}")
+    try:
+        cfg = projects.settings_for(cfg, slug)
+    except projects.RecordError as exc:
+        return ResolveOutcome(False, f"task {task_id}: project {slug}: {exc}")
+    project_dir = f"{cfg.projects_root}/{slug}"
+    branch = docker_exec.task_branch(task_id)
+    try:
+        outcome = docker_exec.merge_base_into_writer(container, cfg.projects_root, slug, task_id)
+    except Exception as exc:
+        return ResolveOutcome(False, f"task {task_id}: resolve conflict could not run: {exc}")
+    if outcome.refused:
+        return ResolveOutcome(False, f"task {task_id}: resolve conflict refused: {outcome.detail}")
+    workdir, tip = outcome.workdir, outcome.tip
+    merged = f"{outcome.base} at {(outcome.base_commit or '')[:7]}"
+
+    def undo(detail: str, why: str) -> ResolveOutcome:
+        try:
+            docker_exec.reset_writer(container, workdir, tip)
+        except Exception as exc:
+            logger.warning("task %s: could not put %s back at %s: %s", task_id, branch, tip[:7], exc)
+            detail = f"{detail}; the checkout was NOT put back: {exc}"
+        return _still_in_conflict(cfg, task_id, f"task {task_id}: not resolved: {detail}", why)
+
+    message = f"Merge {outcome.base} ({(outcome.base_commit or '')[:7]}) into {branch}"
+    try:
+        marked: dict[str, str | None] = {}
+        if outcome.conflicted:
+            allowed = list(outcome.conflicts)
+            for path in allowed:
+                marked[path] = docker_exec.read_file(container, workdir, path)
+            cause = f"merging {merged} in conflicts in {', '.join(allowed)}"
+        else:
+            failure = _gate_resolution(cfg, container, workdir, project_dir, task_id)
+            if failure is None:
+                if docker_exec.merge_in_progress(container, workdir):
+                    docker_exec.finish_merge_commit(container, workdir, [], message)
+                    done = f"{merged} merged in cleanly and the test gate is green"
+                else:
+                    done = f"{branch} already contains {merged} and the test gate is green"
+                return _back_in_review(
+                    cfg, container, project_dir, slug, task_id, tip,
+                    f"{done}; no phase was needed. {_NO_CARRY_OVER}",
+                )
+            allowed = _paths_named(failure, docker_exec.tracked_files(container, workdir))
+            if not allowed:
+                return undo(
+                    f"the test gate is red on {merged} merged in and names no file: {failure}",
+                    f"the test gate is red on {merged} merged in, and the failure names no "
+                    f"tracked file to hand the integrador: {failure}",
+                )
+            for path in allowed:
+                marked[path] = None
+            cause = f"the test gate is red on {merged} merged in: {failure}"
+
+        before = docker_exec.worktree_fingerprint(container, workdir)
+        description = tasks.read_description(cfg.hive_tasks_dir, task_id) or ""
+        task_file = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+        scratch = context_transfer.scratch_dir(cfg.hive_tasks_dir, task_id)
+        harness = learnings.harness_fingerprint(
+            cfg.permission_mode, cfg.allowed_tools, docker_exec.WRITER_ROLES,
+        )
+        files = "\n".join(f"- `{path}`" for path in allowed)
+        note = (
+            f"Why the task is in conflict: {cause}.\n\n"
+            f"The files you may write, and no others:\n{files}"
+        )
+        result = dispatch_phase(
+            cfg, task_id, slug, docker_exec.INTEGRADOR_ROLE,
+            _role_prompt(
+                docker_exec.INTEGRADOR_ROLE, task_id, slug, task_file, description,
+                scratch, cfg.hive_tasks_dir, harness=harness,
+                max_turns=INTEGRADOR_MAX_TURNS, note=note,
+            ),
+            model=cfg.model_for(docker_exec.INTEGRADOR_ROLE),
+            effort=cfg.effort_for(docker_exec.INTEGRADOR_ROLE),
+            max_turns=INTEGRADOR_MAX_TURNS,
+        )
+        payload = result.handoff or {}
+        try:
+            context_transfer.save_handoff(
+                cfg.hive_tasks_dir, task_id, docker_exec.INTEGRADOR_ROLE, result.handoff,
+                session_id=result.session_id, account=result.account,
+            )
+        except Exception as exc:
+            logger.warning("task %s: could not keep the integrador's handoff: %s", task_id, exc)
+        if not result.success:
+            return undo("the integrador phase did not finish", "the integrador phase did not finish")
+        if handoff.blocked(payload):
+            reason = str(payload.get("blocked_reason") or "no reason given").strip()
+            return undo(
+                f"the integrador blocked: {reason}",
+                f"the integrador blocked on a design conflict: {reason}. Answer it with "
+                "request changes",
+            )
+
+        after = docker_exec.worktree_fingerprint(container, workdir)
+        written = sorted(
+            path for path in set(before) | set(after) if before.get(path) != after.get(path)
+        )
+        outside = [path for path in written if path not in allowed]
+        if outside:
+            return undo(
+                f"the integrador wrote outside the files it was given: {', '.join(outside)}",
+                f"the integrador wrote outside the files it was given ({', '.join(outside)})",
+            )
+        moved = docker_exec.resolve_commit(container, workdir, "HEAD") != tip
+        if moved or (
+            not outcome.up_to_date and not docker_exec.merge_in_progress(container, workdir)
+        ):
+            return undo(
+                "the integrador moved HEAD or ended the merge itself",
+                "the integrador moved HEAD or ended the merge itself",
+            )
+        try:
+            docker_exec.finish_merge_commit(container, workdir, allowed, message)
+        except RuntimeError as exc:
+            return undo(f"the merge could not be finished: {exc}", f"the merge could not be finished: {exc}")
+
+        failure = _gate_resolution(cfg, container, workdir, project_dir, task_id)
+        if failure is not None:
+            return undo(
+                f"the test gate is red on the resolution: {failure}",
+                f"the test gate is red on the resolution: {failure}",
+            )
+
+        review_note = (
+            "You are reviewing a conflict resolution, not the task: the task was reviewed "
+            f"before. The integrador resolved {cause}. Review only the resolution, the "
+            "merge commit at the branch tip: `git show --remerge-diff HEAD` shows what it "
+            "changed against the merge git would have made (`git diff HEAD^1 HEAD` where "
+            "that flag is missing). Judge whether it keeps what each side meant."
+        )
+        review = dispatch_phase(
+            cfg, task_id, slug, "revisor",
+            _role_prompt(
+                "revisor", task_id, slug, task_file, description, scratch,
+                cfg.hive_tasks_dir, harness=harness, note=review_note,
+            ),
+            model=cfg.model_for("revisor"),
+            effort=cfg.effort_for("revisor"),
+        )
+        if not review.success or not revisor_approved(review.result_text, review.handoff):
+            return undo(
+                "the revisor did not approve the resolution",
+                "the revisor did not approve the resolution; its findings are in its handoff",
+            )
+
+        audited = [
+            path for path in allowed
+            if _edits_outside_hunks(marked.get(path), docker_exec.read_file(container, workdir, path))
+        ]
+        audit_line = ""
+        if audited:
+            audit_note = (
+                "Audit the conflict resolution at the branch tip, not the task: it changed "
+                f"lines outside the conflicting hunks in {', '.join(audited)}. Check those "
+                "edits against what each side meant, and file what the resolution taught."
+            )
+            audit = dispatch_phase(
+                cfg, task_id, slug, "auditor",
+                _role_prompt(
+                    "auditor", task_id, slug, task_file, description, scratch,
+                    cfg.hive_tasks_dir, harness=harness, note=audit_note,
+                ),
+                model=cfg.model_for("auditor"),
+                effort=cfg.effort_for("auditor"),
+            )
+            if not audit.success or (audit.handoff or {}).get("status") == "blocked":
+                return undo(
+                    "the auditor did not pass the resolution",
+                    "the auditor did not pass the edits outside the conflicting hunks",
+                )
+            audit_line = f" The auditor read the edits outside the hunks in {', '.join(audited)}."
+    except Exception as exc:
+        return undo(f"resolve conflict did not finish: {exc}", f"resolve conflict did not finish: {exc}")
+
+    body = handoff.render(payload) if payload else ""
+    return _back_in_review(
+        cfg, container, project_dir, slug, task_id, tip,
+        f"Resolved {cause}.{audit_line} {_NO_CARRY_OVER}" + (f"\n\n{body}" if body else ""),
+    )
+
+
+def _back_in_review(
+    cfg: Config, container: str, project_dir: str, slug: str, task_id: str, tip: str, text: str,
+) -> ResolveOutcome:
+    """Push when the project asks for it, and hand the task back to review."""
+    pushed = ""
+    if cfg.pushes_task_branch(slug):
+        pushed = _push_task_branch(
+            cfg, container, project_dir, slug, task_id, docker_exec.INTEGRADOR_ROLE, tip,
+        )
+    note = f"{INTEGRADOR_HEADING}\n\n{text}" + (f"\n\n{pushed}" if pushed else "")
+    try:
+        tasks.handoff(cfg.hive_tasks_dir, task_id, tasks.AWAITING_REVIEW_STATUS, note)
+    except Exception as exc:
+        return ResolveOutcome(
+            False, f"task {task_id}: resolved on the branch, but the task was not moved: {exc}",
+        )
+    _drop_review_worktrees(cfg, task_id, slug)
+    return ResolveOutcome(True, f"task {task_id}: resolved; back in awaiting_review")
 
 
 def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
