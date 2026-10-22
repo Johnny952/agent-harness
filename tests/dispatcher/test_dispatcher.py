@@ -1945,6 +1945,196 @@ def test_a_failover_leaves_the_whole_handover_in_the_log(tmp_path, monkeypatch, 
     )
 
 
+def _two_accounts(tmp_path):
+    return _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+        ],
+    )
+
+
+def _three_accounts(tmp_path):
+    return _make_config(
+        tmp_path,
+        accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1"),
+            AccountConfig(name="cuenta2", container="agent-cuenta2"),
+            AccountConfig(name="cuenta3", container="agent-cuenta3"),
+        ],
+    )
+
+
+def _scripted_phase(monkeypatch, behave):
+    """`behave(container, prompt, resume_session_id)` answers each phase call;
+    the usage probe is answered here. Returns the phase calls in order."""
+    calls = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(session_id=None, result_text=_USAGE_TEXT, raw={})
+        calls.append(dict(container=container, prompt=prompt, resume_session_id=resume_session_id))
+        return behave(container, prompt, resume_session_id)
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+    return calls
+
+
+def _limited(session=_SESSION_UUID, **raw):
+    return ClaudeResult(session_id=session, result_text="usage limit reached", raw={"is_error": True, **raw})
+
+
+def _done():
+    return ClaudeResult(session_id=_SESSION_UUID, result_text="done it", raw={"is_error": False})
+
+
+def _cut_on_first_account(monkeypatch, limited):
+    return _scripted_phase(
+        monkeypatch, lambda container, prompt, resume: limited if container == "agent-cuenta1" else _done(),
+    )
+
+
+def test_a_rate_limited_phase_resumes_on_the_short_continue_prompt(tmp_path, monkeypatch, caplog) -> None:
+    cfg = _two_accounts(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    calls = _cut_on_first_account(monkeypatch, _limited(num_turns=3))
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert result.success is True
+    assert calls[1]["resume_session_id"] == _SESSION_UUID
+    assert calls[1]["prompt"].startswith(dispatcher_mod._CONTINUE_PROMPT)
+    assert "build the thing" not in calls[1]["prompt"], "the briefing is not sent again"
+    assert "git status --short" in calls[1]["prompt"], "the stale-context note still rides on it"
+    assert any(
+        f"goes to account cuenta2, resuming session {_SESSION_UUID} with the short continue prompt" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_the_subagent_note_rides_on_the_short_continue_prompt(tmp_path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    asked =_fake_subagents(monkeypatch)
+    calls = _cut_on_first_account(monkeypatch, _limited(num_turns=3))
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert calls[1]["prompt"].startswith(dispatcher_mod._CONTINUE_PROMPT)
+    assert "SendMessage" in calls[1]["prompt"]
+    assert _SUBAGENT.id in calls[1]["prompt"]
+    assert ("agent-cuenta2", _SESSION_UUID) in asked
+
+
+def test_a_rate_limit_with_no_session_id_restarts_on_the_full_prompt(tmp_path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    _fake_subagents(monkeypatch)
+    calls = _cut_on_first_account(monkeypatch, _limited(session=None, num_turns=3))
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert calls[1]["resume_session_id"] is None
+    assert calls[1]["prompt"] == "build the thing"
+
+
+@pytest.mark.parametrize("raw", [{}, {"num_turns": 0}, {"num_turns": True}])
+def test_a_rate_limit_before_any_turn_keeps_the_full_prompt_on_resume(tmp_path, monkeypatch, caplog, raw) -> None:
+    cfg = _two_accounts(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    calls = _cut_on_first_account(monkeypatch, _limited(**raw))
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert calls[1]["resume_session_id"] == _SESSION_UUID
+    assert calls[1]["prompt"].startswith("build the thing\n\n")
+    assert dispatcher_mod._CONTINUE_PROMPT not in calls[1]["prompt"]
+    assert any("no turn served before the rate limit" in r.getMessage() for r in caplog.records)
+
+
+def test_a_refused_resume_restarts_the_phase_with_the_full_prompt(tmp_path, monkeypatch, caplog) -> None:
+    cfg = _two_accounts(tmp_path)
+    _fake_subagents(monkeypatch)
+
+    def behave(container, prompt, resume):
+        if container == "agent-cuenta1":
+            return _limited(num_turns=3)
+        if resume:
+            return ClaudeResult(
+                session_id=None, result_text=f"No conversation found with session ID: {resume}",
+                raw={"is_error": True},
+            )
+        return _done()
+
+    calls = _scripted_phase(monkeypatch, behave)
+
+    with caplog.at_level("INFO", logger=dispatcher_mod.logger.name):
+        result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert result.success is True
+    assert [c["container"] for c in calls] == ["agent-cuenta1", "agent-cuenta2", "agent-cuenta2"]
+    assert calls[2]["resume_session_id"] is None
+    assert calls[2]["prompt"] == "build the thing", "the full prompt, and no notes"
+    assert [(r["account"], r["call"]) for r in _usage_lines(cfg)] == [
+        ("cuenta1", "phase"), ("cuenta2", "phase"), ("cuenta2", "phase-restart"),
+    ]
+    assert any(
+        r.levelname == "WARNING" and "restarts with the full prompt" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_session_that_served_a_turn_stays_briefed_across_a_second_limit(tmp_path, monkeypatch) -> None:
+    cfg = _three_accounts(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+
+    def behave(container, prompt, resume):
+        if container == "agent-cuenta1":
+            return _limited(num_turns=3)
+        if container == "agent-cuenta2":
+            return _limited(num_turns=0)
+        return _done()
+
+    calls = _scripted_phase(monkeypatch, behave)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert [c["container"] for c in calls] == ["agent-cuenta1", "agent-cuenta2", "agent-cuenta3"]
+    assert calls[2]["prompt"].startswith(dispatcher_mod._CONTINUE_PROMPT)
+
+
+def test_an_auth_handover_and_a_callers_resume_keep_the_full_prompt(tmp_path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    _fake_subagents(monkeypatch, agents=())
+    auth = ClaudeResult(
+        session_id=_SESSION_UUID, result_text="Invalid API key · Please run /login",
+        raw={"is_error": True, "num_turns": 3},
+    )
+    assert dispatcher_mod.is_auth_error(auth)
+    calls = _cut_on_first_account(monkeypatch, auth)
+
+    dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "build the thing")
+
+    assert calls[1]["prompt"].startswith("build the thing\n\n")
+    assert dispatcher_mod._CONTINUE_PROMPT not in calls[1]["prompt"]
+
+    refused = ClaudeResult(
+        session_id=None, result_text="No conversation found with session ID: x", raw={"is_error": True},
+    )
+    calls = _scripted_phase(monkeypatch, lambda container, prompt, resume: refused)
+
+    result = dispatcher_mod.dispatch_phase(
+        cfg, "task-2", "myproj", "implementador", "build the thing", resume_session_id=_SESSION_UUID,
+    )
+
+    assert result.success is False
+    assert len(calls) == 1, "a caller's refused resume is not restarted"
+
+
 def test_parking_an_account_over_its_quota_threshold_says_so(tmp_path, monkeypatch, caplog) -> None:
     """The pre-emptive park is the quiet twin of the reactive one: the account
     leaves the pool without having refused anything, so the numbers that took
