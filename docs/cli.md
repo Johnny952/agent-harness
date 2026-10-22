@@ -234,7 +234,7 @@ Exits: 0, 1, 2.
 Runs a confirmed list of tasks, one cycle each, in dependency order, until they
 are done or the token limit is reached (ADR 79). A new queue needs `--project`,
 `--task-id` and/or `--ready`, and `--limit`; `--resume` goes on with a saved one
-and takes no other option.
+and takes only `--limit`, `--parallel` and `--yes` (ADR 336).
 
 | Argument | Unit | Default | What it does |
 |---|---|---|---|
@@ -242,16 +242,24 @@ and takes no other option.
 | `--task-id` | task ids, repeatable | none | The tasks to run, each with a stored description; the listed order is kept. |
 | `--ready` | `N` tasks | `0` | Add the first N tasks of the board's Ready order after the listed ones (ADR 132). At least one of `--task-id` and `--ready` is needed. |
 | `--limit` | `TOKENS`, measured tokens, not tasks | none; required unless `--resume` | The ceiling on the queue's spend: input + output + cache creation + cache read, summed from the usage log (ADR 79). At least `100000` (ADR 333); a smaller value is a usage error (exit 2) and nothing is saved or started. |
-| `--parallel` | cycles at a time | `1` | At most the sum of `max_concurrent_phases` over the accounts (ADR 252); tasks with overlapping surfaces never write at once (ADR 83). |
+| `--parallel` | cycles at a time | `1` for a new queue; the queue's own on `--resume` | At most the sum of `max_concurrent_phases` over the accounts (ADR 252); tasks with overlapping surfaces never write at once (ADR 83). With `--resume` it changes the queue's parallelism (ADR 336). |
 | `--yes` | flag | off | Start without asking; the confirmation screen is still printed. |
-| `--resume` | `QUEUE_ID` | none | Go on with a saved queue under its own project, tasks, limit and parallelism. Combined with any other option it is a usage error. |
+| `--resume` | `QUEUE_ID` | none | Go on with a saved queue under its own project and tasks. Only `--limit`, `--parallel` and `--yes` may go with it; `--project`, `--task-id` and `--ready` are a usage error (exit 2) that names them (ADR 336). |
 
 The limit is checked before each task and before each phase. A phase that has
 started finishes, so a queue can pass its limit by one phase. When the spend has
 reached the limit no new phase or task starts, the queue's status becomes
 `limit_reached`, the tasks it stopped are left in that state, and the command
-exits 5. Raise the limit by planning a new queue, or leave it: `--resume` keeps
-the old limit.
+exits 5. Raise the limit on the same queue with `--resume QUEUE_ID --limit
+TOKENS` (ADR 336): the new limit must be at least `100000` and above the spend
+already recorded in the queue, otherwise it is a usage error (exit 2) naming
+both numbers and nothing runs. The tasks the limit stopped go back to pending
+and run again from the arquitecto, their earlier spend still counted; tasks
+already merged, finished or failed do not run again. A resume that changes the
+limit or `--parallel` asks the same yes as a new queue (unless `--yes`), prints
+the effective values and a "Changed on resume" list, and records each change
+(old and new value, UTC time) under `changes` in the queue file. A plain
+`--resume` keeps the saved limit and asks nothing.
 
 Queue state is saved in `<state_dir>/queues/<queue_id>.json`, written
 atomically on every change; ids look like `q-20261022T120000Z-ab12`. The

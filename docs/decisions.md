@@ -15402,3 +15402,73 @@ look at it without running a command.
 an exit code, now fails the suite until `docs/cli.md` says the same. What an
 argument *does* is still prose and can still drift; only the names and the
 codes are checked.
+
+## ADR 336 — `run-queue --resume` takes a new `--limit` and `--parallel`; the project and the tasks stay the queue's own
+
+**Status:** accepted (2026-10-22), T-152.
+
+**Context.** ADR 79, 5 made `--resume <id>` reload a saved queue and go on
+under the file's own project, tasks, limit and parallelism, and the CLI
+refused every other option with it. ADR 333, 3 repeated that a resume is not
+re-checked against the floor. A queue that stopped `limit_reached` therefore
+stops again at once on a resume: its spend already reached the same limit.
+The owner's only way on was a new queue over the same tasks, which loses the
+record that ties the runs together. Nothing today ever runs a task the queue
+recorded `limit_reached` again, plain resume or not: `_next` takes only
+`pending` tasks. Charter C-4 (*Amended* 2026-10-15) makes the limit the
+ceiling of the owner's authorization and the parallelism part of what was
+confirmed, so changing either is a new authorization by a person.
+
+**Decision.**
+1. *What a resume takes.* `run-queue --resume QUEUE_ID` accepts `--limit
+   TOKENS`, `--parallel N` and `--yes`. `--project`, `--task-id` and `--ready`
+   with `--resume` are a usage error (exit 2) whose message names what a
+   resume takes: `--limit`, `--parallel` and `--yes`, the project and tasks
+   being the queue's own. `--parallel` loses its parser default (`None`, so a
+   given value can be told from an absent one); a new queue still runs at 1
+   when it is not given.
+2. *The checks.* A new limit is refused as a usage error, with nothing
+   written and nothing run, when it is below `MIN_QUEUE_LIMIT` (ADR 333's
+   message), or when it is at or below the queue's spend — the sum of its
+   entries' tokens after a task found `running` was settled `interrupted`
+   (ADR 79, 5); the message names the limit given and that spend. A new
+   `--parallel` goes through the same checks as a new queue's (at least 1, at
+   most the pool's phase slots, ADR 252). A value equal to the file's is not
+   a change. Lowering the limit to a value still above the spend is allowed.
+3. *The record.* `Queue` gains `changes`, a list saved in
+   `<state_dir>/queues/<id>.json`, one object per resume that changed
+   something: `{"at": <UTC ISO-8601>, "limit": {"from": old, "to": new},
+   "parallel": {"from": old, "to": new}}`, carrying only the keys that
+   changed. A file written before this ADR loads with an empty list. `limit`
+   and `parallel` on the queue are the effective values, so the next resume
+   and every reader see them without replaying `changes`.
+4. *The yes.* Every resume prints the queue's plan (`queue.confirmation`)
+   with its effective limit and parallelism and, under it, each recorded
+   change. A resume that changes something asks the same yes a new queue
+   does, unless `--yes`; a no exits 1 and saves nothing. A plain resume asks
+   nothing, as before: it authorizes nothing new.
+5. *What goes on.* Tasks in `merged`, `finished` or any failed state are not
+   run again. When a resume leaves the queue's spend below its limit, a task
+   it had recorded `limit_reached` goes back to `pending`, keeping its
+   `usage_offset`, so its tokens keep counting from its first start and the
+   queue's spend never drops; when its cycle starts again the offset is not
+   reset. Its cycle is `run_task_cycle` as for any task, which starts at the
+   arquitecto on the task's branch as it stands (the same re-run ADR 272 makes
+   for a request for changes): there is no entry into a cycle at a later phase,
+   and adding one is `dispatcher/dispatcher.py`'s, not this ADR's. A task the
+   limit stopped is the one task ADR 79, 4's "no task is started twice" lets
+   start again, because the limit, not the task, ended its cycle.
+6. *Why the project and the tasks stay fixed.* The tasks are what the owner's
+   yes covered (C-4, *What it covers*), the queue's id names that list, and
+   its order, its skips and its spend are computed over exactly those
+   entries. Adding a task is a new authorization over a different list, so it
+   is a new queue; a different project is a different lock (ADR 200) and a
+   different set of task files, so nothing in the old record would still hold.
+
+**Consequences.** This amends ADR 79, 5 (a resume no longer runs only under
+the file's own limit and parallelism) and ADR 333, 3 (a resume's new limit
+is held to the floor). A queue's file now carries its own history of
+ceilings. A resumed `limit_reached` task re-spends its arquitecto phase, and
+can spend more than the phases the limit stopped it before; the confirmation
+does not estimate that. Out of scope and unchanged: adding or removing a
+queue's tasks, and how spend is measured.

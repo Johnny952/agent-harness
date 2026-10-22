@@ -17,6 +17,7 @@ from dispatcher import cli as cli_mod
 from dispatcher import context_transfer, docker_exec, tasks
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
+from dispatcher.config import AccountConfig
 from tests.dispatcher.test_dispatcher import _make_config
 
 _DESCRIPTION = "## Goal\n\nDo {id}.\n\n## Done when\n\nIt is done.\n"
@@ -502,9 +503,11 @@ def test_resume_refuses_a_bad_id(cfg):
         queue_mod.resume(cfg, "q-20261017T000000Z-abcd")
 
 
-def _cli(monkeypatch, tmp_path, *argv, stdin=""):
+def _cli(monkeypatch, tmp_path, *argv, stdin="", config_of=None):
     config = tmp_path / "config.yaml"
-    monkeypatch.setattr(cli_mod, "load_config", lambda path: _make_config(tmp_path))
+    monkeypatch.setattr(
+        cli_mod, "load_config", lambda path: (config_of or _make_config)(tmp_path),
+    )
     config.write_text("")
     monkeypatch.setattr(sys, "argv", ["dispatch", "--config", str(config), *argv])
     monkeypatch.setattr("builtins.input", lambda prompt="": stdin)
@@ -619,6 +622,172 @@ def test_cli_accepts_the_minimum_limit(tmp_path, accounts, monkeypatch):
 
     assert code == 0
     assert fake.started == ["T-1"]
+
+
+def _stopped_queue(tmp_path, monkeypatch, script=None):
+    """A queue T-1, T-2 at 500000 that T-1 spent 600000 of, stopped `limit_reached`."""
+    cfg = _make_config(tmp_path)
+    _task(cfg, "T-1")
+    _task(cfg, "T-2")
+    fake = _install(monkeypatch, cfg, script or {"T-1": {"phases": [600_000, 100]}, "T-2": {}})
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--project", "proj",
+                "--task-id", "T-1", "T-2", "--limit", "500000", "--yes")
+    assert code == cli_mod.EXIT_LIMIT
+    queue_id = os.listdir(queue_mod.queue_dir(cfg))[0][:-len(".json")]
+    return cfg, fake, queue_id
+
+
+def test_resume_with_a_higher_limit_runs_on(tmp_path, accounts, monkeypatch, capsys):
+    cfg, fake, queue_id = _stopped_queue(tmp_path, monkeypatch)
+    assert queue_mod.load(cfg, queue_id).entry("T-1").state == queue_mod.STOPPED
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id,
+                "--limit", "2000000", "--yes")
+
+    queue = queue_mod.load(cfg, queue_id)
+    assert code == 0
+    assert fake.started == ["T-1", "T-1", "T-2"]
+    assert queue.entry("T-1").state == queue_mod.MERGED
+    assert queue.entry("T-2").state == queue_mod.MERGED
+    assert queue.spent >= 1_200_000  # the first 600000 still counts
+    assert queue.limit == 2_000_000
+    assert len(queue.changes) == 1
+    assert queue.changes[0]["limit"] == {"from": 500_000, "to": 2_000_000}
+    assert "parallel" not in queue.changes[0] and queue.changes[0]["at"]
+    out = capsys.readouterr().out
+    assert "Limit: 2000000" in out and "limit 500000 -> 2000000" in out
+
+
+def test_resume_does_not_run_a_finished_task_again(tmp_path, accounts, monkeypatch):
+    cfg, fake, queue_id = _stopped_queue(
+        tmp_path, monkeypatch, {"T-1": {}, "T-2": {"phases": [600_000, 100]}},
+    )
+    assert fake.started == ["T-1", "T-2"]
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id,
+                "--limit", "2000000", "--yes")
+
+    assert code == 0
+    assert fake.started == ["T-1", "T-2", "T-2"]
+
+
+@pytest.mark.parametrize("limit", ["600000", "550000"])
+def test_resume_refuses_a_limit_not_above_the_spend(
+    tmp_path, accounts, monkeypatch, capsys, limit
+):
+    cfg, fake, queue_id = _stopped_queue(tmp_path, monkeypatch)
+    spent = queue_mod.load(cfg, queue_id).spent
+    assert spent == 600_000
+    before = Path(queue_mod.queue_path(cfg, queue_id)).read_text()
+    capsys.readouterr()
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id,
+                "--limit", limit, "--yes")
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert limit in err and str(spent) in err
+    assert fake.started == ["T-1"]
+    assert Path(queue_mod.queue_path(cfg, queue_id)).read_text() == before
+    assert queue_mod.load(cfg, queue_id).changes == []
+
+
+def test_resume_holds_a_new_limit_to_the_floor(tmp_path, accounts, monkeypatch, capsys):
+    cfg, fake, queue_id = _stopped_queue(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id,
+                "--limit", "99999", "--yes")
+
+    assert code == 2
+    assert str(cli_mod.MIN_QUEUE_LIMIT) in capsys.readouterr().err
+    assert fake.started == ["T-1"]
+
+
+@pytest.mark.parametrize("extra", [
+    ["--project", "proj"], ["--task-id", "T-1"], ["--ready", "1"],
+])
+def test_resume_refuses_what_stays_the_queue_s_own(
+    tmp_path, accounts, monkeypatch, capsys, extra
+):
+    cfg, fake, queue_id = _stopped_queue(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id,
+                *extra, "--limit", "2000000", "--yes")
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "--limit" in err and "--parallel" in err
+    assert fake.started == ["T-1"]
+
+
+def test_resume_records_and_uses_a_new_parallelism(tmp_path, accounts, monkeypatch, capsys):
+    def two_slots(path):
+        return _make_config(path, accounts=[
+            AccountConfig(name="cuenta1", container="agent-cuenta1", max_concurrent_phases=2),
+        ])
+
+    cfg = two_slots(tmp_path)
+    _task(cfg, "T-1")
+    queue = queue_mod.plan(cfg, "proj", ["T-1"], 500_000)
+    queue_mod.save(cfg, queue)
+    seen = []
+
+    def fake_parallel(cfg, queue, sleep, lock):
+        seen.append(queue.parallel)
+        queue.status = queue_mod.Q_DONE
+        return queue
+
+    monkeypatch.setattr(queue_mod, "_run_parallel", fake_parallel)
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue.queue_id,
+                "--parallel", "2", "--yes", config_of=two_slots)
+
+    saved = queue_mod.load(cfg, queue.queue_id)
+    assert code == 0
+    assert seen == [2]
+    assert saved.parallel == 2
+    assert saved.changes[0]["parallel"] == {"from": 1, "to": 2}
+    assert "limit" not in saved.changes[0]
+    assert "Parallelism: 2" in capsys.readouterr().out
+
+
+def test_resume_that_changes_something_asks_and_a_no_saves_nothing(
+    tmp_path, accounts, monkeypatch
+):
+    cfg, fake, queue_id = _stopped_queue(tmp_path, monkeypatch)
+    before = Path(queue_mod.queue_path(cfg, queue_id)).read_text()
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id,
+                "--limit", "2000000", stdin="n")
+
+    assert code == cli_mod.EXIT_BLOCKED
+    assert fake.started == ["T-1"]
+    assert Path(queue_mod.queue_path(cfg, queue_id)).read_text() == before
+
+
+def test_a_plain_resume_asks_nothing_and_records_no_change(tmp_path, accounts, monkeypatch):
+    cfg, fake, queue_id = _stopped_queue(tmp_path, monkeypatch)
+
+    code = _cli(monkeypatch, tmp_path, "run-queue", "--resume", queue_id)
+
+    # An answered "no" would be EXIT_BLOCKED: the spend is still at the limit.
+    assert code == cli_mod.EXIT_LIMIT
+    assert queue_mod.load(cfg, queue_id).changes == []
+    assert fake.started == ["T-1"]
+
+
+def test_a_queue_file_without_changes_loads(tmp_path, accounts, monkeypatch):
+    cfg = _make_config(tmp_path)
+    _task(cfg, "T-1")
+    queue = queue_mod.plan(cfg, "proj", ["T-1"], 500_000)
+    path = queue_mod.save(cfg, queue)
+    data = json.loads(Path(path).read_text())
+    data.pop("changes", None)
+    Path(path).write_text(json.dumps(data))
+
+    assert queue_mod.load(cfg, queue.queue_id).changes == []
 
 
 def test_cli_missing_limit_names_the_unit(tmp_path, accounts, monkeypatch, capsys):
