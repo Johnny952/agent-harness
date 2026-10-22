@@ -7,7 +7,7 @@ supersedes: []
 
 # Plan: editing the dispatcher's settings from the console
 
-**Status:** designed 2026-10-15 by T-055, and nothing is built. The decisions
+**Status:** designed 2026-10-15 by T-055, and built 2026-10-17 by T-064 to T-067; section 4, the credentials and the login, is not built. The decisions
 are `docs/decisions.md` ADR 75. This file only orders the build. It
 answers `docs/plans/backlog.md` item 0 and the *Role models write* bullet of
 `docs/plans/front.md` tier 3.
