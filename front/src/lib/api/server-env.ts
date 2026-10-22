@@ -25,9 +25,11 @@
  * backlog writes carry no token: the board-service takes none there, and refuses
  * any request carrying a browser `Origin` instead (`board_service/app.py:_http`).
  *
- * ADR 157 adds `BOARD_ACTIONS_TOKEN`, the bearer of the board-service's two action
- * routes (ADR 151). Like the writer's token it is not a refusal to boot: unset,
- * those two routes answer a 503 naming it.
+ * ADR 157 adds `BOARD_ACTIONS_TOKEN`, the bearer of the board-service's action
+ * routes (ADR 151) and of every board-service write since that asks for it: each
+ * route `forward.ts`'s `boardTarget` resolves with an `action`, listed in
+ * `forwardBoard`'s doc comment. Like the writer's token it is not a refusal to
+ * boot: unset, each of those routes answers a 503 naming it.
  */
 
 // `tsconfig.json` sets `types: ["vite/client"]`, which admits no Node globals,
@@ -107,10 +109,11 @@ export const BOARD_SERVICE_URL = (
 export const BOARD_SERVICE_TIMEOUT_MS = 5000;
 
 /**
- * The bearer of the board-service's start and cancel routes (`docs/decisions.md`
- * ADR 157, on ADR 151), or `null` when unset. Empty and whitespace-only read as
+ * The bearer of the board-service routes `forward.ts`'s `boardTarget` resolves
+ * with an `action` (`docs/decisions.md` ADR 157, on ADR 151; `forwardBoard`'s doc
+ * comment lists them), or `null` when unset. Empty and whitespace-only read as
  * unset, as `CONFIG_WRITER_TOKEN` does. Never thrown on here: `forward.ts`
- * answers those two routes with a JSON 503 naming the variable, and the value is
- * never logged or put in a response.
+ * answers each of those routes with a JSON 503 naming the variable, and the value
+ * is never logged or put in a response.
  */
 export const BOARD_ACTIONS_TOKEN = process.env["BOARD_ACTIONS_TOKEN"]?.trim() || null;
