@@ -114,6 +114,19 @@ class Running:
     kill: Callable[[], None] | None = None
     #: The project's `flock` (ADR 200), held from the claim to the handler's end.
     project_lock: ProjectLock | None = None
+    #: The project slug whose start group this action belongs to (ADR 306); the
+    #: group, not the action, then releases `project_lock`.
+    group: str | None = None
+
+
+@dataclass
+class _StartGroup:
+    """One project's running starts: the shared `flock`, the write-window
+    scheduler (None under a ceiling of 1) and the action ids inside."""
+
+    lock: ProjectLock
+    scheduler: queue_mod.WriteScheduler | None
+    members: set[str]
 
 
 class Worker:
@@ -124,6 +137,9 @@ class Worker:
         self.stopping = threading.Event()
         self.running: dict[str, Running] = {}
         self._lock = threading.Lock()
+        #: Per project slug, the starts running under one `flock` (ADR 306);
+        #: guarded by `_lock`.
+        self._groups: dict[str, _StartGroup] = {}
         self._closed_until: datetime | None = None
         #: The primary's free share and when it was read (the pool's floor).
         self._pool_read: tuple[datetime, int | None] | None = None
@@ -235,16 +251,31 @@ class Worker:
         # The key above is this worker's memory; the project's `flock` is
         # what a `run-task` or a second worker process shows (ADR 200, 4).
         lock = None
-        if key is not None and key.startswith("project:"):
+        group = None
+        if kind == "start":
+            # Up to the project's ceiling of starts share one `flock` and one
+            # write-window scheduler (ADR 306); a ceiling of 1 is the old lock.
+            group = self._join_project(record)
+            if group is None:
+                self._wait(record, "project")
+                return
+            lock = group.lock
+        elif key is not None and key.startswith("project:"):
             try:
                 lock = ProjectLock.take(self.state_dir, record["project"], record.get("task_id"), "worker")
             except ProjectBusy:
                 self._wait(record, "project")
                 return
+
+        def give_back() -> None:
+            if group is not None:
+                self._leave_project(record["project"], aid)
+            elif lock is not None:
+                lock.release()
+
         # A turn is held to its own thread's account by the handler (ADR 173, 5).
         if kind != "turn" and actions.KINDS[kind].spends_quota and not self._account_open():
-            if lock is not None:
-                lock.release()
+            give_back()
             self._wait(record, "account")
             return
         # The pool's floor: a start waits while the primary's free share is
@@ -252,8 +283,7 @@ class Worker:
         if kind == "start":
             free, floor = self._pool_free(), actions.start_floor(record)
             if free is not None and free < floor:
-                if lock is not None:
-                    lock.release()
+                give_back()
                 if record.get("waiting") != "pool":
                     logger.info(
                         "start %s waits for the pool: the primary account has %d%% free, "
@@ -264,14 +294,15 @@ class Worker:
         try:
             claimed = actions.claim(self.state_dir, aid)
         except BaseException:
-            if lock is not None:
-                lock.release()
+            give_back()
             raise
         if claimed is None:
-            if lock is not None:
-                lock.release()
+            give_back()
             return
-        entry = Running(aid, None, threading.Event(), project_lock=lock)
+        entry = Running(
+            aid, None, threading.Event(), project_lock=lock,
+            group=record["project"] if group is not None else None,
+        )
         thread = threading.Thread(
             target=self._run_handler, args=(key, claimed, entry),
             name=f"worker-{aid}", daemon=False,
@@ -280,6 +311,46 @@ class Worker:
         with self._lock:
             self.running[key or aid] = entry
         thread.start()
+
+    def _join_project(self, record: dict) -> _StartGroup | None:
+        """Take a place among the project's running starts, None while it has none.
+
+        The first start takes the project's `flock`; the next ones, up to
+        `cfg.parallel_for`, join the same group, so the lock is held until the
+        last leaves (ADR 306). The place is reserved here and returned by
+        `_leave_project` on every refusal after it.
+        """
+        slug, aid, task_id = record["project"], record["id"], record.get("task_id")
+        ceiling = self.cfg.parallel_for(slug)
+        with self._lock:
+            group = self._groups.get(slug)
+            if group is None:
+                try:
+                    lock = ProjectLock.take(self.state_dir, slug, task_id, "worker")
+                except ProjectBusy:
+                    return None
+                scheduler = None
+                if ceiling > 1:
+                    scheduler = queue_mod.WriteScheduler(
+                        self.cfg, slug, "worker", threading.Condition(threading.RLock()),
+                    )
+                group = self._groups[slug] = _StartGroup(lock, scheduler, set())
+            elif len(group.members) >= ceiling:
+                return None
+            group.members.add(aid)
+            if group.scheduler is not None and task_id:
+                group.scheduler.enlist(task_id)
+            return group
+
+    def _leave_project(self, slug: str, aid: str) -> None:
+        with self._lock:
+            group = self._groups.get(slug)
+            if group is None:
+                return
+            group.members.discard(aid)
+            if not group.members:
+                del self._groups[slug]
+                group.lock.release()
 
     def _account_open(self) -> bool:
         now = _utc_now()
@@ -313,7 +384,9 @@ class Worker:
         try:
             self._guarded(HANDLERS[record["kind"]], record, entry.cancelled)
         finally:
-            if entry.project_lock is not None:
+            if entry.group is not None:
+                self._leave_project(entry.group, record["id"])
+            elif entry.project_lock is not None:
                 entry.project_lock.release()
             with self._lock:
                 if self.running.get(key or record["id"]) is entry:
@@ -350,6 +423,15 @@ def _held_project_lock(worker: Worker, record: dict) -> ProjectLock | None:
     return entry.project_lock if entry is not None else None
 
 
+def _held_scheduler(worker: Worker, record: dict):
+    """The write-window scheduler of the start group this action is in, else None."""
+    with worker._lock:
+        group = worker._groups.get(record["project"])
+        if group is None or record["id"] not in group.members:
+            return None
+        return group.scheduler
+
+
 def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     cfg, sd = worker.cfg, worker.state_dir
     result = dict(record.get("result") or {})
@@ -376,6 +458,7 @@ def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
         cfg, record["task_id"], record["project"], authorized=True,
         may_start_phase=lambda: not (cancelled.is_set() or worker.stopping.is_set()),
         project_lock=_held_project_lock(worker, record),
+        scheduler=_held_scheduler(worker, record),
         token_limit=limit, usage_offset=result.get("usage_offset", 0),
     )
     task = _read_task(cfg, record["task_id"])

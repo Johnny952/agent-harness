@@ -243,6 +243,11 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "every committing phase (ADR 78, ADR 271), and it lives wherever "
         "auto_approve lives (ADR 106)."
     ),
+    "project_parallel": _read_only(
+        "It sets how many of a project's starts the worker runs at once (ADR 306), "
+        "bounded by the pool's phase slots, and it lives wherever auto_approve lives "
+        "(ADR 106)."
+    ),
 }
 
 
@@ -368,6 +373,9 @@ class Config:
     #: (`docs/plans/review.md` *Decisions*, 4; ADR 271). A project not named,
     #: or named `false`, never has its task branch pushed, as before.
     push_task_branch: dict[str, bool] = dataclasses.field(default_factory=dict)
+    #: Per project, how many `start`s the worker runs at once (ADR 306). A
+    #: project not named runs one at a time, as before.
+    project_parallel: dict[str, int] = dataclasses.field(default_factory=dict)
     #: Where a phase reaches the board service's MCP endpoint, without the
     #: `?role=` the dispatcher adds per phase (`docs/decisions.md` ADR 128).
     #: None sends no `--mcp-config` and no board tool names to any phase,
@@ -401,6 +409,11 @@ class Config:
     def pushes_task_branch(self, slug: str) -> bool:
         """Whether `slug`'s task branch is pushed after each committing phase."""
         return self.push_task_branch.get(slug, False)
+
+    def parallel_for(self, slug: str) -> int:
+        """How many starts of `slug` the worker may run at once, never above the slots."""
+        slots = sum(a.max_concurrent_phases for a in self.accounts)
+        return max(1, min(self.project_parallel.get(slug, 1), slots))
 
     def effort_for(
         self, role: str, round_num: int | None = None, repeated_finding: bool = False,
@@ -719,6 +732,26 @@ def _load_push_task_branch(raw: dict) -> dict[str, bool]:
             raise ValueError("push_task_branch keys must be project slugs")
         if not isinstance(value, bool):
             raise ValueError(f"push_task_branch.{slug} must be true or false")
+    return dict(block)
+
+
+def _load_project_parallel(raw: dict, slots: int) -> dict[str, int]:
+    """`project_parallel`, a map of project slug to a start ceiling (ADR 306).
+
+    At most the pool's phase slots, as `queue --parallel` is checked in `cli.py`.
+    """
+    block = raw.get("project_parallel") or {}
+    if not isinstance(block, dict):
+        raise ValueError("project_parallel must be a mapping of project slug to a number")
+    for slug, value in block.items():
+        if not isinstance(slug, str) or not slug.strip():
+            raise ValueError("project_parallel keys must be project slugs")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"project_parallel.{slug} must be a whole number of at least 1")
+        if value > slots:
+            raise ValueError(
+                f"project_parallel.{slug}: at most {slots}, the pool's phase slots"
+            )
     return dict(block)
 
 
@@ -1052,5 +1085,8 @@ def _build_config(raw: dict) -> Config:
         auto_approve=_load_auto_approve(raw),
         protected_paths=_load_protected_paths(raw),
         push_task_branch=_load_push_task_branch(raw),
+        project_parallel=_load_project_parallel(
+            raw, sum(a.max_concurrent_phases for a in accounts)
+        ),
         board_mcp_url=_load_board_mcp_url(raw),
     )

@@ -14717,3 +14717,89 @@ more than one project.
 - *Locking on the task's project from the caller:* `close_cycle` and
   `merge-task` know it, but an entry the task wrote can name another
   project, and that is exactly the file a carry of that project claims.
+
+## ADR 306 — The worker runs up to `project_parallel` starts of one project at once, under one project lock and the queue's write windows
+
+**Status:** accepted (2026-10-22), T-140's arquitecto. Narrows ADR 200,
+decisions 4, 7 and 9, for the worker's `start` only; builds on ADR 83 and
+ADR 252.
+
+**Context.** ADR 200, 7 makes the parallel queue the one sanctioned case
+of more than one cycle on a project. The worker keys every `start` on
+`project:<slug>` (`dispatcher/actions.py` `KINDS`) and takes an exclusive
+`ProjectLock` per action in `Worker._consider`, so *Start epic* (ADR 207)
+runs an epic one task at a time even when its surfaces are disjoint and
+slots are free. `docs/plans/autonomy.md` *Decisions*, 6 already orders
+parallel writers: the parallel queue's scheduler in `dispatcher/queue.py`
+with its surface locks, the single mapping and the
+stale-plan note that `run_task_cycle(scheduler=)` applies.
+
+**Decision.**
+1. **The ceiling.** A top-level config key `project_parallel`, a map of
+   project slug to an integer of at least 1. A project not named runs at
+   1. `load_config` refuses a value that is not such an integer (a bool
+   included) or that exceeds the pool's phase slots, the sum of every
+   account's `max_concurrent_phases` — the bound `queue --parallel` is
+   held to in `dispatcher/cli.py` (ADR 252). `Config.parallel_for(slug)`
+   reads it, clamped to those slots as well, so a `Config` built by hand
+   cannot exceed them either. The key is read-only to the overrides,
+   like `push_task_branch`, and moves to the project record with it
+   (ADR 106). Raising it is the owner's call; the shipped
+   `config.example.yaml` documents it commented out.
+2. **The serial key.** A `start`'s key becomes `start:<project>:<task_id>`,
+   so the worker's in-memory key no longer serialises two starts of one
+   project. Every other kind keeps its key, `command_verdict`,
+   `request_changes`, `clone` and `init` included.
+3. **The start group.** The worker keeps one group per project with a
+   start running: the project's `ProjectLock`, taken by the group's first
+   start (its record names that start's task, `via: "worker"`), the
+   action ids holding a slot, and a scheduler. A start of a project joins
+   the group while it has fewer members than `parallel_for(slug)`,
+   without taking the lock again; a full group, or no group and a refused
+   lock, leaves the start pending as `waiting: "project"`, as before. The
+   slot is reserved before the account and pool checks and the claim, and
+   given back on each of their refusals exactly where the lock was
+   released before. A member that ends leaves the group; the last one to
+   leave releases the lock and removes the group. Join and leave happen
+   under the worker's own `_lock`, so a join never lands on a lock that
+   is being released.
+4. **The write windows are the queue's.** The group's scheduler is
+   `queue.py`'s class, factored only so its order and its log label come
+   from the caller rather than from a `Queue`: the queue passes its
+   confirmed order and `queue <id>`, the worker enlists each start in the
+   order it joins and passes `worker`. The worker hands it to
+   `run_task_cycle(scheduler=)`, so a group's cycles map once, enter a
+   write window per surface under `surface_lock`, merge the base at the
+   window and get the stale-plan note, as a parallel queue's do. Its ADR
+   numbers are the per-task blocks the arquitecto already gets (ADR 81),
+   which need nothing from the group.
+5. **A ceiling of 1 is today's worker.** The group then holds one start,
+   its scheduler is None, and the cycle gets the lock alone, exactly as
+   ADR 200, 4 describes: no write window, no base merge at a window, the
+   mapping as a serial cycle runs it.
+
+**Consequences.**
+- ADR 200, 7 now has two sanctioned cases: the parallel queue and a
+  worker start group. Toward every other process — a `run-task`, a
+  `run-phase`, a queue, another worker — the project stays busy from the
+  group's first start to its last start's end.
+- ADR 200, 9 holds only at a ceiling of 1: above it, *Start epic* runs up
+  to that many of the epic's tasks at once, in the board's order for
+  their write windows, each later one waiting as `project` only when the
+  group is full.
+- A `command_verdict`, `request_changes`, `clone` or `init` on a project
+  whose start group runs waits as `project` on the `flock`, not on the
+  in-memory key; the observable wait is the same.
+- A group's scheduler, and its one mapping, live as long as the group: a
+  start joining after the group emptied starts a new one.
+- The lock's holder record names only the first start of the group.
+
+**Ruled out.**
+- *A second write-window class for the worker:* the task forbids it, and
+  two orderings of one project's surfaces could disagree.
+- *Counting starts under the old `project:<slug>` key:* every other kind
+  shares that key, and a full count would then also gate verdicts and
+  requests for changes, which stay one at a time and out of this ADR.
+- *A ceiling above the pool's slots, clamped silently at the worker:* a
+  config that asks for more than can run is refused where it is loaded,
+  as `--parallel` is refused where it is typed.

@@ -41,7 +41,7 @@ import secrets
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from dispatcher import context_transfer, project_docs, surface, surface_lock, tasks
 from dispatcher import dispatcher as core
@@ -563,21 +563,27 @@ def _run_serial(
 # --- Parallel cycles (`docs/plans/autonomy.md` decision 6, task B-3, ADR 83) ---
 
 
-class _Scheduler:
-    """What the cycles of one parallel queue share: the write windows and the mapping.
+class WriteScheduler:
+    """What the cycles of one parallel group share: the write windows and the mapping.
 
-    One condition guards the queue's state, its waiters and its slots, so a
+    One condition guards the group's state, its waiters and its slots, so a
     cycle leaving its window, a cycle ending and the main loop all wake each
     other. A task that wants its write window waits while an earlier task of
-    the confirmed order wants an overlapping one, then takes the surface lock
-    (`surface_lock`), which also keeps out another process's cycles.
+    the order wants an overlapping one, then takes the surface lock
+    (`surface_lock`), which also keeps out another process's cycles. A queue
+    passes its confirmed order; the worker's start group (ADR 306) passes none
+    and `enlist`s each start as it joins. `label` names the group in the log.
     """
 
-    def __init__(self, cfg: Config, queue: Queue, cond: threading.Condition) -> None:
+    def __init__(
+        self, cfg: Config, project: str, label: str, cond: threading.Condition,
+        order: Iterable[str] = (),
+    ) -> None:
         self.cfg = cfg
-        self.queue = queue
+        self.project = project
+        self.label = label
         self.cond = cond
-        self.order = {e.task_id: n for n, e in enumerate(queue.entries)}
+        self.order = {task_id: n for n, task_id in enumerate(order)}
         self.mapping_lock = threading.Lock()
         self.mapped_by: str | None = None
         self._waiting: dict[str, frozenset[str]] = {}
@@ -585,6 +591,11 @@ class _Scheduler:
         # Every write window granted, in order, as (task_id, "enter"|"leave"):
         # the record the tests read the windows from.
         self.windows: list[tuple[str, str]] = []
+
+    def enlist(self, task_id: str) -> None:
+        """Give `task_id` the next place in the order, if it has none."""
+        with self.cond:
+            self.order.setdefault(task_id, len(self.order))
 
     def _first_in_line(self, task_id: str, entries: frozenset[str]) -> bool:
         mine = self.order.get(task_id, len(self.order))
@@ -603,7 +614,7 @@ class _Scheduler:
                 while True:
                     if self._first_in_line(task_id, entries):
                         taken = surface_lock.SurfaceLock.take(
-                            self.cfg.state_dir, self.queue.project, task_id, entries,
+                            self.cfg.state_dir, self.project, task_id, entries,
                             ttl_seconds=self.cfg.heartbeat_ttl_seconds,
                             heartbeat_interval_seconds=self.cfg.heartbeat_interval_seconds,
                         )
@@ -613,9 +624,9 @@ class _Scheduler:
                             return
                         if not announced:
                             logger.info(
-                                "queue %s: task %s waits for its write window: %s write(s) "
+                                "%s: task %s waits for its write window: %s write(s) "
                                 "an overlapping surface",
-                                self.queue.queue_id, task_id, ", ".join(taken),
+                                self.label, task_id, ", ".join(taken),
                             )
                             announced = True
                     self.cond.wait(timeout=SURFACE_LOCK_POLL_SECONDS)
@@ -644,7 +655,10 @@ def _run_parallel(
     A refused push stops the next phase of every cycle still running.
     """
     cond = threading.Condition(threading.RLock())
-    scheduler = _Scheduler(cfg, queue, cond)
+    scheduler = WriteScheduler(
+        cfg, queue.project, f"queue {queue.queue_id}", cond,
+        [e.task_id for e in queue.entries],
+    )
     running: dict[str, threading.Thread] = {}
     refused: list[str] = []
     stop = {"limit": False}

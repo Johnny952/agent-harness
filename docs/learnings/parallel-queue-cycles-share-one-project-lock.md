@@ -19,6 +19,12 @@ Take a lock of your own, per project, on a new descriptor per acquisition
 (as `dispatcher/adr_numbers.py` `_locked` and `learnings._carry_lock`
 do), so two threads of one process exclude each other.
 
+## Since T-140
+
+The worker does the same for a project's starts under a ceiling above 1:
+`dispatcher/worker.py` `_StartGroup` holds one `ProjectLock` for every start
+in the group (ADR 306). The rule above applies to those cycles too.
+
 ## Evidence
 
 `docs/decisions.md` ADR 200 decision 7 and ADR 294 *Ruled out*.

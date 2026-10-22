@@ -275,7 +275,9 @@ KINDS: dict[str, Kind] = {
     k.name: k
     for k in (
         Kind(
-            "start", _validate_start, lambda r: f"project:{r['project']}",
+            # One key per task: the project's ceiling and lock are the worker's
+            # (ADR 306), the key only stops the same task running twice.
+            "start", _validate_start, lambda r: f"start:{r['project']}:{r['task_id']}",
             True, "requeue_unless_started", "interrupted after it started",
         ),
         Kind("cancel", _validate_cancel, lambda r: None, False, "rerun", None),

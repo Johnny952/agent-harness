@@ -28,6 +28,14 @@ writes the same `waiting: project` when another process — a `run-task`, a
 queue, a second worker — holds it. The rule above is history; the wait it
 describes is still how a pending `start` reads.
 
+## Since T-140
+
+`start`'s serial key is `start:<project>:<task>` (ADR 306). The key now only
+stops the same task running twice. A second start of a project waits as
+`project` when the worker's start group for it is at `Config.parallel_for`
+(default 1, so nothing changes until `project_parallel` names the project),
+or when another process holds the project's `flock`.
+
 ## Evidence
 
 `dispatcher/actions.py` `KINDS` (the `start` row) and `dispatcher/worker.py`
