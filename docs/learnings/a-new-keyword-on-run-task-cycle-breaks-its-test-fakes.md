@@ -5,7 +5,9 @@
 `run_command_request`, and a caller passes it.
 
 **Status:** confirmed. Reported by T-116's implementer; hit again by T-157,
-whose `before_merge` keyword needed the same fakes widened.
+whose `before_merge` keyword needed the same fakes widened, and by T-154-S2,
+whose `start_at`/`start_round`/`on_held` widened `FakeCycle` and
+`ScheduledCycle`.
 
 ## Why
 
