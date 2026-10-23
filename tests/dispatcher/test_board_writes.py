@@ -1024,6 +1024,136 @@ def test_mark_dropped_refuses_a_board_status(tmp_path: Path) -> None:
     assert task.dropped_reason is None
 
 
+# --- close_resolved_debt: ADR 369 ---------------------------------------------
+
+def _resolver(hive: str, ids=("T-050-D1",)) -> None:
+    _task(hive, "T-100", status="done", resolved_debt=list(ids))
+
+
+def test_close_resolved_debt_drops_proposed_and_deferred_cards(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _resolver(hive)
+    _task(hive, "T-001", status="proposed", debt_id="T-050-D1")
+    _task(hive, "T-002", status="deferred", debt_id="T-050-D1")
+    _task(hive, "T-003", status="proposed", debt_id="T-050-D2")
+
+    closed, warnings = tasks.close_resolved_debt(hive, "T-100")
+
+    assert warnings == []
+    assert closed == [
+        "debt T-050-D1: card T-001 dropped, resolved by T-100",
+        "debt T-050-D1: card T-002 dropped, resolved by T-100",
+    ]
+    for card in ("T-001", "T-002"):
+        task = _read(hive, card)
+        assert (task.status, task.dropped_reason, task.dropped_by) == (
+            "dropped", "resolved by T-100", "dispatcher",
+        )
+    assert _read(hive, "T-003").status == "proposed"
+
+
+def test_close_resolved_debt_skips_a_dropped_card_and_keeps_its_reason(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _resolver(hive)
+    _task(hive, "T-001", status="proposed", debt_id="T-050-D1")
+    tasks.accept(hive, "T-001", to="dropped", **DROP)
+
+    assert tasks.close_resolved_debt(hive, "T-100") == ([], [])
+    assert _read(hive, "T-001").dropped_reason == "no longer needed"
+
+
+def test_close_resolved_debt_leaves_a_card_on_the_board_and_warns(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _resolver(hive)
+    _task(hive, "T-001", status="pending", debt_id="T-050-D1")
+
+    closed, warnings = tasks.close_resolved_debt(hive, "T-100")
+
+    assert closed == []
+    assert warnings == [
+        "debt T-050-D1: T-100 resolved it, but its card T-001 is pending; left as it is"
+    ]
+    assert _read(hive, "T-001").status == "pending"
+
+
+def test_close_resolved_debt_skips_the_merging_tasks_own_card(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-100", status="done", debt_id="T-050-D1", resolved_debt=["T-050-D1"])
+
+    assert tasks.close_resolved_debt(hive, "T-100") == ([], [])
+    assert _read(hive, "T-100").status == "done"
+
+
+def test_close_resolved_debt_with_nothing_resolved_or_no_file_does_nothing(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed", debt_id="T-050-D1")
+    _task(hive, "T-100", status="done")
+
+    assert tasks.close_resolved_debt(hive, "T-100") == ([], [])
+    assert tasks.close_resolved_debt(hive, "T-999") == ([], [])
+    assert _read(hive, "T-001").status == "proposed"
+
+
+def test_close_resolved_debt_closes_the_epic_its_card_was_holding_open(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive)
+    s1, s2 = epic["tasks"]
+    tasks.accept(hive, epic["id"])
+    done = _read(hive, s1)
+    done.status = "done"
+    done.merged = {"into": "main", "at": "2026-10-23T00:00:00+00:00"}
+    write_task_file(task_file_path(hive, s1), done)
+    held = _read(hive, s2)
+    held.status, held.debt_id = "deferred", "T-050-D1"
+    write_task_file(task_file_path(hive, s2), held)
+    _resolver(hive)
+
+    closed, warnings = tasks.close_resolved_debt(hive, "T-100")
+
+    assert warnings == []
+    assert closed == [
+        f"debt T-050-D1: card {s2} dropped, resolved by T-100",
+        f"epic {epic['id']}: every sub-task is merged or dropped, so it is done",
+    ]
+    assert _read(hive, epic["id"]).status == "done"
+
+
+def test_close_resolved_debt_reports_an_unreadable_card_and_goes_on(tmp_path: Path, monkeypatch) -> None:
+    hive = _hive(tmp_path)
+    _resolver(hive)
+    _task(hive, "T-001", status="proposed", debt_id="T-050-D1")
+    _task(hive, "T-002", status="proposed", debt_id="T-050-D1")
+    real = tasks.mark_dropped
+
+    def flaky(task, reason, by):
+        if task.task_id == "T-001":
+            raise RuntimeError("boom")
+        real(task, reason, by)
+
+    monkeypatch.setattr(tasks, "mark_dropped", flaky)
+
+    closed, warnings = tasks.close_resolved_debt(hive, "T-100")
+
+    assert warnings == ["debt T-050-D1: card T-001 could not be closed: boom"]
+    assert closed == ["debt T-050-D1: card T-002 dropped, resolved by T-100"]
+    assert _read(hive, "T-001").status == "proposed"
+
+
+def test_close_resolved_debt_never_raises_when_the_cards_cannot_be_read(tmp_path: Path, monkeypatch) -> None:
+    hive = _hive(tmp_path)
+    _resolver(hive)
+
+    def broken(_hive):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(tasks, "read_all_tasks", broken)
+
+    closed, warnings = tasks.close_resolved_debt(hive, "T-100")
+
+    assert closed == []
+    assert len(warnings) == 1 and "disk gone" in warnings[0]
+
+
 def test_field_problems_names_a_bad_dropped_value() -> None:
     task = TaskFile(task_id="T-001", status="dropped", owner=None, depends_on=[],
                     heartbeat=None, body="", dropped_reason=" ", dropped_by=3)

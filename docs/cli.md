@@ -160,6 +160,12 @@ after the pre-merge check. Once the check passes it takes one backup, best
 effort (ADR 345), and prints `backup before the merge: <name>` or, on stderr,
 `no backup before the merge: <why>`; the merge goes ahead either way.
 
+After recording the merge it drops the backlog cards (`proposed` or
+`deferred`) that mirror the debt the task's `resolved_debt` names, printing a
+line for each, with `resolved by <task-id>` as the reason. A card already
+accepted onto the board is left as it is and named on stderr; the exit code
+does not change (ADR 369).
+
 | Argument | Unit | Default | What it does |
 |---|---|---|---|
 | `--task-id` | task id | required | The task. |

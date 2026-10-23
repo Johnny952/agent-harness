@@ -3399,11 +3399,13 @@ def _merge_task_branch(cfg: Config, task_id: str, slug: str) -> bool:
         logger.warning("task %s: not merged: %s", task_id, outcome.detail)
         return False
     logger.info("task %s: %s", task_id, outcome.detail)
-    recorded, problem = record_merge(cfg, task_id, outcome)
+    recorded, problem, warnings = record_merge(cfg, task_id, outcome)
     for line in recorded:
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
+    for line in warnings:
+        logger.warning("%s", line)
     _log_recheck(cfg, slug, task_id)
     return True
 
@@ -3617,17 +3619,20 @@ def _auto_approve_and_merge(
         logger.warning("task %s: merged but not pushed: %s", task_id, push.detail)
     else:
         logger.info("task %s: %s", task_id, push.detail)
-    _record_auto_approve(
-        cfg, task_id,
-        auto_approve.approval_note(
-            decision, outcome.target or "the project's branch", merge_commit, push
-        ) + _backup_suffix(backup_line),
-    )
-    recorded, problem = record_merge(cfg, task_id, outcome)
+    # The record first, so the note can carry its warnings (ADR 369).
+    recorded, problem, warnings = record_merge(cfg, task_id, outcome)
     for line in recorded:
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
+    for line in warnings:
+        logger.warning("%s", line)
+    _record_auto_approve(
+        cfg, task_id,
+        auto_approve.approval_note(
+            decision, outcome.target or "the project's branch", merge_commit, push
+        ) + "".join(f"\n{line}" for line in warnings) + _backup_suffix(backup_line),
+    )
     _log_recheck(cfg, slug, task_id)
     return ApproveResult(True, push)
 
@@ -3755,11 +3760,13 @@ def approve_reviewed(
         finally:
             docker_exec.restore_owner(container, project_dir, owner)
 
-    recorded, problem = record_merge(cfg, task_id, merged)
+    recorded, problem, warnings = record_merge(cfg, task_id, merged)
     for line in recorded:
         logger.info("%s", line)
     if problem:
         logger.warning("%s", problem)
+    for line in warnings:
+        logger.warning("%s", line)
     _log_recheck(cfg, slug, task_id)
     try:
         learnings.drop_promoted(cfg.hive_tasks_dir, task_id)
@@ -3767,27 +3774,28 @@ def approve_reviewed(
         logger.warning("task %s: could not drop its promoted learnings: %s", task_id, exc)
     target = merged.target or "the project's branch"
     short = (merge_commit or "")[:7] or "the branch tip"
+    notes = "".join(f"\n{line}" for line in warnings)  # ADR 369: before the backup line
     if push.refused:
         return out(
             "merged_not_pushed",
             f"merged locally into {target} as {short}; the push did not land; the base "
-            f"waits on a person, then `dispatch merge-task --push`\n{push.detail}",
+            f"waits on a person, then `dispatch merge-task --push`\n{push.detail}{notes}",
             merge_commit, push,
         )
     if push.status == docker_exec.NO_UPSTREAM:
         return out(
-            "merged", f"merged into {target} as {short}; nothing to push to: {push.detail}",
+            "merged", f"merged into {target} as {short}; nothing to push to: {push.detail}{notes}",
             merge_commit, push,
         )
     return out(
         "merged", f"merged into {target} as {short}, pushed to {push.target or 'its upstream'}"
-        f"\n{push.detail}", merge_commit, push,
+        f"\n{push.detail}{notes}", merge_commit, push,
     )
 
 
 def record_merge(
     cfg: Config, task_id: str, outcome: docker_exec.MergeOutcome
-) -> tuple[list[str], str | None]:
+) -> tuple[list[str], str | None, list[str]]:
     """Write a merge that landed onto the task, and close its epic if it was the last.
 
     `docs/plans/task-split.md` section 3, "Merged is recorded on the task":
@@ -3799,31 +3807,38 @@ def record_merge(
 
     Then each started epic queues its tasks now Ready (ADR 218).
 
-    Returns what it recorded, one line each, and what it could not, or None.
+    After the record, the backlog cards mirroring the task's `resolved_debt`
+    are dropped, whether or not the record was written (ADR 369).
+
+    Returns what it recorded, one line each, what it could not, or None, and
+    the warnings (a card left as it is), which every caller shows.
     It never raises: the branch landed whatever happens here, and the
     dependency gate is where a merge with no record is met again.
     """
     hive = cfg.hive_tasks_dir
     recorded = []
+    warnings: list[str] = []
     try:
         task = context_transfer.read_task_file(context_transfer.task_file_path(hive, task_id))
         if outcome.merged or not task.merged:
             tasks.mark_merged(hive, task_id, outcome.target)
             recorded.append(f"task {task_id}: recorded as merged into {outcome.target}")
+        card_lines, warnings = tasks.close_resolved_debt(hive, task_id)
+        recorded += card_lines
         closed = tasks.close_epic(hive, task_id)
         if closed:
             recorded.append(f"epic {closed}: every sub-task is merged or dropped, so it is done")
     except FileNotFoundError:
-        return recorded, f"task {task_id}: it has no task file, so the merge is not recorded"
+        return recorded, f"task {task_id}: it has no task file, so the merge is not recorded", warnings
     except Exception as exc:
-        return recorded, f"task {task_id}: the merge could not be recorded: {exc}"
+        return recorded, f"task {task_id}: the merge could not be recorded: {exc}", warnings
     # A started epic queues its tasks this merge made Ready, or pauses at its
     # limit (ADR 218). After the record, since the dependency gate reads it.
     try:
         recorded += epic_runs.follow_on(hive, cfg.state_dir)
     except Exception as exc:
-        return recorded, f"task {task_id}: merged, but the epics' follow-on failed: {exc}"
-    return recorded, None
+        return recorded, f"task {task_id}: merged, but the epics' follow-on failed: {exc}", warnings
+    return recorded, None, warnings
 
 
 def _needs_mapping(cfg: Config, slug: str) -> bool:
