@@ -16352,3 +16352,60 @@ this undone.
 - *Waiting for step 2 to build it:* the limit is inert without the header,
   so building it now costs nothing and leaves step 2 one less thing to do.
 - *Resetting the address on a good sign-in:* decision 5.
+
+## ADR 384 — A verdict or a comment written over HTTP by a signed-in person names that person as its `author`
+
+**Status:** accepted (2026-10-23), T-150's arquitecto. Resolves
+`docs/debt/T-146-D2.md`; carries out *Every verdict records its `by`* of
+`docs/plans/server-deployment.md` *Decisions* 2. ADR 324 stands; ADR 267 and
+ADR 272 stand but for the author they write.
+
+**Context.** `board_service/signin.py` `check_session` sets `g.session` for a
+request carrying a live session cookie, and audits the write under the
+user's name. The verdict line the board service then writes still names
+`OPERATOR` as its `author`: `_review_action` in `board_service/app.py` (the
+approve and request-changes routes) passes the constant to
+`task_store.record_verdict`, and `_http` passes it to `_call` for
+`POST /api/tasks/<id>/verdict` (a *comment* verdict) and
+`POST /api/tasks/<id>/comments`. `dispatcher/tasks.py` `review_comments`
+picks the comments a request for changes carries by the verdict's `author`,
+so a verdict and the review comments before it must carry the same one.
+Today the console's forward sends no cookie, so no session reaches these
+routes yet; step 2 of the plan's *How it would be built* will.
+
+**Decision.**
+1. **The person is `g.session["user"]`** when the request carries a live
+   session (`hasattr(g, "session")`), else `OPERATOR`, read by one helper in
+   `board_service/app.py`, `_person()`. A request with no session, every
+   request while `BOARD_AUTH_DIR` is unset, writes exactly what it wrote
+   before.
+2. **The `author` field carries it**; there is no new `by` key. The verdict
+   line stays `{"at", "author", "text", "verdict"}` and the comment line
+   `{"at", "author", "text"}`, so every reader of `comments.jsonl` and the
+   console read it unchanged. *Decisions* 2's `by` is this field.
+3. **Three writes take it:** the approve and request-changes verdict lines
+   (`_review_action`), the comment verdict and the task comment (`_http`,
+   for `task_comment` and `review_verdict` only). `review_comments` then
+   pairs a person's request for changes with that person's own comments.
+4. **Nothing else changes author:** `_call`'s role for every other tool,
+   `backlog_accept`'s `by`, a proposal's `source` and the queued action's
+   `actor` stay `OPERATOR`. MCP calls stay the caller's role.
+
+**Consequences.**
+- Inert on the console's path until step 2 forwards the session; exercised
+  by tests and by a caller presenting the cookie, the CSRF token and the
+  bearer itself.
+- A reviewer still cannot give a verdict: `signin.REVIEWER_WRITES` lets a
+  reviewer comment only. The *Awaiting owner's approval* state is the
+  reviewer flow's task, and it reads the reviewer's name from this field.
+- A user named like a role (`operator`, `arquitecto`) reads as that role on
+  a comment: `NAME_RE` allows those names.
+- Comments written before this, and every comment with no session, say
+  `operator`; who wrote them stays only in the audit log.
+
+**Ruled out.**
+- *A separate `by` key beside `author`:* two fields saying who, which every
+  reader and `review_comments` would have to choose between.
+- *Passing the user as `_call`'s role in `_http` for every tool:* a
+  proposal's `source` and an accept's `by` would take a name their readers
+  do not expect; those are left for the task that wants them.
