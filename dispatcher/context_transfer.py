@@ -109,6 +109,9 @@ class TaskFile:
     # projects had records, which `dispatch migrate` stamps on every card.
     # Checked by `tasks.field_problems`; written only when set.
     project: str | None = None
+    # Who dropped the card and why (ADR 366); set by `tasks.mark_dropped`.
+    dropped_reason: str | None = None
+    dropped_by: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -687,6 +690,8 @@ def read_task_file(path: str) -> TaskFile:
         rank=fm.get("rank"),
         debt_id=fm.get("debt_id"),
         project=fm.get("project"),
+        dropped_reason=fm.get("dropped_reason"),
+        dropped_by=fm.get("dropped_by"),
     )
 
 
@@ -828,6 +833,10 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["debt_id"] = task.debt_id
     if task.project is not None:
         fm["project"] = task.project
+    if task.dropped_reason is not None:
+        fm["dropped_reason"] = task.dropped_reason
+    if task.dropped_by is not None:
+        fm["dropped_by"] = task.dropped_by
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

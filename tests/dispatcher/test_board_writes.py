@@ -19,6 +19,7 @@ from dispatcher.context_transfer import (
 _DESCRIPTION = "## Goal\n\nAdd a /healthz endpoint.\n\n## Done when\n\nGET /healthz answers 200.\n"
 _OTHER = "## Goal\n\nSomething else.\n\n## Done when\n\nIt is done.\n"
 _COMMIT = "0123456789abcdef0123456789abcdef01234567"
+DROP = {"reason": "no longer needed", "by": "operator"}
 
 
 def _hive(tmp_path: Path) -> str:
@@ -775,7 +776,7 @@ def test_accept_moves_a_backlog_item(tmp_path: Path, start, to) -> None:
     hive = _hive(tmp_path)
     _task(hive, "T-001", status=start, priority="low")
 
-    result = tasks.accept(hive, "T-001", to=to, priority="high")
+    result = tasks.accept(hive, "T-001", to=to, priority="high", **(DROP if to == "dropped" else {}))
 
     assert result == {"id": "T-001", "status": to, "changed": True, "children": {}}
     assert (_read(hive, "T-001").status, _read(hive, "T-001").priority) == (to, "high")
@@ -800,7 +801,7 @@ def test_accept_never_moves_a_task_on_the_board(tmp_path: Path, status) -> None:
         if to == status:
             continue
         with pytest.raises(tasks.BoardWriteError, match="on the board"):
-            tasks.accept(hive, "T-001", to=to)
+            tasks.accept(hive, "T-001", to=to, **(DROP if to == "dropped" else {}))
     assert _read(hive, "T-001").status == status
 
 
@@ -816,7 +817,7 @@ def test_dropped_is_final(tmp_path: Path) -> None:
     _task(hive, "T-001", status="dropped")
     with pytest.raises(tasks.BoardWriteError, match="dropped, which is final"):
         tasks.accept(hive, "T-001")
-    assert tasks.accept(hive, "T-001", to="dropped")["changed"] is False
+    assert tasks.accept(hive, "T-001", to="dropped", **DROP)["changed"] is False
 
 
 @pytest.mark.parametrize("fields, needle", [({"to": "merged"}, "to is 'merged'"),
@@ -859,7 +860,7 @@ def test_a_task_of_an_epic_waits_for_its_epic(tmp_path: Path) -> None:
     with pytest.raises(tasks.BoardWriteError, match="accept the epic"):
         tasks.accept(hive, epic["tasks"][0])
     # Deferring or dropping it alone is fine.
-    assert tasks.accept(hive, epic["tasks"][0], to="dropped")["status"] == "dropped"
+    assert tasks.accept(hive, epic["tasks"][0], to="dropped", **DROP)["status"] == "dropped"
 
 
 def test_dropping_the_last_open_task_of_an_epic_closes_it(tmp_path: Path) -> None:
@@ -872,7 +873,7 @@ def test_dropping_the_last_open_task_of_an_epic_closes_it(tmp_path: Path) -> Non
 
     # A deferred task holds its epic open, and so does a pending one.
     assert tasks.close_epic(hive, s1) is None
-    assert tasks.accept(hive, s3, to="dropped") == {
+    assert tasks.accept(hive, s3, to="dropped", **DROP) == {
         "id": s3, "status": "dropped", "changed": True, "children": {},
     }
     assert _read(hive, epic["id"]).status == "epic"
@@ -889,9 +890,9 @@ def test_dropping_every_task_of_an_accepted_epic_drops_it(tmp_path: Path) -> Non
     for child in (s1, s2):
         tasks.accept(hive, child, to="deferred")
     tasks.accept(hive, epic["id"])
-    tasks.accept(hive, s1, to="dropped")
+    tasks.accept(hive, s1, to="dropped", **DROP)
 
-    result = tasks.accept(hive, s2, to="dropped")
+    result = tasks.accept(hive, s2, to="dropped", **DROP)
 
     assert result == {
         "id": s2, "status": "dropped", "changed": True, "children": {}, "epic_closed": epic["id"],
@@ -912,11 +913,11 @@ def test_a_retried_drop_closes_the_epic_a_crash_left_open(tmp_path: Path) -> Non
     task.status = "dropped"
     write_task_file(path, task)
 
-    result = tasks.accept(hive, s2, to="dropped")
+    result = tasks.accept(hive, s2, to="dropped", **DROP)
 
     assert result["changed"] is False and result["epic_closed"] == epic["id"]
     assert _read(hive, epic["id"]).status == "done"
-    assert "epic_closed" not in tasks.accept(hive, s2, to="dropped")
+    assert "epic_closed" not in tasks.accept(hive, s2, to="dropped", **DROP)
 
 
 def test_a_dropped_task_closes_its_epic_holding_no_childs_lock(
@@ -945,7 +946,7 @@ def test_a_dropped_task_closes_its_epic_holding_no_childs_lock(
 
     monkeypatch.setattr(tasks, "close_epic", close_checking_locks)
 
-    assert tasks.accept(hive, s2, to="dropped", priority="low")["epic_closed"] == epic["id"]
+    assert tasks.accept(hive, s2, to="dropped", priority="low", **DROP)["epic_closed"] == epic["id"]
     assert free == [True]
 
 
@@ -955,11 +956,80 @@ def test_dropping_an_epic_drops_its_backlog_tasks(tmp_path: Path) -> None:
     s1, s2, s3 = epic["tasks"]
     tasks.accept(hive, s2, to="deferred")
 
-    result = tasks.accept(hive, epic["id"], to="dropped")
+    result = tasks.accept(hive, epic["id"], to="dropped", **DROP)
 
     assert result["children"] == {s1: "dropped", s2: "dropped", s3: "dropped"}
     with pytest.raises(tasks.BoardWriteError, match="final"):
         tasks.accept(hive, epic["id"])
+
+
+@pytest.mark.parametrize("reason", [None, "", "   \n"])
+def test_a_drop_without_a_reason_is_refused(tmp_path: Path, reason) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    before = Path(task_file_path(hive, "T-001")).read_bytes()
+    with pytest.raises(tasks.BoardWriteError, match="a drop needs a reason"):
+        tasks.accept(hive, "T-001", to="dropped", reason=reason, by="operator")
+    assert Path(task_file_path(hive, "T-001")).read_bytes() == before
+
+
+@pytest.mark.parametrize("to", ["pending", "deferred"])
+def test_a_reason_with_another_move_is_refused(tmp_path: Path, to) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    with pytest.raises(tasks.BoardWriteError, match="a reason is only for a drop"):
+        tasks.accept(hive, "T-001", to=to, reason="why")
+    assert _read(hive, "T-001").status == "proposed"
+
+
+def test_a_drop_records_who_and_why(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    tasks.accept(hive, "T-001", to="dropped", **DROP)
+    task = _read(hive, "T-001")
+    assert (task.status, task.dropped_reason, task.dropped_by) == (
+        "dropped", "no longer needed", "operator",
+    )
+    assert tasks.field_problems(task) == []
+
+
+def test_an_epic_drop_records_it_on_each_child(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = _epic(hive, 3)
+    s1, s2, s3 = epic["tasks"]
+    tasks.accept(hive, s2, to="deferred")
+    tasks.accept(hive, epic["id"], to="dropped", **DROP)
+    for task_id in (epic["id"], s1, s2, s3):
+        task = _read(hive, task_id)
+        assert (task.status, task.dropped_reason, task.dropped_by) == (
+            "dropped", "no longer needed", "operator",
+        )
+
+
+def test_a_retried_drop_keeps_the_first_reason(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    tasks.accept(hive, "T-001", to="dropped", **DROP)
+    result = tasks.accept(hive, "T-001", to="dropped", reason="other", by="reviewer")
+    assert result["changed"] is False
+    assert _read(hive, "T-001").dropped_reason == "no longer needed"
+    assert _read(hive, "T-001").dropped_by == "operator"
+
+
+def test_mark_dropped_refuses_a_board_status(tmp_path: Path) -> None:
+    task = TaskFile(task_id="T-001", status="in_progress", owner=None, depends_on=[],
+                    heartbeat=None, body="")
+    with pytest.raises(tasks.BoardWriteError, match="in_progress"):
+        tasks.mark_dropped(task, "why", "operator")
+    assert task.dropped_reason is None
+
+
+def test_field_problems_names_a_bad_dropped_value() -> None:
+    task = TaskFile(task_id="T-001", status="dropped", owner=None, depends_on=[],
+                    heartbeat=None, body="", dropped_reason=" ", dropped_by=3)
+    problems = tasks.field_problems(task)
+    assert any("dropped_reason" in p for p in problems)
+    assert any("dropped_by" in p for p in problems)
 
 
 def test_deferring_an_epic_leaves_its_tasks(tmp_path: Path) -> None:

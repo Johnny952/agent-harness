@@ -301,6 +301,8 @@ def test_tasks_reports_the_fields_the_task_file_carries(tmp_path: Path) -> None:
         "tags": [],
         "rank": None,
         "debt_id": None,
+        "dropped_reason": None,
+        "dropped_by": None,
         # No project named: the one pre-existing project (ADR 199).
         "project": None,
         # The epic fields of a plain task (ADR 137): no parent, no sub-tasks,
@@ -467,6 +469,8 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
         "tags": [],
         "rank": None,
         "debt_id": None,
+        "dropped_reason": None,
+        "dropped_by": None,
         "project": None,
         "epic": None,
         "split_into": [],
@@ -482,6 +486,13 @@ def test_a_task_file_that_still_has_kanban_issue_id_is_served_without_it(
 
 
 # --- backlog fields (ADR 133) --------------------------------------------
+
+
+def test_the_task_row_serves_who_dropped_it_and_why(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _task(harness.tasks_dir, "T-1", status="dropped", dropped_reason="stale", dropped_by="operator")
+    row = _get(harness, "/api/tasks/T-1").get_json()["data"]
+    assert (row["dropped_reason"], row["dropped_by"]) == ("stale", "operator")
 
 
 def test_both_task_routes_serve_the_backlog_fields_the_file_carries(tmp_path: Path) -> None:

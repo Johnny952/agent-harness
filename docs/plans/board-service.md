@@ -438,7 +438,7 @@ phase that has it (`docs/plans/token-economy.md`):
 | `backlog_propose` | an epic with its tasks, or a single task, into the backlog as `proposed`; an epic is all or nothing | yes | yes | — |
 | `task_edit` | title, description, `depends_on`, `priority`, while not started | yes | — | — |
 | `task_comment` | append a comment | yes | yes | — |
-| `backlog_accept` | `proposed`/`deferred` → `pending`, or → `deferred`/`dropped` | yes, on the person's word | — | — |
+| `backlog_accept` | `proposed`/`deferred` → `pending`, or → `deferred`/`dropped`; a drop needs a `reason`, kept with `dropped_by` (the caller's role) on the card (ADR 366) | yes, on the person's word | — | — |
 
 - **No tool moves a task once it is on the board, and none dispatches.**
   - `in_progress`, `phase`, `done`, `blocked` and `merged` stay with the

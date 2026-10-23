@@ -426,3 +426,8 @@ lock.
 **T-158** resolved `T-157-D1`: the `dispatcher` service mounts `BACKUP_DIR`
 in both compose files and `scripts/backup.sh` passes no `-v`/`-e`
 (`docs/decisions.md` ADR 360). It declared no new debt.
+
+**T-160-S1** made a drop through `backlog_accept` need a reason, recorded
+with `dropped_by` on the card by `tasks.mark_dropped` (`docs/decisions.md`
+ADR 366). It resolved no entry and declared no new debt; the console's drop
+answering 400 until T-160-S3 sends a reason is that sub-task's work, not debt.

@@ -262,6 +262,48 @@ def test_accept_refuses_a_bad_to_and_a_task_on_the_board(client, hive):
     assert "on the board" in error(client, "backlog_accept", {"task_id": "T-001"})
 
 
+def test_a_drop_needs_a_reason_over_mcp_and_http(client, hive):
+    task(hive, "T-001", status="proposed")
+    assert "a drop needs a reason" in error(
+        client, "backlog_accept", {"task_id": "T-001", "to": "dropped"}
+    )
+    res = client.post("/api/tasks/T-001/accept", json={"to": "dropped"})
+    assert res.status_code == 400
+    assert "a drop needs a reason" in res.get_data(as_text=True)
+    assert read(hive, "T-001").status == "proposed"
+
+
+def test_a_drop_records_the_role_and_the_reason(client, hive):
+    task(hive, "T-001", status="proposed")
+    task(hive, "T-002", status="proposed")
+    ok(client, "backlog_accept", {"task_id": "T-001", "to": "dropped", "reason": "stale"})
+    res = client.post("/api/tasks/T-002/accept", json={"to": "dropped", "reason": "dup"})
+    assert res.status_code == 200
+    one, two = read(hive, "T-001"), read(hive, "T-002")
+    assert (one.dropped_by, one.dropped_reason) == ("operator", "stale")
+    assert (two.dropped_by, two.dropped_reason) == ("operator", "dup")
+
+
+def test_a_drop_will_not_take_a_by(client, hive):
+    task(hive, "T-001", status="proposed")
+    res = client.post(
+        "/api/tasks/T-001/accept", json={"to": "dropped", "reason": "x", "by": "reviewer"}
+    )
+    assert res.status_code == 400
+    assert read(hive, "T-001").status == "proposed"
+
+
+def test_the_reads_serve_the_drop_fields(client, hive):
+    task(hive, "T-001", status="proposed")
+    task(hive, "T-002", status="proposed")
+    ok(client, "backlog_accept", {"task_id": "T-001", "to": "dropped", "reason": "stale"})
+    rows = {row["id"]: row for row in ok(client, "board_list")["items"]}
+    assert (rows["T-001"]["dropped_reason"], rows["T-001"]["dropped_by"]) == ("stale", "operator")
+    assert (rows["T-002"]["dropped_reason"], rows["T-002"]["dropped_by"]) == (None, None)
+    item = ok(client, "board_get", {"task_id": "T-001"})["item"]
+    assert (item["dropped_reason"], item["dropped_by"]) == ("stale", "operator")
+
+
 # Root ignores the mode bits, so as uid 0 (a phase's container) the write
 # succeeds and there is nothing to test.
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only mode")

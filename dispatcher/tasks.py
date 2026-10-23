@@ -555,6 +555,10 @@ def field_problems(task: context_transfer.TaskFile) -> list[str]:
         problems.append(f"its rank is {task.rank!r}, not an integer from 0 to {MAX_RANK}")
     if task.debt_id is not None and not is_debt_id(task.debt_id):
         problems.append(f"its debt_id is {task.debt_id!r}, not a debt entry id like T-001-D1")
+    for name in ("dropped_reason", "dropped_by"):
+        value = getattr(task, name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            problems.append(f"its {name} is {value!r}, not a non-blank string")
     if task.project is not None and not is_project_slug(task.project):
         problems.append(f"its project is {task.project!r}, not a project slug")
     return problems
@@ -3023,12 +3027,45 @@ def _append_comment(hive_dir: str, task_id: str, comment: dict, check=None) -> d
     return {"id": task_id, "comment": comment, "comment_count": count}
 
 
+def _drop_problems(reason: object, by: object) -> list[str]:
+    """What is wrong with a drop's reason and author: the one rule (ADR 366)."""
+    problems = []
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > MAX_COMMENT_CHARS:
+        problems.append("a drop needs a reason (non-blank, at most "
+                        f"{MAX_COMMENT_CHARS} characters)")
+    problems += [p for p in _comment_problems(by, "x")]
+    return problems
+
+
+def mark_dropped(task: context_transfer.TaskFile, reason: str, by: str) -> None:
+    """Drop `task` in place with its reason and who dropped it (ADR 366).
+
+    The one place a drop is made. Takes no lock and writes no file: the caller
+    holds the card's `task_lock` and calls `_write_task_file`.
+    """
+    problems = _drop_problems(reason, by)
+    if task.status not in ACCEPT_FROM:
+        problems.append(f"it is {task.status}, not one of {', '.join(ACCEPT_FROM)}")
+    if problems:
+        raise BoardWriteError(f"task {task.task_id}", problems)
+    task.status = "dropped"
+    task.dropped_reason = reason
+    task.dropped_by = by
+
+
 def accept(
-    hive_dir: str, task_id: str, to: str = ACCEPTED_STATUS, priority: str | None = None
+    hive_dir: str,
+    task_id: str,
+    to: str = ACCEPTED_STATUS,
+    priority: str | None = None,
+    reason: str | None = None,
+    by: str | None = None,
 ) -> dict:
     """Section 6's `backlog_accept`: `proposed`/`deferred` → `pending`, `deferred` or `dropped`.
 
     A person's act (section 4): the service gives it to the operator alone.
+    A drop needs a `reason` and `by`, recorded on the card by `mark_dropped`
+    (ADR 366); a `reason` with any other `to` is refused.
     `priority` confirms or changes the proposer's bucket. Asking for the
     status a task already has is a no-op, so a retry is safe. A task on the
     board is refused, whatever `to` says: no tool moves it.
@@ -3053,13 +3090,17 @@ def accept(
     if to not in ACCEPT_TO:
         problems.append(f"to is {to!r}, not one of {', '.join(ACCEPT_TO)}")
     problems += _priority_problems(priority)
+    if to == "dropped":
+        problems += _drop_problems(reason, by)
+    elif reason is not None:
+        problems.append("a reason is only for a drop")
     if problems:
         raise BoardWriteError(f"task {task_id}", problems)
     create = task_lock(hive_dir, CREATE_LOCK) if priority is not None else contextlib.nullcontext()
     with create, task_lock(hive_dir, task_id):
         path, task = _board_task(hive_dir, task_id)
         if task.split_into and not task.epic:
-            return _accept_epic(hive_dir, task_id, path, task, to, priority)
+            return _accept_epic(hive_dir, task_id, path, task, to, priority, reason, by)
         status = task.status
         changed = status != to
         if not changed:
@@ -3074,7 +3115,10 @@ def accept(
                         [f"its epic {task.epic} is not accepted yet "
                          f"({why or 'status ' + parent.status}); accept the epic"],
                     )
-            task.status = to
+            if to == "dropped":
+                mark_dropped(task, reason, by)
+            else:
+                task.status = to
             if priority is not None:
                 _rebucket(hive_dir, [task], priority)
             _write_task_file(path, task)
@@ -3136,6 +3180,8 @@ def _accept_epic(
     task: context_transfer.TaskFile,
     to: str,
     priority: str | None,
+    reason: str | None = None,
+    by: str | None = None,
 ) -> dict:
     """`accept` on an epic, under its lock: the parent's, then each child's."""
     current = ACCEPTED_STATUS if task.status == "epic" else task.status
@@ -3175,10 +3221,16 @@ def _accept_epic(
             # The epic first, then its tasks in their order, at the bucket's end.
             _rebucket(hive_dir, [task] + [child for _, child in moved], priority)
         for child_path, child in moved:
-            child.status = moves[child.status]
+            if to == "dropped":
+                mark_dropped(child, reason, by)
+            else:
+                child.status = moves[child.status]
             _write_task_file(child_path, child)
         # The parent last, so an epic is on the board only once its tasks are.
-        task.status = "epic" if to == ACCEPTED_STATUS else to
+        if to == "dropped":
+            mark_dropped(task, reason, by)
+        else:
+            task.status = "epic" if to == ACCEPTED_STATUS else to
         _write_task_file(path, task)
         return {
             "id": task_id, "status": task.status, "changed": True,

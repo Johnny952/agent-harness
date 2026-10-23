@@ -152,7 +152,7 @@ def test_propose_debt_is_idempotent_on_the_debt_id_at_any_status(tmp_path: Path)
     first = tasks.propose_debt(
         hive, debt_id="T-1-D1", title="T-1-D1: x", description=_DESCRIPTION, priority="low",
     )
-    tasks.accept(hive, first["id"], "dropped")
+    tasks.accept(hive, first["id"], "dropped", reason="not needed", by="operator")
     again = tasks.propose_debt(
         hive, debt_id="T-1-D1", title="another title", description=_DESCRIPTION, priority="high",
     )
