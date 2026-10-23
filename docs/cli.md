@@ -256,7 +256,10 @@ exits 5. Raise the limit on the same queue with `--resume QUEUE_ID --limit
 TOKENS` (ADR 336): the new limit must be at least `100000` and above the spend
 already recorded in the queue, otherwise it is a usage error (exit 2) naming
 both numbers and nothing runs. The tasks the limit stopped go back to pending
-and run again from the arquitecto, their earlier spend still counted; tasks
+and run again, their earlier spend still counted. A task held at the
+implementador, revisor or auditor restarts there, in the round it was held in,
+on its saved plan; one held at the arquitecto or the mapper, or whose hold was
+not recorded, restarts from the arquitecto (ADR 357, ADR 354). Tasks
 already merged, finished or failed do not run again. A resume that changes the
 limit or `--parallel` asks the same yes as a new queue (unless `--yes`), prints
 the effective values and a "Changed on resume" list, and records each change

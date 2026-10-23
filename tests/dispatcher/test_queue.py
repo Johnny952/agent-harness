@@ -52,12 +52,18 @@ class FakeCycle:
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
                  on_approve=None, may_start_phase=None, project_lock=None,
-                 before_merge=None):
+                 before_merge=None, scheduler=None, start_at="arquitecto",
+                 start_round=None, on_held=None):
         self.started.append(task_id)
-        self.calls.append({"authorized": authorized, "slug": slug})
+        self.calls.append({
+            "authorized": authorized, "slug": slug,
+            "start_at": start_at, "start_round": start_round,
+        })
         plan = self.script[task_id]
         for spend in plan.get("phases", [100]):
             if may_start_phase is not None and not may_start_phase():
+                if on_held is not None and plan.get("held_at"):
+                    on_held(*plan["held_at"])
                 return core.CycleOutcome.HELD
             _usage(cfg, task_id, spend)
         outcome = plan.get("outcome", core.CycleOutcome.FINISHED)
@@ -369,6 +375,90 @@ def test_limit_reached_inside_a_cycle_starts_no_new_phase(cfg, accounts, monkeyp
     assert queue.spent == 800
     assert queue.status == queue_mod.Q_LIMIT
     assert queue.entry("T-1").state == queue_mod.STOPPED
+
+
+def _held_queue(cfg, monkeypatch, parallel, held_at, limit=200):
+    _task(cfg, "T-1")
+    fake = _install(monkeypatch, cfg, {"T-1": {"phases": [100, 100, 100], "held_at": held_at}})
+    queue = queue_mod.plan(cfg, "proj", ["T-1"], limit)
+    queue.parallel = parallel
+    queue = queue_mod.run(cfg, queue, sleep=lambda s: None)
+    return fake, queue
+
+
+@pytest.mark.parametrize("parallel", [1, 2])
+def test_a_resumed_limit_reached_task_starts_where_the_limit_held_it(
+    cfg, accounts, monkeypatch, parallel,
+):
+    fake, queue = _held_queue(cfg, monkeypatch, parallel, ("implementador", 2))
+
+    assert queue.entry("T-1").state == queue_mod.STOPPED
+    stored = queue_mod.load(cfg, queue.queue_id).entry("T-1")
+    assert stored.held_at == {"role": "implementador", "round": 2}
+
+    queue_mod.resume(cfg, queue.queue_id, limit=10_000)
+    reopened = queue_mod.load(cfg, queue.queue_id).entry("T-1")
+    assert reopened.state == queue_mod.PENDING
+    assert reopened.held_at == {"role": "implementador", "round": 2}
+
+    queue = queue_mod.run(cfg, queue_mod.reopen(cfg, queue.queue_id), sleep=lambda s: None)
+
+    assert fake.calls[0]["start_at"] == "arquitecto"
+    assert fake.calls[1]["start_at"] == "implementador"
+    assert fake.calls[1]["start_round"] == 2
+    assert queue.entry("T-1").state == queue_mod.MERGED
+    assert queue.entry("T-1").held_at is None
+
+
+@pytest.mark.parametrize("role", ["arquitecto", core.project_docs.MAPPER_ROLE])
+def test_a_task_held_at_the_arquitecto_or_mapper_restarts_with_the_defaults(
+    cfg, accounts, monkeypatch, role,
+):
+    fake, queue = _held_queue(cfg, monkeypatch, 1, (role, 1))
+    assert queue.entry("T-1").held_at == {"role": role, "round": 1}
+
+    queue_mod.resume(cfg, queue.queue_id, limit=10_000)
+    queue_mod.run(cfg, queue_mod.reopen(cfg, queue.queue_id), sleep=lambda s: None)
+
+    assert fake.calls[1]["start_at"] == "arquitecto"
+    assert fake.calls[1]["start_round"] is None
+
+
+def test_a_limit_reached_end_without_a_held_report_stores_none(cfg, accounts, monkeypatch):
+    _, queue = _held_queue(cfg, monkeypatch, 1, None)
+    assert queue.entry("T-1").state == queue_mod.STOPPED
+    assert queue.entry("T-1").held_at is None
+
+
+def test_a_queue_file_from_before_held_at_loads_with_none(cfg):
+    _task(cfg, "T-1")
+    queue = queue_mod.plan(cfg, "proj", ["T-1"], 1_000)
+    queue_mod.save(cfg, queue)
+    path = queue_mod.queue_path(cfg, queue.queue_id)
+    data = json.loads(Path(path).read_text())
+    for entry in data["entries"]:
+        entry.pop("held_at", None)
+    Path(path).write_text(json.dumps(data))
+
+    assert queue_mod.load(cfg, queue.queue_id).entry("T-1").held_at is None
+
+
+@pytest.mark.parametrize("plan_", [
+    {"outcome": core.CycleOutcome.FINISHED},
+    {"outcome": core.CycleOutcome.BLOCKED},
+    {"outcome": core.CycleOutcome.SPLIT},
+    {"outcome": core.CycleOutcome.HELD},
+])
+def test_any_other_end_clears_held_at(cfg, accounts, monkeypatch, plan_):
+    _task(cfg, "T-1")
+    _install(monkeypatch, cfg, {"T-1": {"phases": [100], **plan_}})
+    queue = queue_mod.plan(cfg, "proj", ["T-1"], 10_000)
+    queue.entry("T-1").held_at = {"role": "implementador", "round": 2}
+
+    queue = queue_mod.run(cfg, queue, sleep=lambda s: None)
+
+    assert queue.entry("T-1").state != queue_mod.STOPPED
+    assert queue.entry("T-1").held_at is None
 
 
 def test_waits_for_quota_for_free(cfg, accounts, monkeypatch):
