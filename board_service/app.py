@@ -409,7 +409,7 @@ def _ready_check(hive_dir: str):
 
 def epic_start(
     hive_dir: str, state_dir: str, epic_id: str, project=None, note=None, limit=None,
-    floor=None,
+    floor=None, actor: str = OPERATOR,
 ) -> dict:
     """*Start epic*'s queue write (ADR 207): a `start` per Ready task of the epic.
 
@@ -459,7 +459,7 @@ def epic_start(
 
     records, run = actions.start_epic_run(
         state_dir, epic_id, project, queue, limit=limit, floor=floor, note=note,
-        actor="operator", ready=ready,
+        actor=actor, ready=ready,
         offset=lambda tid: epic_runs.usage_offset(hive_dir, tid),
         spent=lambda r: epic_runs.spend(hive_dir, r)[0],
     )
@@ -472,7 +472,7 @@ def epic_start(
     }
 
 
-def epic_stop(hive_dir: str, state_dir: str, epic_id: str) -> dict:
+def epic_stop(hive_dir: str, state_dir: str, epic_id: str, actor: str = OPERATOR) -> dict:
     """*Stop epic*'s queue write (ADR 211): drop the epic's starts still waiting.
 
     A `cancel` is queued for each start *Start epic* queued for the epic
@@ -487,7 +487,7 @@ def epic_stop(hive_dir: str, state_dir: str, epic_id: str) -> dict:
         raise actions.ActionRefused(404, f"no task {epic_id}")
     if epic.status != "epic":
         raise actions.ActionRefused(409, f"{epic_id} is not an epic")
-    made = actions.create_epic_cancels(state_dir, epic_id, actor="operator")
+    made = actions.create_epic_cancels(state_dir, epic_id, actor=actor)
 
     def start(record: dict) -> dict:
         return {"action": record["id"], "task_id": record["task_id"]}
@@ -525,7 +525,8 @@ def task_start(
     running = entry.record if entry is not None and entry.state == actions.CLAIMED else None
     if (
         running is None or running.get("kind") != "turn"
-        or running.get("status") != "running" or running.get("actor") != OPERATOR
+        or running.get("status") != "running"
+        or not isinstance(running.get("actor"), str) or running.get("actor") == THREAD
     ):
         raise ToolError(f"no running turn {turn}")
     params = running.get("params") or {}
@@ -980,7 +981,7 @@ def create_app(config_path: str) -> Flask:
                     params["floor"] = floor
             return actions.create(
                 state_dir, "start", project=body.get("project"), task_id=task_id,
-                params=params, note=body.get("note"), actor="operator",
+                params=params, note=body.get("note"), actor=_person(),
                 ready=_ready_check(hive_dir),
             )
 
@@ -1000,7 +1001,7 @@ def create_app(config_path: str) -> Flask:
         try:
             actions.check_new(
                 kind, project=project, task_id=task_id, params={"commit": commit},
-                actor="operator",
+                actor=_person(),
             )
         except actions.ActionRefused as exc:
             return jsonify({"error": exc.reason}), exc.status
@@ -1016,7 +1017,7 @@ def create_app(config_path: str) -> Flask:
         try:
             record = actions.create(
                 state_dir, kind, project=project, task_id=task_id,
-                params={"commit": commit}, actor="operator",
+                params={"commit": commit}, actor=_person(),
             )
         except actions.ActionRefused as exc:
             return jsonify({"error": exc.reason, "verdict": verdict}), exc.status
@@ -1048,7 +1049,7 @@ def create_app(config_path: str) -> Flask:
             project = body.get("project")
             actions.check_new(
                 "resolve_conflict", project=project, task_id=task_id, params={},
-                actor="operator",
+                actor=_person(),
             )
             try:
                 task = context_transfer.read_task_file(
@@ -1072,7 +1073,7 @@ def create_app(config_path: str) -> Flask:
                 )
             return actions.create(
                 state_dir, "resolve_conflict", project=project, task_id=task_id,
-                params={}, actor="operator",
+                params={}, actor=_person(),
             )
 
         return _action(actions_token, make)
@@ -1091,6 +1092,7 @@ def create_app(config_path: str) -> Flask:
             return epic_start(
                 hive_dir, state_dir, epic_id, project=body.get("project"),
                 note=body.get("note"), limit=body.get("limit"), floor=body.get("floor"),
+                actor=_person(),
             )
 
         return _action(actions_token, make)
@@ -1102,7 +1104,7 @@ def create_app(config_path: str) -> Flask:
         def make(body: dict):
             if body:
                 raise actions.ActionRefused(400, "a stop takes an empty body")
-            return epic_stop(hive_dir, state_dir, epic_id)
+            return epic_stop(hive_dir, state_dir, epic_id, actor=_person())
 
         return _action(actions_token, make)
 
@@ -1112,7 +1114,7 @@ def create_app(config_path: str) -> Flask:
             if body:
                 raise actions.ActionRefused(400, "a cancel takes an empty body")
             return actions.create(
-                state_dir, "cancel", params={"target": action_id}, actor="operator"
+                state_dir, "cancel", params={"target": action_id}, actor=_person()
             )
 
         return _action(actions_token, make)
@@ -1136,7 +1138,7 @@ def create_app(config_path: str) -> Flask:
                     "n": int(n), "verdict": body.get("verdict"),
                     "comment": body.get("comment"), "prefix": body.get("prefix"),
                 },
-                actor="operator",
+                actor=_person(),
             )
 
         return _action(actions_token, make)
@@ -1164,7 +1166,7 @@ def create_app(config_path: str) -> Flask:
                 raise actions.ActionRefused(409, f"thread {thread_id} is archived")
             return actions.create(
                 state_dir, "turn", params={"thread": thread_id, "text": text},
-                actor="operator",
+                actor=_person(),
             )
 
         return _action(actions_token, make)
@@ -1203,7 +1205,7 @@ def create_app(config_path: str) -> Flask:
                 ):
                     raise actions.ActionRefused(404, f"project {slug!r} has no record")
                 return actions.create(
-                    state_dir, kind, project=slug, params=params, actor="operator"
+                    state_dir, kind, project=slug, params=params, actor=_person()
                 )
 
             return _action(actions_token, make)
@@ -1417,7 +1419,7 @@ def _person() -> str:
 
 
 def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 200):
-    """One console write as the operator, or as the signed-in person for a comment or verdict.
+    """One console write as the operator, or as the signed-in person for a comment, verdict or accept/drop.
 
     The result of the tool, or `{"error"}` and 400 or 404.
 
@@ -1436,7 +1438,10 @@ def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 2
             return jsonify({"error": "the task id is the path's; the body takes none"}), 400
         body = {"task_id": task_id, **body}
     try:
-        role = _person() if name in ("task_comment", "review_verdict") else OPERATOR
+        role = (
+            _person() if name in ("task_comment", "review_verdict", "backlog_accept")
+            else OPERATOR
+        )
         result = _call(hive_dir, role, name, body)
     except NotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
