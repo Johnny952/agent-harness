@@ -21,6 +21,9 @@ with `ProjectBusy`, exactly as another process's would (see
 
 Treat an in-worker copy as best effort: catch `ProjectBusy` and go on, as
 `backup.before_merge` does (ADR 342); never make a merge or start wait on it.
+Since T-157 a caller that knows it is the only cycle under its own lock names
+that slug in `shared=` and the copy skips it (ADR 345); every other held lock
+still refuses.
 
 ## Evidence
 
