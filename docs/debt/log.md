@@ -448,3 +448,10 @@ no code, appended no row, and declared no new debt.
 found `yaml.safe_load` letting a bare `ValueError` through; round 2 fixed it
 inside the task, so no entry was filed. It resolved no entry and declared no
 new debt.
+
+**T-149** resolved `T-146-D1`: `board_service/signin.py` `session_create`
+now counts failed sign-ins per first `X-Forwarded-For` hop, unknown names
+included (`docs/decisions.md` ADR 381), and does nothing without the header,
+so it is inert until step 2 of `docs/plans/server-deployment.md` sends it.
+Trusting the header as sent stays step 2's to close (ADR 381,
+*Consequences*), not a new entry. It declared no new debt.
