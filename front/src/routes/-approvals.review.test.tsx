@@ -42,6 +42,8 @@ function task(id: string, over: Partial<Task> = {}): Task {
     tags: [],
     rank: null,
     debt_id: null,
+    dropped_reason: null,
+    dropped_by: null,
     project: "ia-harness",
     epic: null,
     split_into: [],
