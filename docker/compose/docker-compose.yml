@@ -275,7 +275,10 @@ services:
   # <state_dir>/actions/, the queue the board service writes (ADR 142, ADR 148),
   # so the console's Start and Cancel only happen while it runs. Behind the
   # `worker` profile: `docker compose --profile worker up -d worker`. Its mounts
-  # are the dispatcher's, copied, and must stay equal to them.
+  # are the dispatcher's, copied, and must stay equal to them, plus the backup
+  # directory (docs/decisions.md ADR 342): the approve copies the hive and state
+  # there before it merges, with the same BACKUP_DIR / BACKUP_KEEP the host's
+  # `backup` verb reads.
   worker:
     profiles: ["worker"]
     build:
@@ -283,6 +286,9 @@ services:
       dockerfile: docker/dispatcher/Dockerfile
     restart: unless-stopped
     command: ["--config", "/app/config.yaml", "worker"]
+    environment:
+      - BACKUP_DIR=/backups
+      - BACKUP_KEEP=${BACKUP_KEEP:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
@@ -291,6 +297,7 @@ services:
       - ../../.data/credentials/projects:/run/secrets/projects
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
+      - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
     networks:

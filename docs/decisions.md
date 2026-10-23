@@ -15706,3 +15706,66 @@ and the implementador never attempts one.
 **Consequences.** A phase cannot merge any branch through a command request,
 not only the base; no task has needed to. `git pull` is refused by two rules,
 and the reason names both.
+
+## ADR 342 — The worker takes a backup before every approve merge, best effort: a refused or failed copy is named on the task and the merge goes on
+
+**Status:** accepted (2026-10-23), T-153's arquitecto. Builds the "once
+before each merge" half of `docs/plans/server-deployment.md` *Decisions*, 8,
+that ADR 327 *Consequences* left for a compose mount; resolves
+`docs/debt/T-147-D1.md`.
+
+**Context.** ADR 327 built `dispatch backup` and `scripts/backup.sh` but no
+caller before a merge: the `worker` service, which runs the `approve`
+handler, has no `BACKUP_DIR`. A backup takes every project lock without
+waiting (ADR 327, 5), and the worker itself holds a project lock for each
+start it runs (ADR 200, ADR 306) — an `flock` on its own open file, so a copy
+taken from the worker process is refused while any cycle runs in any project.
+An approve holds the base lock and no project lock (ADR 258, ADR 264).
+
+**Decision.**
+1. **Compose.** The `worker` service in `docker/compose/docker-compose.yml`
+   and `docker/compose/docker-compose.coolify.yml` gains the mount
+   `${BACKUP_DIR:-../../.data/backups}:/backups` (the host directory
+   `scripts/backup.sh` defaults to) and the environment `BACKUP_DIR: /backups`
+   and `BACKUP_KEEP: ${BACKUP_KEEP:-}` (empty means ADR 327's default 7).
+   The `dispatcher` service is unchanged: `scripts/backup.sh` still gives it
+   the mount on its `run` line. The worker's mounts are now the dispatcher's
+   plus this one.
+2. **Where it runs.** Inside `dispatcher.approve_reviewed`, under the base
+   lock, after the stale check and the pre-merge check have passed and
+   before `docker_exec.merge_task_branch`: a stale, conflicting or not-run
+   approve takes no copy. The function takes a keyword
+   `before_merge: Callable[[], str] | None = None`, called once there; the
+   worker's `_approve` passes one that calls
+   `backup.before_merge(hive_root, cfg.state_dir, os.environ, now=...)`.
+   `dispatcher.py` does not import `backup` (which imports `worker`).
+3. **`backup.before_merge` never raises** and returns one line:
+   `backup before the merge: <name>` on success; `no backup before the merge:
+   <why>` on `BackupError` (unset `BACKUP_DIR`, bad `BACKUP_KEEP`, a name
+   that exists), on `ProjectBusy` (its own line), and on `OSError`.
+4. **Best effort.** The merge and push go on whatever the line says. The line
+   is logged and is the last line of the approve's comment in every outcome
+   reached after it ran, so the person who approved sees whether a copy is
+   behind the merge.
+5. **Nightly stays a host crontab line** calling `scripts/backup.sh`, as ADR
+   327 *Consequences* has it and the root `README.md` *Backups and restore*
+   documents; nothing in the repo schedules it.
+
+**Consequences.**
+- While any cycle runs, an approve's copy is refused and the comment says so;
+  the nightly copy is then the newest. Making the merge wait on a copy would
+  make approve fail whenever any project is busy.
+- Each landed approve adds a copy, and `BACKUP_KEEP` counts them with the
+  nightly ones: on a day of many merges the oldest nightly copies are pruned
+  sooner. An operator who wants a week of nightlies raises `BACKUP_KEEP`.
+- The automatic approve (ADR 77, `docs/plans/autonomy.md`) and `dispatch
+  merge-task` take no copy: both run inside or beside a cycle that holds a
+  project lock, so a copy would be refused every time.
+
+**Ruled out.**
+- *Refusing the merge when the copy fails:* see the first consequence.
+- *A backup without the project locks:* ADR 327, 5's "between cycles" is
+  what makes a copy restorable.
+- *Calling `backup` from the worker's `_approve` before `approve_reviewed`:*
+  it would copy for approves that turn out stale or conflicting, pruning a
+  real copy for nothing.

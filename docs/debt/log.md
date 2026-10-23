@@ -416,3 +416,9 @@ T-152 let `run-queue --resume` take a new `--limit` and `--parallel` (ADR 336)
 and filed one entry its revisor accepted: `T-152-D1`, a `limit_reached` task
 that re-runs from the arquitecto because no cycle starts at a later phase. It
 resolved none.
+
+T-153 put a best-effort backup before every `approve` merge (ADR 342) and
+resolved `T-147-D1` with a resolution row; nightly stays a host crontab line.
+It filed one entry its revisor accepted: `T-153-D1`, no backup before the
+automatic approve or `dispatch merge-task`, which run beside a held project
+lock.

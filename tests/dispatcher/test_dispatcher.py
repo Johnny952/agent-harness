@@ -9164,6 +9164,47 @@ def test_approve_while_the_base_is_locked_is_not_run(ap, monkeypatch) -> None:
     assert _base_lock_record(ap.cfg)["owner"] == "elsewhere:1:feedface"
 
 
+def test_approve_takes_a_backup_once_before_the_merge_and_ends_its_comment_with_the_line(ap) -> None:
+    seen = []
+
+    def before_merge():
+        seen.append(list(ap.merges))
+        return "backup before the merge: 20261022T030000Z"
+
+    out = dispatcher_mod.approve_reviewed(ap.cfg, "task-1", "myproj", _TIP, before_merge=before_merge)
+
+    assert out.outcome == "merged"
+    assert seen == [[]] and len(ap.merges) == 1
+    assert out.comment.splitlines()[-1] == "backup before the merge: 20261022T030000Z"
+
+
+def test_approve_merges_on_when_the_backup_raises(ap) -> None:
+    def before_merge():
+        raise RuntimeError("disk gone")
+
+    out = dispatcher_mod.approve_reviewed(ap.cfg, "task-1", "myproj", _TIP, before_merge=before_merge)
+
+    assert out.outcome == "merged" and len(ap.merges) == 1
+    assert out.comment.splitlines()[-1] == "no backup before the merge: disk gone"
+
+
+def test_approve_takes_no_backup_when_it_is_stale_or_the_check_fails(ap, monkeypatch) -> None:
+    calls = []
+    out = dispatcher_mod.approve_reviewed(
+        ap.cfg, "task-1", "myproj", "b" * 40, before_merge=lambda: calls.append(1) or "x"
+    )
+    assert out.outcome == "stale"
+    monkeypatch.setattr(
+        dispatcher_mod, "pre_merge_check",
+        lambda *a, **k: dispatcher_mod.PreMergeVerdict(False, "red"),
+    )
+    out = dispatcher_mod.approve_reviewed(
+        ap.cfg, "task-1", "myproj", _TIP, before_merge=lambda: calls.append(1) or "x"
+    )
+    assert out.outcome == "not_run"
+    assert calls == [] and ap.merges == []
+
+
 def test_approve_with_no_agent_container_is_not_run(tmp_path, monkeypatch, fake_git) -> None:
     cfg = _make_config(tmp_path, accounts=[])
 

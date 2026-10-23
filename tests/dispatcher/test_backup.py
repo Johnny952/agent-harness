@@ -164,6 +164,33 @@ def test_settings_default_and_required() -> None:
         backup.settings_from_env({"BACKUP_DIR": " "})
 
 
+def test_before_merge_returns_the_copys_line(env) -> None:
+    hive, state, dest = env
+    line = backup.before_merge(str(hive), str(state), {"BACKUP_DIR": str(dest)}, now=T0)
+    name = T0.strftime(backup.NAME_FORMAT)
+    assert line == f"backup before the merge: {name}"
+    assert backup.copies(str(dest)) == [name]
+
+
+def test_before_merge_without_a_backup_dir_says_so_and_does_not_raise(env) -> None:
+    hive, state, dest = env
+    line = backup.before_merge(str(hive), str(state), {}, now=T0)
+    assert line == "no backup before the merge: BACKUP_DIR is not set"
+    assert not dest.exists()
+
+
+def test_before_merge_under_a_held_project_lock_says_busy_and_writes_nothing(env) -> None:
+    hive, state, dest = env
+    _write(hive / "projects" / "alpha.json", "{}")
+    held = ProjectLock.take(str(state), "alpha", "T-9", "run-task")
+    try:
+        line = backup.before_merge(str(hive), str(state), {"BACKUP_DIR": str(dest)}, now=T0)
+    finally:
+        held.release()
+    assert line.startswith("no backup before the merge: ")
+    assert not dest.exists() or os.listdir(dest) == []
+
+
 def test_restore_round_trip_sets_aside_and_keeps_directories(env) -> None:
     hive, state, dest = env
     backup.backup(str(hive), str(state), str(dest), 7, now=T0)

@@ -918,8 +918,14 @@ def _approve(worker: Worker, record: dict, _cancelled=None) -> None:
     cfg, sd = worker.cfg, worker.state_dir
     record["started_at"] = _utc_now().isoformat()
     actions.rewrite(sd, record)
+    from dispatcher import backup  # backup imports this module
+
     out = core.approve_reviewed(
-        cfg, record["task_id"], record["project"], record["params"]["commit"]
+        cfg, record["task_id"], record["project"], record["params"]["commit"],
+        before_merge=lambda: backup.before_merge(
+            context_transfer.hive_root(cfg.hive_tasks_dir), cfg.state_dir, os.environ,
+            now=_utc_now(),
+        ),
     )
     try:
         tasks.add_comment(cfg.hive_tasks_dir, record["task_id"], "dispatcher", out.comment)
