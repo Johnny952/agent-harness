@@ -28,6 +28,8 @@ Sync file by file inside the existing roots: write each file over the live
 one (temp file in the same directory, `os.replace`), create missing
 directories, keep existing ones, and move what the source lacks into an aside
 directory under the same root. `dispatcher/backup.py` `_sync` is the model.
+Since T-156 (ADR 351) it also moves aside every live file it overwrites with
+different bytes, and never follows a live symlink.
 
 ## Evidence
 
