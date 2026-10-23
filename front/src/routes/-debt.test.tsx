@@ -116,6 +116,8 @@ describe("the Debt screen's backlog items", () => {
     tags: ["debt"],
     rank: null,
     debt_id: null,
+    dropped_reason: null,
+    dropped_by: null,
     project: null,
     epic: null,
     split_into: [],

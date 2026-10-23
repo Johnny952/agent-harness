@@ -472,6 +472,10 @@ export interface Task {
   rank: number | null;
   /** The debt index entry a `source: debt` item came from, else `null` (ADR 131). */
   debt_id: string | null;
+  /** Why the item was dropped, else `null`: not dropped, or dropped without one (ADR 366). */
+  dropped_reason: string | null;
+  /** The role that dropped it: `operator` over HTTP, a role over MCP; else `null` (ADR 366). */
+  dropped_by: string | null;
   /** The epic this task belongs to, as its id, else `null` (ADR 137). */
   epic: string | null;
   /**
@@ -683,6 +687,8 @@ export interface AcceptTaskBody {
   /** Where the item goes; `pending` (on the board) when absent. */
   to?: "pending" | "deferred" | "dropped";
   priority?: TaskPriority;
+  /** Why it is dropped: required with `to: dropped`, refused otherwise (ADR 366). */
+  reason?: string;
 }
 
 /** One record of the action queue, as `dispatcher/actions.py:create` writes it. ADR 160. */

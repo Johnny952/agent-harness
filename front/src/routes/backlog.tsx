@@ -62,6 +62,8 @@ const DEFAULT_STATUSES = ["proposed", "deferred"];
 
 type Move = "up" | "down";
 type Verdict = NonNullable<AcceptTaskBody["to"]>;
+type DecideOpts = { priority?: TaskPriority; reason?: string };
+type OnDecide = (taskId: string, to: Verdict, opts?: DecideOpts) => void;
 
 const VERDICT_DONE: Record<Verdict, string> = {
   pending: "accepted onto the board",
@@ -118,8 +120,10 @@ export function BacklogPage() {
   });
   const busy = accept.isPending || reorder.isPending;
 
-  const decide = (taskId: string, to: Verdict, priority?: TaskPriority) => {
-    const body: AcceptTaskBody = priority ? { to, priority } : { to };
+  const decide = (taskId: string, to: Verdict, opts: DecideOpts = {}) => {
+    const body: AcceptTaskBody = { to };
+    if (opts.priority) body.priority = opts.priority;
+    if (opts.reason) body.reason = opts.reason;
     accept.mutate(
       { taskId, body },
       {
@@ -334,7 +338,7 @@ function ItemRow({
   up?: boolean;
   down?: boolean;
   onMove?: (dir: Move) => void;
-  onDecide: (taskId: string, to: Verdict, priority?: TaskPriority) => void;
+  onDecide: OnDecide;
 }) {
   const epic = isEpic(task);
   const id = task.task_id;
@@ -385,6 +389,11 @@ function ItemRow({
         <span className="ml-2">
           <ProjectMark project={task.project} />
         </span>
+        {task.status === "dropped" ? (
+          <div className="text-[10px] text-muted-foreground" data-testid={`dropped-${id}`}>
+            <DroppedWhy task={task} />
+          </div>
+        ) : null}
       </td>
       <td className="mono px-3 py-1.5">{task.priority}</td>
       <td className="px-3 py-1.5">
@@ -439,6 +448,20 @@ function ItemRow({
   );
 }
 
+const filled = (s: string | null | undefined): s is string =>
+  typeof s === "string" && s.trim() !== "";
+
+/** Who dropped the item and why; a drop recorded before ADR 366 has no reason. */
+function DroppedWhy({ task }: { task: Task }) {
+  if (!filled(task.dropped_reason)) return <Absent label="no reason recorded" />;
+  return (
+    <>
+      dropped by {filled(task.dropped_by) ? task.dropped_by : <Absent label="not recorded" />}:{" "}
+      {task.dropped_reason}
+    </>
+  );
+}
+
 function Actions({
   task,
   busy,
@@ -450,11 +473,12 @@ function Actions({
   busy: boolean;
   epic: boolean;
   acceptBlocked: boolean;
-  onDecide: (taskId: string, to: Verdict, priority?: TaskPriority) => void;
+  onDecide: OnDecide;
 }) {
   const id = task.task_id;
   const [priority, setPriority] = useState<TaskPriority>(bucketOf(task));
   const [confirmDrop, setConfirmDrop] = useState(false);
+  const [reason, setReason] = useState("");
   const btn =
     "rounded-sm border border-border px-1.5 py-0.5 text-[11px] hover:bg-surface-2 disabled:opacity-40";
 
@@ -465,18 +489,34 @@ function Actions({
           drop {id}
           {epic ? " and its tasks" : ""}? It is final.
         </span>
+        <input
+          type="text"
+          aria-label={`reason for dropping ${id}`}
+          placeholder="why"
+          maxLength={20000}
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          className="mono rounded-sm border border-border bg-surface px-1 py-0.5 text-[11px] text-foreground"
+        />
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || reason.trim() === ""}
           className={cn(btn, "border-destructive/60 text-destructive")}
           onClick={() => {
             setConfirmDrop(false);
-            onDecide(id, "dropped");
+            onDecide(id, "dropped", { reason: reason.trim() });
           }}
         >
           confirm drop
         </button>
-        <button type="button" className={btn} onClick={() => setConfirmDrop(false)}>
+        <button
+          type="button"
+          className={btn}
+          onClick={() => {
+            setConfirmDrop(false);
+            setReason("");
+          }}
+        >
           cancel
         </button>
       </span>
@@ -508,7 +548,7 @@ function Actions({
               : undefined
         }
         className={btn}
-        onClick={() => onDecide(id, "pending", priority)}
+        onClick={() => onDecide(id, "pending", { priority })}
       >
         accept
       </button>

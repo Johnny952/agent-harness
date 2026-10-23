@@ -35,6 +35,8 @@ function task(id: string, over: Partial<Task> = {}): Task {
     tags: [],
     rank: null,
     debt_id: null,
+    dropped_reason: null,
+    dropped_by: null,
     project: null,
     epic: null,
     split_into: [],
@@ -168,9 +170,45 @@ describe("the backlog's verdicts", () => {
     const row = await screen.findByTestId("row-T-1");
     fireEvent.click(within(row).getByText("drop"));
     expect(sent.some((s) => s.method === "POST")).toBe(false);
+    fireEvent.change(within(row).getByLabelText("reason for dropping T-1"), {
+      target: { value: "  no longer needed  " },
+    });
     fireEvent.click(within(row).getByText("confirm drop"));
     await waitFor(() => expect(sent.some((s) => s.method === "POST")).toBe(true));
-    expect(sent.find((s) => s.method === "POST")!.body).toEqual({ to: "dropped" });
+    expect(sent.find((s) => s.method === "POST")!.body).toEqual({
+      to: "dropped",
+      reason: "no longer needed",
+    });
+  });
+
+  it("holds confirm drop while the reason is blank", async () => {
+    const { sent } = await open([task("T-1")], { "POST /api/tasks/T-1/accept": accepted });
+    const row = await screen.findByTestId("row-T-1");
+    fireEvent.click(within(row).getByText("drop"));
+    const confirm = within(row).getByText("confirm drop") as HTMLButtonElement;
+    const reason = within(row).getByLabelText("reason for dropping T-1");
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(reason, { target: { value: "   " } });
+    expect(confirm.disabled).toBe(true);
+    fireEvent.click(confirm);
+    expect(sent.some((s) => s.method === "POST")).toBe(false);
+    fireEvent.change(reason, { target: { value: "dup of T-9" } });
+    expect(confirm.disabled).toBe(false);
+  });
+
+  it("shows a refused drop in a toast", async () => {
+    await open([task("T-1")], {
+      "POST /api/tasks/T-1/accept": { status: 400, error: "a drop needs a reason" },
+    });
+    const row = await screen.findByTestId("row-T-1");
+    fireEvent.click(within(row).getByText("drop"));
+    fireEvent.change(within(row).getByLabelText("reason for dropping T-1"), {
+      target: { value: "x" },
+    });
+    fireEvent.click(within(row).getByText("confirm drop"));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("a drop needs a reason")),
+    );
   });
 
   it("shows a refusal in a toast", async () => {
@@ -182,6 +220,35 @@ describe("the backlog's verdicts", () => {
       expect(toast.error).toHaveBeenCalledWith(
         expect.stringContaining("T-1 is not in the backlog"),
       ),
+    );
+  });
+});
+
+describe("a dropped row's reason (ADR 372)", () => {
+  it("reads who dropped it and why", async () => {
+    await open([
+      task("T-1", { status: "dropped", dropped_reason: "dup of T-9", dropped_by: "operator" }),
+    ]);
+    fireEvent.click(await screen.findByLabelText("dropped"));
+    expect((await screen.findByTestId("dropped-T-1")).textContent).toBe(
+      "dropped by operator: dup of T-9",
+    );
+  });
+
+  it("says no reason recorded, never null, when there is none", async () => {
+    await open([task("T-1", { status: "dropped" }), task("T-2")]);
+    fireEvent.click(await screen.findByLabelText("dropped"));
+    const note = await screen.findByTestId("dropped-T-1");
+    expect(note.textContent).toBe("no reason recorded");
+    expect(screen.getByTestId("row-T-1").textContent).not.toContain("null");
+    expect(screen.queryByTestId("dropped-T-2")).toBeNull();
+  });
+
+  it("marks an absent author when only the reason is recorded", async () => {
+    await open([task("T-1", { status: "dropped", dropped_reason: "stale" })]);
+    fireEvent.click(await screen.findByLabelText("dropped"));
+    expect((await screen.findByTestId("dropped-T-1")).textContent).toContain(
+      "dropped by not recorded: stale",
     );
   });
 });
