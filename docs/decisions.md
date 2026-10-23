@@ -15949,3 +15949,53 @@ ADR 73) starts empty.
   is a second cycle path to keep in step with this one.
 - *Refusing a later start with no saved plan:* the caller would have to know
   the hive's files to pick a start; re-planning is what it got before.
+
+## ADR 357 — A queue task the limit stopped records where it was held, and its resumed cycle starts there
+
+**Status:** accepted (2026-10-23), T-154-S2's arquitecto. Amends ADR 336, 5
+("its cycle … starts at the arquitecto"). Closes debt T-152-D1 with ADR 354.
+The task's description names this ADR 349; 349 is outside T-154-S2's
+reserved block (357 to 359), so it is 357.
+
+**Context.** ADR 354 gave `run_task_cycle` `start_at`, `start_round` and
+`on_held`, and left `dispatcher/queue.py` passing none of them (debt
+T-154-S1-D1). A task `reopen` puts back from `limit_reached` to `pending`
+therefore still re-plans from the arquitecto, re-spending phases the limit
+had already paid for.
+
+**Decision.**
+1. *The record.* `Entry` gains `held_at: dict | None = None`, saved in
+   `<state_dir>/queues/<id>.json` as `{"role": <str>, "round": <int or
+   null>}`, the two arguments `on_held` was called with. A file written
+   before this ADR loads with `None` (the dataclass default).
+2. *Who writes it.* Both runners (`_run_serial`, `_run_parallel`) pass
+   `on_held` to every `run_task_cycle` call; the callback only keeps the
+   pair. `_settle` stores it as `held_at` when, and only when, it leaves the
+   entry `limit_reached`, and sets `held_at` to `None` for every other end —
+   finished, merged, blocked, held, split, and back to `pending` after a hold
+   that spent nothing. A `limit_reached` cycle whose `on_held` was never
+   called stores `None`.
+3. *Who keeps it.* `reopen` leaves `held_at` as it is, including when it
+   puts a `limit_reached` entry back to `pending`.
+4. *Who reads it.* A runner starting an entry whose `held_at` names a role
+   other than `arquitecto` or `project_docs.MAPPER_ROLE` passes
+   `start_at=held_at["role"]` and `start_round=held_at["round"]`. Otherwise
+   it passes neither, so the call is the default one (ADR 354, 1: the mapper
+   means the arquitecto). Where the cycle then really enters — the
+   implementador of that round, or the arquitecto when no plan is saved — is
+   ADR 354, 3 to 5, not the queue's.
+
+**Consequences.** ADR 336, 5's "starts at the arquitecto … there is no entry
+into a cycle at a later phase" no longer holds for a queue: a resumed
+`limit_reached` task held at the implementador, revisor or auditor of round
+N runs that round's implementador on its saved plan. Its spend still counts
+from its first `usage_offset`. The confirmation shows no restart point and
+does not estimate the resumed spend (unchanged, out of scope). The worker's
+start and `run-task` pass nothing new.
+
+**Ruled out.**
+- *Reading the restart point from the task file or the usage log on
+  resume:* neither says where a cycle was held; the cycle's own callback
+  does, and the queue file is already the record a resume reads.
+- *Keeping `held_at` across other ends:* a later cycle that finished,
+  blocked or split makes the old restart point false.
