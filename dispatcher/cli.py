@@ -881,7 +881,7 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser = sub.add_parser(
         "restore",
         help="Put a copy back over the hive and the state, in place, setting aside "
-        "what it replaces (ADR 328). Refuses (75) while the worker or a cycle runs.",
+        "what it replaces (ADR 328, 351). Refuses (75) while the worker or a cycle runs.",
     )
     restore_parser.add_argument(
         "--from", dest="copy", required=True, metavar="NAME|latest",

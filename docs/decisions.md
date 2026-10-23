@@ -15837,3 +15837,52 @@ automatic approve would wait on is its own.
   `flock` is already held; holding it twice proves nothing more.
 - *Importing `backup` into `dispatcher.py`:* `backup` imports `worker`,
   which imports `dispatcher` (ADR 342, 2).
+## ADR 351 — A restore sets aside every live file it overwrites with different bytes, and never follows a live symlink
+
+**Status:** accepted (2026-10-23), T-156's arquitecto. Amends ADR 328, 3;
+ADR 328 stands otherwise.
+
+**Context.** ADR 328's title, `dispatcher/backup.py`'s docstring and the
+`restore` help say a restore "sets aside what it replaces", but ADR 328, 3
+and `_sync` set aside only what the copy lacks: a live file the copy also
+holds was overwritten in place and its current version lost. And `_sync`
+skipped a live symlink only when the copy lacked its name; a live symlink
+to a directory sharing a name with a directory in the copy was recursed
+through, so the restore wrote outside the root. `backup` never follows a
+symlink (ADR 327) and a restore must not either.
+
+**Decision.** In ADR 328, 3's sync, per entry of a live directory:
+1. **A live regular file the copy also holds as a file** is compared byte
+   for byte with the copy's (`filecmp.cmp(..., shallow=False)`). Equal: it
+   is overwritten as before and nothing is set aside. Different: it is moved
+   to `<root>/.pre-restore-<YYYYMMDDTHHMMSSZ>/` at the same relative path
+   (`os.replace`, as for what the copy lacks), then the copy's file is put in
+   its place (temp file in the directory, `os.replace`). Nothing a restore
+   changes is lost.
+2. **A live symlink** is never followed, read through or written through.
+   When the copy holds that name (as a file or a directory) the link itself
+   is moved aside, unfollowed, to the same `.pre-restore-*` path, and the
+   copy's entry is then written in its place as for a missing one. When the
+   copy lacks the name the link is left exactly as it is, as before.
+3. Every other rule of ADR 328, 3 is unchanged: a kind mismatch (file vs
+   directory) is set aside whole; what the copy lacks is set aside; a live
+   directory is kept, inode and all; `NEVER_COPIED`, `NOT_RECORDS` and
+   `.pre-restore-*` names are left alone; nothing is deleted. A symlink
+   inside the copy is out of scope: `backup` never writes one.
+
+**Consequences.**
+- ADR 328's title, the module docstring and the CLI help become true as
+  written; `docs/cli.md` `restore` and the root `README.md` *Backups and
+  restore* say the replaced versions are under `.pre-restore-*` too.
+- A restore reads every live file it overwrites once more, to compare; the
+  hive and `/state` are small text, so this is accepted.
+- `.pre-restore-*` holds only what changed, not a second full copy, and a
+  restore of an unchanged tree sets nothing aside.
+
+**Ruled out.**
+- *Fixing the wording instead:* a wrong `--from` would lose the live
+  versions for good, which is what ADR 328's *Ruled out* refuses deletion for.
+- *Setting aside every overwritten file, equal or not:* every restore would
+  duplicate the whole tree into `.pre-restore-*`, burying what changed.
+- *Leaving a live symlink the copy also names in place:* the copy's entry
+  could then only be written through it, or not at all.

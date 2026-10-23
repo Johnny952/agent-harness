@@ -262,6 +262,81 @@ def test_restore_round_trip_sets_aside_and_keeps_directories(env) -> None:
     assert {k: v for k, v in _tree(state).items() if not k.startswith(aside) and not k.startswith("claude_creds_a")
             and not k.startswith("actions/worker.lock")} == want_state
     assert len(result.asides) == 2
+    assert (hive / aside / "tasks" / "T-1.md").read_text() == "changed"
+
+
+def test_restore_sets_aside_the_live_version_of_a_changed_file_only(env) -> None:
+    hive, state, dest = env
+    backup.backup(str(hive), str(state), str(dest), 7, now=T0)
+    (hive / "tasks" / "T-1.md").write_text("changed")
+
+    result = backup.restore(str(hive), str(state), str(dest), "latest", now=T0 + timedelta(hours=1))
+
+    aside = hive / ".pre-restore-20261022T040000Z"
+    assert (hive / "tasks" / "T-1.md").read_text() == "task"
+    assert (aside / "tasks" / "T-1.md").read_text() == "changed"
+    assert not (aside / "board").exists()
+    assert str(aside) in result.asides
+
+
+def test_restore_of_an_unchanged_tree_sets_nothing_aside(env) -> None:
+    hive, state, dest = env
+    backup.backup(str(hive), str(state), str(dest), 7, now=T0)
+
+    result = backup.restore(str(hive), str(state), str(dest), "latest", now=T0 + timedelta(hours=1))
+
+    assert str(hive / ".pre-restore-20261022T040000Z") not in result.asides
+    assert not list(hive.glob(".pre-restore-*"))
+    # the worker lock the restore itself holds is the only thing the state sets aside
+    assert _tree(state / ".pre-restore-20261022T040000Z").keys() <= {"actions/worker.lock"}
+
+
+def test_restore_never_writes_through_a_live_symlink_to_a_directory(env, tmp_path: Path) -> None:
+    hive, state, dest = env
+    outside = tmp_path / "outside"
+    _write(outside / "keep.txt", "mine")
+    backup.backup(str(hive), str(state), str(dest), 7, now=T0)
+    before = _tree(outside)
+    import shutil
+    shutil.rmtree(hive / "board")
+    (hive / "board").symlink_to(outside)
+
+    backup.restore(str(hive), str(state), str(dest), "latest", now=T0 + timedelta(hours=1))
+
+    assert _tree(outside) == before
+    assert not (hive / "board").is_symlink()
+    assert (hive / "board" / "T-1" / "description.md").read_text() == "goal"
+    link = hive / ".pre-restore-20261022T040000Z" / "board"
+    assert link.is_symlink() and os.path.realpath(link) == str(outside.resolve())
+
+
+def test_restore_replaces_a_live_symlink_to_a_file_without_touching_its_target(env, tmp_path: Path) -> None:
+    hive, state, dest = env
+    target = _write(tmp_path / "target.md", "mine")
+    backup.backup(str(hive), str(state), str(dest), 7, now=T0)
+    (hive / "tasks" / "T-1.md").unlink()
+    (hive / "tasks" / "T-1.md").symlink_to(target)
+
+    backup.restore(str(hive), str(state), str(dest), "latest", now=T0 + timedelta(hours=1))
+
+    assert target.read_text() == "mine"
+    live = hive / "tasks" / "T-1.md"
+    assert not live.is_symlink() and live.read_text() == "task"
+    assert (hive / ".pre-restore-20261022T040000Z" / "tasks" / "T-1.md").is_symlink()
+
+
+def test_restore_leaves_a_live_symlink_the_copy_lacks_in_place(env, tmp_path: Path) -> None:
+    hive, state, dest = env
+    outside = tmp_path / "outside"
+    _write(outside / "keep.txt", "mine")
+    backup.backup(str(hive), str(state), str(dest), 7, now=T0)
+    (hive / "extra").symlink_to(outside)
+
+    result = backup.restore(str(hive), str(state), str(dest), "latest", now=T0 + timedelta(hours=1))
+
+    assert (hive / "extra").is_symlink()
+    assert _tree(outside) == {"keep.txt": "mine"}
+    assert not list(hive.glob(".pre-restore-*"))
 
 
 def test_restore_refuses_unknown_and_broken_copies(env) -> None:

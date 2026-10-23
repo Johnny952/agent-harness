@@ -5,10 +5,12 @@ built under a `.partial-` name and renamed once complete. It is taken with every
 project lock held (a caller may share its own), so no other cycle writes while it runs. The two sources are the only
 things ever read, and `NEVER_COPIED` keeps a credential out even if one sits inside
 them. A restore syncs a copy back in place (both roots are mount points) and sets
-aside whatever it replaces; it deletes nothing.
+aside what the copy lacks and every live file it changes (ADR 351); it never follows
+a live symlink and deletes nothing.
 """
 from __future__ import annotations
 
+import filecmp
 import fnmatch
 import json
 import os
@@ -224,12 +226,21 @@ def _set_aside(live: str, aside_root: str, rel: str, result: Result) -> None:
 
 
 def _sync(src: str, dst: str, root: str, aside_root: str, result: Result) -> None:
-    """Make `dst` hold what `src` holds, in place; what `src` lacks is moved aside."""
+    """Make `dst` hold what `src` holds, in place (ADR 351).
+
+    What `src` lacks and every live file it changes are moved aside. A live symlink is
+    never followed: one `src` has no name for is left alone, one it names is moved aside.
+    """
     os.makedirs(dst, exist_ok=True)
     wanted = set(os.listdir(src))
     for name in sorted(os.listdir(dst)):
         live = os.path.join(dst, name)
-        if _skipped(name) or os.path.islink(live) or (name in wanted and _same_kind(live, os.path.join(src, name))):
+        if _skipped(name):
+            continue
+        if os.path.islink(live):
+            if name not in wanted:
+                continue
+        elif name in wanted and _same_kind(live, os.path.join(src, name)):
             continue
         _set_aside(live, aside_root, os.path.relpath(live, root), result)
     for name in sorted(wanted):
@@ -240,6 +251,8 @@ def _sync(src: str, dst: str, root: str, aside_root: str, result: Result) -> Non
             fd, tmp = tempfile.mkstemp(dir=dst, prefix=".restore-")
             os.close(fd)
             shutil.copy2(theirs, tmp)
+            if os.path.isfile(live) and not filecmp.cmp(live, theirs, shallow=False):
+                _set_aside(live, aside_root, os.path.relpath(live, root), result)
             os.replace(tmp, live)
             result.files += 1
 
