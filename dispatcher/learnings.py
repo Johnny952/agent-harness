@@ -220,7 +220,7 @@ def _split(text: str) -> tuple[dict | None, str]:
         return None, text
     try:
         loaded = yaml.safe_load(fm_text)
-    except yaml.YAMLError:
+    except (ValueError, yaml.YAMLError):  # an impossible date raises a bare ValueError
         loaded = _fallback_frontmatter(fm_text)
     if not isinstance(loaded, dict):
         return None, text

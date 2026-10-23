@@ -151,6 +151,16 @@ def test_a_when_with_an_inline_colon_is_still_tracked(tmp_path: Path) -> None:
     assert entry.rule == "Do the thing."
 
 
+def test_an_impossible_date_does_not_stop_the_read(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _raw(hive, "t-1-d.md", "project: myproj\ntask: t-1\nwhen: 2026-02-30\n")
+    _raw(hive, "t-1-e.md", "project: myproj\ntask: t-1\nwhen: fine\n")
+
+    entries = learnings.read_inbox(str(hive))
+
+    assert sorted(e.when for e in entries) == ["2026-02-30", "fine"]
+
+
 def test_the_fallback_removes_one_pair_of_quotes(tmp_path: Path) -> None:
     hive = tmp_path / "hive"
     _raw(hive, "t-1-q.md", 'project: myproj\ntask: t-1\nwhen: "a: b"\nnote: x: y\n')
