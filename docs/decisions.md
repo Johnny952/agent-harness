@@ -16237,7 +16237,8 @@ The backlog screen (`front/src/routes/backlog.tsx`) still sent `{to:
 raises `ScannerError: mapping values are not allowed here`, `_split` answers
 `None`, and `_read_entry` logs "has no usable frontmatter; not tracking it".
 The entry then never reaches a table, the confirmation rule, `carry` or the
-drop. `inbox/T-159-a-debt-task-can-already-be-resolved.md` is the case.
+drop. T-159's inbox entry `T-159-a-debt-task-can-already-be-resolved` (in
+the shared learnings inbox, outside the repo) is the case.
 
 **Decision.**
 1. **YAML first, unchanged.** `_split` still splits on the delimiter and
