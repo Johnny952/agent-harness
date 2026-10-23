@@ -236,7 +236,9 @@ are the same task files, told apart by `status`:
   - the entry's *what* and *fix* become the description.
 
   From there a person accepts it into the board, defers it or drops it, like
-  any other item. Fixing it closes the row in the index, as today.
+  any other item. Fixing it closes the row in the index, as today, and the
+  merge of the fixing task drops its backlog card if still `proposed` or
+  `deferred` (ADR 369, amending ADR 131); an accepted card is left and warned.
 - **Tags group, they do not rank.** `tags` is a free list on any item. The
   dispatcher sets `debt` on every debt item, so the backlog and the board can
   be filtered to debt alone or to everything but debt. An area tag such as

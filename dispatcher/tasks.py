@@ -3053,6 +3053,56 @@ def mark_dropped(task: context_transfer.TaskFile, reason: str, by: str) -> None:
     task.dropped_by = by
 
 
+def close_resolved_debt(hive_dir: str, task_id: str) -> tuple[list[str], list[str]]:
+    """Drop the backlog cards mirroring the debt `task_id` resolved (ADR 369).
+
+    Returns `(closed, warnings)`, one line each, and never raises: a failure
+    is a warning and the next card goes on. For each id in the task's
+    `resolved_debt`, every card with that `debt_id` (the task's own aside) is
+    re-read under its lock: `proposed`/`deferred` is dropped by
+    `mark_dropped` as `dispatcher`; `dropped` or missing is skipped silently,
+    so a re-run is a no-op; any other status is left alone with a warning.
+    `close_epic` runs after the locks, as `accept` does (ADR 134).
+    """
+    closed, warnings, epic_children = [], [], []
+    try:
+        ids = context_transfer.read_resolved_debt(hive_dir, task_id)
+        cards = read_all_tasks(hive_dir) if ids else {}
+    except Exception as exc:
+        return [], [f"task {task_id}: its resolved debt could not be read: {exc}"]
+    for debt_id in ids:
+        for card_id in sorted(c for c, t in cards.items() if t.debt_id == debt_id and c != task_id):
+            try:
+                with task_lock(hive_dir, card_id):
+                    try:
+                        path, card = _board_task(hive_dir, card_id)
+                    except NoTaskError:
+                        continue
+                    if card.status == "dropped":
+                        continue
+                    if card.status not in ACCEPT_FROM:
+                        warnings.append(
+                            f"debt {debt_id}: {task_id} resolved it, but its card "
+                            f"{card_id} is {card.status}; left as it is"
+                        )
+                        continue
+                    mark_dropped(card, f"resolved by {task_id}", "dispatcher")
+                    _write_task_file(path, card)
+                closed.append(f"debt {debt_id}: card {card_id} dropped, resolved by {task_id}")
+                if card.epic:
+                    epic_children.append(card_id)
+            except Exception as exc:
+                warnings.append(f"debt {debt_id}: card {card_id} could not be closed: {exc}")
+    for card_id in epic_children:
+        try:
+            epic = close_epic(hive_dir, card_id)
+            if epic:
+                closed.append(f"epic {epic}: every sub-task is merged or dropped, so it is done")
+        except Exception as exc:
+            warnings.append(f"card {card_id}: its epic could not be closed: {exc}")
+    return closed, warnings
+
+
 def accept(
     hive_dir: str,
     task_id: str,

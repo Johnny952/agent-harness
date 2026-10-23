@@ -7348,11 +7348,11 @@ def test_record_merge_keeps_the_first_record_when_the_branch_was_already_in(tmp_
     tasks.handoff(cfg.hive_tasks_dir, "task-1", new_status="done", body="## auditor")
     up_to_date = _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
 
-    recorded, problem = dispatcher_mod.record_merge(cfg, "task-1", up_to_date)
+    recorded, problem, _ = dispatcher_mod.record_merge(cfg, "task-1", up_to_date)
     assert (recorded, problem) == (["task task-1: recorded as merged into main"], None)
     first = _task(cfg).merged
 
-    assert dispatcher_mod.record_merge(cfg, "task-1", up_to_date) == ([], None)
+    assert dispatcher_mod.record_merge(cfg, "task-1", up_to_date) == ([], None, [])
     assert _task(cfg).merged == first
     # A merge that happened is a new fact, and replaces it.
     dispatcher_mod.record_merge(cfg, "task-1", _merge(dispatcher_mod.docker_exec.MERGED, "release"))
@@ -7365,7 +7365,7 @@ def test_record_merge_repairs_an_epic_whose_close_never_happened(tmp_path) -> No
     tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S1", "main")
     tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S2", "main")
 
-    recorded, problem = dispatcher_mod.record_merge(
+    recorded, problem, _ = dispatcher_mod.record_merge(
         cfg, "task-0-S2", _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
     )
 
@@ -7378,14 +7378,14 @@ def test_record_merge_reports_what_it_could_not_write_and_does_not_raise(tmp_pat
     os.makedirs(cfg.hive_tasks_dir)
     merged = _merge(dispatcher_mod.docker_exec.MERGED)
 
-    recorded, problem = dispatcher_mod.record_merge(cfg, "task-1", merged)
+    recorded, problem, _ = dispatcher_mod.record_merge(cfg, "task-1", merged)
     assert recorded == [] and "no task file" in problem
     assert os.listdir(cfg.hive_tasks_dir) == []
 
     Path(task_file_path(cfg.hive_tasks_dir, "task-1")).write_text(
         "---\ntask_id: task-1\nstatus: done\ndescription: old\n---\n\n"
     )
-    recorded, problem = dispatcher_mod.record_merge(cfg, "task-1", merged)
+    recorded, problem, _ = dispatcher_mod.record_merge(cfg, "task-1", merged)
     assert recorded == [] and tasks.MIGRATE_COMMAND in problem
 
 
@@ -7412,14 +7412,14 @@ def test_record_merge_queues_a_started_epics_next_task_once(tmp_path) -> None:
     _start_epic_run(cfg)
     merged = _merge(dispatcher_mod.docker_exec.MERGED)
 
-    recorded, problem = dispatcher_mod.record_merge(cfg, "task-0-S1", merged)
+    recorded, problem, _ = dispatcher_mod.record_merge(cfg, "task-0-S1", merged)
 
     assert problem is None
     assert recorded[-1] == "epic task-0: queued task-0-S2"
     assert _queued_starts(cfg) == ["task-0-S1", "task-0-S2"]
     # `merge-task` run again records nothing new and queues nothing twice.
     up_to_date = _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
-    assert dispatcher_mod.record_merge(cfg, "task-0-S1", up_to_date) == ([], None)
+    assert dispatcher_mod.record_merge(cfg, "task-0-S1", up_to_date) == ([], None, [])
     assert _queued_starts(cfg) == ["task-0-S1", "task-0-S2"]
 
 
@@ -7433,7 +7433,7 @@ def test_record_merge_queues_nothing_for_a_stopped_or_unstarted_epic(tmp_path) -
     _start_epic_run(cfg)
     actions.create_epic_cancels(cfg.state_dir, "task-0", actor="test")
     tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S1", "release")
-    recorded, problem = dispatcher_mod.record_merge(
+    recorded, problem, _ = dispatcher_mod.record_merge(
         cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.MERGED)
     )
     assert problem is None and not any(line.startswith("epic") for line in recorded)
@@ -7448,7 +7448,7 @@ def test_record_merge_does_not_queue_a_task_already_started(tmp_path) -> None:
     tasks.mark_merged(cfg.hive_tasks_dir, "task-0-S1", "main")
     actions.create_starts(cfg.state_dir, "myproj", ["task-0-S2"], actor="test")
 
-    recorded, _ = dispatcher_mod.record_merge(
+    recorded, _, _ = dispatcher_mod.record_merge(
         cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.UP_TO_DATE)
     )
 
@@ -7466,7 +7466,7 @@ def test_record_merge_pauses_an_epic_at_its_limit(tmp_path) -> None:
         "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
     })
 
-    recorded, problem = dispatcher_mod.record_merge(
+    recorded, problem, _ = dispatcher_mod.record_merge(
         cfg, "task-0-S1", _merge(dispatcher_mod.docker_exec.MERGED)
     )
 
@@ -8219,15 +8219,16 @@ _AA_DESCRIPTION = (
 
 
 def _aa_dispatch_phase(
-    *, gate_report=gates.Report([]), revisor=None, auditor=None,
+    *, gate_report=gates.Report([]), revisor=None, auditor=None, implementador=None,
 ):
-    """Every phase works; the revisor and the auditor return structured handoffs."""
+    """Every phase works; the revisor and the auditor return structured handoffs,
+    and the implementador one only when `implementador` is given."""
     revisor = {"status": "complete", "verdict": "APPROVED"} if revisor is None else revisor
     auditor = {"status": "complete"} if auditor is None else auditor
 
     def fake(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None,
              effort=None, round_num=None, **kwargs):
-        payload = {"revisor": revisor, "auditor": auditor}.get(role)
+        payload = {"revisor": revisor, "auditor": auditor, "implementador": implementador}.get(role)
         return dispatcher_mod.DispatchResult(
             success=True,
             session_id=None,
@@ -8281,6 +8282,40 @@ def test_auto_approve_merges_when_every_condition_holds(tmp_path, monkeypatch, a
     assert "Approved and merged into main at " + "c" * 40 in task.body
     for name in dispatcher_mod.auto_approve.CONDITIONS:
         assert f"`{name}`" in task.body
+
+
+def _debt_cards(cfg, proposed="proposed", accepted="pending") -> None:
+    """Task-1 resolves two entries: one card to drop and one that was accepted."""
+    tasks.set_resolved_debt(cfg.hive_tasks_dir, "task-1", ["T-9-D1", "T-9-D2"])
+    for card, status, debt_id in (("card-1", proposed, "T-9-D1"), ("card-2", accepted, "T-9-D2")):
+        dispatcher_mod.context_transfer.write_task_file(
+            dispatcher_mod.context_transfer.task_file_path(cfg.hive_tasks_dir, card),
+            dispatcher_mod.context_transfer.TaskFile(
+                task_id=card, status=status, owner=None, depends_on=[], heartbeat=None,
+                body="", debt_id=debt_id,
+            ),
+        )
+        tasks.write_description(cfg.hive_tasks_dir, card, _AA_DESCRIPTION)
+
+
+def test_auto_approve_drops_the_resolved_debt_card_and_notes_the_accepted_one(
+    tmp_path, monkeypatch, aa_git
+) -> None:
+    cfg = _aa_config(tmp_path)
+    _debt_cards(cfg)
+
+    outcome = _aa_run(
+        cfg, monkeypatch,
+        implementador={"status": "complete", "resolved_debt": ["T-9-D1", "T-9-D2"]},
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert _task(cfg, "card-1").status == "dropped"
+    assert _task(cfg, "card-1").dropped_reason == "resolved by task-1"
+    assert _task(cfg, "card-2").status == "pending"
+    task = _task(cfg)
+    assert task.status == "done" and task.merged["into"] == "main"
+    assert "debt T-9-D2: task-1 resolved it, but its card card-2 is pending; left as it is" in task.body
 
 
 def _assert_refused_on(cfg, fake_git, condition) -> None:
@@ -9020,6 +9055,21 @@ def test_approve_merges_and_pushes_the_reviewed_tip(ap) -> None:
     assert task.status == "done" and task.merged["into"] == "main"
     assert ap.dropped == ["task-1"]
     assert _base_lock_record(ap.cfg) is None
+
+
+def test_approve_drops_the_resolved_debt_card_and_warns_before_the_backup_line(ap) -> None:
+    _debt_cards(ap.cfg)
+
+    out = dispatcher_mod.approve_reviewed(
+        ap.cfg, "task-1", "myproj", _TIP, before_merge=lambda: "backup: copied"
+    )
+
+    assert out.outcome == "merged"
+    assert _task(ap.cfg, "card-1").status == "dropped"
+    assert _task(ap.cfg, "card-2").status == "pending"
+    lines = out.comment.splitlines()
+    warning = "debt T-9-D2: task-1 resolved it, but its card card-2 is pending; left as it is"
+    assert lines[-2:] == [warning, "backup: copied"]
 
 
 def test_approve_with_no_upstream_is_merged_and_says_nothing_to_push_to(ap, monkeypatch) -> None:

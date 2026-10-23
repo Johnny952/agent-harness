@@ -1163,11 +1163,13 @@ def main() -> None:
         # sub-task (`docs/plans/task-split.md` section 3). Still exit 0 when
         # the record could not be written: exit 1 here means the branch did
         # not land, and it did.
-        recorded, problem = record_merge(cfg, args.task_id, outcome)
+        recorded, problem, warnings = record_merge(cfg, args.task_id, outcome)
         for line in recorded:
             print(line)
         if problem:
             print(problem, file=sys.stderr)
+        for line in warnings:
+            print(line, file=sys.stderr)
         # The base moved: every other task of the project still in review is
         # merged with it again and gated (ADR 274), when the check is on.
         for line in recheck_awaiting_review(cfg, args.project, args.task_id):

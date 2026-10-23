@@ -912,11 +912,53 @@ _DEBT_INDEX = (
 )
 
 
-def test_cli_merge_task_closes_no_card_for_the_debt_the_branch_resolved(
+def _debt_card(tmp_path: Path, task_id: str, status: str, debt_id: str) -> None:
+    hive = str(tmp_path / "hive")
+    path = dispatcher_mod.context_transfer.task_file_path(hive, task_id)
+    dispatcher_mod.context_transfer.write_task_file(
+        path,
+        dispatcher_mod.context_transfer.TaskFile(
+            task_id=task_id, status=status, owner=None, depends_on=[], heartbeat=None,
+            body="", debt_id=debt_id,
+        ),
+    )
+    tasks.write_description(hive, task_id, _DESCRIPTION)
+
+
+def test_cli_merge_task_drops_the_card_of_the_debt_it_resolved_and_warns_about_an_accepted_one(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """ADR 369: a proposed card is dropped and printed; an accepted one is left
+    as it is, with a warning on stderr, and the exit stays 0."""
+    config_path = _write_config(tmp_path)
+    hive = str(tmp_path / "hive")
+    set_resolved_debt(hive, "task-1", ["task-4-D1", "task-4-D2"])
+    _debt_card(tmp_path, "card-1", "proposed", "task-4-D1")
+    _debt_card(tmp_path, "card-2", "pending", "task-4-D2")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
+
+    _run_command(
+        monkeypatch, config_path, "merge-task", "--task-id", "task-1", "--project", "myproj",
+    )
+
+    captured = capsys.readouterr()
+    assert "debt task-4-D1: card card-1 dropped, resolved by task-1" in captured.out
+    assert "debt task-4-D2: task-1 resolved it, but its card card-2 is pending; left as it is" in captured.err
+    read = dispatcher_mod.context_transfer.read_task_file
+    path = dispatcher_mod.context_transfer.task_file_path
+    one = read(path(hive, "card-1"))
+    assert (one.status, one.dropped_reason, one.dropped_by) == (
+        "dropped", "resolved by task-1", "dispatcher",
+    )
+    assert read(path(hive, "card-2")).status == "pending"
+
+
+def test_cli_merge_task_reads_no_index_for_the_debt_the_branch_resolved(
     tmp_path: Path, monkeypatch, capsys,
 ) -> None:
     """ADR 59: the auditor marks the row resolved on the branch and nothing
-    mirrors it, so the merge reads no index and says nothing about debt."""
+    mirrors it, so the merge reads no index; with no card, it says nothing
+    about debt (ADR 369)."""
     config_path = _write_config(tmp_path)
     set_resolved_debt(str(tmp_path / "hive"), "task-1", ["task-4-D1"])
     _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged agent/task/task-1 into main"))
