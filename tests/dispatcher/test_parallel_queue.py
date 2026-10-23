@@ -323,6 +323,7 @@ def cycle(cfg, monkeypatch):
     monkeypatch.setattr(core, "close_cycle", lambda ctx, completed: None)
     monkeypatch.setattr(core, "_mark_blocked", lambda ctx, reason=None: None)
     monkeypatch.setattr(core, "update_project_branch", lambda cfg, slug: None)
+    monkeypatch.setattr(core, "_abort_leftover_merge", lambda cfg, task_id, slug: None)
     monkeypatch.setattr(core, "_needs_mapping", lambda cfg, slug: state["needs_mapping"])
     monkeypatch.setattr(
         core, "merge_base_at_write_window", lambda cfg, task_id, slug: state["move"],
@@ -403,20 +404,43 @@ def test_the_implementador_may_block_back_on_a_moved_base(cfg, monkeypatch, cycl
     assert scheduler.windows[-1] == ("T-2", "leave")
 
 
-def test_without_a_scheduler_the_cycle_never_merges_at_a_window(cfg, monkeypatch, cycle):
+def test_without_a_scheduler_the_cycle_merges_the_base_before_the_implementador(cfg, monkeypatch, cycle):
+    # ADR 339: the base merge is the dispatcher's in every path; only the
+    # window belongs to the scheduler.
     _task(cfg, "T-2", "`dispatcher/`")
+    move = core.BaseMove(changed=("dispatcher/queue.py",), merged_tasks=("T-1",))
+    phases = _Phases()
 
-    def refuse(*args):
-        raise AssertionError("a serial cycle has no write window")
+    def merge(cfg, task_id, slug):
+        phases.calls.append((task_id, "merge", {}))
+        return move
 
-    monkeypatch.setattr(core, "merge_base_at_write_window", refuse)
+    monkeypatch.setattr(core, "merge_base_at_write_window", merge)
+    monkeypatch.setattr(core, "run_phase", phases)
+
+    core.run_task_cycle(cfg, "T-2", "proj")
+
+    roles = [role for _, role, _ in phases.calls]
+    assert roles.index("merge") < roles.index("implementador")
+    assert roles.count("merge") == 1
+    [(_, kwargs)] = phases.of("implementador")
+    assert "`dispatcher/queue.py`" in kwargs["note"]
+
+
+def test_a_conflict_left_in_progress_always_gets_the_note(cfg, monkeypatch, cycle):
+    _task(cfg, "T-2", "`dispatcher/`")
+    cycle["move"] = core.BaseMove(
+        (), ("T-1",), ("front/a.ts",), "conflicts", in_progress=True,
+    )
     phases = _Phases()
     monkeypatch.setattr(core, "run_phase", phases)
 
     core.run_task_cycle(cfg, "T-2", "proj")
 
     [(_, kwargs)] = phases.of("implementador")
-    assert "note" not in kwargs
+    assert kwargs["note"].startswith("## The base merge is yours to finish")
+    assert "`front/a.ts`" in kwargs["note"]
+    assert "Run no git command" in kwargs["note"]
 
 
 def test_two_cycles_that_need_a_map_map_once(cfg, monkeypatch, cycle):
@@ -553,3 +577,40 @@ def test_one_multi_slot_account_runs_two_cycles_at_once(tmp_path, monkeypatch):
     assert queue.status == queue_mod.Q_DONE
     assert [e.state for e in queue.entries] == [queue_mod.MERGED] * 2
     assert {t for t, what in fake.events if what == "arquitecto"} == {"T-1", "T-2"}
+
+
+class _UnfinishedMerge(_Phases):
+    """The first implementador leaves the merge with markers in it; the next does not."""
+
+    def __call__(self, ctx, role, **kwargs):
+        result = super().__call__(ctx, role, **kwargs)
+        if role == "implementador":
+            first = len(self.of("implementador")) == 1
+            result.unresolved_merge = ("front/a.ts",) if first else ()
+        return result
+
+
+def test_a_round_that_leaves_markers_in_the_merge_goes_back_to_the_implementador(
+    cfg, monkeypatch, cycle,
+):
+    _task(cfg, "T-2", "`dispatcher/`")
+    cycle["move"] = core.BaseMove((), ("T-1",), ("front/a.ts",), "conflicts", in_progress=True)
+    phases = _UnfinishedMerge()
+    monkeypatch.setattr(core, "run_phase", phases)
+
+    core.run_task_cycle(cfg, "T-2", "proj")
+
+    first, second = [kwargs for _, kwargs in phases.of("implementador")]
+    assert first["note"].startswith("## The base merge is yours to finish")
+    # Sent back before the revisor, with the note again, though it is round 2.
+    assert second["note"].startswith("## The base merge is yours to finish")
+    assert second["round_num"] == 2
+    roles = [role for _, role, _ in phases.calls]
+    assert roles.count("implementador") == 2 and roles.index("revisor") > roles.index("implementador", roles.index("implementador") + 1)
+    assert "## Base merge not finished" in tasks_body(cfg, "T-2")
+
+
+def tasks_body(cfg, task_id):
+    from dispatcher.context_transfer import read_task_file, task_file_path
+
+    return read_task_file(task_file_path(cfg.hive_tasks_dir, task_id)).body

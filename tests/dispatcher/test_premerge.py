@@ -523,3 +523,85 @@ def test_the_recheck_never_raises_and_skips_a_held_base_lock(
 
     assert any("locked by merge-task" in line for line in lines)
     assert _status(cfg) == "awaiting_review"
+
+
+# --- the base merge before an implementador (ADR 339) ----------------------
+
+
+def _write_window_merge(tmp_path, repo):
+    return dispatcher_mod.merge_base_at_write_window(
+        _config(tmp_path, repo["projects"]), "task-1", "myproj",
+    )
+
+
+def _commit_round(repo):
+    return docker_exec_mod.commit_worktree(
+        _CONTAINER, str(repo["writer"]), "round 1", "implementador (cuenta1)",
+        "implementador@ia-harness.invalid",
+    )
+
+
+def test_a_conflicting_base_merge_is_left_in_progress_and_the_round_commit_is_the_merge(
+    tmp_path, repo,
+) -> None:
+    tip, base = _diverge(repo, conflict=True)
+
+    move = _write_window_merge(tmp_path, repo)
+
+    assert move.in_progress and move.conflicts == ("shared.txt",)
+    writer = str(repo["writer"])
+    assert docker_exec_mod.merge_in_progress(_CONTAINER, writer)
+    assert "<<<<<<<" in (repo["writer"] / "shared.txt").read_text()
+    # Nothing is committed while the markers are there.
+    assert docker_exec_mod.conflicted_with_markers(_CONTAINER, writer) == ("shared.txt",)
+    assert _sha(repo["writer"], "HEAD") == tip
+
+    # The implementador's edit resolves it; no git command of its own.
+    (repo["writer"] / "shared.txt").write_text("one\nTASK and MAIN\nthree\n")
+    assert docker_exec_mod.conflicted_with_markers(_CONTAINER, writer) == ()
+    assert _commit_round(repo)
+
+    parents = _git(repo["writer"], "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert parents[1:] == [tip, base]
+    assert "<<<<<<<" not in _git(repo["writer"], "show", "HEAD:shared.txt")
+    assert not docker_exec_mod.merge_in_progress(_CONTAINER, writer)
+
+
+def test_a_file_still_holding_a_marker_is_not_committed(tmp_path, repo) -> None:
+    tip, _ = _diverge(repo, conflict=True)
+    _write_window_merge(tmp_path, repo)
+    writer = str(repo["writer"])
+    (repo["writer"] / "extra.txt").write_text("new work\n")
+
+    # The guard dispatch_phase runs before its commit names the file.
+    assert docker_exec_mod.conflicted_with_markers(_CONTAINER, writer) == ("shared.txt",)
+
+    # Whatever the guard's caller does, nothing here staged or committed.
+    assert _sha(repo["writer"], "HEAD") == tip
+    assert docker_exec_mod.merge_in_progress(_CONTAINER, writer)
+
+
+def test_a_conflict_that_cannot_be_kept_in_progress_is_aborted_and_reported(
+    tmp_path, repo,
+) -> None:
+    tip, _ = _diverge(repo, conflict=True)
+    (repo["writer"] / "scratch.txt").write_text("uncommitted\n")
+
+    move = _write_window_merge(tmp_path, repo)
+
+    assert move.conflicts == ("shared.txt",) and not move.in_progress
+    assert not docker_exec_mod.merge_in_progress(_CONTAINER, str(repo["writer"]))
+    assert _sha(repo["writer"], "HEAD") == tip
+
+
+def test_a_leftover_merge_is_aborted_at_cycle_open(tmp_path, repo) -> None:
+    tip, _ = _diverge(repo, conflict=True)
+    _write_window_merge(tmp_path, repo)
+    writer = str(repo["writer"])
+    assert docker_exec_mod.merge_in_progress(_CONTAINER, writer)
+
+    assert docker_exec_mod.abort_writer_merge(_CONTAINER, repo["projects"], "myproj", "task-1")
+
+    assert not docker_exec_mod.merge_in_progress(_CONTAINER, writer)
+    assert _sha(repo["writer"], "HEAD") == tip
+    assert not docker_exec_mod.abort_writer_merge(_CONTAINER, repo["projects"], "myproj", "task-1")

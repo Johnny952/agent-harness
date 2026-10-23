@@ -45,9 +45,12 @@ from dispatcher.dispatcher import (
     _cycle_rounds,
     _filed_command_requests,
     _stopped,
+    cleanup_container,
     close_cycle,
+    merge_base_at_write_window,
     open_cycle,
     run_phase,
+    stale_plan_note,
 )
 
 logger = logging.getLogger(__name__)
@@ -609,6 +612,15 @@ def _settle_resume(ctx: CycleContext, role: str, filed_at: object) -> None:
             tasks.mark_blocked(hive, ctx.task_id, handoff.COMMAND_REQUEST)
 
 
+def _merge_pending(ctx: CycleContext) -> bool:
+    """Whether the writers' checkout already has a base merge in progress."""
+    container = cleanup_container(ctx.cfg)
+    if container is None:
+        return False
+    writer = command_targets.writer_worktree(ctx.cfg.projects_root, ctx.slug, ctx.task_id)
+    return docker_exec.path_exists(container, writer) and docker_exec.merge_in_progress(container, writer)
+
+
 def _resume(
     ctx: CycleContext, role: str, round_num: int | None, session_id: str, account: str, prompt: str,
     filed_at: object, changes_requested: str = "",
@@ -633,6 +645,19 @@ def _resume(
             return _blocked_outcome(ctx, handoff.COMMAND_REQUEST)
         return _cycle_from_arquitecto(ctx, True, None)
     round_num = round_num or 1
+    if role == "implementador" and not _merge_pending(ctx):
+        # The base merge is the dispatcher's in every path (ADR 339), so a
+        # resumed implementador is on a branch that contains the base too. A
+        # conflict is left in progress and the resumed session is told. One
+        # already in progress is the session's own to finish.
+        try:
+            move = merge_base_at_write_window(ctx.cfg, ctx.task_id, ctx.slug)
+        except tasks.BaseLockHeldError as exc:
+            logger.warning("task %s: %s", ctx.task_id, exc)
+            return _blocked_outcome(ctx)
+        base_note = stale_plan_note(move, frozenset(), frozenset())
+        if base_note:
+            prompt = f"{prompt}\n\n{base_note}"
     implemented = run_phase(
         ctx, role, round_num=round_num,
         resume_session_id=session_id, prompt=prompt, account=account,

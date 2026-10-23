@@ -12,8 +12,9 @@ it, which is one source; the auditor checked it against the code.
 `dispatcher/dispatcher.py` `run_task_cycle` takes `scheduler=`. Given one, it
 already does what a parallel cycle needs: the single mapping
 (`scheduler.mapping_lock`, `scheduler.mapped_by`), the write window
-(`scheduler.enter_write_window` / `leave_write_window`), the base merge before
-a scheduled cycle writes and the stale-plan note. ADR number blocks need
+(`scheduler.enter_write_window` / `leave_write_window`). The base merge and
+the stale-plan note no longer need it: since T-155 (ADR 339) every cycle
+merges the base before its first implementador. ADR number blocks need
 nothing from the scheduler: they are reserved per task
 (`_adr_block_note`, ADR 81).
 
