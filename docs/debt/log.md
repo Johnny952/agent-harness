@@ -431,3 +431,9 @@ in both compose files and `scripts/backup.sh` passes no `-v`/`-e`
 with `dropped_by` on the card by `tasks.mark_dropped` (`docs/decisions.md`
 ADR 366). It resolved no entry and declared no new debt; the console's drop
 answering 400 until T-160-S3 sends a reason is that sub-task's work, not debt.
+
+**T-160-S2** made a merge drop the backlog cards (`proposed` or `deferred`)
+mirroring the debt its task's `resolved_debt` names, warning about a card
+already accepted (`dispatcher/tasks.py` `close_resolved_debt`,
+`docs/decisions.md` ADR 369, amending ADR 131). It resolved no entry and
+declared no new debt.
