@@ -16103,3 +16103,84 @@ merge resolved, and needs the same write under each card's own lock.
   `accept` and S2 already hold the lock and have the file read; a writer that
   took it again would deadlock or re-read.
 - *Taking `by` from the body:* a phase could then name the operator.
+
+## ADR 369 — A merge drops the backlog cards mirroring the debt its task resolved, and warns about any card already on the board
+
+**Status:** accepted (2026-10-23), T-160-S2's arquitecto. Amends ADR 131:
+its *Consequences* line "Resolving an entry does not close its item: the
+operator drops it" and its *Ruled out* "Closing or dropping an item when its
+entry is marked resolved" no longer hold for an entry a merged task names in
+`resolved_debt`. ADR 59 is untouched: the merge still reads no debt index and
+mirrors nothing onto a row. Uses ADR 366's `tasks.mark_dropped`.
+
+**Context.** A debt card (`source: debt`, `debt_id`) stayed in the backlog
+after the task that fixed its entry merged, so the operator had to find and
+drop it by hand (epic T-160). ADR 131 refused to close a card from the index's
+`resolved` cell, a cell any task can edit. The trigger here is a different
+record: the task file's `resolved_debt`, written by the dispatcher from the
+implementador's handoff (`set_resolved_debt`), reviewed by the revisor and
+auditor, and acted on only once the branch has landed.
+
+**Decision.**
+1. **`tasks.close_resolved_debt(hive_dir, task_id) -> tuple[list[str],
+   list[str]]`**, `(closed, warnings)`, one line each. It never raises: a
+   failure to read the task's `resolved_debt` or the cards, or any exception
+   on one card, is a warning line and the next card goes on.
+2. **Which cards.** For each id in the task's `resolved_debt`, in order, every
+   card whose `debt_id` equals it (more than one can exist: an entry is
+   proposed again after a drop), by sorted id, found from one
+   `read_all_tasks` pass. The merging task's own card is skipped silently: a
+   debt card accepted and worked on resolves its own entry, and is merged.
+3. **Under each card's `task_lock`**, re-read (`_board_task`):
+   - `proposed` or `deferred`: `mark_dropped(card, "resolved by <task_id>",
+     "dispatcher")`, then `_write_task_file`. Closed line:
+     `debt <debt_id>: card <card> dropped, resolved by <task_id>`.
+   - `dropped`, or no file (`NoTaskError`): skipped, no line. So a re-run of
+     `merge-task` is a no-op and keeps the first reason.
+   - any other status (`pending`, on the board, `done`, `epic`, ...): left
+     untouched; warning
+     `debt <debt_id>: <task_id> resolved it, but its card <card> is <status>; left as it is`.
+   One lock at a time; never the merging task's own lock.
+4. **After the locks**, `close_epic(hive_dir, card)` for each card dropped
+   that has `epic`, as `accept` does (ADR 134); a closed epic adds the line
+   `epic <id>: every sub-task is merged or dropped, so it is done` that
+   `record_merge` already uses for its own.
+5. **`dispatcher.record_merge` returns `(recorded, problem, warnings)`**: it
+   calls `close_resolved_debt` after the `mark_merged` block, whether or not
+   that block was written (so a re-run repairs a close a crash cut off), and
+   before the task's own `close_epic`. Closed lines join `recorded`; warnings
+   are the third element and each is `logger.warning`ed by every caller.
+   On an early return (no task file, record failed) `warnings` is what was
+   gathered, usually `[]`.
+6. **Where the warnings show.**
+   - `merge-task`: each warning printed to stderr after the recorded lines;
+     the exit code is unchanged (0: the branch landed).
+   - `approve_reviewed`: each warning a line of the `merged` /
+     `merged_not_pushed` comment, after the merge text and before the backup
+     line, which stays last (ADR 342).
+   - The automatic approve: `record_merge` now runs before
+     `_record_auto_approve` on the merged path, and each warning is a line of
+     the approval note, before the backup suffix. The final status is the
+     same either order (`mark_merged` turns `awaiting_review` into `done`;
+     the note keeps `done`).
+   - The cycle's unconditional merge (`_merge_task_branch`) logs them only.
+
+**Consequences.**
+- A debt card in the backlog disappears from it when its fix merges, with
+  `dropped_reason: resolved by <task>` and `dropped_by: dispatcher`.
+- A card a person accepted is never moved by a merge; the warning is the
+  operator's cue to settle it.
+- An implementador naming the wrong id in `resolved_debt` drops the wrong
+  card once the branch merges; the revisor and auditor are the check, and a
+  dropped card is proposed again to undo it.
+- Every caller of `record_merge` unpacks three values.
+
+**Ruled out.**
+- *Closing from the index's `resolved` cell:* still ADR 131's reason; and the
+  merge would have to read the index from the base.
+- *Moving an accepted card to `done`:* a board status a person set, changed by
+  a claim nobody but the phases checked.
+- *Folding the warnings into `problem`:* `problem` means the merge record
+  failed, and it ends `record_merge` early.
+- *A second comment after the automatic approve's note:* the note is the one
+  place the person reads the outcome.
