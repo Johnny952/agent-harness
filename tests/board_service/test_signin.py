@@ -77,9 +77,11 @@ def code_for(secrets_, clock, user="ana", offset=0):
     return signin.totp_code(secrets_[user], clock["now"] + dt.timedelta(seconds=30 * offset))
 
 
-def sign_in(client, secrets_, clock, user="ana", password=PASSWORD, code=None):
+def sign_in(client, secrets_, clock, user="ana", password=PASSWORD, code=None, headers=None):
     code = code_for(secrets_, clock, user) if code is None else code
-    return client.post("/api/session", json={"name": user, "password": password, "code": code})
+    return client.post(
+        "/api/session", json={"name": user, "password": password, "code": code}, headers=headers
+    )
 
 
 def cookie_of(res) -> str:
@@ -191,6 +193,103 @@ def test_five_failures_lock_the_user_until_the_wait_is_over(client, secrets_, cl
     assert sign_in(client, secrets_, clock).status_code == 429
     advance(clock, 2)
     assert sign_in(client, secrets_, clock).status_code == 200
+
+
+# --- failures per address (ADR 381) ----------------------------------------------
+
+ADDR = {"X-Forwarded-For": "203.0.113.7"}
+
+
+def spray(client, count, headers=ADDR, prefix="ghost"):
+    """`count` failed sign-ins, each with a different unknown name."""
+    for i in range(count):
+        res = client.post(
+            "/api/session",
+            json={"name": f"{prefix}{i}", "password": PASSWORD, "code": "123456"},
+            headers=headers,
+        )
+        assert res.status_code == 401
+
+
+def test_twenty_unknown_names_lock_the_address(client, secrets_, clock, auth_dir):
+    assert signin.MAX_ADDRESS_FAILURES == 20
+    spray(client, 20)
+    res = sign_in(client, secrets_, clock, headers=ADDR)
+    assert res.status_code == 429
+    assert "try again after" in res.get_json()["error"]
+    last = log(auth_dir)[-1]
+    assert (last["reason"], last["user"], last["forwarded_for"]) == ("address_locked", "ana", "203.0.113.7")
+
+
+def test_wrong_passwords_over_two_users_count_toward_the_address(client, secrets_, clock):
+    for i in range(20):
+        sign_in(client, secrets_, clock, user="ana" if i % 2 else "rev", password="wrong wrong wrong", headers=ADDR)
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 429
+
+
+def test_another_address_and_no_header_are_unaffected(client, secrets_, clock):
+    spray(client, 20)
+    other = {"X-Forwarded-For": "198.51.100.1"}
+    assert sign_in(client, secrets_, clock, headers=other).status_code == 200
+    advance(clock, 60)
+    assert sign_in(client, secrets_, clock).status_code == 200
+    spray(client, 25, headers=None, prefix="bare")
+    advance(clock, 60)
+    assert sign_in(client, secrets_, clock).status_code == 200
+
+
+def test_the_first_hop_is_the_key(client, secrets_, clock):
+    spray(client, 20, headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"})
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 429
+
+
+def test_the_address_lock_ends_with_its_time(client, secrets_, clock):
+    spray(client, 20)
+    advance(clock, signin.LOCK_SECONDS - 1)
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 429
+    advance(clock, 2)
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 200
+
+
+def test_failures_spread_past_the_window_do_not_lock(client, secrets_, clock):
+    spray(client, 19)
+    advance(clock, signin.ADDRESS_WINDOW + 1)
+    spray(client, 19, prefix="late")
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 200
+
+
+def test_a_good_sign_in_does_not_reset_the_address_count(client, secrets_, clock):
+    spray(client, 19)
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 200
+    spray(client, 1, prefix="one-more")
+    advance(clock, 60)
+    assert sign_in(client, secrets_, clock, headers=ADDR).status_code == 429
+
+
+def test_a_locked_address_answers_alike_for_a_known_and_an_unknown_name(client, secrets_, clock):
+    spray(client, 20)
+    known = sign_in(client, secrets_, clock, headers=ADDR)
+    unknown = client.post(
+        "/api/session", json={"name": "nobody", "password": PASSWORD, "code": "123456"}, headers=ADDR
+    )
+    assert known.status_code == unknown.status_code == 429
+    assert known.get_json() == unknown.get_json()
+
+
+def test_the_address_store_is_private_and_holds_no_secret(client, secrets_, clock, auth_dir):
+    spray(client, 1)
+    path = auth_dir / "addresses.json"
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    text = path.read_text()
+    assert PASSWORD not in text and "123456" not in text
+    assert set(json.loads(text)["203.0.113.7"]) == {"failures", "since", "locked_until"}
+
+
+def test_an_expired_address_is_pruned_on_the_next_write(client, secrets_, clock, auth_dir):
+    spray(client, 1)
+    advance(clock, signin.ADDRESS_WINDOW + 1)
+    spray(client, 1, headers={"X-Forwarded-For": "198.51.100.1"})
+    assert set(json.loads((auth_dir / "addresses.json").read_text())) == {"198.51.100.1"}
 
 
 def test_a_good_sign_in_resets_the_failure_count(client, secrets_, clock):
