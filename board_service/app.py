@@ -204,6 +204,9 @@ def board_list(
                 # The project the card belongs to, None for one that names
                 # none: the harness's one pre-existing project (ADR 199).
                 "project": task.project,
+                # Why and by whom a dropped card was dropped, None otherwise (ADR 366).
+                "dropped_reason": task.dropped_reason,
+                "dropped_by": task.dropped_by,
             }
             problems = task_store.field_problems(task)
         except _UNREADABLE as exc:
@@ -269,6 +272,8 @@ def board_get(hive_dir: str, task_id: str) -> dict:
                 "id": task_id,
                 "place": place_of(frontmatter.get("status")),
                 "frontmatter": frontmatter,
+                "dropped_reason": task.dropped_reason,
+                "dropped_by": task.dropped_by,
                 "description": description,
                 "comment_count": comments,
             }
@@ -392,7 +397,7 @@ def review_verdict(
 
 def backlog_accept(hive_dir: str, role: str, task_id: str, **arguments) -> dict:
     """Section 6's `backlog_accept`: the person's word, taking an item out of the backlog."""
-    return _writing(task_store.accept, hive_dir, task_id, **arguments)
+    return _writing(task_store.accept, hive_dir, task_id, by=role, **arguments)
 
 
 def _ready_check(hive_dir: str):
@@ -725,7 +730,7 @@ TOOLS: dict[str, dict] = {
         "description": (
             "On the person's word only: move a proposed or deferred item to pending (an epic "
             "with its proposed tasks), or to deferred or dropped. Never moves a task already "
-            "on the board."
+            "on the board. A drop needs a reason, recorded with who dropped it (ADR 366)."
         ),
         "inputSchema": {
             "type": "object",
@@ -737,6 +742,10 @@ TOOLS: dict[str, dict] = {
                     "description": "where it goes; pending when left out",
                 },
                 "priority": _PRIORITY,
+                "reason": {
+                    **_STRING,
+                    "description": "why it is dropped: required with to dropped, refused otherwise",
+                },
             },
             "required": ["task_id"],
             "additionalProperties": False,

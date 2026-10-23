@@ -214,13 +214,16 @@ def test_list_rows(client, hive):
     assert out["items"] == [
         {"id": "T-1", "title": "Serve the board over MCP, reads only.", "status": "pending",
          "place": "board", "epic": "T-9", "merged": False, "priority": "normal", "source": None,
-         "tags": [], "rank": None, "debt_id": None, "project": None},
+         "tags": [], "rank": None, "debt_id": None, "project": None,
+         "dropped_reason": None, "dropped_by": None},
         {"id": "T-2", "title": "Serve the board over MCP, reads only.", "status": "done",
          "place": "board", "epic": None, "merged": True, "priority": "normal", "source": None,
-         "tags": [], "rank": None, "debt_id": None, "project": None},
+         "tags": [], "rank": None, "debt_id": None, "project": None,
+         "dropped_reason": None, "dropped_by": None},
         {"id": "T-3", "title": None, "status": "pending", "place": "board", "epic": None,
          "merged": False, "priority": "normal", "source": None,
-         "tags": [], "rank": None, "debt_id": None, "project": None},
+         "tags": [], "rank": None, "debt_id": None, "project": None,
+         "dropped_reason": None, "dropped_by": None},
     ]
 
 
