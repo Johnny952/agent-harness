@@ -441,3 +441,10 @@ declared no new debt.
 **T-159** was filed from `T-154-S1-D1`, which T-154-S2 had already resolved
 on its base (ADR 357, resolution row in `docs/debt/README.md`); it changed
 no code, appended no row, and declared no new debt.
+
+**T-161** made a learning whose frontmatter is not YAML (a `when:` holding
+`: `) be read line by line in `dispatcher/learnings.py` `_split` /
+`_fallback_frontmatter` (`docs/decisions.md` ADR 378). Its first auditor
+found `yaml.safe_load` letting a bare `ValueError` through; round 2 fixed it
+inside the task, so no entry was filed. It resolved no entry and declared no
+new debt.

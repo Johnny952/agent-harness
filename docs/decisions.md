@@ -16226,3 +16226,63 @@ The backlog screen (`front/src/routes/backlog.tsx`) still sent `{to:
   dialog is a second pattern for one verdict.
 - *Optional fields on `Task`:* the api serves both on every row, and an
   optional type would let a fixture drift from the served shape (ADR 25).
+
+## ADR 378 — A learning whose frontmatter is not YAML is read line by line, and kept only with `project`, `task` and `when`
+
+**Status:** accepted (2026-10-23), T-161's arquitecto.
+
+**Context.** Phases write inbox entries by hand from the `_WRITE` template in
+`dispatcher/learnings.py`, and `when:` is free prose. A `when:` holding `: `
+(`your task has \`source: debt\` and ...`) is not YAML: `yaml.safe_load`
+raises `ScannerError: mapping values are not allowed here`, `_split` answers
+`None`, and `_read_entry` logs "has no usable frontmatter; not tracking it".
+The entry then never reaches a table, the confirmation rule, `carry` or the
+drop. T-159's inbox entry `T-159-a-debt-task-can-already-be-resolved` (in
+the shared learnings inbox, outside the repo) is the case.
+
+**Decision.**
+1. **YAML first, unchanged.** `_split` still splits on the delimiter and
+   calls `yaml.safe_load`. When that returns a dict, the answer is exactly
+   today's, required keys or not.
+2. **A fallback only when `yaml.safe_load` raises** `yaml.YAMLError` or a
+   bare `ValueError` (an impossible date such as `when: 2026-02-30`; added in
+   T-161's round 2; see the learning
+   `yaml-safe-load-raises-valueerror-on-an-impossible-date`). A new private
+   `_fallback_frontmatter(fm_text) -> dict | None` reads the frontmatter text
+   line by line: a line blank after `strip()`, or starting with `#`, is
+   skipped; any other line is split at its first `:`, and kept only when the
+   key, stripped, matches `[A-Za-z_][A-Za-z0-9_-]*` and the `:` is followed by
+   a space or ends the line (so `key: value` and `key:`, never `http://x`).
+   The value is stripped; an inline comment — from the first run of
+   whitespace followed by `#` to the end — is dropped and the rest stripped
+   again; one matching pair of surrounding `"` or `'` is removed. A later
+   duplicate key wins. Every value is a `str`.
+3. **Required keys.** The fallback answers its dict only when `project`,
+   `task` and `when` are all present and non-empty; otherwise `None`, and
+   `_read_entry` logs the same warning it does today. These are the keys the
+   reader cannot default: `scope` and `status` have defaults on `Entry`, and
+   `project` and `task` decide ownership (`applicable`, `carry`,
+   `droppable`), `when` the table's trigger column.
+4. **No fallback** for a file with no leading `---`, nor for a `ValueError`
+   from the split (one delimiter only): both stay `None`.
+5. **The template.** `_WRITE` says, after the fenced template: keep `when:`
+   on one line, and wrap it in double quotes when it contains `: `. Belt and
+   braces; the fallback is the fix.
+
+**Consequences.**
+- The T-159 entry is tracked on the next read with no hand edit. The first
+  dispatcher write to it (`stamp`, `carry`, `reconcile`) re-dumps the meta
+  with `yaml.safe_dump`, so from then on it is valid YAML — the dispatcher's
+  ordinary write, not a repair by this task.
+- `unreadable()` and so `/api/learnings`' warnings stop listing such files.
+- A fallback-read value is never a list or a number: an `orphaned_from` list
+  only ever comes from `_write`, which writes valid YAML, so it never takes
+  this path.
+- A value containing ` #` loses its tail on the fallback path; YAML would
+  have dropped it too.
+
+**Ruled out.**
+- *Quoting the `when:` line and retrying YAML:* the next unquoted colon is in
+  `refutes:` or a key a phase added; line by line covers every key.
+- *Requiring the keys on the YAML path too:* changes what valid files are
+  tracked today, which the task forbids.

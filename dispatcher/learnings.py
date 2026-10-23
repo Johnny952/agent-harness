@@ -179,14 +179,49 @@ _VOLATILE_RE = re.compile(r"[0-9a-f]{6,}|\d+")
 _NOISE_RE = re.compile(r"[^a-z0-9]+")
 
 
+# Keys the fallback reader needs before it vouches for a non-YAML header (ADR 378).
+_FALLBACK_REQUIRED = ("project", "task", "when")
+_FALLBACK_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+_INLINE_COMMENT_RE = re.compile(r"\s+#.*")
+
+
+def _fallback_frontmatter(fm_text: str) -> dict | None:
+    """Read `key: value` lines when the header is not YAML (ADR 378).
+
+    A `when:` that holds `: ` breaks `yaml.safe_load`; the entry is still one
+    the phase wrote on purpose, so it is read line by line instead.
+    """
+    meta: dict[str, str] = {}
+    for line in fm_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition(":")
+        key = key.strip()
+        if not sep or not _FALLBACK_KEY_RE.fullmatch(key):
+            continue
+        if value and not value.startswith(" "):
+            continue
+        value = _INLINE_COMMENT_RE.sub("", value.strip()).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        meta[key] = value
+    if not all(meta.get(key) for key in _FALLBACK_REQUIRED):
+        return None
+    return meta
+
+
 def _split(text: str) -> tuple[dict | None, str]:
     if not text.lstrip().startswith(_FRONTMATTER_DELIM):
         return None, text
     try:
         _, fm_text, body = text.split(_FRONTMATTER_DELIM, 2)
-        loaded = yaml.safe_load(fm_text)
-    except (ValueError, yaml.YAMLError):
+    except ValueError:
         return None, text
+    try:
+        loaded = yaml.safe_load(fm_text)
+    except (ValueError, yaml.YAMLError):  # an impossible date raises a bare ValueError
+        loaded = _fallback_frontmatter(fm_text)
     if not isinstance(loaded, dict):
         return None, text
     return loaded, body.lstrip("\n")
@@ -1083,6 +1118,7 @@ _WRITE = (
     "## Evidence\n"
     "The command that produced the symptom, and where you ran it.\n"
     "```\n\n"
+    "Keep `when:` on one line, and wrap its value in double quotes when it contains `: `.\n\n"
     "`scope: project` is a trap in this project's own code, config or tests. `scope: harness` is "
     "a trap in what every project shares — the container, the CLI, the worktree, the tooling — "
     "and it reaches other projects only once a human has read it. Write `status: unconfirmed` "
