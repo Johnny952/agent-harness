@@ -2417,7 +2417,7 @@ def _mirror_filed_debt(
                 "from the declaration, with no impact", task_id, entry,
             )
             row = debt.declared_row(entry, declaration)
-        wanted.append(row)
+        wanted.append({**row, "blocked_by": declaration.blocked_by})
     try:
         results = tasks.file_debt(cfg.hive_tasks_dir, wanted)
     except Exception as exc:
@@ -2427,6 +2427,12 @@ def _mirror_filed_debt(
         )
         return []
     for result in results:
+        if result["gated"]:
+            logger.info(
+                "task %s: debt entry %s is gated on %s: not filed, the index row is the record",
+                task_id, result["debt_id"], result["blocked_by"],
+            )
+            continue
         logger.info(
             "task %s: debt entry %s %s backlog item %s (priority %s)",
             task_id, result["debt_id"],

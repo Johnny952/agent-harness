@@ -1808,6 +1808,57 @@ def test_cli_import_debt_files_every_open_entry_once_from_a_file(
     assert "T-1-D1: already T-001" in out and "0 filed, 2 already filed" in out
 
 
+_GATED_INDEX = """# Debt
+
+| id | what | where | fix | card | impact |
+|---|---|---|---|---|---|
+| `T-1-D1` | Free entry | cli.py | a fix | none | risk |
+| `T-1-D2` | Task gated | Blocked by T-050; cli.py | a fix | none | cost |
+| `T-1-D3` | Step gated | Blocked by `docs/plans/x.md` step 2; cli.py | a fix | none | cost |
+"""
+
+
+def _gated_setup(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    hive = tmp_path / "hive"
+    hive.mkdir(exist_ok=True)
+    (hive / "T-050.md").write_text(
+        "---\ntask_id: T-050\nstatus: in_progress\ntitle: blocker\n---\n\nBody.\n"
+    )
+    index = tmp_path / "README.md"
+    index.write_text(_GATED_INDEX)
+    return config_path, index
+
+
+def test_cli_import_debt_gates_by_blocked_by(tmp_path: Path, monkeypatch, capsys) -> None:
+    config_path, index = _gated_setup(tmp_path)
+
+    _run_command(monkeypatch, config_path, "import-debt", "--index", str(index))
+
+    items = tasks.read_all_tasks(str(tmp_path / "hive"))
+    by_debt = {t.debt_id: t.depends_on for t in items.values() if t.debt_id}
+    assert by_debt == {"T-1-D1": [], "T-1-D2": ["T-050"]}
+    out = capsys.readouterr().out
+    assert "T-1-D2: filed as T-052 after T-050 (priority normal)" in out
+    assert "T-1-D3: gated on `docs/plans/x.md` step 2, not filed (priority normal)" in out
+    assert "2 filed, 0 already filed, 1 gated on a plan step" in out
+
+
+def test_cli_import_debt_dry_run_follows_the_same_three_cases(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path, index = _gated_setup(tmp_path)
+
+    _run_command(monkeypatch, config_path, "import-debt", "--index", str(index), "--dry-run")
+
+    assert not [t for t in tasks.read_all_tasks(str(tmp_path / "hive")).values() if t.debt_id]
+    out = capsys.readouterr().out
+    assert "T-1-D1: would file (priority high)" in out
+    assert "T-1-D2: would file after T-050" in out
+    assert "T-1-D3: gated on `docs/plans/x.md` step 2, not filed" in out
+    assert "2 to file, 0 already filed, 1 gated on a plan step" in out
+
+
 def test_cli_import_debt_dry_run_writes_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
     config_path = _write_config(tmp_path)
     index = tmp_path / "README.md"

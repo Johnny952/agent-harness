@@ -96,6 +96,7 @@ class Declaration:
     cost: str = ""
     fix: str = ""
     origin: str = INTRODUCED
+    blocked_by: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -128,6 +129,7 @@ def declarations(payload: dict | None) -> list[Declaration]:
                 cost=_text(item, "cost"),
                 fix=_text(item, "fix"),
                 origin=_text(item, "origin") or INTRODUCED,
+                blocked_by=_text(item, "blocked_by"),
             )
         )
     return found
@@ -493,7 +495,39 @@ def declared_row(entry: str, declaration: Declaration) -> dict:
         "card": "none",
         "impact": NO_IMPACT,
         "resolved": False,
+        "blocked_by": declaration.blocked_by,
     }
+
+
+#: A blocker that is a task id (`T-163`, `T-164-S2`); anything else is a plan step (ADR 396).
+TASK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-\d+(?:-S\d+)?$")
+_BLOCKED_BY_RE = re.compile(
+    r"^\s*(?:\*\*)?blocked by:?(?:\*\*)?\s+(?P<value>[^;]+?)\s*(?:\*\*)?\s*(?:;|$)",
+    re.IGNORECASE,
+)
+
+
+def blocker_kind(value: str) -> str:
+    """`task`, `step` or `` for what a `blocked_by` names (ADR 396, decision 2)."""
+    value = _unwrap_code((value or "").strip()).strip()
+    if not value:
+        return ""
+    return "task" if TASK_ID_RE.match(value) else "step"
+
+
+def blocked_by(row: dict) -> str:
+    """What gates a row: its `blocked_by` key, else the lead of its **where** (ADR 396, decision 3).
+
+    A row from the index has no key, only the `Blocked by <value>;` the auditor
+    opens the where cell with; a row built from a declaration carries the key,
+    empty when nothing gates it. A row without either reads as not gated.
+    """
+    if "blocked_by" in row:
+        return _unwrap_code(str(row["blocked_by"] or "").strip()).strip()
+    found = _BLOCKED_BY_RE.match(str(row.get("where", "") or ""))
+    if not found:
+        return ""
+    return _unwrap_code(found.group("value").strip()).strip()
 
 
 def index_fingerprints(text: str) -> set[str]:
@@ -545,7 +579,13 @@ def filing_note(filed: list[tuple[str, Declaration]]) -> str:
         "",
     ]
     for entry, declaration in filed:
-        lines.append(f"- `{entry}` — {declaration.what}")
+        line = f"- `{entry}` — {declaration.what}"
+        gate = _unwrap_code(declaration.blocked_by.strip()).strip()
+        if gate:
+            line += f" — blocked by {gate}: open its where with \"Blocked by {gate};\""
+            if blocker_kind(gate) == "step":
+                line += "; it is not filed as a backlog item, the row is the record"
+        lines.append(line)
     lines.append("")
     lines.append("Resolve an entry by appending a resolution row, never by editing a row (ADR 297).")
     lines.append("")

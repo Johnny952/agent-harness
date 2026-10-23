@@ -256,6 +256,99 @@ def test_file_debt_dry_run_writes_nothing_and_names_what_exists(tmp_path: Path) 
     assert sorted(tasks.read_all_tasks(hive)) == ["T-001"]
 
 
+# --- blocked_by (ADR 396) ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value, kind",
+    [("T-163", "task"), ("T-164-S2", "task"), ("task-1", "task"), ("`T-163`", "task"),
+     ("docs/plans/x.md step 2", "step"), ("T-163 and more", "step"), ("", "")],
+)
+def test_blocker_kind(value, kind) -> None:
+    assert debt.blocker_kind(value) == kind
+
+
+@pytest.mark.parametrize(
+    "where, value",
+    [("Blocked by T-163; cli.py", "T-163"),
+     ("**Blocked by** T-163; cli.py", "T-163"),
+     ("blocked by: `docs/plans/x.md` step 2; later", "`docs/plans/x.md` step 2"),
+     ("Blocked by `T-163`", "T-163"),
+     ("cli.py", ""),
+     ("a task that is blocked by T-12 midway", "")],
+)
+def test_blocked_by_reads_the_lead_of_the_where(where, value) -> None:
+    assert debt.blocked_by({"where": where}) == value
+
+
+def test_the_key_of_a_row_wins_over_its_where() -> None:
+    assert debt.blocked_by({"where": "Blocked by T-1; x", "blocked_by": ""}) == ""
+    assert debt.blocked_by({"where": "x", "blocked_by": "T-2"}) == "T-2"
+
+
+def test_declarations_read_blocked_by_and_the_note_tells_the_auditor() -> None:
+    [free, task, step] = debt.declarations({"debt": [
+        {"what": "a"}, {"what": "b", "blocked_by": "T-9"},
+        {"what": "c", "blocked_by": "docs/plans/x.md step 2"},
+    ]})
+    assert (free.blocked_by, task.blocked_by) == ("", "T-9")
+    note = debt.filing_note([("t-D1", free), ("t-D2", task), ("t-D3", step)])
+    assert "- `t-D1` — a\n" in note
+    assert '- `t-D2` — b — blocked by T-9: open its where with "Blocked by T-9;"\n' in note
+    assert "not filed as a backlog item, the row is the record" in note.split("t-D3")[1]
+    assert "not filed as a backlog item" not in note.split("t-D3")[0]
+
+
+def test_file_debt_follows_blocked_by_in_all_three_cases(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-050")
+    rows = [
+        _row("T-1-D1"),
+        _row("T-1-D2", where="Blocked by T-050; cli.py"),
+        _row("T-1-D3", where="Blocked by docs/plans/x.md step 2; cli.py"),
+        _row("T-1-D4", blocked_by="T-999"),
+    ]
+    out = tasks.file_debt(hive, rows)
+    assert [(r["debt_id"], r["gated"], r["depends_on"], r["created"]) for r in out] == [
+        ("T-1-D1", False, [], True), ("T-1-D2", False, ["T-050"], True),
+        ("T-1-D3", True, [], False), ("T-1-D4", False, [], True),
+    ]
+    assert out[2]["id"] is None and out[2]["blocked_by"] == "docs/plans/x.md step 2"
+    items = {t.debt_id: t.depends_on for t in tasks.read_all_tasks(hive).values() if t.debt_id}
+    assert items == {"T-1-D1": [], "T-1-D2": ["T-050"], "T-1-D4": []}
+
+
+def test_file_debt_dry_run_follows_blocked_by_and_a_gated_row_names_an_existing_item(
+    tmp_path: Path,
+) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-050")
+    tasks.file_debt(hive, [_row("T-1-D3")])
+    rows = [_row("T-1-D2", blocked_by="T-050"), _row("T-1-D3", blocked_by="docs/x.md step 1")]
+    out = tasks.file_debt(hive, rows, dry_run=True)
+    assert [(r["id"], r["created"], r["gated"], r["depends_on"]) for r in out] == [
+        (None, True, False, ["T-050"]), ("T-051", False, True, []),
+    ]
+    assert not [t for t in tasks.read_all_tasks(hive).values() if t.debt_id == "T-1-D2"]
+
+
+def test_propose_debt_depends_on_is_written_and_an_unreadable_dep_is_refused(
+    tmp_path: Path,
+) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-050")
+    made = tasks.propose_debt(
+        hive, debt_id="T-1-D1", title="t", description=_DESCRIPTION, priority="high",
+        depends_on=["T-050"],
+    )
+    assert _read(hive, made["id"]).depends_on == ["T-050"]
+    with pytest.raises(tasks.BoardWriteError):
+        tasks.propose_debt(
+            hive, debt_id="T-1-D2", title="t2", description=_DESCRIPTION, priority="high",
+            depends_on=["T-404"],
+        )
+
+
 def test_a_resolved_entry_already_filed_is_left_alone(tmp_path: Path) -> None:
     hive = _hive(tmp_path)
     [filed] = tasks.file_debt(hive, [_row()])

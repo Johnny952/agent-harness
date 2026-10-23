@@ -120,8 +120,23 @@ def test_schema_stays_small_enough_to_send_on_every_call(role) -> None:
     needing a line saying what belongs in it, and the revisor carries a ruling
     per declaration on top. That is the shape of the feature, not prose, so
     the number moved once — with ~450 bytes of headroom left on the widest
-    role, which is still less than one more field's worth."""
-    assert len(json.dumps(handoff.schema_for(role), separators=(",", ":")).encode()) < 4096
+    role, which is still less than one more field's worth. It moved again to
+    4352 for `debt.blocked_by` (T-164-S2, ADR 396): the field and its
+    description are ~100 bytes, and the revisor restates the debt too."""
+    assert len(json.dumps(handoff.schema_for(role), separators=(",", ":")).encode()) < 4352
+
+
+def test_a_debt_declaration_carries_blocked_by_as_a_required_string() -> None:
+    item = handoff.schema_for("implementador")["properties"]["debt"]["items"]
+    assert item["properties"]["blocked_by"]["type"] == "string"
+    assert "blocked_by" in item["required"]
+
+
+def test_the_prose_rendering_shows_what_gates_a_debt_entry() -> None:
+    gated = {"debt": [{"what": "x", "blocked_by": "T-163"}]}
+    free = {"debt": [{"what": "x", "blocked_by": ""}]}
+    assert "blocked by: T-163" in handoff._debt(gated)[0]
+    assert "blocked by" not in handoff._debt(free)[0]
 
 
 def test_the_arquitecto_is_offered_a_split_and_has_to_answer_it() -> None:
