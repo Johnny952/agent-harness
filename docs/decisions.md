@@ -16609,3 +16609,80 @@ no id.
   what the title already gives.
 - *Filing before the auditor:* nothing the auditor writes feeds the item, and
   filing after keeps one place where a cycle's backlog writes happen.
+
+## ADR 396 — How a debt entry carries `blocked_by`, and how it is filed
+
+**Status:** accepted (2026-10-23), T-164-S2's arquitecto. Carries out ADR 393,
+*Decision* 3.
+
+**Context.** ADR 393 gives a debt declaration an optional `blocked_by` (a task
+id or a plan step) and says what each files. It does not say how the field is
+declared in a schema that requires every field (`tests/dispatcher/test_handoff.py`
+*test_schema_is_closed_at_every_level*), how an index row carries it so that
+`dispatch import-debt`, which sees only the row, can read it, or what happens
+when the task id names no task.
+
+**Decision.**
+1. **The declaration.** The debt item in `dispatcher/handoff.py` gains
+   `blocked_by`, a string, listed in `required` like every field: `""` means
+   nothing gates the entry. "Optional" in ADR 393 is this empty string.
+   `debt.Declaration` gains `blocked_by: str = ""`, read by
+   `debt.declarations`. The handoff's prose rendering adds `blocked by: <x>`
+   when it is set.
+2. **Task id or plan step.** `debt.blocker_kind(value)` returns `"task"` when
+   the value, with one pair of backticks off, fully matches
+   `debt.TASK_ID_RE` = `^[A-Za-z][A-Za-z0-9_]*-\d+(?:-S\d+)?$` (`T-163`,
+   `T-164-S2`, `task-1`), `"step"` for any other non-empty value, and `""`
+   for none.
+3. **The row carries it in its `where`.** No column is added: the table's
+   header and the auditor's "`none` in the last two columns" rule stay as they
+   are (ADR 297). The **where** cell of a gated entry opens with
+   `Blocked by <value>;` and goes on with the rest of the trigger.
+   `debt.blocked_by(row)` returns `row["blocked_by"]` when the row has that key,
+   or else what follows a leading `Blocked by` in `row["where"]` (case-blind,
+   an optional `**` and `:` allowed, up to the first `;` or the end, one pair
+   of backticks off), or else `""`. `index_rows` is unchanged, so `/api/debt`
+   and the old rows read as before, and no old row reads as gated.
+4. **The auditor is told.** `debt.filing_note` appends to the line of each
+   gated entry: `blocked by <value>: open its where with "Blocked by <value>;"`.
+   A plan-step line adds that it is not filed as a backlog item and the row is
+   the record. Ungated lines are unchanged.
+5. **The mirror trusts the declaration.** `_mirror_filed_debt` sets
+   `blocked_by` on each row it hands `tasks.file_debt` from the declaration, so
+   a row the auditor wrote without the lead still files right.
+   `debt.declared_row` carries it too.
+6. **Filing.** `tasks.file_debt` reads `debt.blocked_by(row)` for each open
+   row:
+   - none: as before.
+   - a task id that `tasks` can read: `propose_debt(..., depends_on=[id])`.
+     `propose_debt` gains `depends_on: list[str] | None = None`, checked
+     through `_depends_problems`. An entry already filed keeps its item as it
+     is, `depends_on` included.
+   - a task id it cannot read: filed with no `depends_on`. Every refusal
+     raises out of `file_debt` and stops the rest of the import, and an
+     append-only row cannot be corrected, so refusing would lock the import
+     for good.
+   - a plan step: nothing written. The result has `id` set to an existing
+     item's id or None, and `created: false`.
+   Every result gains `blocked_by` (the value or `""`), `gated` (true for a
+   plan step) and `depends_on` (the list filed, `[]` when none). The
+   `dry_run` results follow the same three cases.
+7. **What `import-debt` prints.** A gated row prints
+   `<id>: gated on <step>, not filed (priority <p>): <title>`, with
+   `; already <item>` before the colon when an item exists. A row filed with a
+   dependency appends ` after <task>` to its verb. The summary line keeps its
+   wording and adds `, <n> gated on a plan step` when n > 0.
+
+**Consequences.**
+- A plan-step entry's backlog item filed before this ADR stays. Dropping it is
+  ADR 393's R5, the operator's.
+- A wrongly typed task id in a row files a ready item. It is visible in the
+  backlog, rather than an item that is silently never filed.
+- The lead is a convention the auditor writes by hand. A row without it reads
+  as not gated at import time, the same fail-safe as a missed fingerprint.
+
+**Ruled out.**
+- *A `blocked_by` column after `impact`:* it changes the header of an
+  append-only table and the auditor's resolution-row rule (S3's prompt), for
+  a value that ADR 393 already places in **where**.
+- *Refusing an unknown task id:* see 6.
