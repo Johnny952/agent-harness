@@ -16244,7 +16244,10 @@ the shared learnings inbox, outside the repo) is the case.
 1. **YAML first, unchanged.** `_split` still splits on the delimiter and
    calls `yaml.safe_load`. When that returns a dict, the answer is exactly
    today's, required keys or not.
-2. **A fallback only on `yaml.YAMLError`.** A new private
+2. **A fallback only when `yaml.safe_load` raises** `yaml.YAMLError` or a
+   bare `ValueError` (an impossible date such as `when: 2026-02-30`; added in
+   T-161's round 2; see the learning
+   `yaml-safe-load-raises-valueerror-on-an-impossible-date`). A new private
    `_fallback_frontmatter(fm_text) -> dict | None` reads the frontmatter text
    line by line: a line blank after `strip()`, or starting with `#`, is
    skipped; any other line is split at its first `:`, and kept only when the
