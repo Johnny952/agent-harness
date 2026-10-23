@@ -191,6 +191,53 @@ def test_before_merge_under_a_held_project_lock_says_busy_and_writes_nothing(env
     assert not dest.exists() or os.listdir(dest) == []
 
 
+def test_a_shared_project_lock_is_not_retaken(env) -> None:
+    hive, state, dest = env
+    _write(hive / "projects" / "p.json", "{}")
+    held = ProjectLock.take(str(state), "p", "T-9", "run-task")
+    try:
+        result = backup.backup(str(hive), str(state), str(dest), 7, now=T0, shared=("p",))
+        line = backup.before_merge(
+            str(hive), str(state), {"BACKUP_DIR": str(dest)},
+            now=T0 + timedelta(seconds=1), shared=("p",),
+        )
+    finally:
+        held.release()
+    assert backup.copies(str(dest)) == [result.name, "20261022T030001Z"]
+    assert line == "backup before the merge: 20261022T030001Z"
+
+
+def test_a_shared_lock_does_not_cover_another_projects_busy_lock(env) -> None:
+    hive, state, dest = env
+    _write(hive / "projects" / "p.json", "{}")
+    _write(hive / "projects" / "q.json", "{}")
+    mine = ProjectLock.take(str(state), "p", "T-9", "run-task")
+    other = ProjectLock.take(str(state), "q", "T-8", "run-task")
+    try:
+        with pytest.raises(ProjectBusy):
+            backup.backup(str(hive), str(state), str(dest), 7, now=T0, shared=("p",))
+    finally:
+        other.release()
+        mine.release()
+    assert not dest.exists() or os.listdir(dest) == []
+
+
+def test_merge_hook_takes_the_copy_with_the_shared_lock(env) -> None:
+    hive, state, dest = env
+    _write(hive / "projects" / "p.json", "{}")
+
+    class Cfg:
+        hive_tasks_dir = str(hive / "tasks")
+        state_dir = str(state)
+
+    held = ProjectLock.take(str(state), "p", "T-9", "run-task")
+    try:
+        line = backup.merge_hook(Cfg, {"BACKUP_DIR": str(dest)}, shared=("p",))()
+    finally:
+        held.release()
+    assert line.startswith("backup before the merge: ")
+
+
 def test_restore_round_trip_sets_aside_and_keeps_directories(env) -> None:
     hive, state, dest = env
     backup.backup(str(hive), str(state), str(dest), 7, now=T0)

@@ -4,7 +4,8 @@
 `run_task_cycle` or `open_cycle`, or to `dispatcher/command_run.py`
 `run_command_request`, and a caller passes it.
 
-**Status:** unconfirmed. Reported by T-116's implementer.
+**Status:** confirmed. Reported by T-116's implementer; hit again by T-157,
+whose `before_merge` keyword needed the same fakes widened.
 
 ## Why
 

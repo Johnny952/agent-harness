@@ -432,6 +432,17 @@ def _held_scheduler(worker: Worker, record: dict):
         return group.scheduler
 
 
+def _merge_hook(cfg, project: str):
+    """The copy before the automatic approve's merge (ADR 345).
+
+    The start holds `project`'s lock alone only when the project runs one task
+    at a time; with more, a sibling cycle may be writing, so nothing is shared.
+    `backup` imports this module, so it is imported here.
+    """
+    from dispatcher import backup
+    return backup.merge_hook(cfg, shared=(project,) if cfg.parallel_for(project) == 1 else ())
+
+
 def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
     cfg, sd = worker.cfg, worker.state_dir
     result = dict(record.get("result") or {})
@@ -460,6 +471,7 @@ def _start(worker: Worker, record: dict, cancelled: threading.Event) -> None:
         project_lock=_held_project_lock(worker, record),
         scheduler=_held_scheduler(worker, record),
         token_limit=limit, usage_offset=result.get("usage_offset", 0),
+        before_merge=_merge_hook(cfg, record["project"]),
     )
     task = _read_task(cfg, record["task_id"])
     result["outcome"] = outcome.value

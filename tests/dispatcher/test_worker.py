@@ -32,6 +32,7 @@ class Cycle:
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
         self.locks: list = []  # the project lock each call was handed
+        self.hooks: list = []  # the before_merge each call was handed
         self.entered: dict[str, threading.Event] = {}
         self.gates: dict[str, threading.Event] = {}
         self.raises: dict[str, Exception] = {}
@@ -48,8 +49,9 @@ class Cycle:
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
                  on_approve=None, may_start_phase=None, scheduler=None, project_lock=None,
-                 token_limit=None, usage_offset=0):
+                 token_limit=None, usage_offset=0, before_merge=None):
         assert authorized is True
+        self.hooks.append(before_merge)
         self.locks.append(project_lock)
         self.limits.append((token_limit, usage_offset))
         self.calls.append((task_id, slug))
@@ -342,6 +344,22 @@ def test_a_start_with_a_limit_counts_from_the_usage_log_it_found(cfg, worker, cy
     result = where(cfg, rec["id"])[1]["result"]
     assert result["usage_offset"] == 2
     assert result["spent"] == {"limit": 500, "tokens": 0, "unmeasured": 0}
+
+
+@pytest.mark.parametrize(("parallel", "shared"), [(1, ("proj",)), (2, ())])
+def test_a_start_hands_the_cycle_a_copy_that_shares_the_lock_only_when_alone(
+    cfg, worker, cycle, monkeypatch, parallel, shared,
+):
+    """ADR 345: with more starts of the project at once a sibling may be writing."""
+    from dispatcher import backup
+    seen = []
+    monkeypatch.setattr(backup, "merge_hook", lambda c, environ=None, *, shared=(): seen.append(shared))
+    monkeypatch.setattr(type(cfg), "parallel_for", lambda self, slug: parallel)
+    start(cfg, "T-1")
+    worker.tick()
+    worker.join()
+    assert len(cycle.hooks) == 1
+    assert seen == [shared]
 
 
 def test_a_start_without_a_limit_runs_unlimited(cfg, worker, cycle):
@@ -1347,7 +1365,8 @@ class ChangesCycle:
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
                  on_approve=None, may_start_phase=None, scheduler=None, project_lock=None,
-                 token_limit=None, usage_offset=0, changes_requested=""):
+                 token_limit=None, usage_offset=0, changes_requested="",
+                 before_merge=None):
         status = worker_mod._read_task(cfg, task_id).status
         self.calls.append({"task_id": task_id, "slug": slug, "authorized": authorized,
                            "changes_requested": changes_requested, "status": status,
