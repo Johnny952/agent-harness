@@ -84,7 +84,7 @@ class ScheduledCycle:
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
                  on_approve=None, may_start_phase=None, scheduler=None, project_lock=None,
-                 before_merge=None):
+                 before_merge=None, start_at="arquitecto", start_round=None, on_held=None):
         assert scheduler is not None, "a parallel queue passes its scheduler"
         self.scheduler = scheduler
         if may_start_phase is not None and not may_start_phase():

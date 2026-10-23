@@ -24,7 +24,7 @@ change of state, so a kill at any point leaves it readable. A task is marked
 `running` before its cycle starts; `--resume` finds it that way, records it
 `interrupted` and never starts it again. A resume may raise the limit and
 change the parallelism, recorded in `changes`; the tasks the limit stopped then
-run again, from the arquitecto (ADR 336, amending ADR 79, 5).
+run again from where the limit held them (ADR 357, amending ADR 336, 5).
 
 The listed tasks can be topped up from the board's *Ready* order (ADR 130,
 ADR 132): `plan(..., ready=n)` adds the first `n` ready tasks after the
@@ -113,6 +113,9 @@ class Entry:
     note: str = ""
     # Taken from the board's Ready order, not listed by the owner (ADR 132).
     from_ready: bool = False
+    # {"role", "round"} the limit held the cycle at; kept only while the task
+    # is `limit_reached` or reopened from it (ADR 357).
+    held_at: dict | None = None
 
 
 @dataclasses.dataclass
@@ -462,7 +465,8 @@ def reopen(
 
     A new `limit` must be above the spend; it and a new `parallel` are recorded
     in `changes` (ADR 336). While the spend is below the limit, a task the limit
-    stopped goes back to `pending`, keeping its `usage_offset`.
+    stopped goes back to `pending`, keeping its `usage_offset` and `held_at`
+    (ADR 357).
     """
     queue = load(cfg, queue_id)
     for entry in queue.entries:
@@ -593,6 +597,11 @@ def _run_serial(
             if result.push is not None and result.push.refused:
                 refused.append(result.push.detail or "the push was refused")
 
+        held: list[tuple[str, int]] = []
+
+        def on_held(role: str, round_: int) -> None:
+            held[:] = [(role, round_)]
+
         outcome = core.run_task_cycle(
             cfg, entry.task_id, queue.project,
             authorized=queue.authorized,
@@ -600,9 +609,11 @@ def _run_serial(
             may_start_phase=may_start_phase,
             project_lock=lock,
             before_merge=_merge_hook(cfg, (queue.project,)),
+            on_held=on_held,
+            **_start_kwargs(entry),
         )
         entry.tokens, entry.unmeasured = _spend(cfg, entry)
-        _settle(cfg, queue, entry, outcome, limit_hit)
+        _settle(cfg, queue, entry, outcome, limit_hit, held[0] if held else None)
         if entry.state == PENDING:
             # Held before any phase spent: the account it was given closed
             # again. Without a pause the account check can pass at once and
@@ -751,6 +762,13 @@ def _run_parallel(
                     own_refusal.append(detail)
                     refused.append(detail)
 
+        held: list[tuple[str, int]] = []
+
+        def on_held(role: str, round_: int) -> None:
+            held[:] = [(role, round_)]
+
+        start_kwargs = _start_kwargs(entry)
+
         def work() -> None:
             try:
                 try:
@@ -762,6 +780,8 @@ def _run_parallel(
                         scheduler=scheduler,
                         project_lock=lock,
                         before_merge=_merge_hook(cfg, ()),
+                        on_held=on_held,
+                        **start_kwargs,
                     )
                 except Exception:  # noqa: BLE001 — one cycle's crash is that task's block
                     logger.exception("queue %s: task %s crashed", queue.queue_id, entry.task_id)
@@ -771,6 +791,7 @@ def _run_parallel(
                     _settle(
                         cfg, queue, entry, outcome,
                         stopped_by["limit"] or stopped_by["refused"],
+                        held[0] if held else None,
                     )
                     if own_refusal:
                         entry.note = f"merged, but the push of the base was refused: {own_refusal[0]}"
@@ -863,10 +884,22 @@ def _next(cfg: Config, queue: Queue, busy: frozenset[str] = frozenset()) -> Entr
     return None
 
 
+def _start_kwargs(entry: Entry) -> dict:
+    """Where the cycle of a task the limit held starts (ADR 357); nothing new
+    when it was held at the arquitecto or the mapper, which start there anyway."""
+    if not entry.held_at or entry.held_at["role"] in ("arquitecto", project_docs.MAPPER_ROLE):
+        return {}
+    return {"start_at": entry.held_at["role"], "start_round": entry.held_at["round"]}
+
+
 def _settle(
-    cfg: Config, queue: Queue, entry: Entry, outcome: core.CycleOutcome, limit_hit: bool
+    cfg: Config, queue: Queue, entry: Entry, outcome: core.CycleOutcome, limit_hit: bool,
+    held_at: tuple[str, int] | None = None,
 ) -> None:
-    """The state one cycle's outcome leaves its task in."""
+    """The state one cycle's outcome leaves its task in.
+
+    `held_at` is the (role, round) the cycle reported; it is kept only when the
+    task ends `limit_reached`, and cleared on any other end (ADR 357)."""
     if outcome is core.CycleOutcome.FINISHED:
         entry.state = MERGED if _is_merged(cfg, entry.task_id) else FINISHED
     elif outcome is core.CycleOutcome.HELD and limit_hit:
@@ -883,6 +916,10 @@ def _settle(
         entry.state = SPLIT
     else:
         entry.state = BLOCKED
+    entry.held_at = (
+        {"role": held_at[0], "round": held_at[1]}
+        if held_at and entry.state == STOPPED else None
+    )
     logger.info("queue %s: task %s is %s", queue.queue_id, entry.task_id, entry.state)
 
 
