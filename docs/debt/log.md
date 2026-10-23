@@ -437,3 +437,7 @@ mirroring the debt its task's `resolved_debt` names, warning about a card
 already accepted (`dispatcher/tasks.py` `close_resolved_debt`,
 `docs/decisions.md` ADR 369, amending ADR 131). It resolved no entry and
 declared no new debt.
+
+**T-159** was filed from `T-154-S1-D1`, which T-154-S2 had already resolved
+on its base (ADR 357, resolution row in `docs/debt/README.md`); it changed
+no code, appended no row, and declared no new debt.
