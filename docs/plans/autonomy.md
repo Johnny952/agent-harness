@@ -171,13 +171,20 @@ keeps today's behaviour). The cycle is split in two by what it touches:
   tasks whose surfaces overlap (a path of one is a prefix of a path of the
   other) are never in their write window at once; tasks with disjoint
   surfaces are.
-- **The plan may go stale, and is checked cheaply.** When a task takes its
-  surface lock, the dispatcher merges the base into its branch first. If
-  that brought in changes to a path the arquitecto's handoff lists under
-  *Changed* or *Surface*, the implementador is told so in its prompt, with
-  the merged task's id and changed paths, and may block back to the
-  arquitecto (`blocks` with a re-plan reason) instead of following a plan
-  for a base that moved. No phase is spent when nothing moved.
+- **The plan may go stale, and is checked cheaply.** Before the first
+  implementador the dispatcher merges the base into the task's branch, in
+  every path that reaches one (a queue, a worker start grouped or not, a
+  request for changes, the CLI `run-task`, a verdict's resume; ADR 339). A
+  scheduler only decides *when*: with one, the merge happens as the task
+  takes its surface lock. If the merge brought in changes to a path the
+  arquitecto's handoff lists under *Changed* or *Surface*, the implementador
+  is told so in its prompt, with the merged task's id and changed paths, and
+  may block back to the arquitecto (`blocks` with a re-plan reason) instead
+  of following a plan for a base that moved. No phase is spent when nothing
+  moved. A conflict is left in progress in the writers' checkout and the
+  implementador resolves it by editing the files; the dispatcher's round
+  commit is the merge commit and refuses markers. No phase ever merges the
+  base, plans to, or files a `git merge` request (ADR 340).
 - **The base is one resource.** Every operation on the project's checkout
   (`update_project_branch`, the mapping commit, the pre-merge check, the
   merge, the push) takes a *base lock*, held only for that operation. It is

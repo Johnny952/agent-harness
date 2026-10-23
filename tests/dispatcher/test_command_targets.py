@@ -299,10 +299,29 @@ def test_every_broken_rule_is_named() -> None:
 def test_the_denylist_is_a_fixed_list_in_code() -> None:
     assert isinstance(command_targets.DENYLIST, tuple)
     assert {rule.name for rule in command_targets.DENYLIST} == {
-        "remote-git", "docker-socket", "credential-path", "privilege",
+        "base-merge", "remote-git", "docker-socket", "credential-path", "privilege",
         "shell-command", "cwd-outside-worktree",
     }
     assert "ADR" in command_targets.DENYLIST.__doc__ or "ADR" in command_targets.__doc__
+
+
+@pytest.mark.parametrize("argv", [
+    ("git", "merge", "main"),
+    ("git", "merge", "origin/main"),
+    ("git", "-C", "x", "merge", "main"),
+    ("git", "rebase", "main"),
+    ("git", "pull"),
+    ("git", "merge", "--abort"),
+])
+def test_a_merge_into_the_task_branch_is_refused_with_the_base_merge_note(argv) -> None:
+    problems = _problems(argv)
+    base = [p for p in problems if p.startswith("denylist rule base-merge:")]
+    assert len(base) == 1 and "dispatcher owns the base merge" in base[0], problems
+
+
+@pytest.mark.parametrize("argv", [("git", "log", "main"), ("git", "diff", "main"), ("git", "merge-base", "a", "b")])
+def test_git_reads_of_the_base_still_pass(argv) -> None:
+    assert _problems(argv) == []
 
 
 # --- the filing check -----------------------------------------------------

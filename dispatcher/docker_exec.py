@@ -1113,6 +1113,35 @@ def finish_merge_commit(
     return head
 
 
+def conflicted_with_markers(container: str, workdir: str) -> tuple[str, ...]:
+    """The unmerged paths of a merge in progress that still hold a conflict marker.
+
+    Empty when no merge is in progress. The guard before a round commit
+    (ADR 339, 4): a path listed here must not be committed.
+    """
+    if not merge_in_progress(container, workdir):
+        return ()
+    left = []
+    for path in unmerged_paths(container, workdir):
+        text = read_file(container, workdir, path)
+        if text is not None and _MARKER_RE.search(text):
+            left.append(path)
+    return tuple(left)
+
+
+def abort_writer_merge(container: str, projects_root: str, slug: str, task_id: str) -> bool:
+    """Abort a merge a stopped run left in progress in the writers' checkout.
+
+    True when one was aborted (ADR 339, 6); False when there is no checkout or
+    no merge.
+    """
+    writer = f"{task_worktrees_dir(projects_root, slug, task_id)}/{WRITER_WORKTREE_NAME}"
+    if not path_exists(container, writer) or not merge_in_progress(container, writer):
+        return False
+    proc = run_docker_exec(container, writer, ["git", "merge", "--abort"], env=_GIT_ENV)
+    return proc.returncode == 0
+
+
 def reset_writer(container: str, workdir: str, tip: str) -> None:
     """Put the writers' checkout back at `tip`, with nothing in progress.
 

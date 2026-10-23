@@ -11,7 +11,7 @@ import posixpath
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from dispatcher import (
     adr_numbers,
@@ -148,6 +148,9 @@ class DispatchResult:
     #: note: empty when it was pushed, when there was nothing new to push, or
     #: when the project does not push its task branch at all (ADR 271).
     branch_push: str = ""
+    #: Paths of a base merge left in progress (ADR 339) that still hold a
+    #: conflict marker: the phase's commit was skipped for them.
+    unresolved_merge: tuple[str, ...] = ()
 
 
 class CycleOutcome(enum.Enum):
@@ -1224,7 +1227,10 @@ _REMOTE_IS_NOT_YOURS = (
     "commits the phases before you already handed on. If the tree looks older than the work "
     "you were handed, or something you need is missing from it, that is a finding for your "
     "handoff and not yours to repair: the dispatcher owns the remote, and a base that really "
-    "did diverge ends the task rather than being reconciled inside it."
+    "did diverge ends the task rather than being reconciled inside it. Merging the base into "
+    "this branch is the dispatcher's too: it merges the base before every implementador and "
+    "leaves a conflict for the implementador to resolve by editing the files, so never plan, "
+    "run, or file a command request for `git merge`, `git rebase` or `git pull`; one is denied."
 )
 
 
@@ -2202,8 +2208,19 @@ def dispatch_phase(
                 result = _shrink_over_budget(
                     cfg, container, workdir, role, result, model, effort, recorder, slug,
                 )
-            # A checkout at the base has no branch to commit to (ADR 94).
+            # A merge the dispatcher left in progress (ADR 339) is committed
+            # only once no unmerged path holds a conflict marker.
+            unresolved_merge: tuple[str, ...] = ()
             if not at_base and _should_commit(role, result):
+                unresolved_merge = docker_exec.conflicted_with_markers(container, workdir)
+                if unresolved_merge:
+                    logger.warning(
+                        "task %s: the %s phase left conflict markers in %s; nothing is committed "
+                        "and the merge stays in progress",
+                        task_id, role, ", ".join(unresolved_merge),
+                    )
+            # A checkout at the base has no branch to commit to (ADR 94).
+            if not at_base and not unresolved_merge and _should_commit(role, result):
                 # The mapping commit is a base operation (ADR 80).
                 with (
                     _base_lock(cfg, slug, "mapping commit")
@@ -2294,7 +2311,7 @@ def dispatch_phase(
                 success=False, session_id=result.session_id, result_text=result.result_text,
                 account=account, handoff=_phase_handoff(container, result), gates=gate_report,
                 permission_denials=_handoff_denials(task_id, role, result),
-                branch_push=branch_push,
+                branch_push=branch_push, unresolved_merge=unresolved_merge,
             )
 
         # A turn the service actually served is proof the refusal is over —
@@ -2306,7 +2323,7 @@ def dispatch_phase(
             success=True, session_id=result.session_id, result_text=result.result_text,
             account=account, handoff=_phase_handoff(container, result), gates=gate_report,
             permission_denials=_handoff_denials(task_id, role, result),
-            branch_push=branch_push,
+            branch_push=branch_push, unresolved_merge=unresolved_merge,
         )
 
 
@@ -4572,9 +4589,10 @@ def run_single_phase(
 #
 # With cycles in parallel, the base a task's arquitecto planned against can
 # move before its implementador starts: another task of the queue merged in
-# the meantime. So a cycle that runs under a scheduler merges the base into
-# its branch as it enters its write window, and tells the implementador when
-# what came in touches what the plan names.
+# the meantime. So every cycle merges the base into its branch before its
+# first implementador (ADR 339: with a scheduler as it enters its write
+# window, without one right after the arquitecto), and tells the implementador
+# when what came in touches what the plan names.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4591,6 +4609,9 @@ class BaseMove:
     merged_tasks: tuple[str, ...]
     conflicts: tuple[str, ...] = ()
     detail: str = ""
+    #: True when `conflicts` is a merge left in progress in the writers'
+    #: checkout for the implementador to resolve (ADR 339), not an aborted one.
+    in_progress: bool = False
 
 
 #: The subject `docker_exec.merge_task_branch` gives a task's merge commit.
@@ -4604,6 +4625,41 @@ def _git_lines(container: str, workdir: str, argv: list[str]) -> list[str]:
     return [line for line in proc.stdout.replace("\0", "\n").splitlines() if line.strip()]
 
 
+def _keep_conflict_in_progress(
+    cfg: Config, container: str, task_id: str, slug: str,
+    outcome: docker_exec.PreMergeOutcome, merged: tuple[str, ...],
+) -> BaseMove:
+    """Redo a conflicting pre-merge in the writers' checkout and leave it there (ADR 339, 3).
+
+    Called with the base lock held. When the merge cannot be kept — the
+    checkout holds uncommitted work, is off the tip, or git would not start
+    it — the conflict is only reported, aborted, as ADR 83, 4 had it (ADR 339, 5).
+    """
+    aborted = BaseMove((), merged, outcome.conflicts, outcome.detail)
+    try:
+        kept = docker_exec.merge_base_into_writer(container, cfg.projects_root, slug, task_id)
+    except Exception as exc:
+        logger.warning("task %s: write window: the conflict could not be kept in progress: %s", task_id, exc)
+        return aborted
+    if kept.conflicted:
+        logger.warning(
+            "task %s: write window: %s; left in progress for the implementador",
+            task_id, kept.detail,
+        )
+        return BaseMove((), merged, kept.conflicts, kept.detail, in_progress=True)
+    logger.warning(
+        "task %s: write window: the conflict was not kept in progress (%s); it is reported aborted",
+        task_id, kept.detail,
+    )
+    if kept.clean and kept.workdir and kept.tip:
+        # Not reachable under the base lock; put the checkout back if it is.
+        try:
+            docker_exec.reset_writer(container, kept.workdir, kept.tip)
+        except Exception as exc:
+            logger.warning("task %s: write window: could not reset the writers' checkout: %s", task_id, exc)
+    return aborted
+
+
 def merge_base_at_write_window(cfg: Config, task_id: str, slug: str) -> BaseMove | None:
     """Merge the base into the task branch before its first implementador.
 
@@ -4611,10 +4667,11 @@ def merge_base_at_write_window(cfg: Config, task_id: str, slug: str) -> BaseMove
     merge could not be tried (no container, no branch, a git error, logged):
     either way no note is given and no phase is spent. A clean merge is kept
     on the branch without a gate, since the implementador's own gates run on
-    it next; a conflict is aborted and left for the pre-merge check, and is
-    reported so the implementador hears of it. Under the base lock (ADR 80):
-    it reads the base and moves a ref while the base may be merging.
-    `tasks.BaseLockHeldError` is the caller's.
+    it next; a conflict is left in progress in the writers' checkout for the
+    implementador to resolve by editing (ADR 339), or, where it cannot be
+    kept, aborted and reported so the implementador hears of it. Under the
+    base lock (ADR 80): it reads the base and moves a ref while the base may
+    be merging. `tasks.BaseLockHeldError` is the caller's.
     """
     container = cleanup_container(cfg)
     if container is None:
@@ -4637,7 +4694,9 @@ def merge_base_at_write_window(cfg: Config, task_id: str, slug: str) -> BaseMove
             )
             if outcome.conflicted:
                 logger.warning("task %s: write window: %s", task_id, outcome.detail)
-                return BaseMove((), merged, outcome.conflicts, outcome.detail)
+                return _keep_conflict_in_progress(
+                    cfg, container, task_id, slug, outcome, merged,
+                )
             try:
                 changed = tuple(_git_lines(
                     container, outcome.workdir,
@@ -4674,6 +4733,30 @@ def _plan_entries(arquitecto_handoff: dict | None) -> frozenset[str]:
     return frozenset(entries)
 
 
+def _unfinished_merge_note(paths: Sequence[str], merged_tasks: Sequence[str] = ()) -> str:
+    """The implementador's note for a base merge left in progress (ADR 339, 3)."""
+    who = ", ".join(merged_tasks) if merged_tasks else "work outside this queue's tasks"
+    return "\n".join([
+        "## The base merge is yours to finish",
+        "",
+        f"{who} merged into the base after this branch was cut. The dispatcher "
+        "merged the base into this task's branch and left the merge in progress "
+        "in your worktree, because it conflicts in "
+        + ", ".join(f"`{p}`" for p in paths) + ".",
+        "",
+        "Resolve each of those files by editing it: keep what both sides meant "
+        "and remove every `<<<<<<<`, `=======` and `>>>>>>>` line. Run no git "
+        "command for it (no add, no commit, no `merge --continue` or "
+        "`--abort`): the dispatcher commits the merge with this round. A file "
+        "still holding a marker is not committed and the round comes back to "
+        "you.",
+        "",
+        "The arquitecto planned before the base moved. If the plan no longer "
+        "holds, do not improvise a new one: end with `status: blocked` and say "
+        "in `pending` what has to be replanned.",
+    ])
+
+
 def stale_plan_note(
     move: BaseMove | None, task_surface: frozenset[str], plan: frozenset[str],
 ) -> str | None:
@@ -4686,6 +4769,8 @@ def stale_plan_note(
     """
     if move is None:
         return None
+    if move.in_progress:
+        return _unfinished_merge_note(move.conflicts, move.merged_tasks)
 
     def named(path: str) -> bool:
         if surface.is_append_only(path):
@@ -4720,6 +4805,26 @@ def stale_plan_note(
         "be replanned.",
     ]
     return "\n".join(lines)
+
+
+def _abort_leftover_merge(cfg: Config, task_id: str, slug: str) -> None:
+    """Abort a base merge a stopped run left in progress, before any phase (ADR 339, 6).
+
+    The base merge after the arquitecto starts it again. Never raises into
+    the cycle.
+    """
+    container = cleanup_container(cfg)
+    if container is None:
+        return
+    project_dir = f"{cfg.projects_root}/{slug}"
+    owner = docker_exec.read_owner(container, project_dir)
+    try:
+        if docker_exec.abort_writer_merge(container, cfg.projects_root, slug, task_id):
+            logger.warning("task %s: aborted a base merge a stopped run left in progress", task_id)
+    except Exception as exc:
+        logger.warning("task %s: could not check for a leftover base merge: %s", task_id, exc)
+    finally:
+        docker_exec.restore_owner(container, project_dir, owner)
 
 
 def run_task_cycle(
@@ -4767,7 +4872,8 @@ def run_task_cycle(
     prompt carries it, and the cycle runs on the task's branch as it stands.
 
     `scheduler` is the parallel queue's (B-3, ADR 83), None everywhere else,
-    and None runs the cycle exactly as before. With one, the mapping runs once
+    and None runs the cycle without a write window. Either way the base is
+    merged into the branch before the first implementador (ADR 339). With one, the mapping runs once
     for the queue (`scheduler.mapping_lock`, `scheduler.mapped_by`), and the
     cycle enters its write window before the first implementador
     (`scheduler.enter_write_window(task_id, surface)`, which waits for the
@@ -4812,6 +4918,7 @@ def run_task_cycle(
             # the remote has to be readable as such afterwards.
             log = logger.warning if update.status == docker_exec.UNAVAILABLE else logger.info
             log("task %s: %s", task_id, update.detail)
+        _abort_leftover_merge(cfg, task_id, slug)
         if scheduler is not None:
             if _needs_mapping(cfg, slug):
                 # One mapping per queue: a second task that needs one waits
@@ -4945,23 +5052,24 @@ def _cycle_from_arquitecto(
         outcome = _file_split(ctx, subtasks)
         return _blocked_outcome(ctx) if outcome is CycleOutcome.BLOCKED else outcome
 
-    stale_note = None
+    task_surface = _task_surface(ctx.description)
     if scheduler is not None:
         # The write window: from here to the merge, no task whose surface
         # overlaps this one's writes (ADR 83). Left in the `finally`.
-        task_surface = _task_surface(ctx.description)
         scheduler.enter_write_window(task_id, task_surface)
         ctx.write_window = True
-        try:
-            move = merge_base_at_write_window(cfg, task_id, slug)
-        except tasks.BaseLockHeldError as exc:
-            logger.warning("task %s: %s", task_id, exc)
-            return _blocked_outcome(ctx)
-        stale_note = stale_plan_note(move, task_surface, _plan_entries(arquitecto.handoff))
-        if stale_note:
-            logger.warning(
-                "task %s: the base moved under the plan; the implementador is told", task_id,
-            )
+    # The base merge is the dispatcher's in every path (ADR 339); the
+    # scheduler only decides when the window opens.
+    try:
+        move = merge_base_at_write_window(cfg, task_id, slug)
+    except tasks.BaseLockHeldError as exc:
+        logger.warning("task %s: %s", task_id, exc)
+        return _blocked_outcome(ctx)
+    stale_note = stale_plan_note(move, task_surface, _plan_entries(arquitecto.handoff))
+    if stale_note:
+        logger.warning(
+            "task %s: the base moved under the plan; the implementador is told", task_id,
+        )
 
     return _cycle_rounds(ctx, authorized, on_approve, stale_note=stale_note)
 
@@ -4992,6 +5100,7 @@ def _cycle_rounds(
     # gates blocked has no review, so it changes neither.
     previous_reasons: dict[str, str] = {}
     repeated_finding = False
+    unfinished_note: str | None = None
     first_round, last_round = 1, cfg.max_revision_rounds
     if resumed is not None:
         # The resumed round runs even when it is past the rounds allowed: a
@@ -5007,7 +5116,13 @@ def _cycle_rounds(
         else:
             # Only the first round hears of the moved base: later rounds open
             # on the review's findings, written against the merged branch.
-            noted = {"note": stale_note} if stale_note and round_num == 1 else {}
+            # A merge the last round left unfinished is told to the next one
+            # whatever its number (ADR 339, 4).
+            if unfinished_note is not None:
+                noted = {"note": unfinished_note}
+            else:
+                noted = {"note": stale_note} if stale_note and round_num == 1 else {}
+            unfinished_note = None
             implemented = run_phase(
                 ctx, "implementador", round_num=round_num, repeated_finding=repeated_finding,
                 **noted,
@@ -5018,6 +5133,23 @@ def _cycle_rounds(
             # Before the gates' verdict and the revisor: the phase stopped
             # for a command it was denied, so its work is not done.
             return _blocked_outcome(ctx, handoff.COMMAND_REQUEST)
+        unresolved = getattr(implemented, "unresolved_merge", ())
+        if unresolved and not handoff.blocked(implemented.handoff):
+            # The commit was skipped (ADR 339, 4): the base merge is still in
+            # progress with markers in it, so the round goes back around
+            # before the gates' verdict and the revisor.
+            logger.warning(
+                "task %s: round %d left the base merge unfinished in %s",
+                task_id, round_num, ", ".join(unresolved),
+            )
+            tasks.append_note(
+                cfg.hive_tasks_dir, task_id,
+                "## Base merge not finished\n\nRound %d ended with conflict markers "
+                "left in %s, so nothing was committed and the round was sent back."
+                % (round_num, ", ".join(f"`{p}`" for p in unresolved)),
+            )
+            unfinished_note = _unfinished_merge_note(unresolved)
+            continue
         if stale_note and round_num == 1 and handoff.blocked(implemented.handoff):
             # The block back the note offers: the plan no longer holds,
             # and the arquitecto replans on the next run of the task.

@@ -228,6 +228,14 @@ def fake_git(monkeypatch):
     monkeypatch.setattr(
         dispatcher_mod.project_docs, "move_staged_run_skills", fake.move_staged_run_skills
     )
+    # The base merge before an implementador (ADR 339) is tested on its own;
+    # here it is out of the way of the tests that count the cycle's git calls.
+    monkeypatch.setattr(dispatcher_mod, "_abort_leftover_merge", lambda cfg, task_id, slug: None)
+    monkeypatch.setattr(dispatcher_mod, "merge_base_at_write_window", lambda cfg, task_id, slug: None)
+    from dispatcher import command_run
+
+    monkeypatch.setattr(command_run, "merge_base_at_write_window", lambda cfg, task_id, slug: None)
+    monkeypatch.setattr(command_run, "_merge_pending", lambda ctx: False)
     return fake
 
 
@@ -3650,6 +3658,43 @@ def test_dispatch_phase_commits_the_writing_phase(tmp_path, monkeypatch, fake_gi
     assert commit["message"].startswith("agent(implementador): task-1 round 2")
     assert "Account: cuenta1" in commit["message"]
     assert "Session: sess-1" in commit["message"]
+
+
+def test_dispatch_phase_does_not_commit_a_merge_that_still_holds_markers(
+    tmp_path, monkeypatch, fake_git,
+) -> None:
+    """ADR 339, 4: the round commit would be the merge commit, markers and all."""
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "conflicted_with_markers",
+        lambda container, workdir: ("src/app.py",),
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert fake_git.commits == []
+    assert result.unresolved_merge == ("src/app.py",)
+
+
+def test_dispatch_phase_commits_when_the_merge_is_resolved(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "exec_claude",
+        _phase_exec(ClaudeResult(session_id="sess-1", result_text="done", raw={"is_error": False})),
+    )
+    _fake_worktree(monkeypatch)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "conflicted_with_markers", lambda container, workdir: (),
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "implementador", "do it")
+
+    assert len(fake_git.commits) == 1 and result.unresolved_merge == ()
 
 
 def test_dispatch_phase_at_base_commits_nothing_even_when_the_phase_modified_a_file(

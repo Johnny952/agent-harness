@@ -183,6 +183,22 @@ def _remote_git(argv: list[str], kind: str, cwd: str, worktree: str) -> str | No
     return None
 
 
+#: Subcommands that merge another history into the task branch.
+_GIT_MERGE_SUBCOMMANDS = frozenset({"merge", "rebase", "pull"})
+
+
+def _base_merge(argv: list[str], kind: str, cwd: str, worktree: str) -> str | None:
+    for i in _positions(argv, ("git",)):
+        sub, _ = _git_subcommand(argv, i)
+        if sub in _GIT_MERGE_SUBCOMMANDS:
+            return (
+                f"`git {sub}` merges into the task branch: the dispatcher owns the base "
+                "merge and merges the base before every implementador (ADR 339); resolve "
+                "a conflict by editing the files, and do not file this again"
+            )
+    return None
+
+
 _DOCKER_BINARIES = frozenset({"docker", "docker-compose", "podman", "nerdctl"})
 #: Anywhere in an item, for every kind: a socket path or the variable that
 #: points a client at a daemon. Substrings, because they come embedded —
@@ -294,6 +310,7 @@ class Rule:
 
 
 DENYLIST: tuple[Rule, ...] = (
+    Rule("base-merge", _base_merge),
     Rule("remote-git", _remote_git),
     Rule("docker-socket", _docker_socket),
     Rule("credential-path", _credential_path),
@@ -305,7 +322,7 @@ DENYLIST: tuple[Rule, ...] = (
 
 Checked when a request is filed and again, by step 4, when it is run. The list
 lives here and not in the config, and it changes only under an ADR
-(`docs/decisions.md` ADR 118 settles this one). It is a denylist, not a
+(`docs/decisions.md` ADR 118 settles this one; ADR 340 adds `base-merge`). It is a denylist, not a
 sandbox: it refuses what C-5 and the account boundary forbid, and the person
 reading the argv in Approvals is still the check on everything else.
 """

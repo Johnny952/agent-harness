@@ -215,6 +215,31 @@ def test_only_refused_requests_do_not_block(tmp_path, monkeypatch) -> None:
     assert len(envelope["command_requests"]["refused"]) == 1
 
 
+@pytest.mark.parametrize("argv", [("git", "merge", "main"), ("git", "merge", "origin/main"), ("git", "pull")])
+def test_a_phases_base_merge_request_is_denied_with_the_note_and_the_cycle_goes_on(
+    tmp_path, monkeypatch, argv,
+) -> None:
+    """ADR 340: the dispatcher owns the base merge; asking for it never blocks."""
+    cfg = _make_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _recording_dispatch_phase(
+            calls, handoffs={"implementador": _implementador_return([_request(argv=argv)])},
+        ),
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome != dispatcher_mod.CycleOutcome.BLOCKED
+    assert "revisor" in [c["role"] for c in calls]
+    assert _task(cfg).blocked_reason is None
+    envelope = context_transfer.read_handoff_envelope(cfg.hive_tasks_dir, "task-1", "implementador")
+    assert envelope["command_requests"]["accepted"] == []
+    [refused] = envelope["command_requests"]["refused"]
+    assert "dispatcher owns the base merge" in refused["reason"]
+
+
 def test_a_mapping_request_blocks_before_the_arquitecto(tmp_path, monkeypatch) -> None:
     cfg = _make_config(
         tmp_path, mapping_enabled=True,
