@@ -207,6 +207,8 @@ def board_list(
                 # Why and by whom a dropped card was dropped, None otherwise (ADR 366).
                 "dropped_reason": task.dropped_reason,
                 "dropped_by": task.dropped_by,
+                # Who filed it from the console, None otherwise (ADR 390).
+                "proposed_by": task.proposed_by,
             }
             problems = task_store.field_problems(task)
         except _UNREADABLE as exc:
@@ -349,13 +351,18 @@ def _writing(write, *args, **kwargs) -> dict:
         raise ToolError(f"unreadable task file: {exc}") from exc
 
 
-def backlog_propose(hive_dir: str, role: str, **arguments) -> dict:
+def backlog_propose(
+    hive_dir: str, role: str, proposed_by: str | None = None, **arguments
+) -> dict:
     """Section 6's `backlog_propose`: a task or an epic into the backlog, as `proposed`.
 
     `source` is the caller's role, not an argument: who proposed an item is
     what the role says, and a phase cannot pass for the operator by naming it.
+    `proposed_by` is not one either: the HTTP path adds it (ADR 390).
     """
-    return _writing(task_store.propose, hive_dir, source=role, **arguments)
+    return _writing(
+        task_store.propose, hive_dir, source=role, proposed_by=proposed_by, **arguments
+    )
 
 
 def task_edit(hive_dir: str, role: str, task_id: str, **fields) -> dict:
@@ -837,15 +844,22 @@ def _check(schema: dict, value, where: str, top: bool = False) -> None:
 
 
 def _call(
-    hive_dir: str, role: str, name: str, arguments: dict, queue: tuple | None = None
+    hive_dir: str,
+    role: str,
+    name: str,
+    arguments: dict,
+    queue: tuple | None = None,
+    trusted: dict | None = None,
 ) -> dict:
     """Run one tool on checked arguments. `ToolError` for arguments the tool does not take.
 
     An argument given as null is one left out. `queue` is `(state_dir, token,
-    turn)`, what `task_start` writes the action queue with.
+    turn)`, what `task_start` writes the action queue with. `trusted` is what
+    the service adds after the check, so no caller can name it (ADR 390).
     """
     _check(TOOLS[name]["inputSchema"], arguments, name, top=True)
     arguments = {key: value for key, value in arguments.items() if value is not None}
+    arguments.update(trusted or {})
     if name == "board_list":
         return board_list(hive_dir, **arguments)
     if name == "board_get":
@@ -1419,7 +1433,7 @@ def _person() -> str:
 
 
 def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 200):
-    """One console write as the operator, or as the signed-in person for a comment, verdict or accept/drop.
+    """One console write as the operator, or as the signed-in person for a comment, verdict or accept/drop; a proposal records its `proposed_by`.
 
     The result of the tool, or `{"error"}` and 400 or 404.
 
@@ -1442,7 +1456,8 @@ def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 2
             _person() if name in ("task_comment", "review_verdict", "backlog_accept")
             else OPERATOR
         )
-        result = _call(hive_dir, role, name, body)
+        trusted = {"proposed_by": _person()} if name == "backlog_propose" else None
+        result = _call(hive_dir, role, name, body, trusted=trusted)
     except NotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except ToolError as exc:
