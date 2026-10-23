@@ -234,6 +234,9 @@ services:
       dockerfile: docker/dispatcher/Dockerfile
     restart: "no"
     command: ["--config", "/app/config.yaml", "run-task", "--task-id", "CHANGE_ME", "--project", "CHANGE_ME"]
+    environment:
+      - BACKUP_DIR=/backups
+      - BACKUP_KEEP=${BACKUP_KEEP:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
@@ -245,6 +248,8 @@ services:
       - ../../config.yaml:/app/config.yaml:ro
       # The writer's overrides, read-only here; see docker-compose.yml.
       - ../../config.d:/app/config.d:ro
+      # The copy before a merge (docs/decisions.md ADR 345, ADR 360).
+      - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
     networks:
@@ -252,8 +257,8 @@ services:
 
   # The worker, mirrored from docker-compose.yml (see its comment): the one
   # long-running service with the docker socket, behind the `worker` profile,
-  # with the dispatcher's mounts plus the backup directory; docs/decisions.md
-  # ADR 142, ADR 166 and ADR 342.
+  # with the dispatcher's mounts, backup directory included; docs/decisions.md
+  # ADR 142, ADR 166, ADR 342 and ADR 360.
   worker:
     profiles: ["worker"]
     build:

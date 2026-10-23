@@ -1000,17 +1000,14 @@ def test_the_worker_is_the_dispatchers_mounts_behind_its_own_profile(
     assert worker["command"] == ["--config", "/app/config.yaml", "worker"]
     assert worker["networks"] == ["ia_harness_net"]
     assert "ports" not in worker
-    # ADR 342: the dispatcher's mounts and environment plus the backup directory
-    assert worker["volumes"] == dispatcher["volumes"] + [
-        "${BACKUP_DIR:-../../.data/backups}:/backups"
-    ]
+    # ADR 342, ADR 360: both mount the backup directory, so they are equal
+    assert worker["volumes"] == dispatcher["volumes"]
+    assert "${BACKUP_DIR:-../../.data/backups}:/backups" in dispatcher["volumes"]
     assert worker["depends_on"] == dispatcher["depends_on"]
     assert worker["build"] == dispatcher["build"]
-    assert _environment(worker) == {
-        **_environment(dispatcher),
-        "BACKUP_DIR": "/backups",
-        "BACKUP_KEEP": "${BACKUP_KEEP:-}",
-    }
+    assert _environment(worker) == _environment(dispatcher)
+    assert _environment(dispatcher)["BACKUP_DIR"] == "/backups"
+    assert _environment(dispatcher)["BACKUP_KEEP"] == "${BACKUP_KEEP:-}"
 
 
 @pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))
