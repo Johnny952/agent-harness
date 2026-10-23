@@ -16039,3 +16039,67 @@ mount (ADR 342, 1), and `scripts/backup.sh` added it on its own `run` line.
   one container path; whether compose replaces or the engine refuses is not
   something this repo can test.
 - *Keeping the flags in `backup.sh` as well:* the same mount twice, as above.
+
+## ADR 366 — A drop through `backlog_accept` needs a reason, and the card keeps `dropped_reason` and `dropped_by`, set by `tasks.mark_dropped`
+
+**Status:** accepted (2026-10-23), T-160-S1's arquitecto. Amends ADR 129's
+`backlog_accept` (an argument added, `by` taken from the role as `source` and
+`author` are) and ADR 133's task row (two fields added). ADR 131 is untouched
+here; T-160-S2 amends it.
+
+**Context.** `backlog_accept` with `to: dropped` took no reason, so a dropped
+card said nothing about why (epic T-160). T-160-S2 will drop the debt cards a
+merge resolved, and needs the same write under each card's own lock.
+
+**Decision.**
+1. **Two optional `TaskFile` fields, `dropped_reason` and `dropped_by`**,
+   read and written like `debt_id`: `None` when absent, serialized after
+   `project` and only when set. `tasks.field_problems` names a value that is
+   not a non-blank string.
+2. **`tasks.mark_dropped(task, reason, by) -> None`** is the one place a drop
+   is made. It takes a `TaskFile` and changes it in place: `status:
+   dropped`, `dropped_reason = reason` as given, `dropped_by = by`. It raises
+   `BoardWriteError` on a `reason` that is not a string, is blank after
+   `strip()`, or is longer than `MAX_COMMENT_CHARS` ("a drop needs a
+   reason"); on a `by` that fails `_comment_problems`'s author rule; and on a
+   task whose status is not in `ACCEPT_FROM`. It takes no lock and writes no
+   file: the caller holds the card's `task_lock` and calls
+   `_write_task_file`, as `accept` and S2's `close_resolved_debt` do.
+3. **`tasks.accept(hive_dir, task_id, to, priority=None, reason=None,
+   by=None)`.** Before any lock, beside the existing `to`/`priority`
+   problems: `to: dropped` with a missing or blank `reason`, or a bad `by`,
+   is refused by the same check `mark_dropped` makes; a `reason` that is not
+   `None` with any other `to` is refused ("a reason is only for a drop"). A
+   single task's drop and an epic's drop go through `mark_dropped`, the epic
+   writing it on every child it moves and then on itself, all with the one
+   `reason` and `by`. A child already dropped is not moved and keeps its own.
+   A retry on a task or epic already dropped is the existing no-op: nothing is
+   written and the first reason stays, whatever reason the retry names.
+4. **The board service.** `backlog_accept`'s schema gains `reason`, a string,
+   "why it is dropped: required with to dropped, refused otherwise".
+   `board_service/app.py:backlog_accept` passes `by=role`: `operator` over
+   HTTP (`POST /api/tasks/<id>/accept`) and the caller's role over MCP. `by`
+   is not in the schema, so a body that names it is refused as an unknown
+   argument and nobody passes for another role.
+5. **The reads.** `board_list`'s rows, `board_get`'s `item` (top level,
+   beside the verbatim `frontmatter`) and the read api's task row
+   (`observability/api/app.py`, so `/api/tasks` and `/api/tasks/<id>`) serve
+   `dropped_reason` and `dropped_by`, `null` when the file has none.
+
+**Consequences.**
+- Every card dropped before this has both fields `null`; nothing back-fills
+  them (T-160 *Out of scope*).
+- The console's drop sends no reason until T-160-S3 lands, so between the two
+  merges a drop from the backlog screen is a 400 the console shows as a
+  refusal. Accept and defer are unaffected.
+- A later writer that drops a card calls `mark_dropped`; setting `status:
+  dropped` by hand in `dispatcher/tasks.py` leaves a card with no reason.
+
+**Ruled out.**
+- *A separate `backlog_cancel(task_id, reason)` tool:* a second tool schema in
+  every operator call for what is one more argument on a move that already
+  exists, and two ways to drop.
+- *`mark_dropped(hive_dir, task_id, ...)` taking the lock and writing:*
+  `accept` and S2 already hold the lock and have the file read; a writer that
+  took it again would deadlock or re-read.
+- *Taking `by` from the body:* a phase could then name the operator.
