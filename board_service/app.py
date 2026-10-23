@@ -54,7 +54,7 @@ import re
 import sys
 
 import yaml
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 from board_service import signin
 from dispatcher import actions, context_transfer, epic_runs, push
@@ -1006,7 +1006,7 @@ def create_app(config_path: str) -> Flask:
             return jsonify({"error": exc.reason}), exc.status
         try:
             verdict = _writing(
-                task_store.record_verdict, hive_dir, task_id, OPERATOR, kind,
+                task_store.record_verdict, hive_dir, task_id, _person(), kind,
                 body.get("text"), commit,
             )
         except NotFoundError as exc:
@@ -1411,8 +1411,15 @@ def _thread_http(make, fields: dict, ok_status: int):
     return jsonify(record), ok_status
 
 
+def _person() -> str:
+    """The signed-in user's name on a request with a live session, else `OPERATOR` (ADR 384)."""
+    return g.session["user"] if hasattr(g, "session") else OPERATOR
+
+
 def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 200):
-    """One console write as the operator: the tool's result, or `{"error"}` and 400 or 404.
+    """One console write as the operator, or as the signed-in person for a comment or verdict.
+
+    The result of the tool, or `{"error"}` and 400 or 404.
 
     `created_status` answers a write that made something: a proposal with
     `created: true`, every comment and verdict. The task id is the path's, never the body's.
@@ -1429,7 +1436,8 @@ def _http(hive_dir: str, name: str, task_id: str | None, created_status: int = 2
             return jsonify({"error": "the task id is the path's; the body takes none"}), 400
         body = {"task_id": task_id, **body}
     try:
-        result = _call(hive_dir, OPERATOR, name, body)
+        role = _person() if name in ("task_comment", "review_verdict") else OPERATOR
+        result = _call(hive_dir, role, name, body)
     except NotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except ToolError as exc:
