@@ -123,6 +123,93 @@ def test_a_file_without_frontmatter_is_left_where_it_is(tmp_path: Path) -> None:
     assert stray.read_text() == "no frontmatter, just prose\n"
 
 
+def _raw(hive: Path, name: str, frontmatter: str) -> Path:
+    path = Path(learnings.ensure_dirs(str(hive))) / learnings.INBOX_NAME / name
+    path.write_text(f"---\n{frontmatter}---\n\n## Rule\n\nDo the thing.\n")
+    return path
+
+
+_WHEN_WITH_COLON = "your task has `source: debt` and the debt can already be resolved"
+
+
+def test_a_when_with_an_inline_colon_is_still_tracked(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _raw(
+        hive,
+        "t-1-a.md",
+        "project: myproj\ntask: t-1\nphase: implementador\n"
+        "scope: project        # or harness\nstatus: unconfirmed\n\n"
+        f"when: {_WHEN_WITH_COLON}\n",
+    )
+
+    (entry,) = learnings.read_inbox(str(hive))
+
+    assert entry.project == "myproj"
+    assert entry.task == "t-1"
+    assert entry.scope == "project"
+    assert entry.when == _WHEN_WITH_COLON
+    assert entry.rule == "Do the thing."
+
+
+def test_the_fallback_removes_one_pair_of_quotes(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _raw(hive, "t-1-q.md", 'project: myproj\ntask: t-1\nwhen: "a: b"\nnote: x: y\n')
+
+    (entry,) = learnings.read_inbox(str(hive))
+
+    assert entry.when == "a: b"
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "project: myproj\ntask: t-1\nnote: a: b\n",  # no when
+        "task: t-1\nwhen: see `a: b`\n",  # no project
+    ],
+)
+def test_broken_frontmatter_missing_required_keys_is_not_tracked(
+    tmp_path: Path, caplog, frontmatter: str
+) -> None:
+    hive = tmp_path / "hive"
+    _raw(hive, "t-1-bad.md", frontmatter)
+
+    with caplog.at_level("WARNING", logger="dispatcher.learnings"):
+        assert learnings.read_inbox(str(hive)) == []
+
+    assert "no usable frontmatter" in caplog.text
+
+
+def test_a_file_without_frontmatter_logs_the_warning(tmp_path: Path, caplog) -> None:
+    hive = tmp_path / "hive"
+    stray = Path(learnings.ensure_dirs(str(hive))) / learnings.INBOX_NAME / "note.md"
+    stray.write_text("no frontmatter, just prose\n")
+
+    with caplog.at_level("WARNING", logger="dispatcher.learnings"):
+        assert learnings.read_inbox(str(hive)) == []
+
+    assert "no usable frontmatter" in caplog.text
+
+
+def test_valid_yaml_frontmatter_parses_as_yaml() -> None:
+    meta = {
+        "project": "myproj",
+        "task": "t-1",
+        "when": "see `source: debt`",
+        "orphaned_from": ["t-2", "t-3"],
+        "n": 3,
+    }
+    text = "---\n" + yaml.safe_dump(meta, sort_keys=False) + "---\n\nbody\n"
+
+    assert learnings._split(text) == (meta, "body\n")
+
+
+def test_valid_yaml_without_when_is_still_tracked(tmp_path: Path) -> None:
+    hive = tmp_path / "hive"
+    _raw(hive, "t-1-ok.md", "project: myproj\ntask: t-1\n")
+
+    assert len(learnings.read_inbox(str(hive))) == 1
+
+
 def test_the_fingerprint_ignores_what_changes_between_two_runs(tmp_path: Path) -> None:
     """Pids, timings and addresses differ every run; if they counted, no two
     tasks would ever be seen to have hit the same wall."""
