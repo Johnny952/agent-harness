@@ -165,7 +165,9 @@ _DEBT_RULINGS_PROPERTY = {
                     "description": (
                         f"{debt.ACCEPTED}: it gets filed in the debt index. "
                         f"{debt.REJECTED}: it is a finding, fix it this round. "
-                        f"{debt.BLOCKS}: it is not debt, it is a block wearing a debt costume."
+                        f"{debt.BLOCKS}: it is not debt, it is a block wearing a debt costume. "
+                        f"{debt.FOLLOW_UP}: it is not debt, it is the next task; it is filed "
+                        "as a backlog item that depends on this one."
                     ),
                 },
                 "why": {"type": "string", "description": "The reason for the ruling, in one line."},

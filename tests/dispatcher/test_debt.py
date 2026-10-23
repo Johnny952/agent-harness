@@ -125,6 +125,69 @@ def test_debt_the_revisor_rejected_is_not_filed() -> None:
     assert accepted == []
 
 
+def test_each_ruling_reaches_only_its_own_reader() -> None:
+    """Accepted, rejected, blocks and follow_up side by side: four
+    declarations, four rulings, and every reader returns exactly its own."""
+    implemented = {
+        "debt": [
+            {"what": "The log line is noisy"},
+            {"what": "The retry loop is untested"},
+            {"what": "The schema needs a column"},
+            {"what": "The export has no CSV mode", "where": "the report page"},
+        ]
+    }
+    reviewed = {
+        "debt_rulings": [
+            {"debt": "The log line is noisy", "ruling": debt.ACCEPTED},
+            {"debt": "The retry loop is untested", "ruling": debt.REJECTED},
+            {"debt": "The schema needs a column", "ruling": debt.BLOCKS},
+            {"debt": "The export has no CSV mode", "ruling": debt.FOLLOW_UP},
+        ]
+    }
+
+    assert [d.what for d in debt.accepted(implemented, reviewed)] == ["The log line is noisy"]
+    assert debt.rejected(reviewed) == ["The retry loop is untested"]
+    assert debt.blocking(reviewed) == ["The schema needs a column"]
+    assert [d.what for d in debt.follow_ups(implemented, reviewed)] == [
+        "The export has no CSV mode"
+    ]
+    assert debt.rulings(reviewed)[debt.fingerprint("The export has no CSV mode")] == debt.FOLLOW_UP
+
+
+def test_a_declaration_with_no_follow_up_ruling_is_not_one() -> None:
+    assert debt.follow_ups(_declared(what="The log line is noisy"), None) == []
+    assert debt.follow_ups(None, _ruled("The log line is noisy", debt.FOLLOW_UP)) == []
+
+
+def test_a_follow_up_item_names_its_task_and_builds_like_a_debt_item() -> None:
+    declaration = debt.Declaration(
+        what="The export has **no** CSV mode.\nYet.",
+        where="the report page",
+        fix="add a CSV button",
+    )
+
+    title, description = debt.follow_up_item("T-9", declaration)
+
+    assert title == "T-9 follow-up: The export has no CSV mode. Yet."
+    assert description == (
+        "## Goal\n\nThe export has no CSV mode. Yet.\n\nWhere: the report page\n\n"
+        "Declared as a follow-up by `T-9`.\n\n## Done when\n\nadd a CSV button\n"
+    )
+
+
+def test_a_follow_up_with_no_fix_still_says_what_done_means() -> None:
+    _, description = debt.follow_up_item("T-9", debt.Declaration(what="A CSV mode"))
+
+    assert "Where:" not in description
+    assert description.endswith("## Done when\n\nThe follow-up `A CSV mode` declared by `T-9` is built.\n")
+
+
+def test_a_long_follow_up_title_is_cut_to_fit() -> None:
+    title, _ = debt.follow_up_item("T-9", debt.Declaration(what="x " * 300))
+
+    assert len(title) <= 200 and title.endswith("...")
+
+
 # --- the entry's id --------------------------------------------------------
 
 

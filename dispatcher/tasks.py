@@ -144,8 +144,9 @@ PRIORITIES = ("high", "normal", "low")
 #: The bucket of a task that names none: every task filed before the field,
 #: and a debt entry filed with no impact (section 4).
 DEFAULT_PRIORITY = "normal"
-#: Who proposed an item.
-SOURCES = ("operator", "arquitecto", "debt")
+#: Who proposed an item. `follow_up` is the dispatcher filing a revisor-ruled
+#: follow-up (ADR 393); no agent can claim it, the board sets the caller's role.
+SOURCES = ("operator", "arquitecto", "debt", "follow_up")
 #: Where `accept` takes a backlog item from, and where it may put one
 #: (section 6's `backlog_accept`). `dropped` is final.
 ACCEPT_FROM = ("proposed", "deferred")

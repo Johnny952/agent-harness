@@ -43,7 +43,10 @@ ORIGINS = (INTRODUCED, FOUND)
 ACCEPTED = "accepted"
 REJECTED = "rejected"
 BLOCKS = "blocks"
-RULINGS = (ACCEPTED, REJECTED, BLOCKS)
+#: `follow_up` is not debt but the next task (ADR 393): it is filed as a backlog
+#: item that depends on the declaring task, with no id and no debt file.
+FOLLOW_UP = "follow_up"
+RULINGS = (ACCEPTED, REJECTED, BLOCKS, FOLLOW_UP)
 
 #: The index's columns, in order. The dispatcher reads **what** back to dedupe
 #: and the api serves them by name, so this is a contract, not a suggestion,
@@ -189,6 +192,16 @@ def accepted(implemented: dict | None, reviewed: dict | None) -> list[Declaratio
         declaration
         for declaration in declarations(implemented)
         if ruled.get(declaration.fingerprint, ACCEPTED) == ACCEPTED
+    ]
+
+
+def follow_ups(implemented: dict | None, reviewed: dict | None) -> list[Declaration]:
+    """The declarations the revisor ruled `follow_up`, in declared order."""
+    ruled = rulings(reviewed)
+    return [
+        declaration
+        for declaration in declarations(implemented)
+        if ruled.get(declaration.fingerprint) == FOLLOW_UP
     ]
 
 
@@ -442,6 +455,29 @@ def backlog_item(row: dict) -> tuple[str, str, str]:
     )
     description = "## Goal\n\n" + "\n".join(goal) + "\n\n## Done when\n\n" + fix + "\n"
     return title, description, priority_for(row.get("impact", NO_IMPACT))
+
+
+def follow_up_item(task_id: str, declaration: Declaration) -> tuple[str, str]:
+    """A `follow_up` declaration as a backlog item: (title, description).
+
+    The title carries the declaring task's id, which keeps two tasks' identical
+    follow-ups apart and is what `tasks.propose` is idempotent on (ADR 394).
+    The description is built the way `backlog_item` builds one.
+    """
+    what = _one_line(declaration.what) or "No description."
+    title = f"{task_id} follow-up: {what}"
+    if len(title) > _MAX_TITLE_CHARS:
+        title = title[: _MAX_TITLE_CHARS - 3].rstrip() + "..."
+    goal = [what, ""]
+    where = _one_line(declaration.where)
+    if where:
+        goal += [f"Where: {where}", ""]
+    goal.append(f"Declared as a follow-up by `{task_id}`.")
+    fix = _one_line(declaration.fix) or (
+        f"The follow-up `{what}` declared by `{task_id}` is built."
+    )
+    description = "## Goal\n\n" + "\n".join(goal) + "\n\n## Done when\n\n" + fix + "\n"
+    return title, description
 
 
 def declared_row(entry: str, declaration: Declaration) -> dict:
