@@ -2593,7 +2593,8 @@ def find_debt_item(hive_dir: str, debt_id: str) -> str | None:
 
 
 def propose_debt(
-    hive_dir: str, *, debt_id: str, title: str, description: str, priority: str
+    hive_dir: str, *, debt_id: str, title: str, description: str, priority: str,
+    depends_on: list[str] | None = None,
 ) -> dict:
     """A debt index entry as a backlog item: `proposed`, `source: debt` (ADR 131).
 
@@ -2604,9 +2605,14 @@ def propose_debt(
     every create is. Idempotent on `debt_id`, not on the title: an entry
     already filed, under any status, is answered with its item and
     `created: false`, and a description a run that died part way did not
-    write is written then. Returns `{"id", "created"}`.
+    write is written then. `depends_on` (ADR 396) gates a new item on tasks
+    that must be readable; an item already filed keeps what it has. Returns
+    `{"id", "created"}`.
     """
+    deps = list(depends_on or [])
     problems = [] if is_debt_id(debt_id) else [f"its debt_id {debt_id!r} is not a debt entry id"]
+    if deps:
+        problems += _depends_problems(hive_dir, None, deps)
     problems += _title_problems(title, "its title")
     problems += _description_problems(description, "its description")
     if priority not in PRIORITIES:
@@ -2624,7 +2630,7 @@ def propose_debt(
         task_id = f"T-{number:0{width}d}"
         task = dataclasses.replace(
             _proposed(
-                task_id, title.strip(), "debt", priority, [],
+                task_id, title.strip(), "debt", priority, deps,
                 tags=[DEBT_TAG], rank=_end_of_bucket(hive_dir, priority),
             ),
             debt_id=debt_id,
@@ -2638,25 +2644,38 @@ def file_debt(hive_dir: str, rows: list[dict], *, dry_run: bool = False) -> list
 
     `rows` are `debt.index_rows`; resolved ones and ones with no entry id
     are skipped. One result per row filed or already filed, in the rows'
-    order: `{"debt_id", "id", "created", "priority", "title"}`. With
-    `dry_run` nothing is written: `id` is the existing item's or None, and
-    `created` says whether a real run would make one.
+    order: `{"debt_id", "id", "created", "priority", "title", "blocked_by",
+    "gated", "depends_on"}`. With `dry_run` nothing is written: `id` is the
+    existing item's or None, and `created` says whether a real run would make
+    one. A row's blocker (`debt.blocked_by`, ADR 396) is a task id this reads
+    (the item depends on it), a task id it cannot read (filed without, since
+    a refusal would lock the import for good), or a plan step (`gated`: no
+    item is filed, the row is the record).
     """
     results = []
     for row in rows:
         if not row.get("id") or row.get("resolved"):
             continue
         title, description, priority = debt.backlog_item(row)
-        if dry_run:
-            existing = find_debt_item(hive_dir, row["id"])
+        blocker = debt.blocked_by(row)
+        kind = debt.blocker_kind(blocker)
+        gated = kind == "step"
+        deps = [blocker] if kind == "task" and not _depends_problems(hive_dir, None, [blocker]) else []
+        existing = find_debt_item(hive_dir, row["id"])
+        if gated:
+            result = {"id": existing, "created": False}
+        elif dry_run:
             result = {"id": existing, "created": existing is None}
         else:
             result = propose_debt(
                 hive_dir, debt_id=row["id"], title=title,
-                description=description, priority=priority,
+                description=description, priority=priority, depends_on=deps,
             )
         results.append(
-            {"debt_id": row["id"], **result, "priority": priority, "title": title}
+            {
+                "debt_id": row["id"], **result, "priority": priority, "title": title,
+                "blocked_by": blocker, "gated": gated, "depends_on": deps,
+            }
         )
     return results
 

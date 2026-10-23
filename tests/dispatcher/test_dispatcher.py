@@ -4794,6 +4794,40 @@ def test_the_debt_the_auditor_filed_becomes_a_backlog_item_at_its_impact(
     assert item.title == "task-1-D1: The retry loop has no test."
 
 
+@pytest.mark.parametrize(
+    "blocked_by, depends_on, filed",
+    [("", [], True), ("T-050", ["T-050"], True), ("docs/plans/x.md step 2", [], False)],
+)
+def test_blocked_by_decides_how_the_mirror_files_the_entry(
+    tmp_path, monkeypatch, fake_git, debt_index, blocked_by, depends_on, filed,
+) -> None:
+    """ADR 396: none files as before, a task id gates the item on it (even when
+    the auditor's row lacks the lead), a plan step files no item at all."""
+    cfg = _make_config(tmp_path)
+    _declaring_task_file(cfg, "T-050")
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _auditor_writes_index(
+            debt_index,
+            _debt_dispatch_phase(calls, declared=({**_DEBT, "blocked_by": blocked_by},)),
+            _AUDITED_INDEX,
+        ),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    items = list(_debt_items(cfg).values())
+    if filed:
+        [item] = items
+        assert item.depends_on == depends_on
+    else:
+        assert items == []
+    note = _by_role(calls)["auditor"]
+    assert (f'"Blocked by {blocked_by};"' in note) == bool(blocked_by)
+    assert ("the row is the record" in note) == (not filed)
+
+
 _FOLLOW_UP = {
     "origin": debt.INTRODUCED,
     "what": "The export has no CSV mode.",

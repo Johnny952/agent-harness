@@ -113,8 +113,15 @@ _PROPERTIES: dict[str, dict] = {
                         "What would resolve it, or the doc section that already decides how."
                     ),
                 },
+                "blocked_by": {
+                    "type": "string",
+                    "description": (
+                        "A task id (T-163) or plan step (`docs/plans/x.md step 2`) the work "
+                        "cannot start before; \"\" if none."
+                    ),
+                },
             },
-            "required": ["origin", "what", "where", "why", "cost", "fix"],
+            "required": ["origin", "what", "where", "why", "cost", "fix", "blocked_by"],
             "additionalProperties": False,
         },
         "description": (
@@ -854,6 +861,7 @@ def _debt(payload: dict) -> list[str]:
                 ("why", str(item.get("why", "")).strip()),
                 ("cost", str(item.get("cost", "")).strip()),
                 ("fix", str(item.get("fix", "")).strip()),
+                ("blocked by", str(item.get("blocked_by", "")).strip()),
             )
             if value
         )

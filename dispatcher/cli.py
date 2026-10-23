@@ -324,16 +324,28 @@ def _run_import_debt(args: argparse.Namespace, cfg: Config, parser: argparse.Arg
         print(f"not imported: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_BLOCKED) from None
     new = [result for result in results if result["created"]]
+    gated = [result for result in results if result["gated"]]
     for result in results:
+        if result["gated"]:
+            already = f"; already {result['id']}" if result["id"] else ""
+            print(
+                f"{result['debt_id']}: gated on {result['blocked_by']}, not filed{already} "
+                f"(priority {result['priority']}): {result['title']}"
+            )
+            continue
         if result["created"]:
             verb = "would file" if args.dry_run else f"filed as {result['id']}"
         else:
             verb = f"already {result['id']}"
+        if result["depends_on"]:
+            verb += f" after {', '.join(result['depends_on'])}"
         print(f"{result['debt_id']}: {verb} (priority {result['priority']}): {result['title']}")
     prefix = "dry run: " if args.dry_run else ""
+    tail = f", {len(gated)} gated on a plan step" if gated else ""
     print(
         f"{prefix}{len(results)} open entr{'y' if len(results) == 1 else 'ies'} in {source}; "
-        f"{len(new)} {'to file' if args.dry_run else 'filed'}, {len(results) - len(new)} already filed"
+        f"{len(new)} {'to file' if args.dry_run else 'filed'}, "
+        f"{len(results) - len(new) - len(gated)} already filed{tail}"
     )
 
 
