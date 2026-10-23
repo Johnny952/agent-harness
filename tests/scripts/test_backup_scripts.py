@@ -13,6 +13,7 @@ RESTORE = REPO_ROOT / "scripts" / "restore.sh"
 #: Answers `ps` with FAKE_RUNNING and fails a `run` that carries `restore` when FAKE_FAIL.
 FAKE_DOCKER = """#!/bin/sh
 echo "$*" >> "$FAKE_LOG"
+echo "$BACKUP_DIR" >> "$FAKE_LOG.env"
 case "$*" in
   *" ps "*) [ -n "$FAKE_RUNNING" ] && echo abc123 ;;
   *" run "*) [ -n "$FAKE_FAIL" ] && exit 7 ;;
@@ -38,15 +39,25 @@ def _run(tmp_path: Path, script: Path, *args: str, running: str = "", fail: str 
     return proc, log.read_text().splitlines()
 
 
-def test_backup_mounts_backup_dir_on_the_run_line(tmp_path: Path) -> None:
+def _exported(tmp_path: Path) -> list[str]:
+    return (tmp_path / "log.env").read_text().splitlines()
+
+
+def test_backup_leaves_the_mount_to_the_service(tmp_path: Path) -> None:
     proc, calls = _run(tmp_path, BACKUP, BACKUP_KEEP="3")
     assert proc.returncode == 0, proc.stderr
     assert (tmp_path / "b").is_dir()
     assert len(calls) == 1
-    assert f"-v {tmp_path / 'b'}:/backups" in calls[0]
-    assert "-e BACKUP_DIR=/backups" in calls[0]
-    assert "-e BACKUP_KEEP=3" in calls[0]
-    assert calls[0].endswith("dispatcher --config /app/config.yaml backup")
+    assert " -v " not in calls[0] and " -e " not in calls[0]
+    assert calls[0].endswith("run --rm dispatcher --config /app/config.yaml backup")
+    assert _exported(tmp_path) == [str(tmp_path / "b")]
+
+
+def test_backup_exports_a_relative_backup_dir_as_absolute(tmp_path: Path) -> None:
+    proc, _ = _run(tmp_path, BACKUP, BACKUP_DIR="rel")
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "rel").is_dir()
+    assert _exported(tmp_path) == [str(tmp_path / "rel")]
 
 
 def test_restore_stops_runs_then_starts_the_worker(tmp_path: Path) -> None:
@@ -54,7 +65,8 @@ def test_restore_stops_runs_then_starts_the_worker(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     verbs = ("ps", "stop", "run", "up")
     assert [next(v for v in verbs if f" {v} " in c) for c in calls] == list(verbs)
-    assert ":/backups:ro" in calls[2] and calls[2].endswith("restore --from latest")
+    assert ":/restore:ro" in calls[2] and "-e BACKUP_DIR=/restore" in calls[2]
+    assert calls[2].endswith("restore --from latest")
 
 
 def test_restore_does_not_start_a_worker_that_was_not_running(tmp_path: Path) -> None:

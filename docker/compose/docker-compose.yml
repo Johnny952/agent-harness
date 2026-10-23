@@ -247,6 +247,9 @@ services:
       dockerfile: docker/dispatcher/Dockerfile
     restart: "no"
     command: ["--config", "/app/config.yaml", "run-task", "--task-id", "CHANGE_ME", "--project", "CHANGE_ME"]
+    environment:
+      - BACKUP_DIR=/backups
+      - BACKUP_KEEP=${BACKUP_KEEP:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
@@ -265,6 +268,9 @@ services:
       # directory, not the file, because the writer swaps the file with a
       # rename. configure.sh creates it so docker does not make it root-owned.
       - ../../config.d:/app/config.d:ro
+      # The copy before a merge (docs/decisions.md ADR 345) from run-task,
+      # run-queue and merge-task, and the host's `backup` verb (ADR 360).
+      - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
     networks:
@@ -275,10 +281,10 @@ services:
   # <state_dir>/actions/, the queue the board service writes (ADR 142, ADR 148),
   # so the console's Start and Cancel only happen while it runs. Behind the
   # `worker` profile: `docker compose --profile worker up -d worker`. Its mounts
-  # are the dispatcher's, copied, and must stay equal to them, plus the backup
-  # directory (docs/decisions.md ADR 342): the approve copies the hive and state
-  # there before it merges, with the same BACKUP_DIR / BACKUP_KEEP the host's
-  # `backup` verb reads.
+  # are the dispatcher's, copied, and must stay equal to them, backup directory
+  # included (docs/decisions.md ADR 342, ADR 360): the approve copies the hive
+  # and state there before it merges, with the same BACKUP_DIR / BACKUP_KEEP the
+  # host's `backup` verb reads.
   worker:
     profiles: ["worker"]
     build:

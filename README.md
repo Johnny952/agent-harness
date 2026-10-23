@@ -668,8 +668,8 @@ too (ADR 345), sharing the project lock its own cycle holds (a serial queue or a
 project with one start at a time; a parallel one shares none, so it is refused
 while a sibling runs). `dispatch merge-task` takes one after its check passes
 and prints the line; it holds no lock, so a running cycle refuses it. The
-one-off `dispatcher` service has no `BACKUP_DIR` unless the run line passes
-it, so there the line says `no backup before the merge: BACKUP_DIR is not set`.
+one-off `dispatcher` service mounts `BACKUP_DIR` at `/backups` too (ADR 360),
+so `run-task`, `run-queue` and `merge-task` through it take the copy.
 
 `bash scripts/restore.sh <name>|latest` stops the worker, puts the copy back
 in place and starts the worker again if it was running. Files the copy lacks,

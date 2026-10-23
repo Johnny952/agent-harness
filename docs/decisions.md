@@ -15999,3 +15999,43 @@ start and `run-task` pass nothing new.
   does, and the queue file is already the record a resume reads.
 - *Keeping `held_at` across other ends:* a later cycle that finished,
   blocked or split makes the old restart point false.
+
+## ADR 360 — The one-off `dispatcher` service mounts `BACKUP_DIR` as the worker does, and the host scripts stop passing it
+
+**Status:** accepted (2026-10-23), T-158's arquitecto. Resolves
+`docs/debt/T-157-D1.md`; amends ADR 345 *Consequences*, second bullet, and
+the "no compose file changes" of `scripts/backup.sh` (ADR 327).
+
+**Context.** Since ADR 345, `run-task`, `run-queue` and `merge-task` take a
+copy before their merge, and through the `dispatcher` service they found no
+`BACKUP_DIR` unless the `run` line passed it. Only the `worker` carried the
+mount (ADR 342, 1), and `scripts/backup.sh` added it on its own `run` line.
+
+**Decision.**
+1. **The `dispatcher` service in `docker-compose.yml` and
+   `docker-compose.coolify.yml` gets the worker's backup lines:**
+   `environment: [BACKUP_DIR=/backups, BACKUP_KEEP=${BACKUP_KEEP:-}]` and the
+   volume `${BACKUP_DIR:-../../.data/backups}:/backups`, last in its list. The
+   worker and the dispatcher then carry equal `volumes` and `environment`.
+2. **`scripts/backup.sh`'s `run` line is `docker compose run --rm dispatcher
+   --config /app/config.yaml backup`**: no `-v`, no `-e`. It exports
+   `BACKUP_DIR` made absolute with `realpath -m` (default
+   `<repo>/.data/backups`) so compose interpolates the same host directory it
+   `mkdir -p`s, and leaves `BACKUP_KEEP` to the service's interpolation.
+3. **`scripts/restore.sh` keeps its read-only mount at another path:**
+   `-v "$BACKUP_DIR:/restore:ro" -e BACKUP_DIR=/restore`, so its mount never
+   shares a target with the service's writable `/backups`.
+
+**Consequences.**
+- A `run-task`, `run-queue` or `merge-task` through the `dispatcher` service
+  takes its copy with no extra flags; ADR 345's second consequence no longer
+  holds.
+- A plain `docker compose up`/`run` with no `BACKUP_DIR` in the shell mounts
+  `<repo>/.data/backups`; one with a relative value set resolves it against
+  `docker/compose/`, which is why the scripts export an absolute path.
+
+**Ruled out.**
+- *Restore re-mounting `/backups` read-only on the run line:* two mounts on
+  one container path; whether compose replaces or the engine refuses is not
+  something this repo can test.
+- *Keeping the flags in `backup.sh` as well:* the same mount twice, as above.

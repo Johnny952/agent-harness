@@ -422,3 +422,7 @@ resolved `T-147-D1` with a resolution row; nightly stays a host crontab line.
 It filed one entry its revisor accepted: `T-153-D1`, no backup before the
 automatic approve or `dispatch merge-task`, which run beside a held project
 lock.
+
+**T-158** resolved `T-157-D1`: the `dispatcher` service mounts `BACKUP_DIR`
+in both compose files and `scripts/backup.sh` passes no `-v`/`-e`
+(`docs/decisions.md` ADR 360). It declared no new debt.
