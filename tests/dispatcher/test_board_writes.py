@@ -1162,6 +1162,43 @@ def test_field_problems_names_a_bad_dropped_value() -> None:
     assert any("dropped_by" in p for p in problems)
 
 
+def test_field_problems_names_a_blank_proposed_by() -> None:
+    task = TaskFile(task_id="T-001", status="proposed", owner=None, depends_on=[],
+                    heartbeat=None, body="", proposed_by=" ")
+    assert any("proposed_by" in p for p in tasks.field_problems(task))
+
+
+def test_propose_records_proposed_by_on_every_file_and_a_repeat_keeps_it(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    tasks.propose(hive, title="Alone", description=_DESCRIPTION, source="operator", proposed_by="ana")
+    assert _read(hive, "T-001").proposed_by == "ana"
+    again = tasks.propose(
+        hive, title="Alone", description=_DESCRIPTION, source="operator", proposed_by="bob"
+    )
+    assert again["created"] is False
+    assert _read(hive, "T-001").proposed_by == "ana"
+    epic = tasks.propose(
+        hive, title="Epic", description=_DESCRIPTION, source="operator", proposed_by="ana",
+        tasks=[{"title": "One", "description": _DESCRIPTION},
+               {"title": "Two", "description": _OTHER}],
+    )
+    for task_id in [epic["id"], *epic["tasks"]]:
+        assert _read(hive, task_id).proposed_by == "ana"
+
+
+def test_propose_without_proposed_by_writes_none(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    tasks.propose(hive, title="Alone", description=_DESCRIPTION, source="arquitecto")
+    assert _read(hive, "T-001").proposed_by is None
+
+
+def test_propose_refuses_a_blank_proposed_by(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    with pytest.raises(tasks.BoardWriteError) as err:
+        tasks.propose(hive, title="Alone", description=_DESCRIPTION, source="operator", proposed_by=" ")
+    assert "proposed_by" in str(err.value)
+
+
 def test_deferring_an_epic_leaves_its_tasks(tmp_path: Path) -> None:
     hive = _hive(tmp_path)
     epic = _epic(hive)

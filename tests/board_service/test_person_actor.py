@@ -6,7 +6,7 @@ import json
 
 from dispatcher import actions, tasks as task_store
 from board_service.app import ToolError, task_start
-from tests.board_service.test_app import task
+from tests.board_service.test_app import DESCRIPTION, call, ok, task
 from tests.board_service.test_signin import (  # noqa: F401  (fixtures)
     auth_dir, clock, cfg, client, fast_scrypt, hive, secrets_, session,
 )
@@ -35,6 +35,64 @@ def test_a_signed_in_drop_names_the_person(client, hive, secrets_, clock):
 def test_a_drop_with_no_cookie_is_the_operators(client, hive):
     assert drop(client, hive, BEARER).status_code == 200
     assert task_store.read_all_tasks(str(hive))["T-002"].dropped_by == "operator"
+
+
+def propose(client, headers, **extra):
+    body = {"title": "Filed", "description": DESCRIPTION, **extra}
+    return client.post("/api/backlog", json=body, headers=headers)
+
+
+def test_a_signed_in_proposal_names_the_person_and_keeps_the_source(client, hive, secrets_, clock):
+    _, csrf, _ = session(client, secrets_, clock, "ana")
+    res = propose(client, {**BEARER, **csrf})
+    assert res.status_code == 201
+    filed = task_store.read_all_tasks(str(hive))[res.get_json()["id"]]
+    assert (filed.proposed_by, filed.source) == ("ana", "operator")
+
+
+def test_a_signed_in_epic_proposal_names_the_person_on_every_file(client, hive, secrets_, clock):
+    _, csrf, _ = session(client, secrets_, clock, "ana")
+    tasks = [{"title": "One", "description": DESCRIPTION}, {"title": "Two", "description": DESCRIPTION}]
+    res = propose(client, {**BEARER, **csrf}, tasks=tasks)
+    assert res.status_code == 201
+    out = res.get_json()
+    files = task_store.read_all_tasks(str(hive))
+    assert [files[i].proposed_by for i in [out["id"], *out["tasks"]]] == ["ana"] * 3
+
+
+def test_a_proposal_with_no_cookie_is_the_operators(client, hive):
+    res = propose(client, BEARER)
+    assert res.status_code == 201
+    assert task_store.read_all_tasks(str(hive))[res.get_json()["id"]].proposed_by == "operator"
+
+
+def test_a_body_naming_proposed_by_is_refused(client, hive):
+    res = propose(client, BEARER, proposed_by="ana")
+    assert res.status_code == 400
+    assert "proposed_by" in res.get_json()["error"]
+
+
+def test_a_phase_proposal_has_no_proposed_by(client, hive):
+    out = ok(client, "backlog_propose", {"title": "Filed", "description": DESCRIPTION}, role="arquitecto")
+    assert task_store.read_all_tasks(str(hive))[out["id"]].proposed_by is None
+    assert "proposed_by" in tool_error_named(client)
+
+
+def tool_error_named(client) -> str:
+    args = {"title": "Other", "description": DESCRIPTION, "proposed_by": "ana"}
+    result = call(client, "backlog_propose", args, role="arquitecto")["result"]
+    assert result["isError"] is True
+    return result["content"][0]["text"]
+
+
+def test_the_board_serves_proposed_by_in_a_row_and_in_the_frontmatter(
+    client, hive, secrets_, clock
+):
+    _, csrf, _ = session(client, secrets_, clock, "ana")
+    task_id = propose(client, {**BEARER, **csrf}).get_json()["id"]
+    rows = {r["id"]: r for r in ok(client, "board_list")["items"]}
+    assert rows[task_id]["proposed_by"] == "ana"
+    assert ok(client, "board_get", {"task_id": task_id})["item"]["frontmatter"]["proposed_by"] == "ana"
 
 
 def test_a_signed_in_start_and_approve_name_the_person(client, hive, secrets_, clock, tmp_path):

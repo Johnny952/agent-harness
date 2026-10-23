@@ -16466,3 +16466,41 @@ signed-in person, pending a check of their readers. That check:
   source's meaning rest on it being a short closed list.
 - *Keeping `OPERATOR` on turns only:* `task_start`'s check is about who sent
   the turn, a person rather than the thread, and reads the same with a name.
+
+## ADR 390 — A console proposal records who proposed it in `proposed_by`, beside `source`
+
+**Status:** accepted (2026-10-23), T-163's arquitecto. Resolves
+`docs/debt/T-162-D1.md`; carries out ADR 387, *Decision* 4's debt.
+
+**Context.** `source` is a closed kind (ADR 387), so the person who filed a
+proposal from the console was on no card, only in the sign-in audit log.
+
+**Decision.**
+1. **A task file may carry `proposed_by`**, a non-blank string:
+   `context_transfer.TaskFile` field, read from and written to the
+   frontmatter only when set, checked by `tasks.field_problems` with
+   `dropped_reason` and `dropped_by`.
+2. **`tasks.propose` takes `proposed_by: str | None = None`**, checks it is a
+   non-blank string when given, and puts it on every file it writes: the
+   task, or the epic and each of its tasks. A repeat proposal answered with
+   `created: false` neither compares nor changes it; an epic task written
+   late by `_propose_again` takes the epic's `proposed_by`.
+3. **Only the console's HTTP path sets it**: `_http` passes
+   `proposed_by=_person()` to `backlog_propose`, so a signed-in person's name
+   or, with no session, `operator`. It is not a tool argument: the
+   `backlog_propose` schema is unchanged, so neither an MCP caller nor an
+   HTTP body can name it, and a phase's proposal has none (its `source`
+   already names the role). `source` stays `operator` on the console path.
+4. **Both readers serve it**: `board_service/app.py` `board_list` rows and
+   `observability/api/app.py` `_task` rows gain `proposed_by`, `null` when
+   absent; `board_get` already serves the whole frontmatter.
+
+**Consequences.**
+- Cards proposed before this have no `proposed_by`; they read `null`.
+- The console does not show it yet: `front/` types and screens are not
+  changed, and an extra JSON key is ignored there.
+
+**Ruled out.**
+- *Setting it on every proposal, phases included:* it would repeat `source`
+  for a role, and a `debt` filing's proposer is the auditor run, not a person.
+- *A `proposed_by` tool argument:* a phase could then pass for a person.

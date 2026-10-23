@@ -555,7 +555,7 @@ def field_problems(task: context_transfer.TaskFile) -> list[str]:
         problems.append(f"its rank is {task.rank!r}, not an integer from 0 to {MAX_RANK}")
     if task.debt_id is not None and not is_debt_id(task.debt_id):
         problems.append(f"its debt_id is {task.debt_id!r}, not a debt entry id like T-001-D1")
-    for name in ("dropped_reason", "dropped_by"):
+    for name in ("dropped_reason", "dropped_by", "proposed_by"):
         value = getattr(task, name)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             problems.append(f"its {name} is {value!r}, not a non-blank string")
@@ -2400,6 +2400,7 @@ def _proposed(
     split_into: list[str] | None = None,
     tags: list[str] | None = None,
     rank: int | None = None,
+    proposed_by: str | None = None,
 ) -> context_transfer.TaskFile:
     return context_transfer.TaskFile(
         task_id=task_id,
@@ -2415,6 +2416,7 @@ def _proposed(
         title=title,
         tags=list(tags) if tags else None,
         rank=rank,
+        proposed_by=proposed_by,
     )
 
 
@@ -2488,8 +2490,12 @@ def propose(
     depends_on: list[str] | None = None,
     tasks: list[dict] | None = None,
     tags: list[str] | None = None,
+    proposed_by: str | None = None,
 ) -> dict:
     """Section 6's `backlog_propose`: a task, or an epic with its tasks, as `proposed`.
+
+    `proposed_by`, when given, is the person who filed it and goes on every
+    file written (ADR 390); a repeat proposal neither compares nor changes it.
 
     A single task gets the next free `T-<n>`. An epic (`tasks` given) gets one
     for itself, `split_into` and its description holding the goal, and its 2
@@ -2514,6 +2520,8 @@ def propose(
         problems.append(f"its source is {source!r}, not one of {', '.join(SOURCES)}")
     problems += _priority_problems(priority)
     problems += _tags_problems(tags)
+    if proposed_by is not None and (not isinstance(proposed_by, str) or not proposed_by.strip()):
+        problems.append(f"its proposed_by is {proposed_by!r}, not a non-blank string")
     deps: list[str] = [] if depends_on is None else depends_on
     entries: list[tuple[str, str, list[int]]] | None = None
     if tasks is not None:
@@ -2539,7 +2547,10 @@ def propose(
         if entries is None:
             _write_new(
                 hive_dir,
-                _proposed(task_id, title, source, priority, deps, tags=tags, rank=rank),
+                _proposed(
+                    task_id, title, source, priority, deps, tags=tags, rank=rank,
+                    proposed_by=proposed_by,
+                ),
                 description,
             )
             return {"id": task_id, "created": True, "tasks": []}
@@ -2550,7 +2561,8 @@ def propose(
             _write_new(
                 hive_dir,
                 _proposed(
-                    task_id, title, source, priority, [], split_into=ids, tags=tags, rank=rank
+                    task_id, title, source, priority, [], split_into=ids, tags=tags, rank=rank,
+                    proposed_by=proposed_by,
                 ),
                 description,
             )
@@ -2561,6 +2573,7 @@ def propose(
                     child_id, child_title, source, priority,
                     [ids[i - 1] for i in after], epic=task_id, tags=tags,
                     rank=min(rank + position * RANK_STEP, MAX_RANK),
+                    proposed_by=proposed_by,
                 )
                 _write_new(hive_dir, child, child_text)
         return {"id": task_id, "created": True, "tasks": ids}
@@ -2721,6 +2734,7 @@ def _propose_again(
                 child_id, child_title, task.source or source, child_priority,
                 child_deps, epic=task_id, tags=task.tags,
                 rank=_end_of_bucket(hive_dir, child_priority or DEFAULT_PRIORITY),
+                proposed_by=task.proposed_by,
             )
             _write_new(hive_dir, child, child_text)
     return {"id": task_id, "created": False, "tasks": ids}

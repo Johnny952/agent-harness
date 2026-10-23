@@ -1658,6 +1658,7 @@ def _task(
         "debt_id": task.debt_id,
         "dropped_reason": task.dropped_reason,
         "dropped_by": task.dropped_by,
+        "proposed_by": task.proposed_by,
         # The project slug the card belongs to, `null` for one that names none,
         # which is the harness's one pre-existing project (ADR 199).
         "project": task.project,
