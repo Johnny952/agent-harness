@@ -16504,3 +16504,108 @@ proposal from the console was on no card, only in the sign-in audit log.
 - *Setting it on every proposal, phases included:* it would repeat `source`
   for a role, and a `debt` filing's proposer is the auditor run, not a person.
 - *A `proposed_by` tool argument:* a phase could then pass for a person.
+
+## ADR 393 — Known follow-up work is a sub-task, not debt
+
+**Status:** accepted (2026-10-23, approved by the user with
+`docs/plans/debt-triage.md`), T-164-S1's arquitecto. Built in steps: S1
+(T-164-S1) builds *Decision* 2, S2 builds 3, S3 builds 1, 4 and 5 in the role
+prompts and `docs/debt/README.md`.
+
+**Context.** Most entries filed from T-065 on are not debt.
+- They are the next slice of the task's own goal, cut by narrowing the
+  surface (P4).
+- Or they are work gated on a plan step.
+- Or they are one-line copies of the fix the task was making.
+
+Each one was accepted as debt, given a debt file and filed as a ready backlog
+proposal (ADR 131). The follow-up lost its order, and the backlog filled with
+items that cannot start.
+
+**Decision.**
+1. The arquitecto does not narrow a goal that spans surfaces. It returns a
+   `split` (ADR 60).
+2. The revisor gets a fourth debt ruling, `follow_up`.
+   - The entry is filed as a `proposed` backlog item with source `follow_up`
+     and `depends_on` the task that declared it.
+   - It gets no debt file and no index row.
+3. A debt declaration may carry `blocked_by`.
+   - A task id becomes the backlog item's `depends_on`.
+   - A plan step files no backlog item. The index row is the record until the
+     step is built.
+4. A mechanical fix (count, citation, name, path) is applied to every copy in
+   the repo. It is not a second surface. The revisor rejects debt that defers
+   one.
+5. `accepted` debt means a deliberate shortcut, or a defect found in what the
+   task touched. Nothing else.
+
+**Consequences.**
+- The index shrinks to real debt.
+- Follow-up work shows up in the backlog in order, behind the task that
+  revealed it.
+- Gated work stops being proposed before it can run.
+- The revisor's rulings grow to four. `tasks.SOURCES` gains `follow_up`.
+- Old rows are left as written (ADR 297). R5 of the plan handles their
+  backlog items once.
+
+**Ruled out.**
+- *Letting an epic's sub-task split again.* This reopens the depth limit
+  ADR 60 set on purpose. A filed follow-up with `depends_on` gives the same
+  order without nesting.
+- *Dropping the auto-filing of ADR 131.* Real debt still needs to reach the
+  backlog. Only what is filed, and with what dependency, changes.
+- *Rewriting the existing entries.* The index is append-only, and their
+  backlog items are what gets cleaned up.
+
+## ADR 394 — How the dispatcher files a `follow_up` entry
+
+**Status:** accepted (2026-10-23), T-164-S1's arquitecto. Carries out ADR 393,
+*Decision* 2.
+
+**Context.** ADR 393 says what a `follow_up` entry becomes, not when it is
+filed, what makes a re-run file it once, or what it does to the rest of the
+cycle. A debt item is idempotent on its `debt_id` (ADR 131); a follow-up has
+no id.
+
+**Decision.**
+1. **Which entries.** `debt.follow_ups(implemented, reviewed)` returns the
+   declarations whose fingerprint the revisor ruled `follow_up`. A ruling that
+   matches no declaration files nothing; a declaration that matches no ruling
+   stays accepted debt, as before (accept-by-default, `debt.accepted`).
+   `debt.accepted` leaves `follow_up` entries out, so they get no id, no line
+   in `debt.filing_note`, no index row and no debt file.
+2. **The item.** `debt.follow_up_item(task_id, declaration)` returns
+   `(title, description)`: the title `<task_id> follow-up: <what>`, on one
+   line and cut to `_MAX_TITLE_CHARS`; the description `## Goal` with the
+   **what**, `Where: <where>` and a line naming the declaring task, then
+   `## Done when` with the **fix** (a fallback line when it is empty), the
+   way `debt.backlog_item` builds one. It is filed through `tasks.propose`
+   with `source="follow_up"`, `priority="normal"` and
+   `depends_on=[task_id]`, no tags.
+3. **Idempotent on the title.** `tasks.propose` already answers a repeat of
+   the same title, description and `depends_on` with `created: false`, under
+   any status, so a re-run files nothing twice. The task id in the title keeps
+   two tasks' identical follow-ups apart.
+4. **When.** After the auditor, beside `_mirror_filed_debt`, in both
+   `run_task_cycle` and `run_single_phase(final=True)`, through one
+   `_file_follow_ups` helper. Like the mirror it never fails the cycle: a
+   `BoardWriteError` or `OSError` is logged and the cycle finishes.
+5. **The rest of the cycle is unchanged by it.** A `follow_up` ruling is not
+   a finding, does not send the round back, does not block, and is not
+   `filed_debt` to the automatic approve: the item waits on this task's merge
+   through `depends_on`.
+
+**Consequences.**
+- A follow-up whose `what` the implementador rewords on a re-run is filed
+  again under the new title, the same miss a fingerprint has for debt.
+- A follow-up whose title an unrelated task already has is refused by
+  `propose` and logged, not filed.
+- `front/src/lib/api/types.ts` `TaskSource` does not list `follow_up` yet; the
+  field is typed `TaskSource | string | null` and the backlog's source filter
+  is built from the data, so the item shows.
+
+**Ruled out.**
+- *A `follow_up_of` field to be idempotent on:* a new task-file field for
+  what the title already gives.
+- *Filing before the auditor:* nothing the auditor writes feeds the item, and
+  filing after keeps one place where a cycle's backlog writes happen.

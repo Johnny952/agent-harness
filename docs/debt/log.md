@@ -476,3 +476,9 @@ which the service adds after the schema check so no caller can name it, and
 both `board_list` and the read api serve it (`docs/decisions.md` ADR 390).
 It declared `T-163-D1`: the console's `TaskRow` type and backlog screen do
 not show `proposed_by` yet.
+
+**T-164-S1** resolved no earlier row and declared no debt. It added the
+revisor's fourth ruling, `follow_up`, which is not debt: the dispatcher files
+such an entry as a `proposed` backlog item with source `follow_up` that
+depends on the declaring task, with no id, no file here and no index row
+(`docs/decisions.md` ADR 393, ADR 394).

@@ -94,6 +94,15 @@ def test_an_accepted_ruling_says_where_the_debt_is_filed() -> None:
     assert "accepted: it gets filed in the debt index." in ruling["description"]
 
 
+def test_a_revisor_may_rule_a_declaration_follow_up() -> None:
+    """The ruling enum is what validates a revisor's return: `follow_up` is in
+    it, says where it goes, and a word that is no ruling still is not."""
+    ruling = handoff.schema_for("revisor")["properties"]["debt_rulings"]["items"]["properties"]["ruling"]
+    assert ruling["enum"] == ["accepted", "rejected", "blocks", "follow_up"]
+    assert "follow_up: it is not debt, it is the next task" in ruling["description"]
+    assert "maybe" not in ruling["enum"]
+
+
 def test_unknown_role_gets_no_schema() -> None:
     """No schema means no `--json-schema` flag and the prose path, the same
     way an unknown role gets no skills — not a crashed dispatch."""

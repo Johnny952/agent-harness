@@ -4794,6 +4794,114 @@ def test_the_debt_the_auditor_filed_becomes_a_backlog_item_at_its_impact(
     assert item.title == "task-1-D1: The retry loop has no test."
 
 
+_FOLLOW_UP = {
+    "origin": debt.INTRODUCED,
+    "what": "The export has no CSV mode.",
+    "where": "the report page",
+    "why": "the format was not specified",
+    "cost": "users copy the table by hand",
+    "fix": "add a CSV button to the report page",
+}
+
+
+def _follow_up_items(cfg):
+    from dispatcher import tasks as tasks_mod
+    return {
+        task_id: task for task_id, task in tasks_mod.read_all_tasks(cfg.hive_tasks_dir).items()
+        if task.source == "follow_up"
+    }
+
+
+def _declaring_task_file(cfg, task_id="task-1"):
+    """The declaring task's file: `propose` refuses a `depends_on` with none."""
+    Path(cfg.hive_tasks_dir).mkdir(parents=True, exist_ok=True)
+    Path(cfg.hive_tasks_dir, f"{task_id}.md").write_text(
+        f"---\ntask_id: {task_id}\nstatus: in_progress\ntitle: declaring\n---\n\nBody.\n"
+    )
+
+
+_SIDE_BY_SIDE = (
+    {"debt": "The retry loop has no test", "ruling": debt.ACCEPTED, "why": "ok"},
+    {"debt": "The export has no CSV mode", "ruling": debt.FOLLOW_UP, "why": "next task"},
+)
+
+
+def test_a_follow_up_is_filed_as_one_dependent_item_and_no_debt(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """ADR 394: the follow_up entry gets no id, no line in the auditor's note
+    and no debt item; it becomes one `proposed` item waiting on its task."""
+    cfg = _make_config(tmp_path)
+    _declaring_task_file(cfg)
+    calls = []
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase",
+        _debt_dispatch_phase(
+            calls, declared=(_DEBT, _FOLLOW_UP), rulings=_SIDE_BY_SIDE,
+        ),
+    )
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert _filed_lines(_by_role(calls)["auditor"]) == [
+        "- `task-1-D1` — The retry loop has no test."
+    ]
+    [item] = _follow_up_items(cfg).values()
+    assert (item.status, item.priority, item.depends_on, item.debt_id) == (
+        "proposed", "normal", ["task-1"], None,
+    )
+    assert item.title == "task-1 follow-up: The export has no CSV mode."
+    assert [i.debt_id for i in _debt_items(cfg).values()] == ["task-1-D1"]
+
+
+def test_a_follow_up_is_filed_once_however_often_it_is_filed(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _declaring_task_file(cfg)
+    implemented = {"debt": [dict(_FOLLOW_UP)]}
+    reviewed = {"debt_rulings": [dict(_SIDE_BY_SIDE[1])]}
+
+    first = dispatcher_mod._file_follow_ups(cfg, "task-1", implemented, reviewed)
+    again = dispatcher_mod._file_follow_ups(cfg, "task-1", implemented, reviewed)
+
+    assert [r["created"] for r in first + again] == [True, False]
+    assert len(_follow_up_items(cfg)) == 1
+
+
+def test_a_follow_up_the_board_refuses_does_not_fail_the_cycle(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    """No task file for `task-1`: `propose` refuses the dependency, which is
+    logged and not raised."""
+    cfg = _make_config(tmp_path)
+    implemented = {"debt": [dict(_FOLLOW_UP)]}
+    reviewed = {"debt_rulings": [dict(_SIDE_BY_SIDE[1])]}
+
+    assert dispatcher_mod._file_follow_ups(cfg, "task-1", implemented, reviewed) == []
+    assert _follow_up_items(cfg) == {}
+
+
+def test_the_cycle_hands_the_follow_up_filer_its_task(
+    tmp_path, monkeypatch, fake_git, debt_index,
+) -> None:
+    cfg = _make_config(tmp_path)
+    _declaring_task_file(cfg)
+    filed = []
+    monkeypatch.setattr(
+        dispatcher_mod, "_file_follow_ups",
+        lambda cfg_arg, task_id, implemented, reviewed: filed.append((task_id, implemented, reviewed)),
+    )
+    monkeypatch.setattr(
+        dispatcher_mod, "dispatch_phase", _debt_dispatch_phase([], declared=(_FOLLOW_UP,)),
+    )
+
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert [task_id for task_id, _, _ in filed] == ["task-1"]
+
+
 def test_a_re_run_files_no_second_backlog_item(
     tmp_path, monkeypatch, fake_git, debt_index,
 ) -> None:

@@ -2436,6 +2436,44 @@ def _mirror_filed_debt(
     return results
 
 
+def _file_follow_ups(
+    cfg: Config,
+    task_id: str,
+    implemented: dict | None,
+    reviewed: dict | None,
+) -> list[dict]:
+    """File each `follow_up` the revisor ruled as a `proposed` backlog item (ADR 394).
+
+    Source `follow_up`, normal priority, `depends_on` this task. `tasks.propose`
+    is idempotent on the title, so a re-run files nothing twice. These have no
+    debt id, so they are never in the filing note or the automatic approve's
+    `filed`. Never fails the cycle: a refused or unwritable item is logged.
+    """
+    results = []
+    for declaration in debt.follow_ups(implemented, reviewed):
+        title, description = debt.follow_up_item(task_id, declaration)
+        try:
+            result = tasks.propose(
+                cfg.hive_tasks_dir,
+                title=title,
+                description=description,
+                source="follow_up",
+                priority="normal",
+                depends_on=[task_id],
+            )
+        except (tasks.BoardWriteError, OSError) as exc:
+            logger.warning("task %s: could not file follow-up %r: %s", task_id, title, exc)
+            continue
+        logger.info(
+            "task %s: follow-up %r %s backlog item %s",
+            task_id, title,
+            "filed as" if result.get("created") else "already has",
+            result.get("id"),
+        )
+        results.append(result)
+    return results
+
+
 def cleanup_container(cfg: Config) -> str | None:
     """Which container to run worktree housekeeping in.
 
@@ -4611,6 +4649,7 @@ def run_single_phase(
             return None
         if final:
             _mirror_filed_debt(cfg, task_id, slug, filed)
+            _file_follow_ups(cfg, task_id, implemented, reviewed)
             # Said out loud because the difference is invisible from the task
             # file: a task closed this way was closed by a phase, not by a
             # cycle that read a verdict, and the merge a finished `run-task`
@@ -5386,6 +5425,7 @@ def _cycle_rounds(
             ctx.held_at = ("auditor", rounds_run)
         return _stopped(ctx)
     _mirror_filed_debt(cfg, task_id, slug, filed)
+    _file_follow_ups(cfg, task_id, implemented.handoff, revisor_result.handoff)
     ctx.completed = True
 
     if cfg.auto_approves(slug):
