@@ -482,3 +482,10 @@ revisor's fourth ruling, `follow_up`, which is not debt: the dispatcher files
 such an entry as a `proposed` backlog item with source `follow_up` that
 depends on the declaring task, with no id, no file here and no index row
 (`docs/decisions.md` ADR 393, ADR 394).
+
+**T-164-S2** resolved no earlier row and declared no debt. It gave a debt
+declaration a `blocked_by` (a task id or a plan step, `""` for none): the
+cycle mirror and `dispatch import-debt` file an entry blocked by a task as a
+backlog item that depends on it, and file nothing for one blocked by a plan
+step, whose row here is the record. A hand-written row carries the blocker as
+a `Blocked by <value>;` lead in its **where** (`docs/decisions.md` ADR 396).
