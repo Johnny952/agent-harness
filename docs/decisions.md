@@ -16184,3 +16184,45 @@ auditor, and acted on only once the branch has landed.
   failed, and it ends `record_merge` early.
 - *A second comment after the automatic approve's note:* the note is the one
   place the person reads the outcome.
+
+## ADR 372 — The backlog's drop asks for a reason, and a dropped row says who dropped it and why
+
+**Status:** accepted (2026-10-23), T-160-S3's arquitecto. Uses ADR 366's
+`reason` argument and its two served fields; amends ADR 138's drop confirm.
+
+**Context.** Since ADR 366 the board service refuses a drop with no reason,
+and the read api serves `dropped_reason` and `dropped_by` on every task row.
+The backlog screen (`front/src/routes/backlog.tsx`) still sent `{to:
+"dropped"}` and showed a dropped row as *final* only.
+
+**Decision.**
+1. **Types.** `Task` gains `dropped_reason` and `dropped_by`, each `string |
+   null`, required like `debt_id` because the api always serves both.
+   `AcceptTaskBody` gains an optional `reason`. Every `Task` literal, fixture
+   and test helper carries both, `null` unless the case needs a value.
+2. **The confirm.** The drop confirm holds a text input labelled
+   `reason for dropping <id>`, `maxLength` 20000 (the board service's
+   `MAX_COMMENT_CHARS`). *confirm drop* is disabled while the input is blank
+   after `trim()`, or while a write is in flight, and sends `{to: "dropped",
+   reason: <the trimmed text>}`. The console's check is a convenience: the
+   board service's refusal is the rule, and a refusal is toasted as every
+   other verdict's is. The typed reason survives a refusal (the confirm closes
+   on click as before, the text stays in the row's state) and is cleared by
+   *cancel*.
+3. **The row.** A dropped row keeps *final* in its action cell and shows,
+   under its title, `dropped by <by>: <reason>` in muted type. A reason that
+   is not a non-blank string (every card dropped before ADR 366) renders as
+   `Absent` labelled *no reason recorded*, alone. A reason with no `by`
+   renders `by` as `Absent` labelled *not recorded*. Values are guarded at the
+   render with `typeof`, never trusted from the type
+   (`docs/learnings/a-console-type-over-a-served-value-is-an-annotation.md`).
+
+**Consequences.**
+- ADR 366's gap closes: a drop from the backlog screen succeeds again.
+- The task detail screen shows neither field (T-160 *Out of scope*).
+
+**Ruled out.**
+- *A dialog for the reason:* the confirm is already inline in the row, and a
+  dialog is a second pattern for one verdict.
+- *Optional fields on `Task`:* the api serves both on every row, and an
+  optional type would let a fixture drift from the served shape (ADR 25).
