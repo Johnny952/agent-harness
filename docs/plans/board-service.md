@@ -437,7 +437,7 @@ phase that has it (`docs/plans/token-economy.md`):
 |---|---|---|---|---|
 | `board_list` | items filtered by place (backlog or board), status, epic or text: ids, titles, states | yes | yes | — |
 | `board_get` | one task or epic: frontmatter, description, comment count | yes | yes | — |
-| `backlog_propose` | an epic with its tasks, or a single task, into the backlog as `proposed`; an epic is all or nothing | yes | yes | — |
+| `backlog_propose` | an epic with its tasks, or a single task, into the backlog as `proposed`; an epic is all or nothing; the console's records `proposed_by` (ADR 390) | yes | yes | — |
 | `task_edit` | title, description, `depends_on`, `priority`, while not started | yes | — | — |
 | `task_comment` | append a comment | yes | yes | — |
 | `backlog_accept` | `proposed`/`deferred` → `pending`, or → `deferred`/`dropped`; a drop needs a `reason`, kept with `dropped_by` (the caller's role) on the card (ADR 366) | yes, on the person's word | — | — |
