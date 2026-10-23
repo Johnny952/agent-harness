@@ -1139,6 +1139,7 @@ class Approve:
 
     def __init__(self):
         self.calls: list[tuple] = []
+        self.before_merges: list = []
         self.entered = threading.Event()
         self.gate: threading.Event | None = None
         self.outcome = "merged"
@@ -1146,8 +1147,9 @@ class Approve:
         self.push = None
         self.merge_commit = "c" * 40
 
-    def __call__(self, cfg, task_id, slug, commit):
+    def __call__(self, cfg, task_id, slug, commit, *, before_merge=None):
         self.calls.append((task_id, slug, commit))
+        self.before_merges.append(before_merge)
         self.entered.set()
         if self.gate is not None:
             assert self.gate.wait(WAIT)
@@ -1187,6 +1189,24 @@ def test_an_approve_comments_once_and_ends_done_with_its_result(cfg, worker, app
     [comment] = comments(cfg, "T-1")
     assert comment["author"] == "dispatcher"
     assert comment["text"].startswith("approve at aaaaaaa:")
+
+
+def test_an_approve_is_handed_the_backup_that_runs_before_its_merge(
+    cfg, worker, approves, monkeypatch
+):
+    from dispatcher import backup
+
+    got = []
+    monkeypatch.setattr(
+        backup, "before_merge",
+        lambda hive, state, environ, *, now: got.append((hive, state)) or "backup before the merge: n",
+    )
+    approve(cfg)
+    worker.tick()
+    worker.join()
+    [before_merge] = approves.before_merges
+    assert before_merge() == "backup before the merge: n"
+    assert got == [(core.context_transfer.hive_root(cfg.hive_tasks_dir), cfg.state_dir)]
 
 
 @pytest.mark.parametrize("outcome", ["stale", "conflict", "not_run", "merge_refused"])

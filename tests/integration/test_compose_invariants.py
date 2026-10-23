@@ -548,7 +548,9 @@ def test_compose_passes_a_quoted_bcrypt_hash_through_intact(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "compose_file", ["docker-compose.yml", "docker-compose.coolify.yml"]
 )
-@pytest.mark.parametrize("variable", ["CONSOLE_PROJECT", "BOARD_ACTIONS_TOKEN"])
+@pytest.mark.parametrize(
+    "variable", ["CONSOLE_PROJECT", "BOARD_ACTIONS_TOKEN", "BACKUP_KEEP"]
+)
 def test_an_optional_variable_carries_an_empty_default(
     compose_file: str, variable: str
 ) -> None:
@@ -998,10 +1000,17 @@ def test_the_worker_is_the_dispatchers_mounts_behind_its_own_profile(
     assert worker["command"] == ["--config", "/app/config.yaml", "worker"]
     assert worker["networks"] == ["ia_harness_net"]
     assert "ports" not in worker
-    assert worker["volumes"] == dispatcher["volumes"]
+    # ADR 342: the dispatcher's mounts and environment plus the backup directory
+    assert worker["volumes"] == dispatcher["volumes"] + [
+        "${BACKUP_DIR:-../../.data/backups}:/backups"
+    ]
     assert worker["depends_on"] == dispatcher["depends_on"]
     assert worker["build"] == dispatcher["build"]
-    assert _environment(worker) == _environment(dispatcher)
+    assert _environment(worker) == {
+        **_environment(dispatcher),
+        "BACKUP_DIR": "/backups",
+        "BACKUP_KEEP": "${BACKUP_KEEP:-}",
+    }
 
 
 @pytest.mark.parametrize("deployment", sorted(DEPLOYMENTS))

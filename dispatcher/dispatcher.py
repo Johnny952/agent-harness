@@ -3661,7 +3661,10 @@ def _stale_reason(
     return None, tip
 
 
-def approve_reviewed(cfg: Config, task_id: str, slug: str, commit: str) -> ApprovalOutcome:
+def approve_reviewed(
+    cfg: Config, task_id: str, slug: str, commit: str,
+    *, before_merge: Callable[[], str] | None = None,
+) -> ApprovalOutcome:
     """Merge and push the reviewed tip under the base lock, or say why not, never raising.
 
     The `approve` handler's one function (ADR 258, 4; ADR 264): the stale check,
@@ -3670,9 +3673,11 @@ def approve_reviewed(cfg: Config, task_id: str, slug: str, commit: str) -> Appro
     Writes no comment; the worker does, from `comment`.
     """
     head = f"approve at {commit[:7]}:"
+    backup_line: list[str] = []  # ADR 342: the last line of every comment after the copy
 
     def out(outcome, text, merge_commit=None, push=None):
-        return ApprovalOutcome(outcome, commit, merge_commit, push, f"{head} {text}")
+        tail = "".join(f"\n{line}" for line in backup_line)
+        return ApprovalOutcome(outcome, commit, merge_commit, push, f"{head} {text}{tail}")
 
     container = cleanup_container(cfg)
     if container is None:
@@ -3712,6 +3717,13 @@ def approve_reviewed(cfg: Config, task_id: str, slug: str, commit: str) -> Appro
                     )
                 return out("not_run", f"not merged: {verdict.detail}; nothing changed, approve again")
             logger.info("%s", verdict.detail)
+            if before_merge is not None:
+                try:
+                    line = before_merge()
+                except Exception as exc:  # best effort: the merge never waits on the copy
+                    line = f"no backup before the merge: {exc}"
+                logger.info("task %s: %s", task_id, line)
+                backup_line.append(line)
             try:
                 merged = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
                 if not merged.refused:

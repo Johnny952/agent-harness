@@ -160,6 +160,21 @@ def backup(hive_root: str, state_dir: str, backup_dir: str, keep: int, *, now: d
     return result
 
 
+def before_merge(hive_root: str, state_dir: str, environ, *, now: datetime) -> str:
+    """One copy before an approve merge, best effort; never raises (ADR 342).
+
+    The line goes on the approve's comment. A refusal (no BACKUP_DIR, a bad
+    BACKUP_KEEP, a copy already named so, or a project lock held, which is any
+    running cycle) is said in the line and the merge goes on.
+    """
+    try:
+        backup_dir, keep = settings_from_env(environ)
+        result = backup(hive_root, state_dir, backup_dir, keep, now=now)
+    except (BackupError, ProjectBusy, OSError) as exc:
+        return f"no backup before the merge: {exc}"
+    return f"backup before the merge: {result.name}"
+
+
 def _resolve_copy(backup_dir: str, which: str) -> str:
     names = copies(backup_dir)
     if which == "latest":

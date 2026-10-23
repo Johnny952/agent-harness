@@ -658,8 +658,13 @@ Nightly is a host crontab line (not wired by the repo):
 15 3 * * * cd /srv/ia-harness && bash scripts/backup.sh
 ```
 
-"Once before each merge" is a documented follow-up: the worker would need
-`BACKUP_DIR` mounted, which is a compose change awaiting approval.
+The `approve` merge takes one too (ADR 342): the worker has `BACKUP_DIR`
+mounted at `/backups`, and the approve's comment ends with `backup before the
+merge: <name>`. It is best effort: the worker's own cycles hold the project
+locks, so while any cycle runs the copy is refused, the comment says `no
+backup before the merge: ...` and the merge goes ahead. Each copy counts
+against `BACKUP_KEEP`. The automatic approve and `dispatch merge-task` take
+none.
 
 `bash scripts/restore.sh <name>|latest` stops the worker, puts the copy back
 in place and starts the worker again if it was running. Files the copy lacks
