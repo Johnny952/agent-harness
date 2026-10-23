@@ -15769,3 +15769,71 @@ An approve holds the base lock and no project lock (ADR 258, ADR 264).
 - *Calling `backup` from the worker's `_approve` before `approve_reviewed`:*
   it would copy for approves that turn out stale or conflicting, pruning a
   real copy for nothing.
+
+## ADR 345 — A backup shares the project lock of the one cycle that holds it, so the automatic approve and `dispatch merge-task` take a copy before their merge too
+
+**Status:** accepted (2026-10-23), T-157's arquitecto. Resolves
+`docs/debt/T-153-D1.md`; narrows ADR 342 *Consequences*, third bullet.
+
+**Context.** ADR 342 took a copy before the worker's `approve` merge only.
+The automatic approve (ADR 77) runs inside `run_task_cycle`, after the
+auditor, while the cycle still holds its project's lock (ADR 200), and a
+`flock` belongs to its open file description, so `backup` opening the same
+lock file again in the same process is refused by the cycle's own lock.
+`dispatch merge-task` holds no project lock at all; it took no copy only
+because ADR 342 did not wire one. Waiting for a held lock is no answer: the
+merge holds the base lock, a cycle runs for hours, and the lock the
+automatic approve would wait on is its own.
+
+**Decision.**
+1. **`backup.backup` and `backup.before_merge` take a keyword `shared:
+   Iterable[str] = ()`**: project slugs whose lock the caller already holds,
+   with no cycle but the caller's own running under it. `backup` takes no
+   lock for those slugs and takes every other lock as ADR 327, 5 says, non-
+   blocking; one busy still refuses and writes nothing. `restore` is
+   unchanged. No waiting mode is built.
+2. **Who may name a slug in `shared`** is whoever knows it is the only cycle
+   under the lock: `dispatch run-task` (its cycle took the lock itself); a
+   queue run serially (`queue.parallel == 1`); the worker's `start` when its
+   project's ceiling is one (`cfg.parallel_for(slug) == 1`, so no second start
+   can join the group, ADR 306). A parallel queue and a worker group with a
+   ceiling above one pass `()`, and their copy is refused while the group
+   holds the lock, as ADR 342 has it.
+3. **The automatic approve** gets the copy through an injected callable, as
+   `approve_reviewed` does: `run_task_cycle` takes a keyword `before_merge:
+   Callable[[], str] | None = None`, kept on `CycleContext.before_merge`, and
+   `_auto_approve_and_merge` takes it as a keyword. It is called once, under
+   the base lock, only when `auto_approve.decide` approved and before
+   `docker_exec.merge_task_branch`; a raising callable gives the line `no
+   backup before the merge: <exc>`. The line is logged and is the last line
+   of the automatic approve's comment when the merge lands or fails after
+   it; a refusal takes no copy and has no line. `dispatcher.py` still does
+   not import `backup`. The callers that build it are `cli` *run-task*,
+   `queue._run_serial`, `queue._run_parallel` and `worker._start`; a cycle
+   with no caller-built callable (`run-phase`, a verdict's resume, a request
+   for changes, which is never authorized) takes no copy.
+4. **`dispatch merge-task`** calls `backup.before_merge` with `shared=()`
+   after the pre-merge check passed and before the merge, and prints its line
+   (stdout when a copy was taken, stderr when not). The exit code is the
+   merge's, whatever the line says.
+5. **Best effort, as ADR 342, 4.** No merge waits on or is refused for a copy.
+
+**Consequences.**
+- On a project run one task at a time, the automatic approve's copy now
+  succeeds unless another project's cycle is running; the comment says which.
+- The one-off `dispatcher` service has no `BACKUP_DIR` (ADR 342, 1), so a
+  `run-task`, `run-queue` or `merge-task` run through it says `no backup
+  before the merge: BACKUP_DIR is not set` unless the operator passes the
+  mount and variable on the `run` line as `scripts/backup.sh` does. Giving
+  that service the mount is left to a later task: `scripts/backup.sh` adds
+  the same `/backups` mount on its own `run` line.
+- A slug in `shared` is trusted: a caller that names one with a second cycle
+  running under it gets a copy taken mid-cycle.
+
+**Ruled out.**
+- *A waiting mode:* it waits under the base lock for hours, and on its own
+  cycle's lock forever.
+- *Sharing the caller's open descriptor instead of skipping the slug:* the
+  `flock` is already held; holding it twice proves nothing more.
+- *Importing `backup` into `dispatcher.py`:* `backup` imports `worker`,
+  which imports `dispatcher` (ADR 342, 2).
