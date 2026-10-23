@@ -469,3 +469,10 @@ admits a turn from any actor but `thread` (`docs/decisions.md` ADR 387,
 `board_service/app.py` `_person`). A proposal's `source` stays `operator`
 because it is a closed enum, so it declared `T-162-D1`: a console proposal
 records no person and there is no `proposed_by` field.
+
+**T-163** resolved `T-162-D1`: a proposal filed over the board service's HTTP
+path now records the signed-in person in a separate `proposed_by` field,
+which the service adds after the schema check so no caller can name it, and
+both `board_list` and the read api serve it (`docs/decisions.md` ADR 390).
+It declared `T-163-D1`: the console's `TaskRow` type and backlog screen do
+not show `proposed_by` yet.
