@@ -455,3 +455,10 @@ included (`docs/decisions.md` ADR 381), and does nothing without the header,
 so it is inert until step 2 of `docs/plans/server-deployment.md` sends it.
 Trusting the header as sent stays step 2's to close (ADR 381,
 *Consequences*), not a new entry. It declared no new debt.
+
+**T-150** resolved `T-146-D2`: a verdict or comment written over HTTP by a
+signed-in person now names that person as its `author` (`docs/decisions.md`
+ADR 384, `board_service/app.py` `_person`), ahead of the reviewer flow and
+inert until step 2 of `docs/plans/server-deployment.md` forwards the session
+cookie. It declared `T-150-D1`: accept/drop `by`, a proposal's `source` and
+the action `actor` still record `operator`.
