@@ -462,3 +462,10 @@ ADR 384, `board_service/app.py` `_person`), ahead of the reviewer flow and
 inert until step 2 of `docs/plans/server-deployment.md` forwards the session
 cookie. It declared `T-150-D1`: accept/drop `by`, a proposal's `source` and
 the action `actor` still record `operator`.
+
+**T-162** resolved `T-150-D1`: a drop's `by` and every action the board
+service's HTTP routes queue now name the signed-in person, and `task_start`
+admits a turn from any actor but `thread` (`docs/decisions.md` ADR 387,
+`board_service/app.py` `_person`). A proposal's `source` stays `operator`
+because it is a closed enum, so it declared `T-162-D1`: a console proposal
+records no person and there is no `proposed_by` field.
