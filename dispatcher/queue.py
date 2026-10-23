@@ -549,6 +549,17 @@ def _take_project(
             sleep(WAIT_POLL_SECONDS)
 
 
+def _merge_hook(cfg: Config, shared: tuple[str, ...]):
+    """The copy before the automatic approve's merge (ADR 345).
+
+    A serial queue holds its project's lock itself and shares it; a parallel
+    one has sibling cycles writing, so it shares nothing. `backup` imports the
+    worker, which imports this module, hence the local import.
+    """
+    from dispatcher import backup
+    return backup.merge_hook(cfg, shared=shared)
+
+
 def _run_serial(
     cfg: Config, queue: Queue, sleep: Callable[[float], None], lock: ProjectLock,
 ) -> Queue:
@@ -588,6 +599,7 @@ def _run_serial(
             on_approve=on_approve,
             may_start_phase=may_start_phase,
             project_lock=lock,
+            before_merge=_merge_hook(cfg, (queue.project,)),
         )
         entry.tokens, entry.unmeasured = _spend(cfg, entry)
         _settle(cfg, queue, entry, outcome, limit_hit)
@@ -749,6 +761,7 @@ def _run_parallel(
                         may_start_phase=may_start_phase,
                         scheduler=scheduler,
                         project_lock=lock,
+                        before_merge=_merge_hook(cfg, ()),
                     )
                 except Exception:  # noqa: BLE001 — one cycle's crash is that task's block
                     logger.exception("queue %s: task %s crashed", queue.queue_id, entry.task_id)

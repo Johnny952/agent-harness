@@ -156,7 +156,9 @@ Exits: 0, 1, 2.
 ### `merge-task`
 
 Merges `agent/task/<task-id>` into the branch the project is checked out on,
-after the pre-merge check.
+after the pre-merge check. Once the check passes it takes one backup, best
+effort (ADR 345), and prints `backup before the merge: <name>` or, on stderr,
+`no backup before the merge: <why>`; the merge goes ahead either way.
 
 | Argument | Unit | Default | What it does |
 |---|---|---|---|

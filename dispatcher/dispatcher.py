@@ -3464,6 +3464,10 @@ class ApproveResult:
     push: docker_exec.PushOutcome | None = None
 
 
+def _backup_suffix(line: str | None) -> str:
+    return f"\n{line}" if line else ""
+
+
 def _auto_approve_and_merge(
     cfg: Config,
     task_id: str,
@@ -3475,8 +3479,13 @@ def _auto_approve_and_merge(
     audited: DispatchResult,
     filed: list[tuple[str, debt.Declaration]],
     authorized: bool,
+    before_merge: Callable[[], str] | None = None,
 ) -> ApproveResult:
     """The automatic approve of `docs/plans/autonomy.md` *Decisions*, 1 (ADR 77).
+
+    `before_merge`, when given, is called once after the decision approved and
+    before the merge (ADR 345); its line ends the comment, and a raise is said
+    in the line and the merge goes on.
 
     Where `_merge_task_branch` merges unconditionally, this merges only when
     every condition of `auto_approve.decide` holds, and writes a comment on
@@ -3550,6 +3559,7 @@ def _auto_approve_and_merge(
         merge_commit = None
         merge_problem = None
         push = None
+        backup_line = None
         try:
             try:
                 verdict = pre_merge_check(cfg, container, task_id, slug)
@@ -3569,6 +3579,12 @@ def _auto_approve_and_merge(
                 changed_paths=tuple(changed) if changed is not None else None,
             ))
             if decision.approved:
+                if before_merge is not None:
+                    try:
+                        backup_line = before_merge()
+                    except Exception as exc:  # best effort: the merge never waits on the copy
+                        backup_line = f"no backup before the merge: {exc}"
+                    logger.info("task %s: %s", task_id, backup_line)
                 try:
                     outcome = docker_exec.merge_task_branch(container, cfg.projects_root, slug, task_id)
                     if not outcome.refused:
@@ -3591,7 +3607,10 @@ def _auto_approve_and_merge(
         merge_problem = outcome.detail
     if merge_problem is not None:
         logger.warning("task %s: not merged: %s", task_id, merge_problem)
-        _record_auto_approve(cfg, task_id, auto_approve.merge_failed_note(decision, merge_problem))
+        _record_auto_approve(
+            cfg, task_id,
+            auto_approve.merge_failed_note(decision, merge_problem) + _backup_suffix(backup_line),
+        )
         return ApproveResult(False)
     logger.info("task %s: automatic approve: %s", task_id, outcome.detail)
     if push.refused:
@@ -3602,7 +3621,7 @@ def _auto_approve_and_merge(
         cfg, task_id,
         auto_approve.approval_note(
             decision, outcome.target or "the project's branch", merge_commit, push
-        ),
+        ) + _backup_suffix(backup_line),
     )
     recorded, problem = record_merge(cfg, task_id, outcome)
     for line in recorded:
@@ -3867,6 +3886,9 @@ class CycleContext:
     # nothing started and nothing marked. The queue's token limit (A-5, ADR
     # 79) is the one caller: a limit reached mid-cycle starts no new phase.
     may_start_phase: Callable[[], bool] | None = None
+    # One backup before the automatic approve's merge (ADR 345); the caller
+    # builds it, since it knows which project lock it holds.
+    before_merge: Callable[[], str] | None = None
     # The start's own spending limit (ADR 230), in measured tokens counted from
     # `usage_offset`, the task's usage log length when the start began. Read
     # before each phase, like `may_start_phase`: reached, no new phase starts
@@ -4853,8 +4875,11 @@ def run_task_cycle(
     token_limit: int | None = None,
     usage_offset: int = 0,
     changes_requested: str = "",
+    before_merge: Callable[[], str] | None = None,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
+
+    `before_merge` is called once before the automatic approve's merge (ADR 345).
 
     The project is held for the whole cycle (ADR 200): a busy one raises
     `project_lock.ProjectBusy` before anything is written. `project_lock` is a
@@ -4900,6 +4925,7 @@ def run_task_cycle(
     if ctx is None:
         return CycleOutcome.BLOCKED
     ctx.may_start_phase = may_start_phase
+    ctx.before_merge = before_merge
     ctx.token_limit, ctx.usage_offset = token_limit, usage_offset
     ctx.changes_requested = changes_requested
     def blocked(reason: str | None = None) -> CycleOutcome:
@@ -5266,6 +5292,7 @@ def _cycle_rounds(
             audited=audited,
             filed=filed,
             authorized=authorized,
+            before_merge=ctx.before_merge,
         )
         if on_approve is not None:
             on_approve(approve)

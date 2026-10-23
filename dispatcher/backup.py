@@ -2,7 +2,7 @@
 
 A backup is a plain directory, `<BACKUP_DIR>/<UTC time>/{hive,state,manifest.json}`,
 built under a `.partial-` name and renamed once complete. It is taken with every
-project lock held, so no cycle writes while it runs. The two sources are the only
+project lock held (a caller may share its own), so no other cycle writes while it runs. The two sources are the only
 things ever read, and `NEVER_COPIED` keeps a credential out even if one sits inside
 them. A restore syncs a copy back in place (both roots are mount points) and sets
 aside whatever it replaces; it deletes nothing.
@@ -16,7 +16,8 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dispatcher import context_transfer, projects, worker
@@ -95,12 +96,18 @@ def _lock_slugs(hive_root: str, state_dir: str) -> list[str]:
 
 
 class _Locks:
-    """Every project lock, taken without waiting; one busy releases the rest and re-raises."""
+    """Every project lock, taken without waiting; one busy releases the rest and re-raises.
 
-    def __init__(self, hive_root: str, state_dir: str, via: str):
+    A slug in `shared` is the caller's own, already held: it is not taken (ADR 345).
+    """
+
+    def __init__(self, hive_root: str, state_dir: str, via: str, shared: Iterable[str] = ()):
         self._held: list[ProjectLock] = []
+        skip = set(shared)
         try:
             for slug in _lock_slugs(hive_root, state_dir):
+                if slug in skip:
+                    continue
                 self._held.append(ProjectLock.take(state_dir, slug, None, via))
         except ProjectBusy:
             self.release()
@@ -127,7 +134,8 @@ def _copy_tree(src: str, dst: str, result: Result) -> None:
             result.files += 1
 
 
-def backup(hive_root: str, state_dir: str, backup_dir: str, keep: int, *, now: datetime) -> Result:
+def backup(hive_root: str, state_dir: str, backup_dir: str, keep: int, *, now: datetime,
+           shared: Iterable[str] = ()) -> Result:
     hive_root, state_dir = os.path.realpath(hive_root), os.path.realpath(state_dir)
     target = os.path.realpath(backup_dir)
     for source in (hive_root, state_dir):
@@ -137,7 +145,7 @@ def backup(hive_root: str, state_dir: str, backup_dir: str, keep: int, *, now: d
     final, partial = os.path.join(target, name), os.path.join(target, PARTIAL + name)
     if os.path.exists(final):
         raise BackupError(f"a copy named {name} already exists")
-    locks = _Locks(hive_root, state_dir, "backup")  # ProjectBusy: nothing written
+    locks = _Locks(hive_root, state_dir, "backup", shared)  # ProjectBusy: nothing written
     result = Result(name)
     try:
         os.makedirs(target, exist_ok=True)
@@ -160,8 +168,11 @@ def backup(hive_root: str, state_dir: str, backup_dir: str, keep: int, *, now: d
     return result
 
 
-def before_merge(hive_root: str, state_dir: str, environ, *, now: datetime) -> str:
-    """One copy before an approve merge, best effort; never raises (ADR 342).
+def before_merge(hive_root: str, state_dir: str, environ, *, now: datetime,
+                 shared: Iterable[str] = ()) -> str:
+    """One copy before an approve merge, best effort; never raises (ADR 342, 345).
+
+    `shared` names project locks the caller holds itself; they are not retaken.
 
     The line goes on the approve's comment. A refusal (no BACKUP_DIR, a bad
     BACKUP_KEEP, a copy already named so, or a project lock held, which is any
@@ -169,10 +180,19 @@ def before_merge(hive_root: str, state_dir: str, environ, *, now: datetime) -> s
     """
     try:
         backup_dir, keep = settings_from_env(environ)
-        result = backup(hive_root, state_dir, backup_dir, keep, now=now)
+        result = backup(hive_root, state_dir, backup_dir, keep, now=now, shared=shared)
     except (BackupError, ProjectBusy, OSError) as exc:
         return f"no backup before the merge: {exc}"
     return f"backup before the merge: {result.name}"
+
+
+def merge_hook(cfg, environ=None, *, shared: Iterable[str] = ()):
+    """The `before_merge` callable a cycle's caller hands `run_task_cycle` (ADR 345)."""
+    hive_root = context_transfer.hive_root(cfg.hive_tasks_dir)
+    env = os.environ if environ is None else environ
+    shared = tuple(shared)
+    return lambda: before_merge(hive_root, cfg.state_dir, env,
+                                now=datetime.now(timezone.utc), shared=shared)
 
 
 def _resolve_copy(backup_dir: str, which: str) -> str:

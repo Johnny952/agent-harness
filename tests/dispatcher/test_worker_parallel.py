@@ -41,7 +41,7 @@ class WindowCycle(Cycle):
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
                  on_approve=None, may_start_phase=None, scheduler=None, project_lock=None,
-                 token_limit=None, usage_offset=0):
+                 token_limit=None, usage_offset=0, before_merge=None):
         self.schedulers.append(scheduler)
         self.locks.append(project_lock)
         self.calls.append((task_id, slug))

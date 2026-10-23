@@ -51,7 +51,8 @@ class FakeCycle:
         self.calls: list[dict] = []
 
     def __call__(self, cfg, task_id, slug, description=None, authorized=True,
-                 on_approve=None, may_start_phase=None, project_lock=None):
+                 on_approve=None, may_start_phase=None, project_lock=None,
+                 before_merge=None):
         self.started.append(task_id)
         self.calls.append({"authorized": authorized, "slug": slug})
         plan = self.script[task_id]

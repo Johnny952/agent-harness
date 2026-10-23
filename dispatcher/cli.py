@@ -948,7 +948,10 @@ def main() -> None:
         _require_migrated(cfg, parser)
         description = _resolve_description(args, cfg, parser)
         try:
-            outcome = run_task_cycle(cfg, args.task_id, args.project, description=description)
+            outcome = run_task_cycle(
+                cfg, args.task_id, args.project, description=description,
+                before_merge=backup_mod.merge_hook(cfg, shared=(args.project,)),
+            )
         except ProjectBusy as exc:
             _exit_project_busy(exc, args.task_id)
         for line in left_behind_report(cfg, args.task_id):
@@ -1130,6 +1133,10 @@ def main() -> None:
                     print(verdict.detail, file=sys.stderr)
                     raise SystemExit(1)
                 print(verdict.detail)
+                # One copy before the merge, best effort (ADR 345): no cycle of
+                # this process holds a lock, so a running one refuses it.
+                line = backup_mod.merge_hook(cfg)()
+                print(line, file=sys.stdout if line.startswith("backup before") else sys.stderr)
                 outcome = docker_exec.merge_task_branch(
                     container, cfg.projects_root, args.project, args.task_id
                 )

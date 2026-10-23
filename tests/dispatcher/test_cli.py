@@ -73,8 +73,9 @@ def _write_config(tmp_path: Path) -> Path:
 def _capture_cycle(monkeypatch, outcome: CycleOutcome | None = CycleOutcome.FINISHED) -> dict:
     captured: dict = {}
 
-    def fake_run_task_cycle(cfg, task_id, slug, description=None):
-        captured.update(task_id=task_id, slug=slug, description=description)
+    def fake_run_task_cycle(cfg, task_id, slug, description=None, before_merge=None):
+        captured.update(task_id=task_id, slug=slug, description=description,
+                        before_merge=before_merge)
         return outcome
 
     monkeypatch.setattr(cli_mod, "run_task_cycle", fake_run_task_cycle)
@@ -792,6 +793,64 @@ def test_cli_merge_task_keeps_a_clean_premerge_before_it_merges(
 
     assert adopted == [clean]
     assert "test gate green" in capsys.readouterr().out
+
+
+def test_cli_merge_task_takes_a_copy_after_the_check_and_before_the_merge(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """ADR 345: the copy's line is printed; a refusal of it is not a failure."""
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged"))
+    order = []
+    monkeypatch.setattr(
+        cli_mod.docker_exec, "merge_task_branch",
+        lambda container, projects_root, slug, task_id: order.append("merge")
+        or MergeOutcome(MERGED, "main", "merged"),
+    )
+    monkeypatch.setattr(
+        cli_mod.backup_mod, "before_merge",
+        lambda *a, **k: order.append("backup") or "backup before the merge: 20261022T030000Z",
+    )
+
+    _merge_task(monkeypatch, config_path)
+
+    assert order == ["backup", "merge"]
+    assert "backup before the merge: 20261022T030000Z" in capsys.readouterr().out
+
+
+def test_cli_merge_task_says_on_stderr_when_the_copy_was_refused(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged"))
+    monkeypatch.setattr(
+        cli_mod.backup_mod, "before_merge",
+        lambda *a, **k: "no backup before the merge: BACKUP_DIR is not set",
+    )
+
+    _merge_task(monkeypatch, config_path)
+
+    assert "no backup before the merge" in capsys.readouterr().err
+
+
+def test_cli_merge_task_takes_no_copy_when_the_check_fails(
+    tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    config_path = _write_config(tmp_path)
+    _card(tmp_path, "task-1")
+    _fake_merge(monkeypatch, MergeOutcome(MERGED, "main", "merged"))
+    _fake_premerge(monkeypatch, PreMergeOutcome(
+        PREMERGE_CONFLICT, "main", "b" * 40, "a" * 40, "conflicts", conflicts=("app.py",),
+    ))
+    calls = []
+    monkeypatch.setattr(cli_mod.backup_mod, "before_merge", lambda *a, **k: calls.append(1) or "x")
+
+    with pytest.raises(SystemExit):
+        _merge_task(monkeypatch, config_path)
+
+    assert calls == []
 
 
 def test_cli_merge_task_that_was_refused_records_nothing(

@@ -8257,10 +8257,12 @@ def _aa_config(tmp_path, **overrides):
     return _make_config(tmp_path, auto_approve={"myproj": True}, **overrides)
 
 
-def _aa_run(cfg, monkeypatch, *, description=_AA_DESCRIPTION, authorized=True, **phase):
+def _aa_run(cfg, monkeypatch, *, description=_AA_DESCRIPTION, authorized=True,
+            before_merge=None, **phase):
     monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _aa_dispatch_phase(**phase))
     return dispatcher_mod.run_task_cycle(
         cfg, "task-1", "myproj", description=description, authorized=authorized,
+        before_merge=before_merge,
     )
 
 
@@ -8431,6 +8433,44 @@ def test_auto_approve_records_a_merge_that_did_not_land(tmp_path, monkeypatch, a
     assert task.merged is None
     assert task.status == "awaiting_review"
     assert "but the merge did not land: the project has uncommitted changes" in task.body
+
+
+def test_auto_approve_takes_one_copy_before_the_merge_and_says_so(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    seen = []
+
+    def before_merge():
+        seen.append(list(aa_git.merges))
+        return "backup before the merge: 20261022T030000Z"
+
+    _aa_run(cfg, monkeypatch, before_merge=before_merge)
+
+    assert seen == [[]]
+    assert len(aa_git.merges) == 1
+    assert _task(cfg).body.rstrip().endswith("backup before the merge: 20261022T030000Z")
+
+
+def test_auto_approve_that_refuses_takes_no_copy(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+    calls = []
+
+    _aa_run(cfg, monkeypatch, before_merge=lambda: calls.append(1) or "x",
+            auditor={"status": "partial"})
+
+    assert calls == []
+    assert aa_git.merges == []
+
+
+def test_auto_approve_merges_when_the_copy_raises(tmp_path, monkeypatch, aa_git) -> None:
+    cfg = _aa_config(tmp_path)
+
+    def before_merge():
+        raise RuntimeError("disk full")
+
+    _aa_run(cfg, monkeypatch, before_merge=before_merge)
+
+    assert len(aa_git.merges) == 1
+    assert "no backup before the merge: disk full" in _task(cfg).body
 
 
 def test_a_project_without_auto_approve_merges_exactly_as_before(tmp_path, monkeypatch, aa_git) -> None:

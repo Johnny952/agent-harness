@@ -663,8 +663,13 @@ mounted at `/backups`, and the approve's comment ends with `backup before the
 merge: <name>`. It is best effort: the worker's own cycles hold the project
 locks, so while any cycle runs the copy is refused, the comment says `no
 backup before the merge: ...` and the merge goes ahead. Each copy counts
-against `BACKUP_KEEP`. The automatic approve and `dispatch merge-task` take
-none.
+against `BACKUP_KEEP`. The automatic approve at the end of a cycle takes one
+too (ADR 345), sharing the project lock its own cycle holds (a serial queue or a
+project with one start at a time; a parallel one shares none, so it is refused
+while a sibling runs). `dispatch merge-task` takes one after its check passes
+and prints the line; it holds no lock, so a running cycle refuses it. The
+one-off `dispatcher` service has no `BACKUP_DIR` unless the run line passes
+it, so there the line says `no backup before the merge: BACKUP_DIR is not set`.
 
 `bash scripts/restore.sh <name>|latest` stops the worker, puts the copy back
 in place and starts the worker again if it was running. Files the copy lacks
