@@ -672,9 +672,11 @@ one-off `dispatcher` service has no `BACKUP_DIR` unless the run line passes
 it, so there the line says `no backup before the merge: BACKUP_DIR is not set`.
 
 `bash scripts/restore.sh <name>|latest` stops the worker, puts the copy back
-in place and starts the worker again if it was running. Files the copy lacks
-are moved to `.pre-restore-<time>/` inside the hive and the state, never
-deleted; delete those directories once the restore is trusted. Afterwards:
+in place and starts the worker again if it was running. Files the copy lacks,
+and the live version of every file it changes, are moved to
+`.pre-restore-<time>/` inside the hive and the state, never deleted; a live
+symlink is never followed (moved aside if the copy has that name, else left
+alone). Delete those directories once the restore is trusted. Afterwards:
 each account signs in again from `/pool`, the first user is recreated, and
 push is turned on again on each device.
 
