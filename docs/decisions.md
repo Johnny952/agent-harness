@@ -16409,3 +16409,60 @@ routes yet; step 2 of the plan's *How it would be built* will.
 - *Passing the user as `_call`'s role in `_http` for every tool:* a
   proposal's `source` and an accept's `by` would take a name their readers
   do not expect; those are left for the task that wants them.
+
+## ADR 387 — A drop's `by` and a queued action's `actor` name the signed-in person; a proposal's `source` stays a kind
+
+**Status:** accepted (2026-10-23), T-162's arquitecto. Resolves
+`docs/debt/T-150-D1.md`. Narrows ADR 384, *Decision* 4: the drop's `by` and
+the action's `actor` leave its list; a proposal's `source` stays on it.
+
+**Context.** ADR 384 left three console writes naming `OPERATOR` for a
+signed-in person, pending a check of their readers. That check:
+- `backlog_accept`'s `by` is read only on a drop (`dispatcher/tasks.py`
+  `accept`, `mark_dropped`), stored as `dropped_by`; `field_problems` asks a
+  non-blank string, the api and the board service pass it through, and the
+  backlog screen prints it as text. A name fits.
+- A queued action's `actor` (`dispatcher/actions.py`) must be non-blank
+  text; the worker writes it as a start note's comment author, a command
+  verdict's `by`, a resolve-conflict comment's *asked by* and a turn's log
+  field; an epic run keeps it and its later starts reuse it
+  (`actions.py`, the run's `actor`); the chat panel prints it. Two readers
+  compare it: `actions.py`'s start check treats `THREAD` specially, and
+  `board_service/app.py` `task_start` admits only a turn whose actor is
+  `OPERATOR` — a turn a person sent would be refused there.
+- A proposal's `source` is an enum, `dispatcher/tasks.py` `SOURCES`
+  (`operator`, `arquitecto`, `debt`): `propose` refuses any other value,
+  `field_problems` flags it, and the console types and filters it as
+  `TaskSource`. It names the kind of proposer, not a person. A name does
+  not fit.
+
+**Decision.**
+1. **`_http` passes `_person()` for `backlog_accept` too**, beside
+   `task_comment` and `review_verdict`; a drop records the person as
+   `dropped_by`. `backlog_propose` and `task_edit` keep `OPERATOR`.
+2. **Every action the board service's HTTP routes queue takes
+   `actor=_person()`**: start, approve, request changes (with their
+   `check_new`), resolve conflict, cancel, command verdict, turn, the four
+   project setup kinds, and *Start epic*/*Stop epic*, whose module functions
+   `epic_start` and `epic_stop` take an `actor` argument defaulting to
+   `OPERATOR`. The MCP `task_start` keeps `actor=THREAD`.
+3. **`task_start` admits a running turn whose actor is any person**: it
+   refuses a turn whose `actor` is `THREAD` or not a string, instead of one
+   that is not `OPERATOR`.
+4. **`source` stays `operator`** for a console proposal. Who proposed it is
+   not recorded on the card; that is a new field, left as debt.
+
+**Consequences.**
+- With no session (every request while `BOARD_AUTH_DIR` is unset, and the
+  console's path until the forward sends the cookie) every field is
+  `operator`, exactly as before.
+- A user named `thread` cannot start a task by hand (`actions.py` asks a
+  thread's params) nor have the thread start one from a turn; one named
+  like a role reads as that role, as ADR 384 already notes.
+- Actions queued before this say `operator`.
+
+**Ruled out.**
+- *Widening `SOURCES` to any name:* the backlog filter and the `debt`
+  source's meaning rest on it being a short closed list.
+- *Keeping `OPERATOR` on turns only:* `task_start`'s check is about who sent
+  the turn, a person rather than the thread, and reads the same with a name.
