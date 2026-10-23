@@ -27,6 +27,21 @@ to them merge without a conflict.
 Declare `found` debt only for files your task touched, and only if it is not
 already a row here.
 
+What is debt and what is not (`docs/decisions.md` ADR 393):
+
+- A row is a deliberate shortcut the task took knowingly, or a defect found in
+  what the task touched. The revisor rules only those `accepted`.
+- The next slice of the task's own goal is not debt. The arquitecto splits a
+  goal that spans surfaces instead of narrowing it and leaving the rest here;
+  work found mid-task is ruled `follow_up`, filed as a backlog item that
+  depends on the task, with no row and no file (ADR 394).
+- A mechanical fix (a count, a citation, a name, a path) is applied to every
+  copy of it in the repo. It is not a second surface, and debt that only defers
+  it to another copy is rejected.
+- Gated debt carries `blocked_by`, and its **where** opens with
+  `Blocked by <value>;`. A task id files the backlog item with `depends_on`
+  that task; a plan step files no item and the row is the record (ADR 396).
+
 `card` is `none` on every row because no card exists to point at. That was
 first an accident of configuration — this harness never had a board set, so
 no auditor from T-008 on was handed a card id — and since T-028 it is the
@@ -43,7 +58,8 @@ paragraphs below means this one: no card exists.
 `impact` says what leaving the entry as it is costs, and the auditor writes it:
 `risk` (left as it is, it can break or lose something), `cost` (it slows or
 costs work) or `cosmetic` (wording or polish). The dispatcher files every open
-entry as a proposed backlog item tagged `debt`, and the impact sets its
+entry, except one gated on a plan step (ADR 396), as a proposed backlog item
+tagged `debt`, and the impact sets its
 priority: `risk` is `high`, `cost` is `normal`, `cosmetic` is `low`. A row with
 no impact, or one outside those three, reads as `none` and files at `normal`.
 Resolved rows say `none`: they are never filed. The column is last so a row

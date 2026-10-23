@@ -341,6 +341,37 @@ def test_the_implementador_is_told_what_resolved_debt_does() -> None:
     assert "the auditor appends a resolution row" in duties
 
 
+def test_the_arquitecto_never_narrows_a_goal_into_debt() -> None:
+    duties = project_docs.duties("arquitecto", "task-1")
+
+    assert "Never narrow a goal that spans surfaces" in duties
+    assert "is not a second surface" in duties
+
+
+def test_the_implementador_is_told_to_fix_every_copy_and_to_gate_debt() -> None:
+    duties = project_docs.duties("implementador", "task-1")
+
+    assert "applied to every copy of it in the repo" in duties
+    assert "`blocked_by`" in duties
+    assert "`follow_up`" in duties
+
+
+def test_the_revisor_reserves_accepted_and_names_follow_up() -> None:
+    revisor = project_docs.duties("revisor", "task-1")
+
+    for ruling in ("`accepted`", "`rejected`", "`follow_up`", "`blocks`"):
+        assert ruling in revisor
+    assert "deliberate shortcut" in revisor
+    assert "only defers the task's own mechanical fix" in revisor
+    assert "not a finding" in revisor
+
+
+def test_the_auditor_does_not_file_a_follow_up() -> None:
+    auditor = project_docs.duties("auditor", "task-1")
+
+    assert "`follow_up` is never filed" in auditor
+
+
 def test_the_auditor_s_duties_and_the_filing_note_agree_about_the_card_column() -> None:
     """Both land in one auditor prompt. The note says to write `none` in the
     `card` column; duties that speak of cards the row points back at would
