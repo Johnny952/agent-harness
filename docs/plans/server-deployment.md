@@ -348,6 +348,10 @@ Each step is a single surface:
    is set. Stdlib scrypt and TOTP instead of argon2 and an opaque server-side
    session id instead of a signed cookie; the cookie, CSRF and role checks
    bind only requests that carry the cookie, so Basic auth stays until step 2.
+   Since T-149 (`docs/decisions.md` ADR 381) failed sign-ins are also counted
+   per `X-Forwarded-For` address, unknown names included; it does nothing
+   until step 2 sends the header, and step 2 must overwrite any the browser
+   sent.
 2. The console's sign-in screen and the first-user setup command. A front
    task, behind its own ask for a build.
 3. TLS: the proxy in the plain compose, and the Coolify notes in the README.

@@ -16286,3 +16286,69 @@ the shared learnings inbox, outside the repo) is the case.
   `refutes:` or a key a phase added; line by line covers every key.
 - *Requiring the keys on the YAML path too:* changes what valid files are
   tracked today, which the task forbids.
+
+## ADR 381 — Failed sign-ins are also counted per `forwarded_for`, unknown names included, and only when the header is sent
+
+**Status:** accepted (2026-10-23), T-149's arquitecto. Resolves
+`docs/debt/T-146-D1.md`; carries out the per-address half ADR 324,
+*Consequences*, left for step 2 of `docs/plans/server-deployment.md` *How it
+would be built*. ADR 324 stands; this adds to its decisions 5 and 9.
+
+**Context.** `board_service/signin.py` `session_create` locks a user after
+`MAX_FAILURES` failures and never counts an unknown name, so one password
+tried over many names is never slowed. Step 2 (the console relaying
+`X-Forwarded-For`) is not built yet: today every request reaches the service
+from the console's own address and carries no such header. Counting by
+`remote_addr` would lock every person out together, which is why T-146 left
+this undone.
+
+**Decision.**
+1. **The key is the first `X-Forwarded-For` hop**, the same value the audit
+   line records as `forwarded_for`, read by one helper both use. A request
+   that sends no such header is not counted and not checked per address, so
+   the console's path behaves exactly as before until step 2 sends it.
+   `remote_addr` is never the key.
+2. **`addresses.json`** in `BOARD_AUTH_DIR`, beside `users.json`, written
+   the same way (atomic, 0600, under the one `.lock`). Per key: `failures`,
+   `since` (ISO, the first failure of the current window) and
+   `locked_until` (ISO or null). Each write drops every key whose window and
+   lock have both run out, so the file holds only the last window's
+   addresses.
+3. **What counts:** every failed `POST /api/session` that carries the
+   header — `unknown_user`, `wrong_password`, `wrong_code`,
+   `replayed_code` and the user-`locked` refusal. A 400 for a malformed body
+   is not a sign-in attempt and does not count; neither does an
+   `address_locked` refusal, so a lock ends when its time does.
+4. **The limit:** `MAX_ADDRESS_FAILURES = 20` failures inside
+   `ADDRESS_WINDOW = LOCK_SECONDS` (15 minutes) lock the address for
+   `LOCK_SECONDS`; reaching it zeroes the count. A failure after the window
+   has run out starts a new window at one. Twenty, not five, because many
+   people may share one address and each may mistype; the per-user five
+   still applies to each name.
+5. **A good sign-in does not reset the address's count**: a sprayer holding
+   one real account could otherwise clear its own count between guesses.
+6. **The check runs first**, after the body is validated and before the
+   name is looked up or any scrypt runs: a locked address is 429 `too many
+   failed sign-ins; try again after <ISO time>` (the address's
+   `locked_until`), the same shape as the user lock, whatever name it sends.
+   Its audit line is `sign_in_failed` with reason `address_locked`, `user`
+   the name only when it names a user.
+
+**Consequences.**
+- Until step 2 sends the header this code does nothing on the console's
+  path; it is exercised only by tests and by a caller that sends the
+  header itself.
+- The value is trusted as sent. The service is reachable only on the
+  internal network, and step 2 must send the client's address as the first
+  hop (overwriting any the browser sent), or a caller can pick its own key:
+  that evades the per-address limit and can lock out another address. Step
+  2's task owns that.
+- An address shared by many people (one office NAT) can be locked by one
+  of them after twenty failures in fifteen minutes.
+
+**Ruled out.**
+- *Counting by `remote_addr`:* locks everyone out at once today (ADR 324,
+  *Consequences*).
+- *Waiting for step 2 to build it:* the limit is inert without the header,
+  so building it now costs nothing and leaves step 2 one less thing to do.
+- *Resetting the address on a good sign-in:* decision 5.

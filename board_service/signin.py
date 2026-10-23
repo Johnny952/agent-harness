@@ -33,6 +33,8 @@ SESSION_LIFETIME = 12 * 3600
 SESSION_IDLE = 3600
 MAX_FAILURES = 5
 LOCK_SECONDS = 15 * 60
+MAX_ADDRESS_FAILURES = 20
+ADDRESS_WINDOW = LOCK_SECONDS
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**14, 8, 5
 SCRYPT_MAXMEM = 64 * 1024 * 1024
 ROLES = ("owner", "reviewer")
@@ -228,12 +230,54 @@ def _audit_path(auth_dir: str) -> str:
     return os.path.join(auth_dir, "audit.jsonl")
 
 
+def _addresses_path(auth_dir: str) -> str:
+    return os.path.join(auth_dir, "addresses.json")
+
+
+def _forwarded_for() -> str | None:
+    """The first `X-Forwarded-For` hop, or None: no header, or outside a request."""
+    if not request:
+        return None
+    return request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or None
+
+
+def _count_address(auth_dir: str, addresses: dict, address: str, now: dt.datetime) -> None:
+    """Count one failure for `address` (ADR 381) and write `addresses.json`, pruned."""
+    entry = addresses.get(address) or {}
+    try:
+        fresh = (now - _parse(entry["since"])).total_seconds() <= ADDRESS_WINDOW
+    except (KeyError, ValueError, TypeError):
+        fresh = False
+    if fresh:
+        failures = entry.get("failures", 0) + 1
+        since = entry["since"]
+    else:
+        failures, since = 1, _iso(now)
+    locked_until = entry.get("locked_until")
+    if failures >= MAX_ADDRESS_FAILURES:
+        failures = 0
+        locked_until = _iso(now + dt.timedelta(seconds=LOCK_SECONDS))
+    addresses[address] = {"failures": failures, "since": since, "locked_until": locked_until}
+    _write(_addresses_path(auth_dir), {
+        key: val for key, val in addresses.items() if _address_live(val, now)
+    })
+
+
+def _address_live(entry: dict, now: dt.datetime) -> bool:
+    try:
+        if entry.get("locked_until") and now < _parse(entry["locked_until"]):
+            return True
+        return (now - _parse(entry["since"])).total_seconds() <= ADDRESS_WINDOW
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def audit(auth_dir: str, event: str, user: str | None = None, **fields) -> None:
     """Append one line. `user` is a name only when it names a user."""
     line = {"at": _iso(_now()), "event": event, "user": user}
     if request:
         line["addr"] = request.remote_addr
-        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        forwarded = _forwarded_for()
         if forwarded:
             line["forwarded_for"] = forwarded
     line.update({k: v for k, v in fields.items() if v is not None})
@@ -342,11 +386,28 @@ def install(app: Flask, auth_dir: str) -> None:
         with _locked(auth_dir):
             users = _read(_users_path(auth_dir))
             user = users.get(name) if NAME_RE.fullmatch(name) else None
+            address = _forwarded_for()
+            addresses = _read(_addresses_path(auth_dir)) if address else {}
+            held = (addresses.get(address) or {}).get("locked_until") if address else None
+            if held and now < _parse(held):
+                audit(auth_dir, "sign_in_failed", name if user is not None else None,
+                      reason="address_locked")
+                return jsonify(
+                    {"error": f"too many failed sign-ins; try again after {held}"}
+                ), 429
+
+            def count(reason: str, who: str | None):
+                if address:
+                    _count_address(auth_dir, addresses, address, now)
+                return failed(reason, who)
+
             if user is None:
                 verify_password(password, _dummy())
-                return failed("unknown_user", None)
+                return count("unknown_user", None)
             locked = user.get("locked_until")
             if locked and now < _parse(locked):
+                if address:
+                    _count_address(auth_dir, addresses, address, now)
                 audit(auth_dir, "sign_in_failed", name, reason="locked")
                 return jsonify(
                     {"error": f"too many failed sign-ins; try again after {locked}"}
@@ -367,7 +428,7 @@ def install(app: Flask, auth_dir: str) -> None:
                     user["failures"] = 0
                     user["locked_until"] = _iso(now + dt.timedelta(seconds=LOCK_SECONDS))
                 _write(_users_path(auth_dir), users)
-                return failed(reason, name)
+                return count(reason, name)
             user["totp_last_step"] = step
             user["failures"] = 0
             user["locked_until"] = None
