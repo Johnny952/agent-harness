@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -9378,6 +9379,170 @@ def test_run_task_cycle_without_a_request_gives_the_arquitecto_no_note(tmp_path,
     dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
 
     assert "requested changes" not in prompts["arquitecto"]
+
+
+# --- start_at / on_held (ADR 354, T-154-S1) ---------------------------------
+
+def _recording_dispatch(monkeypatch):
+    """Every phase complete, the revisor approving; keep (role, round, prompt) per call."""
+    calls = []
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, resume_session_id=None, model=None, effort=None, round_num=None, **kwargs):
+        calls.append((role, round_num, prompt))
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="Structured output provided successfully",
+            account="cuenta1",
+            handoff={"status": "complete", "verdict": "APPROVED"} if role == "revisor" else {"status": "complete"},
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    return calls
+
+
+def _save_plan(cfg, changed=("src/app.py: edit",)) -> None:
+    save_handoff(
+        cfg.hive_tasks_dir, "task-1", "arquitecto", {"status": "complete", "changed": list(changed)},
+    )
+
+
+def test_run_task_cycle_default_start_runs_every_role_in_order(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    calls = _recording_dispatch(monkeypatch)
+
+    outcome = dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert [role for role, _, _ in calls] == ["arquitecto", "implementador", "revisor", "auditor"]
+
+
+@pytest.mark.parametrize("start_at", ["implementador", "revisor", "auditor"])
+def test_run_task_cycle_enters_at_the_implementador_of_the_round(
+    tmp_path, monkeypatch, fake_git, start_at,
+) -> None:
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    _save_plan(cfg)
+    calls = _recording_dispatch(monkeypatch)
+
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, start_at=start_at, start_round=2,
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert [(role, rnd) for role, rnd, _ in calls] == [
+        ("implementador", 2), ("revisor", 2), ("auditor", None),
+    ]
+
+
+def test_run_task_cycle_enters_at_round_one_by_default(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    _save_plan(cfg)
+    calls = _recording_dispatch(monkeypatch)
+
+    dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, start_at="implementador",
+    )
+
+    assert [(role, rnd) for role, rnd, _ in calls][0] == ("implementador", 1)
+
+
+def test_run_task_cycle_tells_the_entered_round_the_base_moved(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path, max_revision_rounds=1)
+    _save_plan(cfg, changed=("src/planned.py: edit",))
+    calls = _recording_dispatch(monkeypatch)
+    move = dispatcher_mod.BaseMove(changed=("src/planned.py",), merged_tasks=("T-9",))
+    monkeypatch.setattr(dispatcher_mod, "merge_base_at_write_window", lambda cfg, task_id, slug: move)
+
+    dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, start_at="implementador", start_round=2,
+    )
+
+    implementador = next(prompt for role, _, prompt in calls if role == "implementador")
+    assert "The base moved under the plan" in implementador
+
+
+def test_run_task_cycle_runs_from_the_arquitecto_without_a_saved_plan(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    calls = _recording_dispatch(monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        outcome = dispatcher_mod.run_task_cycle(
+            cfg, "task-1", "myproj", description=_DESCRIPTION,
+            start_at="implementador", start_round=2,
+        )
+
+    assert outcome is dispatcher_mod.CycleOutcome.FINISHED
+    assert [role for role, _, _ in calls][0] == "arquitecto"
+    assert "no usable arquitecto plan" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"start_at": "mapeador"},
+        {"start_at": "revisor", "changes_requested": "change it"},
+        {"start_at": "implementador", "start_round": 0},
+    ],
+)
+def test_run_task_cycle_refuses_a_bad_start_before_opening_the_cycle(
+    tmp_path, monkeypatch, kwargs,
+) -> None:
+    cfg = _make_config(tmp_path)
+
+    def never(*args, **kw):
+        raise AssertionError("the cycle was opened")
+
+    monkeypatch.setattr(dispatcher_mod, "open_cycle", never)
+
+    with pytest.raises(ValueError):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [("arquitecto", ("arquitecto", None)), ("implementador", ("implementador", 1)),
+     ("revisor", ("revisor", 1)), ("auditor", ("auditor", 1))],
+)
+def test_run_task_cycle_tells_on_held_where_it_was_held(
+    tmp_path, monkeypatch, fake_git, role, expected,
+) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _no_account_for(role))
+    held = []
+
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, on_held=lambda *at: held.append(at),
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.HELD
+    assert held == [expected]
+
+
+def test_run_task_cycle_tells_on_held_when_the_callers_limit_stopped_it(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    held = []
+
+    outcome = dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION,
+        may_start_phase=lambda: False, on_held=lambda *at: held.append(at),
+    )
+
+    assert outcome is dispatcher_mod.CycleOutcome.HELD
+    assert held == [("arquitecto", None)]
+
+
+def test_run_task_cycle_does_not_call_on_held_when_it_finished(tmp_path, monkeypatch, fake_git) -> None:
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", _approving_dispatch_phase)
+    held = []
+
+    dispatcher_mod.run_task_cycle(
+        cfg, "task-1", "myproj", description=_DESCRIPTION, on_held=lambda *at: held.append(at),
+    )
+
+    assert held == []
 
 
 # --- the stream's rate_limit_event stands in for the probe (ADR 312) --------

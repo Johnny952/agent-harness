@@ -3874,6 +3874,10 @@ class CycleContext:
     # take it: the run stops the same as any other stop, but it is held, not
     # failed, and says so in its exit code (ADR 52).
     held: bool = False
+    # Where `held` stopped the run: (role, round), the round None outside the
+    # rounds, the auditor's the last one run. `run_task_cycle`'s `on_held`
+    # reads it (ADR 354).
+    held_at: tuple[str, int | None] | None = None
     # Set once a phase of this run took the task's lock. Every phase lets go
     # of it before `run_phase` returns, so at the end of a blocked cycle the
     # file cannot say whether this run ever held it; this can.
@@ -4142,6 +4146,7 @@ def run_phase(
             "task %s: %s not started, the caller's limit was reached", ctx.task_id, role
         )
         ctx.held = True
+        ctx.held_at = (role, round_num)
         return None
     if _budget_reached(ctx):
         logger.warning(
@@ -4218,6 +4223,8 @@ def run_phase(
                         ctx.task_id, exc, result.branch_push,
                     )
             ctx.held = result.no_account
+            if result.no_account:
+                ctx.held_at = (role, round_num)
             ctx.phase_failed = not result.no_account
             return None
         # A phase the task does not depend on. It still hands off what it
@@ -4861,6 +4868,10 @@ def _abort_leftover_merge(cfg: Config, task_id: str, slug: str) -> None:
         docker_exec.restore_owner(container, project_dir, owner)
 
 
+#: The `start_at` roles that enter at the implementador on the saved plan (ADR 354).
+_LATER_STARTS = ("implementador", "revisor", "auditor")
+
+
 def run_task_cycle(
     cfg: Config,
     task_id: str,
@@ -4876,8 +4887,19 @@ def run_task_cycle(
     usage_offset: int = 0,
     changes_requested: str = "",
     before_merge: Callable[[], str] | None = None,
+    start_at: str = "arquitecto",
+    start_round: int | None = None,
+    on_held: Callable[[str, int | None], None] | None = None,
 ) -> CycleOutcome:
     """Run a task from the arquitecto to the auditor, and say how it ended.
+
+    `start_at` implementador, revisor or auditor enters at the implementador of
+    `start_round` (default 1) on the saved arquitecto envelope, skipping the
+    mapping and the arquitecto; revisor and auditor are narrowed to that, since
+    the implementador's work is not resumable. Without an envelope it warns and
+    runs from the arquitecto. An unknown role, or a later start with
+    `changes_requested`, raises ValueError before anything is opened. A HELD
+    cycle calls `on_held(role, round)` once, where it was held (ADR 354).
 
     `before_merge` is called once before the automatic approve's merge (ADR 345).
 
@@ -4916,6 +4938,16 @@ def run_task_cycle(
     (`scheduler.enter_write_window(task_id, surface)`, which waits for the
     surface lock) and leaves it when it ends (`leave_write_window(task_id)`).
     """
+    valid = ("arquitecto", project_docs.MAPPER_ROLE) + _LATER_STARTS
+    if start_at not in valid:
+        raise ValueError(f"start_at {start_at!r} is not one of {', '.join(valid)}")
+    if start_round is not None and start_round < 1:
+        raise ValueError(f"start_round must be 1 or more, not {start_round}")
+    if start_at in _LATER_STARTS and changes_requested:
+        raise ValueError(
+            f"start_at {start_at!r} cannot carry changes_requested: the request "
+            "is the arquitecto's, and this start skips it"
+        )
     cfg = project_config(cfg, task_id, slug)
     if cfg is None:
         return CycleOutcome.BLOCKED
@@ -4932,84 +4964,117 @@ def run_task_cycle(
         return _blocked_outcome(ctx, reason)
 
     try:
-        try:
-            update = update_project_branch(cfg, slug)
-        except tasks.BaseLockHeldError as exc:
-            # Another operation held the base past the wait (ADR 80): the
-            # task has not started, so it stops before anything is cut.
-            logger.warning("task %s: %s", task_id, exc)
-            return CycleOutcome.BLOCKED
-        if update is not None:
-            if update.blocking:
-                # Before any worktree exists, so nothing has been cut from the
-                # base this would have moved. A divergence is two histories and
-                # one of them is nobody's to pick here: the charter's C-1 has a
-                # phase that needs a decision the task never gave it end blocked
-                # and say so, and this is the same decision one step earlier.
-                logger.warning(
-                    "task %s: the project's own branch diverged from its remote: %s",
-                    task_id, update.detail,
-                )
-                return CycleOutcome.BLOCKED
-            # Said out loud either way: a task that started from a stale base is
-            # the thing this exists to prevent, and a run that could not reach
-            # the remote has to be readable as such afterwards.
-            log = logger.warning if update.status == docker_exec.UNAVAILABLE else logger.info
-            log("task %s: %s", task_id, update.detail)
-        _abort_leftover_merge(cfg, task_id, slug)
-        if scheduler is not None:
-            if _needs_mapping(cfg, slug):
-                # One mapping per queue: a second task that needs one waits
-                # for the first and asks again. The first's map is on its own
-                # branch until it merges, so asking again can still say no
-                # index; the queue has mapped once, and this task runs
-                # unmapped as a failed mapping would leave it.
-                mapped = None
-                with scheduler.mapping_lock:
-                    if _needs_mapping(cfg, slug):
-                        if scheduler.mapped_by is not None:
-                            logger.info(
-                                "task %s: not mapped again: task %s mapped %s in this queue, "
-                                "and its map lands with its merge",
-                                task_id, scheduler.mapped_by, slug,
-                            )
-                        else:
-                            scheduler.mapped_by = task_id
-                            mapped = run_phase(
-                                ctx,
-                                project_docs.MAPPER_ROLE,
-                                fatal=False,
-                                model=cfg.mapping_model,
-                                max_turns=cfg.mapping_max_turns,
-                            )
-                if ctx.foreign_lock:
-                    return CycleOutcome.BLOCKED
-                if _filed_command_requests(ctx, mapped):
-                    return blocked(handoff.COMMAND_REQUEST)
-        elif _needs_mapping(cfg, slug):
-            # Before the arquitecto, because what it writes is what the
-            # arquitecto reads. Optional in both directions: the operator has
-            # to turn it on, and if it fails the task runs anyway on a project
-            # that stays unmapped.
-            mapped = run_phase(
-                ctx,
-                project_docs.MAPPER_ROLE,
-                fatal=False,
-                model=cfg.mapping_model,
-                max_turns=cfg.mapping_max_turns,
-            )
-            if ctx.foreign_lock:
-                return CycleOutcome.BLOCKED
-            if _filed_command_requests(ctx, mapped):
-                return blocked(handoff.COMMAND_REQUEST)
-
-        return _cycle_from_arquitecto(ctx, authorized, on_approve, scheduler)
+        outcome = _run_cycle_body(
+            ctx, authorized, on_approve, scheduler, start_at, start_round, blocked,
+        )
+        if outcome is CycleOutcome.HELD and on_held is not None and ctx.held_at is not None:
+            on_held(*ctx.held_at)
+        return outcome
     finally:
         try:
             close_cycle(ctx, completed=ctx.completed)
         finally:
             if ctx.write_window:
                 scheduler.leave_write_window(task_id)
+
+
+def _run_cycle_body(
+    ctx: CycleContext,
+    authorized: bool,
+    on_approve: Callable[[ApproveResult], None] | None,
+    scheduler,
+    start_at: str,
+    start_round: int | None,
+    blocked: Callable[..., CycleOutcome],
+) -> CycleOutcome:
+    """`run_task_cycle` after `open_cycle`: the base update, the mapping, the phases."""
+    cfg, task_id, slug = ctx.cfg, ctx.task_id, ctx.slug
+    try:
+        update = update_project_branch(cfg, slug)
+    except tasks.BaseLockHeldError as exc:
+        # Another operation held the base past the wait (ADR 80): the
+        # task has not started, so it stops before anything is cut.
+        logger.warning("task %s: %s", task_id, exc)
+        return CycleOutcome.BLOCKED
+    if update is not None:
+        if update.blocking:
+            # Before any worktree exists, so nothing has been cut from the
+            # base this would have moved. A divergence is two histories and
+            # one of them is nobody's to pick here: the charter's C-1 has a
+            # phase that needs a decision the task never gave it end blocked
+            # and say so, and this is the same decision one step earlier.
+            logger.warning(
+                "task %s: the project's own branch diverged from its remote: %s",
+                task_id, update.detail,
+            )
+            return CycleOutcome.BLOCKED
+        # Said out loud either way: a task that started from a stale base is
+        # the thing this exists to prevent, and a run that could not reach
+        # the remote has to be readable as such afterwards.
+        log = logger.warning if update.status == docker_exec.UNAVAILABLE else logger.info
+        log("task %s: %s", task_id, update.detail)
+    _abort_leftover_merge(cfg, task_id, slug)
+    if start_at in _LATER_STARTS:
+        # The saved plan stands in for the mapping and the arquitecto (ADR 354).
+        plan = context_transfer.read_handoff(cfg.hive_tasks_dir, task_id, "arquitecto")
+        if plan is None or handoff.blocked(plan) or handoff.split_of(plan):
+            logger.warning(
+                "task %s: no usable arquitecto plan at %s, so the cycle runs "
+                "from the arquitecto instead of the %s",
+                task_id, context_transfer.handoff_path(cfg.hive_tasks_dir, task_id, "arquitecto"),
+                start_at,
+            )
+        else:
+            return _cycle_from_plan(
+                ctx, authorized, on_approve, scheduler, plan, start_round or 1,
+            )
+    if scheduler is not None:
+        if _needs_mapping(cfg, slug):
+            # One mapping per queue: a second task that needs one waits
+            # for the first and asks again. The first's map is on its own
+            # branch until it merges, so asking again can still say no
+            # index; the queue has mapped once, and this task runs
+            # unmapped as a failed mapping would leave it.
+            mapped = None
+            with scheduler.mapping_lock:
+                if _needs_mapping(cfg, slug):
+                    if scheduler.mapped_by is not None:
+                        logger.info(
+                            "task %s: not mapped again: task %s mapped %s in this queue, "
+                            "and its map lands with its merge",
+                            task_id, scheduler.mapped_by, slug,
+                        )
+                    else:
+                        scheduler.mapped_by = task_id
+                        mapped = run_phase(
+                            ctx,
+                            project_docs.MAPPER_ROLE,
+                            fatal=False,
+                            model=cfg.mapping_model,
+                            max_turns=cfg.mapping_max_turns,
+                        )
+            if ctx.foreign_lock:
+                return CycleOutcome.BLOCKED
+            if _filed_command_requests(ctx, mapped):
+                return blocked(handoff.COMMAND_REQUEST)
+    elif _needs_mapping(cfg, slug):
+        # Before the arquitecto, because what it writes is what the
+        # arquitecto reads. Optional in both directions: the operator has
+        # to turn it on, and if it fails the task runs anyway on a project
+        # that stays unmapped.
+        mapped = run_phase(
+            ctx,
+            project_docs.MAPPER_ROLE,
+            fatal=False,
+            model=cfg.mapping_model,
+            max_turns=cfg.mapping_max_turns,
+        )
+        if ctx.foreign_lock:
+            return CycleOutcome.BLOCKED
+        if _filed_command_requests(ctx, mapped):
+            return blocked(handoff.COMMAND_REQUEST)
+
+    return _cycle_from_arquitecto(ctx, authorized, on_approve, scheduler)
 
 
 def _stopped(ctx: CycleContext) -> CycleOutcome:
@@ -5090,6 +5155,23 @@ def _cycle_from_arquitecto(
         outcome = _file_split(ctx, subtasks)
         return _blocked_outcome(ctx) if outcome is CycleOutcome.BLOCKED else outcome
 
+    return _cycle_from_plan(ctx, authorized, on_approve, scheduler, arquitecto.handoff)
+
+
+def _cycle_from_plan(
+    ctx: CycleContext,
+    authorized: bool,
+    on_approve: Callable[[ApproveResult], None] | None,
+    scheduler,
+    plan: dict,
+    start_round: int = 1,
+) -> CycleOutcome:
+    """The cycle from the write window on, given the arquitecto's plan (ADR 354).
+
+    The tail of `_cycle_from_arquitecto`, also where a cycle that enters at the
+    implementador starts, with the saved envelope as `plan`.
+    """
+    cfg, task_id, slug = ctx.cfg, ctx.task_id, ctx.slug
     task_surface = _task_surface(ctx.description)
     if scheduler is not None:
         # The write window: from here to the merge, no task whose surface
@@ -5103,13 +5185,15 @@ def _cycle_from_arquitecto(
     except tasks.BaseLockHeldError as exc:
         logger.warning("task %s: %s", task_id, exc)
         return _blocked_outcome(ctx)
-    stale_note = stale_plan_note(move, task_surface, _plan_entries(arquitecto.handoff))
+    stale_note = stale_plan_note(move, task_surface, _plan_entries(plan))
     if stale_note:
         logger.warning(
             "task %s: the base moved under the plan; the implementador is told", task_id,
         )
 
-    return _cycle_rounds(ctx, authorized, on_approve, stale_note=stale_note)
+    return _cycle_rounds(
+        ctx, authorized, on_approve, stale_note=stale_note, start_round=start_round,
+    )
 
 
 def _cycle_rounds(
@@ -5118,8 +5202,12 @@ def _cycle_rounds(
     on_approve: Callable[[ApproveResult], None] | None,
     stale_note: str | None = None,
     resumed: tuple[int, DispatchResult] | None = None,
+    start_round: int = 1,
 ) -> CycleOutcome:
     """The implementador and revisor rounds, then the auditor and the merge.
+
+    `start_round` is the round the implementador starts at (ADR 354); the
+    stale note goes to the first round run.
 
     `resumed` is `(round, result)` for a verdict that already resumed that
     round's implementador (ADR 119): the rounds start there, from the result,
@@ -5139,11 +5227,13 @@ def _cycle_rounds(
     previous_reasons: dict[str, str] = {}
     repeated_finding = False
     unfinished_note: str | None = None
-    first_round, last_round = 1, cfg.max_revision_rounds
+    first_round = start_round
     if resumed is not None:
         # The resumed round runs even when it is past the rounds allowed: a
         # `run-phase --round` can have filed it from beyond them.
         first_round = resumed[0]
+    last_round = cfg.max_revision_rounds
+    if resumed is not None or start_round > 1:
         last_round = max(last_round, first_round)
     for round_num in range(first_round, last_round + 1):
         rounds_run = round_num
@@ -5159,7 +5249,7 @@ def _cycle_rounds(
             if unfinished_note is not None:
                 noted = {"note": unfinished_note}
             else:
-                noted = {"note": stale_note} if stale_note and round_num == 1 else {}
+                noted = {"note": stale_note} if stale_note and round_num == first_round else {}
             unfinished_note = None
             implemented = run_phase(
                 ctx, "implementador", round_num=round_num, repeated_finding=repeated_finding,
@@ -5188,7 +5278,7 @@ def _cycle_rounds(
             )
             unfinished_note = _unfinished_merge_note(unresolved)
             continue
-        if stale_note and round_num == 1 and handoff.blocked(implemented.handoff):
+        if stale_note and round_num == first_round and handoff.blocked(implemented.handoff):
             # The block back the note offers: the plan no longer holds,
             # and the arquitecto replans on the next run of the task.
             logger.warning(
@@ -5277,6 +5367,8 @@ def _cycle_rounds(
     )
     audited = run_phase(ctx, "auditor", final=True, note=debt.filing_note(filed))
     if audited is None:
+        if ctx.held:
+            ctx.held_at = ("auditor", rounds_run)
         return _stopped(ctx)
     _mirror_filed_debt(cfg, task_id, slug, filed)
     ctx.completed = True

@@ -15886,3 +15886,66 @@ symlink (ADR 327) and a restore must not either.
   duplicate the whole tree into `.pre-restore-*`, burying what changed.
 - *Leaving a live symlink the copy also names in place:* the copy's entry
   could then only be written through it, or not at all.
+
+## ADR 354 — `run_task_cycle` can enter at a round's implementador off the saved plan, and tells its caller where it was held
+
+**Status:** accepted (2026-10-23), T-154-S1's arquitecto. Amends ADR 336, 5
+("there is no entry into a cycle at a later phase"); the queue's use of it
+is T-154's next sub-task. The task's description names this ADR 348; 348 is
+outside T-154-S1's reserved block (354 to 356), so it is 354.
+
+**Context.** Debt T-152-D1: a queue task its limit stopped after the
+arquitecto re-runs from the arquitecto on a resume, because `run_task_cycle`
+in `dispatcher/dispatcher.py` always starts there and its caller is never
+told which phase the cycle was held at.
+
+**Decision.**
+1. *The keywords.* `run_task_cycle` takes `start_at: str = "arquitecto"`,
+   `start_round: int | None = None` and `on_held: Callable[[str, int | None],
+   None] | None = None`. `start_at` is one of `arquitecto`,
+   `project_docs.MAPPER_ROLE`, `implementador`, `revisor`, `auditor`; the
+   mapper's role means the same as `arquitecto`, so any role `on_held` reports
+   is a valid `start_at`. `start_round` is read only for a later start and
+   defaults to 1.
+2. *Refusals before anything is opened.* An unknown `start_at`, a
+   `start_round` below 1, or a later `start_at` together with a non-empty
+   `changes_requested` raise `ValueError` before `project_config` and
+   `open_cycle`, so nothing is written or locked. A request for changes is a
+   new plan (ADR 272), so it always starts at the arquitecto.
+3. *The later entry.* After `open_cycle`, `update_project_branch` and
+   `_abort_leftover_merge` as for every cycle, a later start runs neither the
+   mapping nor the arquitecto. The plan is the saved arquitecto envelope,
+   `context_transfer.read_handoff(hive, task, "arquitecto")`; its Changed
+   entries feed `stale_plan_note`. Then the same tail as after an arquitecto
+   (`_cycle_from_plan`): write window, base merge (ADR 339), and
+   `_cycle_rounds` from `start_round`, whose first round run gets the
+   stale-plan note and whose last round is `max(max_revision_rounds,
+   start_round)`, so a round past the allowance still runs once.
+4. *The narrowing.* `revisor` and `auditor` enter at the implementador of
+   `start_round` too. The revisor reviews what that round's implementador
+   committed and the auditor, the debt filing and the automatic approve read
+   that round's implementador and revisor results, which the cycle holds in
+   memory and a new process does not; one implementador phase is the price of
+   having them, against the whole re-plan ADR 336, 5 paid.
+5. *The fallback.* No saved envelope, or one that blocked or carries a split,
+   is no plan to implement: the cycle logs a warning naming the path and
+   runs from the arquitecto, mapping included, exactly as the default.
+6. *Where it was held.* `CycleContext.held_at: tuple[str, int | None] | None`
+   is set wherever `run_phase` sets `ctx.held` to True: the role and its
+   round. The auditor has no round of its own, so `_cycle_rounds` records it
+   as `("auditor", <last round run>)`. A cycle that ends HELD calls `on_held`
+   once with `held_at`, inside the cycle's `try` before `close_cycle`; any
+   other outcome never calls it.
+
+**Consequences.** The default call is unchanged. A queue can now resume a held
+task at its phase (T-154's next sub-task); `dispatcher/queue.py` and the CLI
+pass nothing new yet. A later start redoes the round's implementador even
+when its work was committed; the round's revisor state (repeated findings,
+ADR 73) starts empty.
+
+**Ruled out.**
+- *Entering at the revisor or the auditor themselves:* their inputs are
+  in-memory results of the round before; rebuilding them from saved envelopes
+  is a second cycle path to keep in step with this one.
+- *Refusing a later start with no saved plan:* the caller would have to know
+  the hive's files to pick a start; re-planning is what it got before.
