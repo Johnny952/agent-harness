@@ -578,3 +578,10 @@ or blank field saves null, which turns the escalated model off, a model ID
 saves trimmed, and *Reset* still goes back to `config.yaml`
 (`docs/decisions.md` ADR 444). With the server half from T-177-S1 the
 operator no longer has to edit `config.yaml` to set or clear it.
+
+**T-178-S2** declared no debt and resolved none. `GET /api/roadmap` now serves
+epics as rows with their sub-tasks nested in `split_into` order, backlog
+epics in the future band marked `place: backlog`, and a warning for an empty
+epic, a missing epic file or an unreadable one (`docs/decisions.md` ADR 447).
+A plan file can now sit in two bands, which the screen half, T-178-S3, keys
+by band and file.
