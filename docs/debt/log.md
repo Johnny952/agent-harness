@@ -506,3 +506,9 @@ appended, since each resolution row was already there; `T-163-D1` stays open.
 type (the debt entry called it `TaskRow`) gains `proposed_by`, and the backlog
 screen's source cell prints ` · by <name>` when it is set. `TaskSource` gains
 `follow_up` (`docs/decisions.md` ADR 402).
+
+**T-167** resolved no earlier row and declared no debt. `tasks.file_debt`
+looks an entry up once on a real row (inside `propose_debt`), and each result
+carries `unknown_blocker`, true when `blocked_by` is a task id the board cannot
+read; the after-cycle mirror logs a warning for it and `import-debt` prints it.
+The row is still filed with no dependency (`docs/decisions.md` ADR 396).
