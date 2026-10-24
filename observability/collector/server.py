@@ -18,6 +18,7 @@ not a collector that serves the whole network.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -197,6 +198,16 @@ def main(environ=None) -> Flask:
     )
 
 
+def _log_waitress() -> None:
+    """Send waitress's start line and queue warnings to stderr (ADR 420)."""
+    logger = logging.getLogger("waitress")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+        logger.addHandler(handler)
+
+
 def run(environ=None) -> None:
     """Serve the collector from waitress (`docs/decisions.md` ADR 417)."""
     app = main(environ)
@@ -204,6 +215,7 @@ def run(environ=None) -> None:
     # waitress is installed.
     from waitress import serve
 
+    _log_waitress()
     serve(app, host=HOST, port=PORT, threads=THREADS)
 
 

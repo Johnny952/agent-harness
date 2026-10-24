@@ -15,6 +15,7 @@ import dataclasses
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -36,7 +37,12 @@ from dispatcher.project_docs import MAPPER_ROLE
 from observability.auth import _bearer, check_token
 
 CONFIG_PATH = "/app/config.yaml"
+HOST = "0.0.0.0"
 PORT = 8791
+
+#: Request threads (`docs/decisions.md` ADR 420): saves are rare and each holds
+#: a file lock briefly, so four is ample.
+THREADS = 4
 TOKEN_VAR = "CONFIG_WRITER_TOKEN"
 REALM = "ia-harness-config-writer"
 RECENT_CHANGES = 20
@@ -388,5 +394,26 @@ def main(environ=None) -> Flask:
     return create_app(environ.get("CONFIG_PATH", CONFIG_PATH), token)
 
 
+def _log_waitress() -> None:
+    """Send waitress's start line and queue warnings to stderr (ADR 420)."""
+    logger = logging.getLogger("waitress")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+        logger.addHandler(handler)
+
+
+def run(environ=None) -> None:
+    """Serve the config writer from waitress (`docs/decisions.md` ADR 420)."""
+    app = main(environ)
+    # Imported after `main`: a refused configuration exits 2 whether or not
+    # waitress is installed.
+    from waitress import serve
+
+    _log_waitress()
+    serve(app, host=HOST, port=PORT, threads=THREADS)
+
+
 if __name__ == "__main__":
-    main().run(host="0.0.0.0", port=PORT)
+    run()

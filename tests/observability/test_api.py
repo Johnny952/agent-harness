@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import logging
 import sys
 import types
 from pathlib import Path
@@ -922,6 +923,26 @@ def test_run_serves_the_app_from_waitress_with_the_same_environment(
     assert client.get(
         "/api/tasks", headers={"Authorization": "Bearer s3cret-token"}
     ).status_code == 200
+
+
+def test_run_sends_waitress_start_line_and_queue_warnings_to_stderr(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    def serve(app, **kwargs):
+        logging.getLogger("waitress").info("Serving on http://0.0.0.0:8789")
+        logging.getLogger("waitress.queue").warning("Task queue depth is 1")
+
+    monkeypatch.setitem(sys.modules, "waitress", types.SimpleNamespace(serve=serve))
+    harness = _harness(tmp_path)
+    root = logging.getLogger()
+    before = (root.level, list(root.handlers))
+
+    api_app.run(_run_env(harness), config_path=harness.config_path)
+
+    err = capsys.readouterr().err
+    assert "INFO:waitress:Serving on" in err
+    assert "WARNING:waitress.queue:Task queue depth" in err
+    assert (root.level, list(root.handlers)) == before  # only `waitress` changed
 
 
 def test_run_without_an_api_token_still_serves_with_the_bearer_path_shut(

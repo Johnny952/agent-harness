@@ -1,5 +1,8 @@
 import json
+import logging
 import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -462,6 +465,62 @@ def test_main_refuses_to_start_with_no_config(tmp_path):
 
 def test_main_reads_the_config_from_the_environment(cfg):
     assert main({"CONFIG_PATH": str(cfg)}).test_client().get("/health").status_code == 200
+
+
+def _fake_waitress(monkeypatch, cfg, calls):
+    """A stand-in `waitress` in `sys.modules`; `push.start` logs to the same list."""
+    monkeypatch.setitem(
+        sys.modules,
+        "waitress",
+        types.SimpleNamespace(serve=lambda app, **kwargs: calls.append(("serve", app, kwargs))),
+    )
+    monkeypatch.setattr(service.push, "start", lambda notifier: calls.append(("push",)))
+
+
+def test_serve_starts_the_notifier_then_serves_from_waitress(cfg, monkeypatch):
+    calls: list = []
+    _fake_waitress(monkeypatch, cfg, calls)
+
+    service.serve({"CONFIG_PATH": str(cfg)})
+
+    assert [c[0] for c in calls] == ["push", "serve"]
+    _, app, kwargs = calls[1]
+    # The literals pin ADR 420: a change to any is a decision to revisit.
+    assert kwargs == {"host": "0.0.0.0", "port": 8792, "threads": 8}
+    assert (service.HOST, service.PORT, service.THREADS) == ("0.0.0.0", 8792, 8)
+    assert app.test_client().get("/health").status_code == 200
+
+
+def test_serve_refuses_a_missing_config_before_it_touches_waitress(tmp_path, monkeypatch):
+    calls: list = []
+    _fake_waitress(monkeypatch, None, calls)
+    monkeypatch.setitem(sys.modules, "waitress", None)  # an import would raise
+
+    with pytest.raises(SystemExit) as exc:
+        service.serve({"CONFIG_PATH": str(tmp_path / "nope.yaml")})
+
+    assert exc.value.code == 2
+    assert calls == []
+
+
+def test_serve_sends_waitress_start_line_and_queue_warnings_to_stderr(
+    cfg, monkeypatch, capsys
+):
+    def serve(app, **kwargs):
+        logging.getLogger("waitress").info("Serving on http://0.0.0.0:8792")
+        logging.getLogger("waitress.queue").warning("Task queue depth is 1")
+
+    monkeypatch.setitem(sys.modules, "waitress", types.SimpleNamespace(serve=serve))
+    monkeypatch.setattr(service.push, "start", lambda notifier: None)
+    root = logging.getLogger()
+    before = (root.level, list(root.handlers))
+
+    service.serve({"CONFIG_PATH": str(cfg)})
+
+    err = capsys.readouterr().err
+    assert "INFO:waitress:Serving on" in err
+    assert "WARNING:waitress.queue:Task queue depth" in err
+    assert (root.level, list(root.handlers)) == before  # only `waitress` changed
 
 
 def test_the_dockerfile_copies_what_the_service_imports():

@@ -49,6 +49,7 @@ from __future__ import annotations
 import datetime as dt
 import hmac
 import json
+import logging
 import os
 import re
 import sys
@@ -65,7 +66,13 @@ from dispatcher.board_mcp import OPERATOR, ROLE_TOOLS, THREAD
 from dispatcher.config import PHASE_ROLES, load_config
 
 CONFIG_PATH = "/app/config.yaml"
+HOST = "0.0.0.0"
 PORT = 8792
+
+#: Request threads (`docs/decisions.md` ADR 420): requests are short file and
+#: lock operations; eight leaves room for the MCP calls agents make while the
+#: operator's board polls.
+THREADS = 8
 ACTIONS_TOKEN_ENV = "BOARD_ACTIONS_TOKEN"
 
 #: Every role the service knows. A role outside it is a misspelt URL, answered
@@ -1536,11 +1543,26 @@ def main(environ=None) -> Flask:
     return create_app(config_path)
 
 
+def _log_waitress() -> None:
+    """Send waitress's start line and queue warnings to stderr (ADR 420)."""
+    logger = logging.getLogger("waitress")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+        logger.addHandler(handler)
+
+
 def serve(environ=None) -> None:
     """The service as its container runs it: the app, and the push notifier's thread."""
     app = main(environ)
     push.start(app.config["PUSH_NOTIFIER"])
-    app.run(host="0.0.0.0", port=PORT)
+    _log_waitress()
+    # Imported after `main`: a refused configuration exits 2 whether or not
+    # waitress is installed.
+    from waitress import serve as waitress_serve
+
+    waitress_serve(app, host=HOST, port=PORT, threads=THREADS)
 
 
 if __name__ == "__main__":

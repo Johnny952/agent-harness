@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import shlex
 import sqlite3
@@ -2567,6 +2568,16 @@ def _worker_heartbeat(path: Path, warnings: list[str]) -> dict:
     return answer
 
 
+def _log_waitress() -> None:
+    """Send waitress's start line and queue warnings to stderr (ADR 420)."""
+    logger = logging.getLogger("waitress")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+        logger.addHandler(handler)
+
+
 def run(environ=None, config_path: str = CONFIG_PATH) -> None:
     """Serve the read API from waitress (`docs/decisions.md` ADR 417)."""
     environ = os.environ if environ is None else environ
@@ -2586,6 +2597,7 @@ def run(environ=None, config_path: str = CONFIG_PATH) -> None:
     # not waitress is installed.
     from waitress import serve
 
+    _log_waitress()
     serve(app, host=HOST, port=PORT, threads=THREADS)
 
 

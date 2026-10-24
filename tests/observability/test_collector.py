@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import sys
 import types
@@ -237,6 +238,26 @@ def test_run_serves_the_app_from_waitress_on_the_same_host_and_port(
     assert kwargs == {"host": "0.0.0.0", "port": 8787, "threads": 4}
     assert (HOST, PORT, THREADS) == ("0.0.0.0", 8787, 4)
     assert app.test_client().get("/events", headers=_bearer(READ)).status_code == 200
+
+
+def test_run_sends_waitress_start_line_and_queue_warnings_to_stderr(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    def serve(app, **kwargs):
+        logging.getLogger("waitress").info("Serving on http://0.0.0.0:8787")
+        logging.getLogger("waitress.queue").warning("Task queue depth is 1")
+
+    monkeypatch.setitem(sys.modules, "waitress", types.SimpleNamespace(serve=serve))
+    env = dict(GOOD_ENV, COLLECTOR_DB_PATH=str(tmp_path / "events.db"))
+    root = logging.getLogger()
+    before = (root.level, list(root.handlers))
+
+    run(env)
+
+    err = capsys.readouterr().err
+    assert "INFO:waitress:Serving on" in err
+    assert "WARNING:waitress.queue:Task queue depth" in err
+    assert (root.level, list(root.handlers)) == before  # only `waitress` changed
 
 
 @pytest.mark.parametrize("installed", [True, False])

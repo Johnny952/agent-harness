@@ -525,3 +525,8 @@ the read API are served by waitress from a `run()` their `__main__` calls,
 with 4 and 8 request threads (`docs/decisions.md` ADR 417). The board service
 and the config writer were out of scope and still run Werkzeug's development
 server, which is `T-171-D1`.
+
+**T-172** resolved `T-171-D1`. The board service and the config writer are
+served by waitress with 8 and 4 request threads, and all four services send
+waitress's start line and queue warnings to stderr (`docs/decisions.md`
+ADR 420). It declared no debt.

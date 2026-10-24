@@ -1,6 +1,9 @@
 import json
+import logging
 import os
 import stat
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -334,6 +337,52 @@ def test_startup_is_refused_without_the_token(capsys) -> None:
         assert exit_info.value.code == 2
         assert "CONFIG_WRITER_TOKEN" in capsys.readouterr().err
     assert main({"CONFIG_WRITER_TOKEN": "t"}).name  # builds an app
+
+
+def test_run_serves_from_waitress_on_the_same_host_and_port(cfg, monkeypatch) -> None:
+    calls: list = []
+    monkeypatch.setitem(
+        sys.modules,
+        "waitress",
+        types.SimpleNamespace(serve=lambda app, **kwargs: calls.append((app, kwargs))),
+    )
+
+    writer.run({"CONFIG_WRITER_TOKEN": TOKEN, "CONFIG_PATH": str(cfg)})
+
+    app, kwargs = calls[0]
+    # The literals pin ADR 420: a change to any is a decision to revisit.
+    assert kwargs == {"host": "0.0.0.0", "port": 8791, "threads": 4}
+    assert (writer.HOST, writer.PORT, writer.THREADS) == ("0.0.0.0", 8791, 4)
+    assert app.test_client().get("/settings", headers=auth()).status_code == 200
+
+
+def test_run_refuses_a_missing_token_before_it_touches_waitress(monkeypatch, capsys) -> None:
+    monkeypatch.setitem(sys.modules, "waitress", None)  # an import would raise
+
+    with pytest.raises(SystemExit) as exit_info:
+        writer.run({})
+
+    assert exit_info.value.code == 2
+    assert "CONFIG_WRITER_TOKEN" in capsys.readouterr().err
+
+
+def test_run_sends_waitress_start_line_and_queue_warnings_to_stderr(
+    cfg, monkeypatch, capsys
+) -> None:
+    def serve(app, **kwargs):
+        logging.getLogger("waitress").info("Serving on http://0.0.0.0:8791")
+        logging.getLogger("waitress.queue").warning("Task queue depth is 1")
+
+    monkeypatch.setitem(sys.modules, "waitress", types.SimpleNamespace(serve=serve))
+    root = logging.getLogger()
+    before = (root.level, list(root.handlers))
+
+    writer.run({"CONFIG_WRITER_TOKEN": TOKEN, "CONFIG_PATH": str(cfg)})
+
+    err = capsys.readouterr().err
+    assert "INFO:waitress:Serving on" in err
+    assert "WARNING:waitress.queue:Task queue depth" in err
+    assert (root.level, list(root.handlers)) == before  # only `waitress` changed
 
 
 def test_rows_are_the_key_table_in_order(client) -> None:
