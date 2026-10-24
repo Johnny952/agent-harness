@@ -1859,6 +1859,24 @@ def test_cli_import_debt_dry_run_follows_the_same_three_cases(
     assert "2 to file, 0 already filed, 1 gated on a plan step" in out
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_import_debt_says_when_the_blocker_cannot_be_read(
+    tmp_path: Path, monkeypatch, capsys, dry_run: bool,
+) -> None:
+    config_path, index = _gated_setup(tmp_path)
+    index.write_text(
+        "# Debt\n\n| id | what | where | fix | card | impact |\n|---|---|---|---|---|---|\n"
+        "| `T-1-D1` | Typo | Blocked by T-16; cli.py | a fix | none | cost |\n"
+    )
+    argv = ["import-debt", "--index", str(index)] + (["--dry-run"] if dry_run else [])
+
+    _run_command(monkeypatch, config_path, *argv)
+
+    out = capsys.readouterr().out
+    verb = "would file" if dry_run else "filed as T-051"
+    assert f"T-1-D1: {verb}, blocked by T-16, which the board cannot read (priority normal)" in out
+
+
 def test_cli_import_debt_dry_run_writes_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
     config_path = _write_config(tmp_path)
     index = tmp_path / "README.md"

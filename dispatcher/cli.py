@@ -339,6 +339,8 @@ def _run_import_debt(args: argparse.Namespace, cfg: Config, parser: argparse.Arg
             verb = f"already {result['id']}"
         if result["depends_on"]:
             verb += f" after {', '.join(result['depends_on'])}"
+        if result["unknown_blocker"]:
+            verb += f", blocked by {result['blocked_by']}, which the board cannot read"
         print(f"{result['debt_id']}: {verb} (priority {result['priority']}): {result['title']}")
     prefix = "dry run: " if args.dry_run else ""
     tail = f", {len(gated)} gated on a plan step" if gated else ""
