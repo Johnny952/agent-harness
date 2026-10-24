@@ -125,6 +125,23 @@ def test_save_then_reset(client, cfg: Path) -> None:
     ]
 
 
+def test_put_of_a_null_escalated_model_is_200_and_means_off(client, cfg: Path) -> None:
+    res = put(client, "escalated_model", None, None)
+    assert res.status_code == 200
+    data = res.get_json()["data"]
+    assert data["overrides"] == {"escalated_model": None}
+    row = next(r for r in data["rows"] if r["key"] == "escalated_model")
+    assert row["value"] is None
+    assert (row["source"], row["kind"]) == ("override", "nullable_model")
+    assert load_config(str(cfg)).escalated_model is None
+    line = log_lines(cfg)[0]
+    assert line["op"] == "set" and line["new"] is None
+
+    res = put(client, "escalated_model", "", data["revision"])
+    assert res.status_code == 422
+    assert str(d(cfg) / "overrides.yaml") in res.get_json()["error"]
+
+
 def test_a_stale_revision_is_409_and_writes_nothing(client, cfg: Path) -> None:
     revision = put(client, "reserve_pct", 50, None).get_json()["data"]["revision"]
     before = (d(cfg) / "overrides.yaml").read_bytes()
