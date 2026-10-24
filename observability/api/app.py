@@ -2348,16 +2348,13 @@ def _roadmap_epics(
             "state": row["state"],
             "merged_at": merged_at,
             "kind": "epic",
-            "place": "backlog" if row["state"] in _BACKLOG_STATES else "board",
+            "place": "backlog" if row["state"] in task_store.BACKLOG_STATUSES else "board",
             "merged_tasks": sum(1 for sub in subs if sub.merged),
             "tasks": [sub.row for sub in subs],
         }
         backlog = row["state"] in ("proposed", "deferred")
         placed.append(_Placed(epic_row, entry.plan, all_merged, _month_of(merged_at), backlog, entry.key))
     return placed
-
-
-_BACKLOG_STATES = ("proposed", "deferred", "dropped")
 
 
 def _is_future(plan_row: dict) -> bool:

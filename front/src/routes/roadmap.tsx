@@ -497,7 +497,7 @@ function TaskTable({ tasks, ctl }: { tasks: RoadmapRow[]; ctl: TableCtl }) {
 function TaskRow({ task: t, indent = false }: { task: RoadmapTask; indent?: boolean }) {
   return (
     <tr className={ROW}>
-      <td className={cn("w-24 py-1.5 pr-3", indent ? "pl-8" : "pl-3")}>
+      <td className={cn("w-24 whitespace-nowrap py-1.5 pr-3", indent ? "pl-8" : "pl-3")}>
         <TaskLink taskId={t.id}>
           <Mono className="font-semibold hover:underline">{t.id}</Mono>
         </TaskLink>
