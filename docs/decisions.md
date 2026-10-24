@@ -17320,3 +17320,58 @@ that one verb: `HEAD`/`GET /_ping` (version negotiation), `GET
   also run by hand, and compose is where the proxy is named.
 - *Publishing the proxy on loopback for host tooling:* nothing on the host
   needs it, and the task forbids a published port.
+
+## ADR 441 — `escalated_model` is editable as the override kind `nullable_model`, the one kind whose `null` override is a value
+
+**Status:** accepted (T-177-S1, 2026-10-24). Narrows ADR 75 part 1
+(*Removing a key*) for this one kind; ADR 75 otherwise stands. Supersedes
+the "read-only" sentence of ADR 432 decision 1. The server half of
+`docs/debt/T-175-D1.md`.
+
+**Context.** ADR 432 gave `escalated_model` a `_read_only` row in
+`dispatcher/config.py` `CONFIG_KEYS` because no override kind takes a
+nullable string, so the console cannot set or clear it. ADR 75 part 1
+refuses every `null` override: absence keeps `config.yaml`'s meaning and a
+reset is deleting the key. For `escalated_model`, `null` is a meaning of
+its own — *off* — so an operator whose `config.yaml` names a model has no
+override that turns it off without that refusal giving way.
+
+**Decision.**
+
+1. *The kind.* `_check_override_value` gains `nullable_model`: `None` or a
+   string that is not blank after `strip()` passes; anything else — `""`,
+   `"  "`, `3`, `true`, a list — fails with `must be a non-empty model ID
+   or null`. The message goes through `_overrides_error`, so it names the
+   overrides file like every other override refusal.
+2. *The null exemption.* `_read_overrides` refuses a `null` value as
+   before for every kind except `nullable_model`, whose `null` is handed
+   to `_check_override_value` like any other value. No other kind gains
+   it; `merge_on_done: null` is still refused.
+3. *What the two acts mean.* An override `escalated_model: null` is *off*:
+   the merged result is `None` even when `config.yaml` names a model. A
+   reset (the writer's `DELETE`) is *use `config.yaml`*: the key leaves
+   the overrides file. So an editable nullable key has three states —
+   overridden with a model, overridden off, not overridden.
+4. *The row.* `escalated_model` becomes
+   `_editable("nullable_model", ...)`, and the kinds listed in the
+   `ConfigKey.kind` comment gain it. The writer needs no code: a `PUT`
+   with `{"value": null}` writes `escalated_model: null`, which
+   `load_config` now accepts, so it answers 200; its change-log line has
+   `op: "set"` and `new: null`, told from a reset by `op`.
+
+**Consequences.**
+- The writer serves `kind: "nullable_model"` on the row. The console has
+  no control for it yet: its unknown-kind fallback still offers Reset
+  only, which is the front half of T-175-D1 and not this task's.
+- A future nullable key takes the same kind, or one of its own built the
+  same way; the exemption is per kind, never per key.
+
+**Ruled out.**
+- *A `null` override meaning "delete":* ADR 75 ruled it out, and reset
+  already deletes; `null` would then have no way to say *off*.
+- *A sentinel string (`"none"`, `"off"`) for off:* a second spelling of
+  `None` that `config.yaml` would not share, and it collides with a model
+  ID namespace the CLI owns.
+- *Exempting `null` for every kind:* most keys have no *off*, and
+  `_build_config` coerces some (`bool(raw.get("merge_on_done"))`), so a
+  `null` would silently read as a value.
