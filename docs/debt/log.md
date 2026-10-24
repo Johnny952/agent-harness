@@ -592,3 +592,10 @@ epics in the future band marked `place: backlog`, and a warning for an empty
 epic, a missing epic file or an unreadable one (`docs/decisions.md` ADR 447).
 A plan file can now sit in two bands, which the screen half, T-178-S3, keys
 by band and file.
+
+**T-178-S3** declared no debt and resolved none. The Roadmap screen draws an
+epic as a collapsed row in its list's task table, opening to its sub-tasks as
+indented task rows, with a muted `backlog` label on a backlog epic, and keys a
+plan row by band and file (`docs/decisions.md` ADR 453). It is the first task
+walked headless against route fixtures (`docs/plans/browser.md` step 4); the
+walk is recorded in `docs/ROADMAP.md` *Results log*.

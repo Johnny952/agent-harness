@@ -7,6 +7,7 @@ import {
   Absent,
   EmptyState,
   ErrorState,
+  Malformed,
   Mono,
   PageHeader,
   StatusPill,
@@ -16,7 +17,15 @@ import { cn } from "@/lib/utils";
 import { useProjectScope } from "@/lib/projects";
 import { TaskLink } from "@/components/console/project-scope";
 import { roadmapQuery } from "@/lib/api/queries";
-import type { Roadmap, RoadmapMonth, RoadmapPlan, RoadmapTask, TaskStatus } from "@/lib/api/types";
+import type {
+  Roadmap,
+  RoadmapEpic,
+  RoadmapMonth,
+  RoadmapPlan,
+  RoadmapRow,
+  RoadmapTask,
+  TaskStatus,
+} from "@/lib/api/types";
 
 /**
  * The two values of the filter, kept in the URL as `?view=`. `full` is the
@@ -57,7 +66,7 @@ export const Route = createFileRoute("/roadmap")({
  * task file's `merged` block, which it serves as `merged_at`; a merged block with
  * no date reads as `null` there, and `done` is what such a task carries anyway.
  */
-function isHistory(task: RoadmapTask): boolean {
+function isHistory(task: RoadmapRow): boolean {
   return task.merged_at !== null || task.state === "done";
 }
 
@@ -100,7 +109,7 @@ export function RoadmapPage() {
     <AppShell>
       <PageHeader
         title={project === null ? "Roadmap" : `Roadmap · ${project}`}
-        subtitle="Future, now and past, newest first. A plan opens to the tasks that name it."
+        subtitle="Future, now and past, newest first. A plan opens to its epics and tasks."
         right={<RefreshedAt at={roadmap.dataUpdatedAt} />}
       />
 
@@ -195,12 +204,14 @@ export function RoadmapBands({
     );
 
   const current = view === "current";
-  const keep = (tasks: RoadmapTask[]) => (current ? tasks.filter((t) => !isHistory(t)) : tasks);
+  const keep: Keep = (tasks) => (current ? tasks.filter((t) => !isHistory(t)) : tasks);
+  const ctl: TableCtl = { keep, expanded, onToggle };
 
   return (
     <div className="space-y-5 p-4">
       <Band
         title="Future"
+        band="future"
         plans={bands.future}
         keep={keep}
         expanded={expanded}
@@ -208,6 +219,7 @@ export function RoadmapBands({
       />
       <Band
         title="Now"
+        band="now"
         plans={bands.now}
         keep={keep}
         expanded={expanded}
@@ -218,6 +230,7 @@ export function RoadmapBands({
               tasks={keep(no_plan.now)}
               open={expanded.has(NO_PLAN_NOW)}
               onToggle={() => onToggle(NO_PLAN_NOW)}
+              ctl={ctl}
             />
           ) : null
         }
@@ -225,6 +238,7 @@ export function RoadmapBands({
       {current ? null : (
         <Band
           title="Past"
+          band="past"
           plans={bands.past}
           keep={keep}
           expanded={expanded}
@@ -235,6 +249,7 @@ export function RoadmapBands({
                 months={no_plan.past}
                 open={expanded.has(NO_PLAN_PAST)}
                 onToggle={() => onToggle(NO_PLAN_PAST)}
+                ctl={ctl}
               />
             ) : null
           }
@@ -244,8 +259,19 @@ export function RoadmapBands({
   );
 }
 
+/** The current-only filter, applied to a list of rows and to an epic's sub-tasks alike. */
+type Keep = (rows: RoadmapRow[]) => RoadmapRow[];
+
+/** What a task table needs to draw an epic: the filter, and which epics are open. */
+interface TableCtl {
+  keep: Keep;
+  expanded: ReadonlySet<string>;
+  onToggle: (key: string) => void;
+}
+
 function Band({
   title,
+  band,
   plans,
   keep,
   expanded,
@@ -253,12 +279,14 @@ function Band({
   noPlan = null,
 }: {
   title: string;
+  band: string;
   plans: RoadmapPlan[];
-  keep: (tasks: RoadmapTask[]) => RoadmapTask[];
+  keep: Keep;
   expanded: ReadonlySet<string>;
   onToggle: (key: string) => void;
   noPlan?: ReactNode;
 }) {
+  const ctl = { keep, expanded, onToggle };
   return (
     <section className="space-y-2" aria-label={title}>
       <h2 className="label-xs">
@@ -268,12 +296,14 @@ function Band({
         <p className="text-[11px] text-muted-foreground">No plan is in this band.</p>
       ) : null}
       {plans.map((plan) => (
+        // A plan file can be a row in two bands (ADR 447): band plus file.
         <PlanRow
-          key={plan.file}
+          key={`${band}:${plan.file}`}
           plan={plan}
           tasks={keep(plan.tasks)}
-          open={expanded.has(plan.file)}
-          onToggle={() => onToggle(plan.file)}
+          open={expanded.has(`${band}:${plan.file}`)}
+          onToggle={() => onToggle(`${band}:${plan.file}`)}
+          ctl={ctl}
         />
       ))}
       {noPlan}
@@ -319,13 +349,17 @@ function PlanRow({
   tasks,
   open,
   onToggle,
+  ctl,
 }: {
   plan: RoadmapPlan;
-  tasks: RoadmapTask[];
+  tasks: RoadmapRow[];
   open: boolean;
   onToggle: () => void;
+  ctl: TableCtl;
 }) {
   const hidden = plan.tasks.length - tasks.length;
+  const epics = tasks.filter((t) => t.kind === "epic").length;
+  const plain = tasks.length - epics;
   return (
     <Collapsible
       open={open}
@@ -355,7 +389,8 @@ function PlanRow({
             </span>
           ) : null}
           <span className="ml-auto text-[10px] text-muted-foreground">
-            {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
+            {plain} {plain === 1 ? "task" : "tasks"}
+            {epics > 0 ? ` · ${epics} ${epics === 1 ? "epic" : "epics"}` : ""}
             {hidden > 0 ? ` · ${hidden} merged or done hidden` : ""}
           </span>
         </>
@@ -366,7 +401,7 @@ function PlanRow({
           {hidden > 0 ? "Every task of this plan is merged or done." : "No task names this plan."}
         </p>
       ) : (
-        <TaskTable tasks={tasks} />
+        <TaskTable tasks={tasks} ctl={ctl} />
       )}
     </Collapsible>
   );
@@ -377,10 +412,12 @@ function NoPlanNow({
   tasks,
   open,
   onToggle,
+  ctl,
 }: {
-  tasks: RoadmapTask[];
+  tasks: RoadmapRow[];
   open: boolean;
   onToggle: () => void;
+  ctl: TableCtl;
 }) {
   return (
     <Collapsible
@@ -395,7 +432,7 @@ function NoPlanNow({
         </>
       }
     >
-      <TaskTable tasks={tasks} />
+      <TaskTable tasks={tasks} ctl={ctl} />
     </Collapsible>
   );
 }
@@ -405,10 +442,12 @@ function NoPlanPast({
   months,
   open,
   onToggle,
+  ctl,
 }: {
   months: RoadmapMonth[];
   open: boolean;
   onToggle: () => void;
+  ctl: TableCtl;
 }) {
   const count = months.reduce((n, m) => n + m.tasks.length, 0);
   return (
@@ -430,36 +469,116 @@ function NoPlanPast({
           <h3 className="label-xs px-3 pt-1.5">
             {m.month ?? "merge date not recorded"} · {m.tasks.length}
           </h3>
-          <TaskTable tasks={m.tasks} />
+          <TaskTable tasks={m.tasks} ctl={ctl} />
         </div>
       ))}
     </Collapsible>
   );
 }
 
-function TaskTable({ tasks }: { tasks: RoadmapTask[] }) {
+const ROW = "border-b border-border/50 last:border-0 hover:bg-surface-2/50";
+
+function TaskTable({ tasks, ctl }: { tasks: RoadmapRow[]; ctl: TableCtl }) {
   return (
     <table className="w-full text-[11px]">
       <tbody>
-        {tasks.map((t) => (
-          <tr key={t.id} className="border-b border-border/50 last:border-0 hover:bg-surface-2/50">
-            <td className="w-24 px-3 py-1.5">
-              <TaskLink taskId={t.id}>
-                <Mono className="font-semibold hover:underline">{t.id}</Mono>
-              </TaskLink>
-            </td>
-            <td className="px-3 py-1.5">{t.title ?? <Absent label="no title" />}</td>
-            <td className="w-28 px-3 py-1.5">
-              {/* Verbatim, muted when it is not one of the five: the api passes
-                  the task file's status through. */}
-              <StatusPill status={t.state as TaskStatus} />
-            </td>
-            <td className="mono w-28 px-3 py-1.5 text-muted-foreground">
-              {t.merged_at ? `merged ${day(t.merged_at)}` : ""}
-            </td>
-          </tr>
-        ))}
+        {tasks.map((t) =>
+          t.kind === "epic" ? (
+            <EpicRows key={`epic:${t.id}`} epic={t} ctl={ctl} />
+          ) : (
+            <TaskRow key={t.id} task={t} />
+          ),
+        )}
       </tbody>
     </table>
+  );
+}
+
+function TaskRow({ task: t, indent = false }: { task: RoadmapTask; indent?: boolean }) {
+  return (
+    <tr className={ROW}>
+      <td className={cn("w-24 py-1.5 pr-3", indent ? "pl-8" : "pl-3")}>
+        <TaskLink taskId={t.id}>
+          <Mono className="font-semibold hover:underline">{t.id}</Mono>
+        </TaskLink>
+      </td>
+      <td className="px-3 py-1.5">{t.title ?? <Absent label="no title" />}</td>
+      <td className="w-28 px-3 py-1.5">
+        {/* Verbatim, muted when it is not one of the five: the api passes
+            the task file's status through. */}
+        <StatusPill status={t.state as TaskStatus} />
+      </td>
+      <td className="mono w-28 px-3 py-1.5 text-muted-foreground">
+        {t.merged_at ? `merged ${day(t.merged_at)}` : ""}
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * An epic (ADR 453): a row whose title toggles its sub-tasks, which follow it
+ * as indented task rows. `backlog` is marked beside the state, in whichever
+ * band the epic is.
+ */
+function EpicRows({ epic, ctl }: { epic: RoadmapEpic; ctl: TableCtl }) {
+  const key = `epic:${epic.id}`;
+  const open = ctl.expanded.has(key);
+  const Chevron = open ? ChevronDown : ChevronRight;
+  const listed = Array.isArray(epic.tasks);
+  const subs = listed ? ctl.keep(epic.tasks) : [];
+  return (
+    <>
+      <tr className={ROW}>
+        <td className="w-24 px-3 py-1.5">
+          <TaskLink taskId={epic.id}>
+            <Mono className="font-semibold hover:underline">{epic.id}</Mono>
+          </TaskLink>
+        </td>
+        <td className="px-3 py-1.5">
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => ctl.onToggle(key)}
+            className="flex items-center gap-1.5 text-left font-medium hover:underline"
+          >
+            <Chevron className="size-3.5 shrink-0 text-muted-foreground" />
+            {epic.title ?? <Absent label="no title" />}
+          </button>
+        </td>
+        <td className="w-28 px-3 py-1.5">
+          <div className="flex items-center gap-1.5">
+            <StatusPill status={epic.state as TaskStatus} />
+            {epic.place === "backlog" ? (
+              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                backlog
+              </span>
+            ) : null}
+          </div>
+        </td>
+        <td className="mono w-28 px-3 py-1.5 text-muted-foreground">
+          {listed ? `${epic.merged_tasks}/${epic.tasks.length} merged` : ""}
+          {epic.merged_at ? ` · ${day(epic.merged_at)}` : ""}
+        </td>
+      </tr>
+      {open ? (
+        !listed ? (
+          <tr className={ROW}>
+            <td colSpan={4} className="py-1.5 pl-8 pr-3">
+              <Malformed label="tasks" got={epic.tasks} want="a list" />
+            </td>
+          </tr>
+        ) : subs.length === 0 ? (
+          <tr className={ROW}>
+            <td colSpan={4} className="py-1.5 pl-8 pr-3 text-muted-foreground">
+              {epic.tasks.length > 0
+                ? "Every sub-task of this epic is merged or done."
+                : "No sub-task is listed in this epic's split_into."}
+            </td>
+          </tr>
+        ) : (
+          subs.map((t) => <TaskRow key={t.id} task={t as RoadmapTask} indent />)
+        )
+      ) : null}
+    </>
   );
 }

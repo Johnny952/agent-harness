@@ -179,6 +179,13 @@ stands.
    every merged or done task); no parameter is *Full history*. Plans expand
    straight to tasks: epics come with step 2 of *How it would be built*.
 
+   **Note 2026-10-24** (T-178-S3, ADR 453): the epics are drawn. An epic is a
+   collapsed row in its plan's task list (title, state, `merged/total
+   merged`) that opens to its sub-tasks, each a task link; a backlog epic
+   carries a `backlog` label, in the future band; *Current only* hides a
+   merged epic and a kept epic's merged sub-tasks. A plan row's open state is
+   keyed by band and file, since one file can be in two bands.
+
 ## How it would be built
 
 1. **The cheap form, possible now.** The plans' frontmatter, the backfill,
