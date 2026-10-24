@@ -933,6 +933,7 @@ def test_run_sends_waitress_start_line_and_queue_warnings_to_stderr(
     def serve(app, **kwargs):
         # waitress.serve() runs logging.basicConfig(): a stderr handler on root
         handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
         root.addHandler(handler)
         try:
             logging.getLogger("waitress").info("Serving on http://0.0.0.0:8789")
