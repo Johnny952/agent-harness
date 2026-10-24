@@ -17542,3 +17542,54 @@ the future band (*Decisions*, 3). T-178-S1 writes `plan` as a path,
 - *Backlog epics nested under the plan in whichever band it is in:* the
   plan doc puts them in the future band, and a `building` plan's next
   epics are future work.
+
+## ADR 453 — the Roadmap screen draws an epic as a collapsed row inside the task list, keyed by band
+
+**Status:** accepted (T-178-S3, 2026-10-24). The screen half of step 2 of
+`docs/plans/roadmap-view.md` (*How it would be built*), over ADR 447's
+answer. Extends the T-075 screen, `front/src/routes/roadmap.tsx`, which
+`/p/$slug/roadmap` draws whole (ADR 210).
+
+**Context.** ADR 447 puts epic rows (`kind: "epic"`) in every list a task
+row rides in, with sub-tasks nested in `tasks`, and lets one plan file be
+a row in two bands. The T-075 screen keys a plan row, and its open state,
+by `file` alone, and draws every row as a task link.
+
+**Decision.**
+
+1. *Where an epic is drawn.* In the same table its list's task rows are,
+   at the place the api put it: a plan's rows, `no_plan.now`, a month of
+   `no_plan.past`. It is a row whose title is a toggle (`aria-expanded`),
+   collapsed by default, with its id as a task link to its own page, its
+   state as `StatusPill`, and `<merged_tasks>/<sub-tasks> merged`. Open,
+   its sub-tasks follow it as indented task rows, each with its task link
+   (`TaskLink`: `/tasks/$taskId`, or `/p/$slug/tasks/$taskId` under a
+   project, as every link on the screen). An epic with no sub-tasks opens
+   to one muted line saying its `split_into` lists none.
+2. *Backlog.* An epic with `place: "backlog"` carries a muted `backlog`
+   label beside its state, whichever band it is in. A task row has no
+   `place` and no label.
+3. *Keys.* A plan row's open state and React key are `<band>:<file>`; an
+   epic's are `epic:<id>`. The no-plan keys stay as they are.
+4. *Current only.* An epic row is history by the rule a task row is
+   (`merged_at` set, or state `done`) and is hidden with it. In an epic
+   that stays, its history sub-tasks are hidden as a plan's are, the count
+   still reading the api's `merged_tasks` of all of them. A plan row's
+   count names its epics and its tasks apart.
+5. *A row of the wrong shape.* An epic row whose `tasks` is not a list is
+   drawn with `Malformed` (`tasks`, a list) in place of its sub-tasks,
+   per `docs/ui.md` *A value of the wrong shape is named*; the screen's
+   other rows are drawn.
+
+**Consequences.**
+- No new `docs/ui.md` entry: the toggle is the screen's existing
+  `aria-expanded` row, the label is muted text, and no second screen
+  draws `place`. If one does, the label becomes an entry.
+- `front/src/lib/api/types.ts` grows `RoadmapEpic` and the row union the
+  lists hold; `RoadmapTask` keeps its four keys.
+
+**Ruled out.**
+- *Epics as a second collapsible panel under the plan:* the api puts them
+  in the task list in id order, and a separate group would reorder them.
+- *Hiding a kept epic's merged sub-tasks under Full history too:* full
+  history is the default and hides nothing.
