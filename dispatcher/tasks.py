@@ -2645,12 +2645,13 @@ def file_debt(hive_dir: str, rows: list[dict], *, dry_run: bool = False) -> list
     `rows` are `debt.index_rows`; resolved ones and ones with no entry id
     are skipped. One result per row filed or already filed, in the rows'
     order: `{"debt_id", "id", "created", "priority", "title", "blocked_by",
-    "gated", "depends_on"}`. With `dry_run` nothing is written: `id` is the
+    "gated", "depends_on", "unknown_blocker"}`. With `dry_run` nothing is written: `id` is the
     existing item's or None, and `created` says whether a real run would make
     one. A row's blocker (`debt.blocked_by`, ADR 396) is a task id this reads
     (the item depends on it), a task id it cannot read (filed without, since
     a refusal would lock the import for good), or a plan step (`gated`: no
-    item is filed, the row is the record).
+    item is filed, the row is the record). `unknown_blocker` is true only for
+    the second case. A real row looks the entry up once, inside `propose_debt`.
     """
     results = []
     for row in rows:
@@ -2661,10 +2662,11 @@ def file_debt(hive_dir: str, rows: list[dict], *, dry_run: bool = False) -> list
         kind = debt.blocker_kind(blocker)
         gated = kind == "step"
         deps = [blocker] if kind == "task" and not _depends_problems(hive_dir, None, [blocker]) else []
-        existing = find_debt_item(hive_dir, row["id"])
+        unknown_blocker = kind == "task" and not deps
         if gated:
-            result = {"id": existing, "created": False}
+            result = {"id": find_debt_item(hive_dir, row["id"]), "created": False}
         elif dry_run:
+            existing = find_debt_item(hive_dir, row["id"])
             result = {"id": existing, "created": existing is None}
         else:
             result = propose_debt(
@@ -2675,6 +2677,7 @@ def file_debt(hive_dir: str, rows: list[dict], *, dry_run: bool = False) -> list
             {
                 "debt_id": row["id"], **result, "priority": priority, "title": title,
                 "blocked_by": blocker, "gated": gated, "depends_on": deps,
+                "unknown_blocker": unknown_blocker,
             }
         )
     return results
