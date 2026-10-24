@@ -1,16 +1,16 @@
 ---
-status: design
+status: built
 approved: 2026-10-23
-built: null
+built: 2026-10-23
 supersedes: []
 ---
 
 # Debt triage — known follow-up work is a sub-task, not debt
 
-**Status:** design, approved by the user on 2026-10-23. S1 (the `follow_up`
+**Status:** built, approved by the user on 2026-10-23. S1 (the `follow_up`
 ruling) is built by T-164-S1 (ADR 393, 394) and S2 (`blocked_by`) by T-164-S2
-(ADR 396), and S3 (the role prompts and the debt rules) by T-164-S3; only R5,
-the operator's, is left.
+(ADR 396), and S3 (the role prompts and the debt rules) by T-164-S3. R5 was
+done by the operator on 2026-10-23 (see *R5 — One-time triage* below).
 The implementing task assigns the ADR its number (*Proposed ADR* below).
 
 ## 1. Why the index keeps growing
@@ -98,6 +98,17 @@ and not a dispatched task:
   is left alone.
 - **Gated entries.** The backlog item is dropped and the index row stays.
 - **Cosmetic entries.** They are swept by one small task under R2.
+
+**Done on 2026-10-23.** By then every entry but one had already been resolved
+by a task, so the picture of 55 open entries in section 1 no longer held:
+
+- **Follow-up:** T-163-D1 only. Its backlog item T-165 was re-titled "Show
+  proposed_by on the console's backlog card", given `depends_on: [T-163]`,
+  and its description rewritten; it also adds `follow_up` to the front's
+  `TaskSource`.
+- **Gated:** none open.
+- **Cosmetic:** none open in the index. Six debt files still said
+  `Status: open` after their index resolution; T-166 sweeps them.
 
 ## 3. How the implementation is split
 
