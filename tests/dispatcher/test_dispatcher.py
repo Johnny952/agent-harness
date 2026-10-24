@@ -7600,6 +7600,104 @@ def test_effort_for_without_the_signal_is_the_round_count_rule_for_every_role(tm
             assert on.effort_for(role, round_num, repeated_finding=True) == "max"
 
 
+# --- model escalation (ADR 432) ----------------------------------------------
+
+
+def _model_cycle(tmp_path, monkeypatch, findings_by_round, **overrides):
+    """`_findings_cycle`, returning each implementador round's model by round."""
+    settings = {"max_revision_rounds": 3, "escalate_effort_after_round": 5}
+    settings.update(overrides)
+    cfg = _make_config(tmp_path, **settings)
+    models = {}
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, model=None, **kwargs):
+        current = next((n for n in (1, 2, 3) if f"round {n}" in prompt), None)
+        if role == "implementador":
+            models[current] = model
+        if role == "revisor":
+            verdict = "APPROVED" if current == 3 else "CHANGES_REQUESTED"
+            return dispatcher_mod.DispatchResult(
+                success=True, session_id=None, result_text="ok", account="cuenta1",
+                handoff={"status": "complete", "verdict": verdict, "findings": findings_by_round.get(current, [])},
+            )
+        return dispatcher_mod.DispatchResult(success=True, session_id=None, result_text="ok", account="cuenta1")
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+    return cfg, models
+
+
+_SAME_FINDING = ["`tasks.claim` never releases the lock on an error."]
+
+
+def test_escalated_model_runs_the_round_the_repeated_finding_escalates(tmp_path, monkeypatch, caplog) -> None:
+    with caplog.at_level("INFO"):
+        cfg, models = _model_cycle(
+            tmp_path, monkeypatch, {1: _SAME_FINDING, 2: _SAME_FINDING},
+            escalated_model="claude-opus-5-5", default_model="claude-sonnet-5-5",
+            escalate_effort_on_repeated_finding=True,
+        )
+
+    assert models == {1: "claude-sonnet-5-5", 2: "claude-sonnet-5-5", 3: "claude-opus-5-5"}
+    fired = [r.getMessage() for r in caplog.records if "same finding(s) twice" in r.getMessage()]
+    assert "on model claude-opus-5-5" in fired[0]
+
+
+def test_escalated_model_runs_the_round_the_round_count_escalates(tmp_path, monkeypatch) -> None:
+    cfg, models = _model_cycle(
+        tmp_path, monkeypatch, {},
+        escalated_model="claude-opus-5-5", default_model="claude-sonnet-5-5",
+        escalate_effort_after_round=2,
+    )
+
+    assert models == {1: "claude-sonnet-5-5", 2: "claude-sonnet-5-5", 3: "claude-opus-5-5"}
+
+
+def test_escalated_model_unset_keeps_every_rounds_model(tmp_path, monkeypatch, caplog) -> None:
+    with caplog.at_level("INFO"):
+        cfg, models = _model_cycle(
+            tmp_path, monkeypatch, {1: _SAME_FINDING, 2: _SAME_FINDING},
+            default_model="claude-sonnet-5-5", escalate_effort_on_repeated_finding=True,
+            escalate_effort_after_round=2,
+        )
+
+    assert models == {1: "claude-sonnet-5-5", 2: "claude-sonnet-5-5", 3: "claude-sonnet-5-5"}
+    assert not [r for r in caplog.records if " on model " in r.getMessage()]
+
+
+def test_run_phase_records_the_model_and_signal_in_the_phase_record(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, escalated_model="claude-opus-5-5", escalate_effort_on_repeated_finding=True)
+
+    def fake_dispatch_phase(cfg_arg, task_id, slug, role, prompt, model=None, **kwargs):
+        return dispatcher_mod.DispatchResult(
+            success=True, session_id=None, result_text="ok", account="cuenta1",
+        )
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", fake_dispatch_phase)
+    read = dispatcher_mod.context_transfer.read_handoff_envelope
+
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=2, repeated_finding=True)
+    envelope = read(cfg.hive_tasks_dir, "task-1", "implementador")
+    assert envelope["model"] == "claude-opus-5-5" and envelope["repeated_finding"] is True
+
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=2)
+    envelope = read(cfg.hive_tasks_dir, "task-1", "implementador")
+    assert envelope["model"] == cfg.default_model and "repeated_finding" not in envelope
+
+
+def test_the_usage_line_names_the_escalated_model(tmp_path, monkeypatch) -> None:
+    cfg = _make_config(tmp_path, escalated_model="claude-opus-5-5", escalate_effort_after_round=1)
+    _phase_recorder(monkeypatch, [
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+        ClaudeResult(session_id="sess-1", result_text="built it", raw=_FULL_RAW),
+    ])
+
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=1)
+    dispatcher_mod.run_phase(_split_ctx(cfg), "implementador", round_num=2)
+
+    assert [line["model"] for line in _usage_lines(cfg)] == [cfg.default_model, "claude-opus-5-5"]
+
+
 def test_model_for_falls_back_to_the_default_model(tmp_path) -> None:
     cfg = _make_config(
         tmp_path, default_model="claude-opus-5-5",

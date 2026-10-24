@@ -1,4 +1,5 @@
 import dataclasses
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,65 @@ def test_load_config_reads_the_repeated_finding_signal(tmp_path: Path) -> None:
     cfg = load_config(str(config_path))
 
     assert cfg.escalate_effort_on_repeated_finding is True
+
+
+def test_escalated_model_is_unset_by_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML)
+
+    assert load_config(str(config_path)).escalated_model is None
+
+
+def test_load_config_reads_the_escalated_model(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + "\nescalated_model: claude-opus-5-5\n")
+    assert load_config(str(config_path)).escalated_model == "claude-opus-5-5"
+
+    config_path.write_text(CONFIG_YAML + "\nescalated_model:\n")
+    assert load_config(str(config_path)).escalated_model is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ['escalated_model: ""\n', 'escalated_model: "  "\n', "escalated_model: 5\n", "escalated_model: [m]\n"],
+)
+def test_load_config_refuses_a_bad_escalated_model(tmp_path: Path, extra: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(CONFIG_YAML + extra)
+
+    with pytest.raises(ValueError, match="escalated_model"):
+        load_config(str(config_path))
+
+
+def test_model_for_escalated_model_unset_changes_nothing() -> None:
+    cfg = _bare_config(role_model={"implementador": "sonnet"})
+    for role in ("cartografo", "arquitecto", "implementador", "revisor", "auditor", "integrador"):
+        assert cfg.model_for(role, 9, True) == cfg.model_for(role)
+
+
+def test_model_for_escalates_only_the_implementador() -> None:
+    cfg = _bare_config(
+        escalated_model="opus", role_model={"implementador": "sonnet"},
+        escalate_effort_after_round=2, escalate_effort_on_repeated_finding=True,
+    )
+    assert cfg.model_for("implementador") == "sonnet"
+    assert cfg.model_for("implementador", 2) == "sonnet"
+    assert cfg.model_for("implementador", 3) == "opus"
+    assert cfg.model_for("implementador", 1, repeated_finding=True) == "opus"
+    for role in ("arquitecto", "revisor", "auditor"):
+        assert cfg.model_for(role, 3, True) == cfg.default_model
+    # The integrador takes the implementador's own model, never the escalated one (ADR 277).
+    assert cfg.model_for("integrador", 3, True) == "sonnet"
+    off = _bare_config(escalated_model="opus", escalate_effort_after_round=2)
+    assert off.model_for("implementador", 1, repeated_finding=True) == off.default_model
+
+
+def _bare_config(**overrides) -> Config:
+    with tempfile.TemporaryDirectory() as tmp:
+        config_path = Path(tmp) / "config.yaml"
+        config_path.write_text(CONFIG_YAML)
+        cfg = load_config(str(config_path))
+    return dataclasses.replace(cfg, **overrides)
 
 
 def test_load_config_reads_the_effort_per_role(tmp_path: Path) -> None:
@@ -1109,6 +1169,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
         "escalated_effort": "high",
         "escalate_effort_after_round": 1,
         "escalate_effort_on_repeated_finding": True,
+        "escalated_model": "m",
         "max_revision_rounds": 2,
         "max_handoff_resumes": 1,
         "phase_timeout_seconds": 60,
@@ -1151,7 +1212,7 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
         23,
-        21,
+        22,
         3,
     )
     for spec in CONFIG_KEYS.values():

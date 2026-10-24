@@ -438,6 +438,7 @@ def run_command_request(
         return _resume(
             ctx, role, envelope.get("round"), session_id, account, prompt, filed_at,
             changes_requested=envelope.get("changes_requested") or "",
+            repeated_finding=envelope.get("repeated_finding") is True,
         )
     finally:
         close_cycle(ctx, completed=ctx.completed)
@@ -583,6 +584,7 @@ def resume_command_verdict(
         return _resume(
             ctx, role, envelope.get("round"), session_id, account, prompt, filed_at,
             changes_requested=envelope.get("changes_requested") or "",
+            repeated_finding=envelope.get("repeated_finding") is True,
         )
     finally:
         close_cycle(ctx, completed=ctx.completed)
@@ -623,9 +625,13 @@ def _merge_pending(ctx: CycleContext) -> bool:
 
 def _resume(
     ctx: CycleContext, role: str, round_num: int | None, session_id: str, account: str, prompt: str,
-    filed_at: object, changes_requested: str = "",
+    filed_at: object, changes_requested: str = "", repeated_finding: bool = False,
 ) -> CycleOutcome:
     """The filing phase's session resumed, then the cycle from after that phase.
+
+    `repeated_finding` is the signal the filing round ran on, read back from
+    its envelope (ADR 432): the resumed implementador decides its effort and
+    model as that round did.
 
     `changes_requested` is the note the filing phase's cycle carried (ADR
     272), read back from its envelope: the arquitecto this resume runs reads
@@ -659,9 +665,11 @@ def _resume(
         if base_note:
             prompt = f"{prompt}\n\n{base_note}"
     implemented = run_phase(
-        ctx, role, round_num=round_num,
+        ctx, role, round_num=round_num, repeated_finding=repeated_finding,
         resume_session_id=session_id, prompt=prompt, account=account,
     )
     _settle_resume(ctx, role, filed_at)
     # `_cycle_rounds` reads a None and a filed request the way a cycle does.
-    return _cycle_rounds(ctx, True, None, resumed=(round_num, implemented))
+    return _cycle_rounds(
+        ctx, True, None, resumed=(round_num, implemented), repeated_finding=repeated_finding,
+    )

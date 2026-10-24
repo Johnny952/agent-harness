@@ -461,6 +461,24 @@ def test_save_handoff_without_denials_writes_the_four_keys_it_always_did(tmp_pat
     assert sorted(envelope) == ["handoff", "role", "round", "saved_at"]
 
 
+def test_save_handoff_keeps_the_model_and_the_repeated_finding_it_was_given(tmp_path: Path) -> None:
+    """Written only when given, `repeated_finding` only when true (ADR 432)."""
+    path = save_handoff(
+        str(tmp_path), "task-1", "implementador", {"status": "complete"}, round_num=3,
+        model="claude-opus-5-5", repeated_finding=True,
+    )
+
+    envelope = json.loads(Path(path).read_text())
+    assert envelope["model"] == "claude-opus-5-5"
+    assert envelope["repeated_finding"] is True
+
+    path = save_handoff(
+        str(tmp_path), "task-1", "implementador", {"status": "complete"}, round_num=3,
+        model="claude-opus-5-5",
+    )
+    assert "repeated_finding" not in json.loads(Path(path).read_text())
+
+
 @pytest.mark.parametrize(
     "denials",
     [
