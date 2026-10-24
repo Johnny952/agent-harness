@@ -85,7 +85,7 @@ export const SETTINGS_NOTE =
   "A change applies to the next dispatcher run. A task already running keeps the settings it started with. The Pool screen's thresholds follow at the api's next restart.";
 
 /** The string keys whose value is a model ID, and so take the model suggestions. */
-const MODEL_KEYS = new Set(["default_model", "mapping_model"]);
+const MODEL_KEYS = new Set(["default_model", "mapping_model", "escalated_model"]);
 
 /** One write: a save with its value, or a reset. `origin` is where a refusal is shown. */
 type Change =
@@ -411,7 +411,8 @@ function SettingLine({
  * positive key is its 422, under the row — because a second copy of the rule
  * here would drift from `dispatcher/config.py`. A kind with no control of its
  * own (a generic list or mapping, or one this console does not know) says so and
- * keeps *Reset*, which is still a true action on it.
+ * keeps *Reset*, which is still a true action on it. A `nullable_model` field
+ * sends `null` when it is empty, which turns the model off (ADR 444).
  */
 function SettingControl({
   row,
@@ -575,6 +576,27 @@ function SettingControl({
       </div>
     );
     toSend = () => ({ ok: true, value: current });
+  } else if (row.kind === "nullable_model") {
+    const text = draft as string;
+    control = (
+      <div className="mt-1">
+        <Input
+          aria-label={key}
+          className="h-7 text-xs"
+          list="settings-models"
+          disabled={busy}
+          value={text}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <p className="text-[10px] text-muted-foreground">
+          Empty saves null: no escalated model. Reset falls back to config.yaml.
+        </p>
+      </div>
+    );
+    toSend = () => {
+      const t = text.trim();
+      return { ok: true, value: t === "" ? null : t };
+    };
   } else if (row.kind === "string") {
     const text = draft as string;
     control = (

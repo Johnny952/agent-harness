@@ -17375,3 +17375,44 @@ override that turns it off without that refusal giving way.
 - *Exempting `null` for every kind:* most keys have no *off*, and
   `_build_config` coerces some (`bool(raw.get("merge_on_done"))`), so a
   `null` would silently read as a value.
+
+## ADR 444 — the Settings screen's `nullable_model` control: an empty field saves `null`
+
+**Status:** accepted (T-177-S2, 2026-10-24). The front half of
+`docs/debt/T-175-D1.md`; reads ADR 441's three states. Extends ADR 113
+part 1 (a control by `class` and `kind`) with one kind.
+
+**Context.** ADR 441 serves `escalated_model` as `kind: "nullable_model"`:
+a `PUT` takes a non-blank model ID or `null` (*off*), and a reset deletes
+the override (*use `config.yaml`*). `SettingControl` in
+`front/src/routes/models.tsx` has no branch for the kind, so the row falls
+to the unknown-kind fallback and offers Reset only.
+
+**Decision.**
+
+1. *The control.* A `nullable_model` row gets a text `Input` on the
+   `settings-models` datalist (`escalated_model` joins `MODEL_KEYS`), with
+   Save, and Reset when its source is `override`, like every editable row.
+2. *Empty is off.* The draft is trimmed; an empty result — an untouched
+   field on a `null` row, a cleared field, or whitespace only — is sent as
+   `{"value": null}`, and anything else as the trimmed string. The console
+   never sends `""` for this kind, which the writer would refuse.
+3. *The hint.* Under the field, verbatim: "Empty saves null: no escalated
+   model. Reset falls back to config.yaml." It names both acts because
+   ADR 441 gives them different meanings.
+4. *The value cell is unchanged.* A `null` value still renders `not set`
+   (`SettingValue`); a `null` value starts the field empty
+   (`initialDraft`'s existing rule).
+
+**Consequences.**
+- Saving an untouched field on a row that is `null` from `config.yaml`
+  writes an explicit `null` override; that is a real change of source
+  (*override*), and Reset takes it back.
+- The model suggestions are unchanged: `modelSuggestions` does not read
+  `escalated_model` values, so a model named only there is not suggested.
+
+**Ruled out.**
+- *A separate "off" switch beside the field:* two controls for one value,
+  and the empty field already has no other meaning ADR 441 allows.
+- *Refusing an empty field client-side, as the number fields do:* empty is
+  a legal value for this kind, not a typo.

@@ -571,3 +571,10 @@ item 6).
 `nullable_model` kind, where a null override means off and a reset goes back
 to `config.yaml` (`docs/decisions.md` ADR 441). `T-175-D1` stays open for the
 front half, a console control for that kind in `front/src/routes/models.tsx`.
+
+**T-177-S2** resolved `T-175-D1` and declared no debt. The Settings screen's
+`SettingControl` now gives a `nullable_model` row a model-ID input: an empty
+or blank field saves null, which turns the escalated model off, a model ID
+saves trimmed, and *Reset* still goes back to `config.yaml`
+(`docs/decisions.md` ADR 444). With the server half from T-177-S1 the
+operator no longer has to edit `config.yaml` to set or clear it.
