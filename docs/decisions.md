@@ -16990,3 +16990,93 @@ root logger is still not touched.
   `_quiet`, and not in a future waitress that stops — and its format would
   be whatever root was given. It also leaves nothing for a test to pin but
   the absence of a handler, since pytest's root never prints.
+
+## ADR 432 — an opt-in `escalated_model` switches the implementador's model on the rounds the effort escalation already picks
+
+**Status:** accepted (T-175, 2026-10-24). Builds the model half of
+refinement (2) of `docs/plans/backlog.md` item 4; leaves ADR 73's
+signal, ADR 65's `role_model` and the "suspiciously short result" ruling
+of ADR 73 as they are.
+
+**Context.** Two rules pick a round to escalate: the round count
+(`escalate_effort_after_round`) and, opt-in, a review repeating the last
+one's finding (ADR 73). Both only raise `--effort`; `Config.model_for`
+takes no round, and `config.example.yaml` says the escalation "changes
+the effort, never the model". An operator running the implementador on a
+cheaper model (`role_model`) has no way to put a bouncing round on a
+stronger one. A command-request resume (ADR 119, `command_run._resume`)
+re-runs a round from its envelope's `round` alone: the repeated-finding
+flag lives in `_cycle_rounds`' locals, so a resumed round loses it.
+
+**Decision.**
+
+1. *The key.* `escalated_model: str | None`, default `None`. Absent or
+   `null` is `None`; anything else must be a non-empty string, refused at
+   load otherwise, the check `role_model`'s values get. Which IDs exist
+   is the CLI's to say, as for every model key. Its `CONFIG_KEYS` row is
+   read-only: the override kinds have no nullable string, and the console
+   showing or editing it is a follow-up, not this task.
+2. *One decision, two outputs.* `Config` gains a private
+   `_escalates(round_num, repeated_finding) -> bool` holding exactly the
+   two rules `effort_for` checks today (round count first, then the
+   signal with `escalate_effort_on_repeated_finding` on). `effort_for`
+   calls it; `model_for(role, round_num=None, repeated_finding=False)`
+   returns `escalated_model` when it is set, `role` is `implementador`
+   and `_escalates` is true, and its current answer otherwise. So the
+   model escalates on exactly the rounds the effort does, never on a
+   different one, and with the key unset `model_for` answers what it
+   does today for every role and round.
+3. *The implementador only.* The revisor, auditor, arquitecto, the
+   draft run and the integrador keep their models whatever the round:
+   it is the implementador that keeps failing to fix the thing (ADR 73
+   part 3), and a revisor that changed model mid-cycle would be judging
+   rounds against a different bar. The revisor's effort still follows
+   the round count, as before. `escalated_model` wins over `role_model`
+   and `default_model` on an escalated round; a `model` the caller of
+   `run_phase` names itself still wins over it.
+4. *Where it is applied.* `run_phase` asks
+   `cfg.model_for(role, round_num, repeated_finding=...)`, the inputs it
+   already hands `effort_for`. `dispatch_phase` then puts that model on
+   the call, on its in-phase resumes and on the `_UsageRecorder`, so the
+   usage line's `model` is the model the round ran on with no change
+   there. The handoff envelope (`save_handoff`, the phase record
+   `/api/phases` serves) gains `model`, the model the phase was
+   dispatched with, written only when given, so callers that pass none
+   write the keys they did.
+5. *A resume decides the same way.* `run_phase` writes
+   `repeated_finding: true` into the envelope when the phase ran on the
+   signal, and nothing when it did not. `command_run._resume` reads it
+   back (`envelope.get("repeated_finding") is True`), passes it to the
+   resumed `run_phase`, and seeds `_cycle_rounds` with it (a new
+   `repeated_finding` parameter, default `False`), so the resumed round
+   and the rounds after it pick the model and the effort the original
+   cycle would have. `run-phase --round N` has no envelope signal and
+   decides on the round count alone, as its effort does today.
+6. *Said once.* ADR 73's info line, when it fires, also names the model
+   the next round runs on when `escalated_model` is set.
+
+**Consequences.**
+- With `escalated_model` unset every phase runs the model it does today;
+  the default config does not change.
+- A resumed round that ran on the signal now also resumes at
+  `escalated_effort`, which before this it silently lost. That is an
+  effort change on a path that was wrong, recorded here so it is not
+  read as a regression.
+- Switching model on a `--resume` of a session started on the same
+  model is a no-op by construction: the resume makes the decision the
+  original call made.
+- The signal still does not survive into a new cycle started at the
+  implementador (ADR 354 `start_round`): it starts `False` there, for
+  effort and model alike, as before.
+- The `model` envelope key is new on every phase's envelope written by
+  `run_phase`; readers that ignore unknown keys are unaffected.
+
+**Ruled out.**
+- *A separate `escalate_model_on_repeated_finding` switch:* two switches
+  for one signal could disagree, and the task asks for the model on the
+  same signal. Setting `escalated_model` is the opt-in.
+- *A result-length signal:* ADR 73's ruling stands.
+- *Escalating every role's model:* see part 3.
+- *Reading the model back from the envelope on resume:* the decision is
+  re-made from the same inputs, so a config change between the block and
+  the resume applies to model and effort alike.
