@@ -89,7 +89,13 @@ CONFIG_PATH = "/app/config.yaml"
 #: environment variable.
 DEFAULT_DB_PATH = "/events/events.db"
 
+HOST = "0.0.0.0"
 PORT = 8789
+
+#: Request threads (`docs/decisions.md` ADR 417). The service holds no
+#: long-lived stream, so eight leaves seven free for polls while one diff
+#: request waits out its `git` timeouts.
+THREADS = 8
 
 #: This service's realm, on both the Basic challenge and the bearer path's 401.
 #: Every service keeps its own; see `observability/auth.py:requires_auth` on why
@@ -2561,17 +2567,27 @@ def _worker_heartbeat(path: Path, warnings: list[str]) -> dict:
     return answer
 
 
-if __name__ == "__main__":
+def run(environ=None, config_path: str = CONFIG_PATH) -> None:
+    """Serve the read API from waitress (`docs/decisions.md` ADR 417)."""
+    environ = os.environ if environ is None else environ
     app = create_app(
-        CONFIG_PATH,
-        os.environ.get("COLLECTOR_DB_PATH", DEFAULT_DB_PATH),
-        os.environ["DASHBOARD_USERNAME"],
-        os.environ["DASHBOARD_PASSWORD_HASH"],
+        config_path,
+        environ.get("COLLECTOR_DB_PATH", DEFAULT_DB_PATH),
+        environ["DASHBOARD_USERNAME"],
+        environ["DASHBOARD_PASSWORD_HASH"],
         # `.get` and not `[...]`: an operator upgrading a running host has a
         # `docker/compose/.env` written before `API_TOKEN` existed, and this
         # service must still start there with the bearer path shut. The two
         # `DASHBOARD_` names are deliberate and stay — renaming them means
         # editing a `.env` that exists on a running host to buy a spelling.
-        os.environ.get("API_TOKEN"),
+        environ.get("API_TOKEN"),
     )
-    app.run(host="0.0.0.0", port=PORT)
+    # Imported after the app is built, so a missing variable raises whether or
+    # not waitress is installed.
+    from waitress import serve
+
+    serve(app, host=HOST, port=PORT, threads=THREADS)
+
+
+if __name__ == "__main__":
+    run()

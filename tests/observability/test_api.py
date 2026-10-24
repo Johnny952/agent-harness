@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import json
+import sys
 import types
 from pathlib import Path
 
@@ -880,6 +881,73 @@ def test_an_api_with_no_token_configured_accepts_no_bearer_at_all(tmp_path: Path
         "/api/tasks", headers={"Authorization": "Bearer anything"}
     ).status_code == 401
     assert _get(harness, "/api/tasks").status_code == 200
+
+
+def _run_env(harness, **overrides) -> dict:
+    env = {
+        "DASHBOARD_USERNAME": "admin",
+        "DASHBOARD_PASSWORD_HASH": PASSWORD_HASH,
+        "API_TOKEN": "s3cret-token",
+        "COLLECTOR_DB_PATH": harness.db_path,
+    }
+    env.update(overrides)
+    return {k: v for k, v in env.items() if v is not None}
+
+
+def _fake_waitress(monkeypatch) -> list:
+    """A stand-in `waitress` in `sys.modules`: the agent venv has none (ADR 417)."""
+    calls: list = []
+    monkeypatch.setitem(
+        sys.modules,
+        "waitress",
+        types.SimpleNamespace(serve=lambda app, **kwargs: calls.append((app, kwargs))),
+    )
+    return calls
+
+
+def test_run_serves_the_app_from_waitress_with_the_same_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = _fake_waitress(monkeypatch)
+    harness = _harness(tmp_path)
+
+    api_app.run(_run_env(harness), config_path=harness.config_path)
+
+    assert len(calls) == 1
+    app, kwargs = calls[0]
+    # The literals pin ADR 417: a change to either is a decision to revisit.
+    assert kwargs == {"host": "0.0.0.0", "port": 8789, "threads": 8}
+    assert (api_app.HOST, api_app.PORT, api_app.THREADS) == ("0.0.0.0", 8789, 8)
+    client = app.test_client()
+    assert client.get(
+        "/api/tasks", headers={"Authorization": "Bearer s3cret-token"}
+    ).status_code == 200
+
+
+def test_run_without_an_api_token_still_serves_with_the_bearer_path_shut(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = _fake_waitress(monkeypatch)
+    harness = _harness(tmp_path)
+
+    api_app.run(_run_env(harness, API_TOKEN=None), config_path=harness.config_path)
+
+    client = calls[0][0].test_client()
+    assert client.get(
+        "/api/tasks", headers={"Authorization": "Bearer anything"}
+    ).status_code == 401
+
+
+def test_run_without_a_dashboard_username_raises_before_waitress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "waitress", None)  # an import would raise
+    harness = _harness(tmp_path)
+
+    with pytest.raises(KeyError, match="DASHBOARD_USERNAME"):
+        api_app.run(
+            _run_env(harness, DASHBOARD_USERNAME=None), config_path=harness.config_path
+        )
 
 
 @pytest.mark.parametrize("key", ["vibe_kanban", "local_board"])

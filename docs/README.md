@@ -26,7 +26,7 @@ dispatcher while it runs you**, below.
 
 Python 3.11, standard library except for `pyyaml` (config, task-file
 frontmatter, the learnings index), `flask` (the collector and the read API, both
-JSON) and `requests` (the observability hook). Nothing renders a template any more, so `markupsafe` is no longer
+JSON), `waitress` (serves them, ADR 417) and `requests` (the observability hook). Nothing renders a template any more, so `markupsafe` is no longer
 pinned here — the Jinja board that imported it was retired
 (`docs/decisions.md` ADR 32). Tests are `pytest` with no
 plugins. Docker Compose runs the stack; the dispatcher reaches the agent
