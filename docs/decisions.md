@@ -16802,3 +16802,73 @@ does not release its claim.
   so the guard would never see it.
 - *Anchoring on `busy_since` alone:* a phase whose later `claude` call was
   orphaned could be reaped while that call still runs.
+
+## ADR 417 — The collector and the read API are served by waitress, threaded, from their own `run`
+
+**Status:** accepted (2026-10-24), T-171's arquitecto. Closes the Flask
+development server entry of `docs/plans/backlog.md` item 6 (*Observability and
+hardening*) for these two services; the board service and the config writer
+are left on theirs.
+
+**Context.** `observability/collector/server.py` and `observability/api/app.py`
+end in Werkzeug's `run`, which Flask documents as not for production: a
+single-process threaded server with no request queue bound, run here 24/7.
+The task asked that the read API's server-sent-events tail keep working and
+that the thread count be sized so the capped streams cannot starve ordinary
+requests. The read API has no stream: GET /events/stream and its stream cap
+lived on the Jinja board, which was deleted (ADR 32), and the console's live
+tail polls `/api/events?since=<id>` (`front/src/lib/api/client.ts`). Every
+request either service answers is one bounded read or one insert. The slowest
+is the read API's diff route, whose every `git` call is cut at
+`GIT_TIMEOUT_SECONDS` (20 s). The agent image's venv has neither waitress nor
+gunicorn installed (`docker/agent/Dockerfile` pins its packages by hand), so a
+test that imports the server package fails in a phase.
+
+**Decision.**
+1. **waitress**, pinned `waitress>=3.0` in `pyproject.toml`. Pure Python with
+   no dependency of its own and no C extension, so no build step; one process
+   and a thread pool, the model Werkzeug's threaded server already ran these
+   apps under, so nothing in either app meets a fork or a second process
+   (the collector's SQLite writer stays one process). It is started from
+   Python, so `main()`'s exit 2 on missing credentials and the read API's
+   start-up raises keep happening before any socket opens, and both
+   Dockerfiles' `python -m` entry points stay as they are.
+2. **One `run` per module, called by `__main__`.** Each module gains
+   `run(environ=None, ...)` that builds the app exactly as `__main__` did —
+   the same variables, the same defaults — then imports waitress *inside the
+   function, after the app is built*, and calls
+   `serve(app, host="0.0.0.0", port=<port>, threads=<n>)`. `__main__` is
+   `run()`. The import placement is load-bearing: a configuration refusal
+   never depends on waitress being installed, and the tests reach the call
+   with a stand-in `waitress` module put in `sys.modules`, opening no socket.
+3. **The numbers.** The collector serves with `THREADS = 4` (waitress's own
+   default, named): each request is one SQLite insert or one bounded select,
+   and the hooks of every agent the pool can run at once fit in four threads
+   with waitress queueing the rest. The read API serves with `THREADS = 8`:
+   there are **0** long-lived streams, so no request can hold a thread past
+   its own bounded work, and eight leaves seven threads for the console's
+   polls while one diff request waits out its `git` timeouts. Everything else
+   is waitress's default: `connection_limit` 100, `channel_timeout` 120 s.
+   A stream added to this service later owes a cap of its own, at most
+   `THREADS - 4`, so four threads always stay for the polls; that rule is
+   this ADR's, not a constant in the code today.
+4. **Host and port unchanged.** `0.0.0.0:8787` and `0.0.0.0:8789` (`PORT`).
+
+**Consequences.**
+- Werkzeug's one access-log line per request on stderr is gone from
+  `docker logs` for both services; waitress logs only its start line and
+  its own warnings (a queue depth warning is the sign `THREADS` is short).
+- A running container keeps its old server until the operator rebuilds the
+  two images; nothing in compose changes.
+- `board_service/app.py` and `config_writer/app.py` still call Werkzeug's
+  `run`; the same `run` pattern fits them, and is left as debt.
+- The agent image does not install waitress; the suite never needs it.
+
+**Ruled out.**
+- *gunicorn:* pre-fork workers would split the read API's one loaded config
+  across processes and need an app factory string on a command line in place
+  of `python -m`, moving the start-up refusals into a worker boot failure that
+  gunicorn reports with its own exit code. It also does not run on Windows,
+  where a contributor's host may be. Its sync workers suit no stream either.
+- *Werkzeug with `threaded=True` and a bigger backlog:* still the development
+  server Flask warns about, which is the item being closed.
