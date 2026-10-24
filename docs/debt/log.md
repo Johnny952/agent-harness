@@ -530,3 +530,9 @@ server, which is `T-171-D1`.
 served by waitress with 8 and 4 request threads, and all four services send
 waitress's start line and queue warnings to stderr (`docs/decisions.md`
 ADR 420). It declared no debt.
+
+**T-173** resolved no earlier row and declared no debt. Each of the four
+services' `_log_waitress()` now sets `propagate = False` on the `waitress`
+logger, so a waitress line no longer prints a second time through the root
+handler that `waitress.serve()`'s own `basicConfig()` adds
+(`docs/decisions.md` ADR 423, amending ADR 420 Decision 3).
