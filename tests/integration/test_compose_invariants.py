@@ -976,15 +976,117 @@ def test_the_board_service_writes_only_the_hive_and_mounts_no_socket(compose_fil
     assert _environment(board) == {"BOARD_ACTIONS_TOKEN": "${BOARD_ACTIONS_TOKEN:-}"}
 
 
+# --- the docker socket proxy (docs/decisions.md ADR 435) ----------------------
+
+PROXY_NETWORK = "docker_proxy_net"
+HEX64 = "a" * 64
+
+
+def _proxy_patterns(compose_file: str) -> dict[str, re.Pattern[str]]:
+    """The proxy's `-allow<METHOD>=` flags as Python regexes, `$$` unescaped."""
+    command = _load(compose_file)["services"]["docker-proxy"]["command"]
+    patterns = {}
+    for item in command:
+        match = re.fullmatch(r"-allow([A-Z]+)=(.*)", item)
+        if match:
+            patterns[match.group(1)] = re.compile(match.group(2).replace("$$", "$"))
+    return patterns
+
+
+def _allowed(patterns: dict[str, re.Pattern[str]], method: str, path: str) -> bool:
+    pattern = patterns.get(method)
+    return bool(pattern and pattern.search(path))
+
+
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
-def test_only_the_worker_and_the_dispatcher_mount_the_docker_socket(
+def test_only_the_docker_proxy_mounts_the_docker_socket_read_only(
     compose_file: str,
 ) -> None:
     services = _load(compose_file)["services"]
 
     assert {
         name for name, s in services.items() if "docker.sock" in yaml.safe_dump(s)
-    } == {"worker", "dispatcher"}
+    } == {"docker-proxy"}
+    assert services["docker-proxy"]["volumes"] == [
+        "/var/run/docker.sock:/var/run/docker.sock:ro"
+    ]
+    for name in ("dispatcher", "worker"):
+        assert "docker.sock" not in yaml.safe_dump(services[name]), name
+    agents = _load("docker-compose.agents.yml")
+    assert "docker.sock" not in yaml.safe_dump(agents)
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_docker_proxy_is_pinned_unpublished_and_on_an_internal_network(
+    compose_file: str,
+) -> None:
+    compose = _load(compose_file)
+    proxy = compose["services"]["docker-proxy"]
+
+    image, _, tag = proxy["image"].partition(":")
+    assert image and tag and tag != "latest"
+    assert "ports" not in proxy
+    assert "expose" not in proxy
+    assert proxy["networks"] == [PROXY_NETWORK]
+    assert proxy["profiles"] == ["dispatcher", "worker"]
+    assert compose["networks"][PROXY_NETWORK] == {"internal": True}
+    members = {
+        name
+        for name, s in compose["services"].items()
+        if PROXY_NETWORK in (s.get("networks") or [])
+    }
+    assert members == {"docker-proxy", "dispatcher", "worker"}
+    assert PROXY_NETWORK not in yaml.safe_dump(_load("docker-compose.agents.yml"))
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_dispatcher_and_the_worker_reach_docker_through_the_proxy(
+    compose_file: str,
+) -> None:
+    services = _load(compose_file)["services"]
+
+    for name in ("dispatcher", "worker"):
+        assert _environment(services[name])["DOCKER_HOST"] == "tcp://docker-proxy:2375", name
+        assert "docker-proxy" in services[name]["depends_on"], name
+        assert PROXY_NETWORK in services[name]["networks"], name
+
+
+@pytest.mark.parametrize("compose_file", BOTH_FILES)
+def test_the_docker_proxy_allowlist_admits_exec_and_refuses_the_rest(
+    compose_file: str,
+) -> None:
+    patterns = _proxy_patterns(compose_file)
+
+    assert set(patterns) == {"HEAD", "GET", "POST"}
+    admitted = [
+        ("HEAD", "/_ping"),
+        ("GET", "/_ping"),
+        ("GET", "/v1.47/containers/agent-cuenta1/json"),
+        ("POST", "/v1.47/containers/dind-cuenta2/exec"),
+        ("POST", f"/v1.47/exec/{HEX64}/start"),
+        ("GET", f"/v1.47/exec/{HEX64}/json"),
+    ]
+    for method, path in admitted:
+        assert _allowed(patterns, method, path), (method, path)
+
+    refused = [
+        ("POST", "/v1.47/containers/create"),
+        ("POST", "/v1.47/containers/agent-x/start"),
+        ("POST", "/v1.47/containers/agent-x/stop"),
+        ("POST", "/v1.47/containers/agent-x/kill"),
+        ("POST", "/v1.47/containers/agent-x/restart"),
+        ("DELETE", "/v1.47/containers/agent-x"),
+        ("POST", "/containers/caddy/exec"),
+        ("POST", "/containers/agent-x/exec/../../create"),
+        ("POST", "/images/create"),
+        ("POST", "/volumes/create"),
+        ("POST", "/networks/create"),
+        ("POST", "/build"),
+        ("GET", "/containers/json"),
+        ("GET", "/images/json"),
+    ]
+    for method, path in refused:
+        assert not _allowed(patterns, method, path), (method, path)
 
 
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
@@ -998,7 +1100,8 @@ def test_the_worker_is_the_dispatchers_mounts_behind_its_own_profile(
     assert worker["profiles"] == ["worker"]
     assert worker["restart"] == "unless-stopped"
     assert worker["command"] == ["--config", "/app/config.yaml", "worker"]
-    assert worker["networks"] == ["ia_harness_net"]
+    assert worker["networks"] == ["ia_harness_net", PROXY_NETWORK]
+    assert worker["networks"] == dispatcher["networks"]
     assert "ports" not in worker
     # ADR 342, ADR 360: both mount the backup directory, so they are equal
     assert worker["volumes"] == dispatcher["volumes"]

@@ -476,6 +476,10 @@ networks:
   ia_harness_net:
     name: ia_harness_net
   console_net:
+  # docker-proxy and its clients, dispatcher and worker (ADR 435); internal,
+  # no name: key, so the agents file cannot join it.
+  docker_proxy_net:
+    internal: true
 
 volumes:
   observability_data:

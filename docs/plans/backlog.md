@@ -504,7 +504,13 @@ run arbitrary code from cloned repos on the same network:
   […] The collector and the read API also run
   Flask's development server rather than a production WSGI server.
 - […]
-- The dispatcher mounts the host's `/var/run/docker.sock`, which is root
+- **Done 2026-10-24 by T-176** (`docs/decisions.md` ADR 435): a
+  `docker-proxy` service (`wollomatic/socket-proxy`, pinned) is the only
+  service that mounts the socket, `:ro`, on the internal `docker_proxy_net`
+  with nothing published. It allows exec into `agent-*`/`dind-*` containers
+  and the calls around it, nothing else. The dispatcher and the worker reach
+  it with `DOCKER_HOST` and mount no socket. The original text follows.
+  The dispatcher mounts the host's `/var/run/docker.sock`, which is root
   on the host. A socket proxy limited to `exec` would narrow that.
 
 ### 7. **Code-inspection/code-intelligence tooling in agent containers.**

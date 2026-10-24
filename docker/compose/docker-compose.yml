@@ -223,6 +223,37 @@ services:
       # only resolves because they join this same network from the other file.
       - ia_harness_net
 
+  # The only service in any compose file that mounts the host's docker socket
+  # (docs/decisions.md ADR 435, narrowing ADR 142 and ADR 166). The dispatcher
+  # and the worker reach Docker through it with DOCKER_HOST and may do nothing
+  # the allowlist below does not name: `docker exec` into agent-* and dind-*
+  # containers and the calls the CLI makes around it. No container create,
+  # start, stop or delete, no image, volume or network call. The patterns are
+  # RE2; `$$` is a literal `$` through compose interpolation. It publishes
+  # nothing and sits on docker_proxy_net, which is internal. It runs with
+  # either profile, so a client never starts without it.
+  docker-proxy:
+    profiles: ["dispatcher", "worker"]
+    image: wollomatic/socket-proxy:1.10.0
+    restart: unless-stopped
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - -listenip=0.0.0.0
+      - -proxyport=2375
+      - -allowfrom=0.0.0.0/0
+      - -allowHEAD=^(/v[0-9]+\.[0-9]+)?/_ping$$
+      - -allowGET=^(/v[0-9]+\.[0-9]+)?/(_ping|containers/(agent|dind)-[a-zA-Z0-9_.-]+/json|exec/[a-f0-9]+/json)$$
+      - -allowPOST=^(/v[0-9]+\.[0-9]+)?/(containers/(agent|dind)-[a-zA-Z0-9_.-]+/exec|exec/[a-f0-9]+/start)$$
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy_net
+
   # dispatcher.run_task_cycle (dispatcher/dispatcher.py) processes exactly
   # one task through the full role lifecycle and then exits — there is no
   # daemon/polling loop. This service is therefore single-shot per
@@ -250,8 +281,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - BACKUP_KEEP=${BACKUP_KEEP:-}
+      - DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
@@ -273,11 +304,13 @@ services:
       - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
+      - docker-proxy
     networks:
       - ia_harness_net
+      - docker_proxy_net
 
   # The worker (docs/decisions.md ADR 142 decision 1 and ADR 166): the one
-  # long-running service with the docker socket. `dispatch worker` drains
+  # long-running Docker client, through `docker-proxy` (ADR 435). `dispatch worker` drains
   # <state_dir>/actions/, the queue the board service writes (ADR 142, ADR 148),
   # so the console's Start and Cancel only happen while it runs. Behind the
   # `worker` profile: `docker compose --profile worker up -d worker`. Its mounts
@@ -295,8 +328,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - BACKUP_KEEP=${BACKUP_KEEP:-}
+      - DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
@@ -306,8 +339,10 @@ services:
       - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
+      - docker-proxy
     networks:
       - ia_harness_net
+      - docker_proxy_net
 
   # Fills <repo-root>/.data/ms-playwright with the headless Chromium every
   # agent mounts read-only at /ms-playwright (docs/decisions.md ADR 43,
@@ -342,6 +377,11 @@ networks:
   # docker-compose.agents.yml never names it. No `name:` key, so no other file
   # can join it as `external` by the bare name.
   console_net:
+  # docker-proxy and its two clients, dispatcher and worker (ADR 435).
+  # `internal: true`: no route out and nothing published. No `name:` key, so
+  # docker-compose.agents.yml cannot join it.
+  docker_proxy_net:
+    internal: true
 
 volumes:
   observability_data:

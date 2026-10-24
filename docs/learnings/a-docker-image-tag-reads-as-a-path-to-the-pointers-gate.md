@@ -4,8 +4,11 @@
 `docs/` and reach for backticks around it — any namespace/image:tag whose tag
 has a dot in it, the agent image's bun base at 1.3.12 being the one that bit.
 
-**Status:** unconfirmed — one task. T-019's revisor read the mechanism off the
-gate after the dispatcher reported it against the implementador's round 1.
+**Status:** confirmed — two tasks. T-019's revisor read the mechanism off the
+gate after the dispatcher reported it against the implementador's round 1;
+T-176's implementador hit it again with the socket-proxy image pinned at
+1.10.0 in ADR 435 and `docs/implementations/T-176.md`, and its auditor
+reworded both.
 
 ## Symptom
 

@@ -558,3 +558,10 @@ which is not part of the what: `T-037-D1`, `T-039-D1`, `T-065-D1`, `T-100-D1`,
 is append-only (ADR 297). The filing note now tells the auditor to keep the
 origin out of the row, and `backlog_item` drops the trailing word from the
 title and goal (`docs/decisions.md` ADR 426).
+
+**T-176** resolved no earlier row and declared no debt. A `docker-proxy`
+service is now the only one that mounts the host's docker socket, read-only,
+on an internal network with nothing published; the dispatcher and the worker
+reach Docker through it with `DOCKER_HOST`, and it admits only `docker exec`
+into `agent-*`/`dind-*` containers (`docs/decisions.md` ADR 435, backlog
+item 6).
