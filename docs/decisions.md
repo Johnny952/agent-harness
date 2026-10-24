@@ -16872,3 +16872,75 @@ test that imports the server package fails in a phase.
   where a contributor's host may be. Its sync workers suit no stream either.
 - *Werkzeug with `threaded=True` and a bigger backlog:* still the development
   server Flask warns about, which is the item being closed.
+
+## ADR 420 — The board service and the config writer are served by waitress too, and every waitress logs to stderr
+
+**Status:** accepted (2026-10-24), T-172's arquitecto. Extends ADR 417 to the
+two services it left on Werkzeug, resolving debt `T-171-D1`, and corrects its
+first *Consequences* line, which ADR 417 could not keep on its own.
+
+**Context.** `board_service/app.py` `serve` (which starts the push
+notifier's thread, then calls `app.run`) and `config_writer/app.py`'s
+`__main__` (`main().run(...)`) still serve from Werkzeug's development
+server. Separately, ADR 417 says waitress logs its start line, but redeployed
+the collector and the read API print nothing to `docker logs`: waitress logs
+`Serving on ...` at INFO on the `waitress` logger, no service configures
+`logging`, and Python's last-resort handler prints only WARNING and above.
+No module ships in all four images: the collector's copies only
+`observability/`, the board service's has no `observability/`, and the
+config writer's copies `observability/auth.py` alone; the Dockerfiles are
+not this task's to change.
+
+**Decision.**
+1. **ADR 417's pattern, as written.** `board_service/app.py` gains `HOST =
+   "0.0.0.0"` and `THREADS`; `serve(environ=None)` keeps its name and its
+   order — `main(environ)`, then `push.start(...)`, then a lazy `from
+   waitress import serve as waitress_serve` and `waitress_serve(app,
+   host=HOST, port=PORT, threads=THREADS)`. `config_writer/app.py` gains
+   `HOST`, `THREADS` and `run(environ=None)`: `main(environ)`, then the lazy
+   import and the same call; `__main__` is `run()`. A refused start (exit 2
+   from either `main`) happens before waitress is imported. Ports stay 8792
+   and 8791, the variables stay as they are.
+2. **The numbers.** The board service serves with `THREADS = 8`: every
+   request is bounded (no stream, no subprocess), but a write waits on
+   `dispatcher/tasks.py` `task_lock`, a blocking `flock` the dispatcher also
+   takes, and the MCP calls of every running phase arrive with the
+   console's writes and sign-ins (an `hashlib.scrypt` each); eight lets
+   a few lock-waiting writes sit without queueing a phase's `board_get`.
+   The config writer serves with `THREADS = 4`, waitress's default named:
+   its callers are the operator's settings screen, and every write is
+   serialized by one `flock` anyway. The push notifier's thread is not a
+   request thread and is not counted. Everything else is waitress's default.
+3. **Waitress logs to stderr, from the entry point only.** Each of the four
+   entry points (`observability/collector/server.py` `run`,
+   `observability/api/app.py` `run`, `board_service/app.py` `serve`,
+   `config_writer/app.py` `run`) calls a private `_log_waitress()` just
+   before waitress is imported. It touches the `waitress` logger alone: level
+   INFO and, when it has no handler yet, one `logging.StreamHandler()` on
+   stderr with the format `%(levelname)s:%(name)s:%(message)s`
+   (`logging.BASIC_FORMAT`). Its children — `waitress.queue`'s depth warning
+   among them — propagate to it. The root logger, Flask's `app.logger` and
+   `dispatcher.push`'s logger are untouched, and nothing runs at import, so
+   a test or another importer keeps its own logging. The helper is four
+   copies of a few lines rather than one module, because no module is in
+   all four images (*Context*).
+
+**Consequences.**
+- `docker logs` of all four services shows `INFO:waitress:Serving on
+  http://0.0.0.0:<port>` after a rebuild, and `WARNING:waitress.queue:...`
+  when `THREADS` is short — the sign ADR 417 named.
+- Werkzeug's per-request access line is gone from the board service's and
+  the config writer's logs as well; the board service's own
+  `app.logger.warning` lines are unchanged.
+- No running container changes until the operator rebuilds the images.
+- A test that calls one of these entry points must restore the `waitress`
+  logger's level and handlers afterwards, or a later test inherits a handler
+  bound to a closed capture stream.
+
+**Ruled out.**
+- *`logging.basicConfig(level=INFO)` in each entry point:* it raises every
+  library's INFO on the root logger, not waitress's alone, and is a no-op
+  whenever root already has a handler — which pytest gives it — so no test
+  could pin it.
+- *One shared helper module:* it would need a Dockerfile `COPY` in at least
+  two images, which this task may not touch.
