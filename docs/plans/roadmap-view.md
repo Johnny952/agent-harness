@@ -153,6 +153,15 @@ stands.
    harness: no task file carries a project key or a `plan` today, so every task
    lands in `no_plan` until the backfill and item 2. ADRs and charter entries
    are not read yet; that is a later step.
+
+   **Note 2026-10-24** (T-178-S2): epics are built (ADR 447). An epic, a
+   task file with `split_into`, is a row in the same lists a task is, with
+   `kind: "epic"`, `place`, `merged_tasks` and its sub-tasks nested in
+   `tasks` in `split_into` order; they are no longer flat rows. A sub-task
+   with no `plan` takes its epic's. A backlog epic is in the `future` band,
+   as a second row for its plan file when that plan is `building` or past,
+   or in `no_plan.now` with no plan. A `plan` is a plan file name or
+   `docs/plans/` plus it. A plan file can so be in two bands.
 5. **The screen.** A vertical list in the three bands, each plan expanding to
    its epics and each epic to its tasks, with the *full history* and *current
    only* filter.
