@@ -17161,7 +17161,7 @@ that one verb: `HEAD`/`GET /_ping` (version negotiation), `GET
 **Decision.**
 1. **A `docker-proxy` service** in `docker/compose/docker-compose.yml` and,
    mirrored, `docker-compose.coolify.yml` (above the agent pairs):
-   image `wollomatic/socket-proxy:1.10.0`, pinned; the only mount
+   the wollomatic socket-proxy image pinned at 1.10.0; the only mount
    `/var/run/docker.sock:/var/run/docker.sock:ro`; no `ports`; network
    `docker_proxy_net` only; `profiles: ["dispatcher", "worker"]`, so it runs
    only when one of its two clients can; `restart: unless-stopped`;
