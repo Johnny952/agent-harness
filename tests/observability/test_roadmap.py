@@ -418,3 +418,146 @@ def test_auth_is_required(tmp_path: Path) -> None:
     _plan(harness, "a.md")
 
     assert harness.client.get("/api/roadmap").status_code == 401
+
+
+# --- epics (ADR 447) ------------------------------------------------------
+
+
+def _epic(harness, epic_id: str, subs: list[str], **front) -> None:
+    _raw_task(harness.tasks_dir, epic_id, split_into=subs, title=f"Epic {epic_id}", **front)
+    for sub in subs:
+        _raw_task(harness.tasks_dir, sub, epic=epic_id)
+
+
+def _ids(rows: list[dict]) -> list[str]:
+    return [row["id"] for row in rows]
+
+
+def test_an_epic_is_a_row_under_its_plan_with_sub_tasks_nested(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _plan(harness, "a.md", status="building")
+    _raw_task(harness.tasks_dir, "T-1-S2", epic="T-1", merged=_merged("2026-10-12T10:00:00+00:00"))
+    _raw_task(harness.tasks_dir, "T-1-S1", epic="T-1")
+    _raw_task(harness.tasks_dir, "T-1", split_into=["T-1-S2", "T-1-S1"], plan="a.md", title="One")
+
+    data, warnings = _data(harness)
+
+    assert warnings == []
+    (epic,) = data["bands"]["now"][0]["tasks"]
+    assert epic == {
+        "id": "T-1",
+        "title": "One",
+        "state": "in_progress",
+        "merged_at": None,
+        "kind": "epic",
+        "place": "board",
+        "merged_tasks": 1,
+        "tasks": [
+            {
+                "id": "T-1-S2",
+                "title": None,
+                "state": "in_progress",
+                "merged_at": "2026-10-12T10:00:00+00:00",
+            },
+            {"id": "T-1-S1", "title": None, "state": "in_progress", "merged_at": None},
+        ],
+    }
+    assert data["no_plan"] == {"now": [], "past": []}
+
+
+def test_a_sub_task_takes_its_epics_plan_and_a_differing_plan_is_a_warning(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _plan(harness, "a.md", status="building")
+    _plan(harness, "b.md", status="building")
+    _raw_task(harness.tasks_dir, "T-1-S1", epic="T-1", plan="b.md")
+    _raw_task(harness.tasks_dir, "T-1-S2", epic="T-1")
+    _raw_task(harness.tasks_dir, "T-1", split_into=["T-1-S1", "T-1-S2"], plan="a.md")
+
+    data, warnings = _data(harness)
+
+    rows = {row["file"]: row for row in data["bands"]["now"]}
+    assert _ids(rows["a.md"]["tasks"]) == ["T-1"]
+    assert _ids(rows["a.md"]["tasks"][0]["tasks"]) == ["T-1-S1", "T-1-S2"]
+    assert rows["b.md"]["tasks"] == []
+    assert len(warnings) == 1
+    assert "T-1-S1" in warnings[0] and "b.md" in warnings[0]
+
+
+def test_an_epic_with_no_plan_is_now_until_every_sub_task_is_merged(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _plan(harness, "a.md")
+    _raw_task(harness.tasks_dir, "T-1-S1", epic="T-1", merged=_merged("2026-09-01T00:00:00+00:00"))
+    _raw_task(harness.tasks_dir, "T-1-S2", epic="T-1")
+    _raw_task(harness.tasks_dir, "T-1", split_into=["T-1-S1", "T-1-S2"])
+    _raw_task(harness.tasks_dir, "T-2-S1", epic="T-2", merged=_merged("2026-09-01T00:00:00+00:00"))
+    _raw_task(harness.tasks_dir, "T-2-S2", epic="T-2", merged=_merged("2026-10-03T00:00:00+00:00"))
+    _raw_task(harness.tasks_dir, "T-2", split_into=["T-2-S1", "T-2-S2"])
+
+    data, warnings = _data(harness)
+
+    assert warnings == []
+    (now,) = data["no_plan"]["now"]
+    assert now["id"] == "T-1" and _ids(now["tasks"]) == ["T-1-S1", "T-1-S2"]
+    (past,) = data["no_plan"]["past"]
+    assert past["month"] == "2026-10"
+    assert past["tasks"][0]["id"] == "T-2"
+    assert past["tasks"][0]["merged_at"] == "2026-10-03T00:00:00+00:00"
+    assert _ids(past["tasks"][0]["tasks"]) == ["T-2-S1", "T-2-S2"]
+
+
+def test_a_backlog_epic_is_in_the_future_band(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _plan(harness, "idea.md", status="idea")
+    _plan(harness, "build.md", status="building")
+    _raw_task(harness.tasks_dir, "T-0", plan="build.md")
+    _epic(harness, "T-1", ["T-1-S1"], status="proposed", plan="idea.md")
+    _epic(harness, "T-2", ["T-2-S1"], status="proposed", plan="build.md")
+    _epic(harness, "T-3", ["T-3-S1"], status="proposed", priority="normal")
+    _epic(harness, "T-4", ["T-4-S1"], status="proposed", priority="high")
+    _epic(harness, "T-5", ["T-5-S1"], status="dropped", plan="idea.md")
+    _raw_task(harness.tasks_dir, "T-9")
+
+    data, warnings = _data(harness)
+
+    assert warnings == []
+    future = data["bands"]["future"]
+    (echo,) = [row for row in future if row["file"] == "build.md"]
+    assert _ids(echo["tasks"]) == ["T-2"]
+    assert echo["tasks"][0]["place"] == "backlog"
+    assert echo["tasks"][0]["kind"] == "epic"
+    (now_plan,) = data["bands"]["now"]
+    assert _ids(now_plan["tasks"]) == ["T-0"]
+    (idea,) = [row for row in future if row["file"] == "idea.md"]
+    # a dropped epic is placed as a board epic is, ahead of the proposed ones
+    assert _ids(idea["tasks"]) == ["T-5", "T-1"]
+    assert _ids(data["no_plan"]["now"]) == ["T-9", "T-4", "T-3"]
+
+
+def test_an_epic_with_no_sub_tasks_a_missing_epic_and_a_bad_epic_file_warn(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _raw_task(harness.tasks_dir, "T-1", split_into=[])
+    _raw_task(harness.tasks_dir, "T-2-S1", epic="T-2")
+    _raw_task(harness.tasks_dir, "T-3-S1", epic="T-3")
+    Path(context_transfer.task_file_path(str(harness.tasks_dir), "T-3")).write_text(
+        "---\ntask_id: [unclosed\n---\n"
+    )
+
+    data, warnings = _data(harness)
+
+    assert _ids(data["no_plan"]["now"]) == ["T-1", "T-2-S1", "T-3-S1"]
+    text = "\n".join(warnings)
+    assert "epic T-1: no sub-tasks" in text
+    assert "task T-2-S1: names epic T-2" in text
+    assert "unreadable task file" in text
+    assert "task T-3-S1: names epic T-3" in text
+
+
+def test_a_plan_path_matches_the_plan_file_name(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _plan(harness, "x.md", status="building")
+    _raw_task(harness.tasks_dir, "T-1", plan="docs/plans/x.md")
+
+    data, warnings = _data(harness)
+
+    assert warnings == []
+    assert _ids(data["bands"]["now"][0]["tasks"]) == ["T-1"]
