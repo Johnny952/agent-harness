@@ -12,7 +12,7 @@ decision; this page is the plan for building it, and where the two differ the
 ADR wins. Steps 1 and 2 are built and run: written by ADR 223, then built, installed,
 smoke-checked and measured on 2026-10-24 (the Results log row of that date).
 A headless shell screenshots `about:blank` inside `agent-cuenta1`, and the
-container peaked at 384 MiB with the browser open. Steps 3–5 are open. Written 2026-10-09 by the operator, after
+container peaked at 384 MiB with the browser open. Step 3's entry is in `config.yaml` (2026-10-24); steps 4 and 5 are open. Written 2026-10-09 by the operator, after
 walking `docs/ROADMAP.md` **V0.6e** with a Playwright script from the host
 (the Results log row of that date; scripts and screenshots in
 `.data/verify/v06e/`). That walk took about forty lines of Python and found a
@@ -196,7 +196,10 @@ beside it.
 2. The client and system libraries in `docker/agent/Dockerfile`; a smoke check
    that a phase can screenshot `about:blank`. *Written (ADR 223); the smoke
    check passed 2026-10-24 in `agent-cuenta1`.*
-3. The allowlist entry, by the operator.
+3. The allowlist entry, by the operator. *Done 2026-10-24:
+   `Bash(node /data/.hive/tasks/*/verify/*.mjs*)` in `config.yaml`
+   `allowed_tools`; a probe on CLI 2.1.296 ran a script under `*/verify/`
+   and refused one outside it.*
 4. One console task whose done-means includes a phase walk against route
    fixtures, to test the recording rules on a real row.
 5. Then, separately, whether to install option B's skills.
