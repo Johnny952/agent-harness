@@ -9,10 +9,10 @@ supersedes: []
 
 **Status:** decided, being built. `docs/decisions.md` **ADR 43** records the
 decision; this page is the plan for building it, and where the two differ the
-ADR wins. Written, not yet built or run (ADR 223): the install service, the
-read-only mounts and the image's client and libraries of steps 1 and 2 below.
-Nothing has been built, downloaded or launched yet, so the memory measurement
-of step 1 and the smoke check of step 2 are still open, and so are steps 3–5. Written 2026-10-09 by the operator, after
+ADR wins. Steps 1 and 2 are built and run: written by ADR 223, then built, installed,
+smoke-checked and measured on 2026-10-24 (the Results log row of that date).
+A headless shell screenshots `about:blank` inside `agent-cuenta1`, and the
+container peaked at 384 MiB with the browser open. Steps 3–5 are open. Written 2026-10-09 by the operator, after
 walking `docs/ROADMAP.md` **V0.6e** with a Playwright script from the host
 (the Results log row of that date; scripts and screenshots in
 `.data/verify/v06e/`). That walk took about forty lines of Python and found a
@@ -191,10 +191,11 @@ beside it.
 
 1. The one-shot install service and the read-only mount, with the version
    declared once. Measure the agent's memory with Chromium running, as D8 did.
-   *Written (ADR 223); the measurement waits for a build.*
+   *Done 2026-10-24: 384 MiB peak with a browser open, about 1.1 GiB with
+   D8's gate, under the 4 GiB limit.*
 2. The client and system libraries in `docker/agent/Dockerfile`; a smoke check
    that a phase can screenshot `about:blank`. *Written (ADR 223); the smoke
-   check waits for a build.*
+   check passed 2026-10-24 in `agent-cuenta1`.*
 3. The allowlist entry, by the operator.
 4. One console task whose done-means includes a phase walk against route
    fixtures, to test the recording rules on a real row.
