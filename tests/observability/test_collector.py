@@ -1,15 +1,21 @@
 import sqlite3
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from observability.collector import db
 from observability.collector.server import (
+    HOST,
+    PORT,
+    THREADS,
     ConfigError,
     create_app,
     load_config,
     main,
     parse_write_tokens,
+    run,
 )
 
 # Placeholder credentials, made up for these tests. Nothing here is a real token.
@@ -204,6 +210,53 @@ def test_startup_with_both_variables_builds_the_app(tmp_path) -> None:
     c = main(env).test_client()
 
     assert c.get("/events", headers=_bearer(READ)).status_code == 200
+
+
+def _fake_waitress(monkeypatch) -> list:
+    """A stand-in `waitress` in `sys.modules`: the agent venv has none (ADR 417)."""
+    calls: list = []
+    monkeypatch.setitem(
+        sys.modules,
+        "waitress",
+        types.SimpleNamespace(serve=lambda app, **kwargs: calls.append((app, kwargs))),
+    )
+    return calls
+
+
+def test_run_serves_the_app_from_waitress_on_the_same_host_and_port(
+    tmp_path, monkeypatch
+) -> None:
+    calls = _fake_waitress(monkeypatch)
+    env = dict(GOOD_ENV, COLLECTOR_DB_PATH=str(tmp_path / "events.db"))
+
+    run(env)
+
+    assert len(calls) == 1
+    app, kwargs = calls[0]
+    # The literals pin ADR 417: a change to either is a decision to revisit.
+    assert kwargs == {"host": "0.0.0.0", "port": 8787, "threads": 4}
+    assert (HOST, PORT, THREADS) == ("0.0.0.0", 8787, 4)
+    assert app.test_client().get("/events", headers=_bearer(READ)).status_code == 200
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_run_refuses_a_missing_token_before_it_touches_waitress(
+    installed, tmp_path, monkeypatch, capsys
+) -> None:
+    if installed:
+        calls = _fake_waitress(monkeypatch)
+    else:
+        monkeypatch.setitem(sys.modules, "waitress", None)  # import raises
+        calls = []
+    env = dict(GOOD_ENV, COLLECTOR_DB_PATH=str(tmp_path / "events.db"))
+    del env["COLLECTOR_READ_TOKEN"]
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(env)
+
+    assert excinfo.value.code == 2
+    assert "COLLECTOR_READ_TOKEN" in capsys.readouterr().err
+    assert calls == []
 
 
 def test_the_map_tolerates_whitespace_and_line_wrapping() -> None:

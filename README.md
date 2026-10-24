@@ -1584,7 +1584,9 @@ number and title.
      built*, step 2), so the console still signs in with Basic auth and its
      constant-time compare (`observability/auth.py`).
    - The collector and the read API run Flask's development server —
-     **open**.
+     **built**: both are served by waitress (`docs/decisions.md` ADR 417).
+     The board service and the config writer still run the development
+     server (filed as debt).
    - A per-task view — **built**: the dock's execution thread shows a task's
      phases and their hook events (`GET /api/tasks/<id>/events`,
      `docs/decisions.md` ADR 197), over the phase rows and the usage log

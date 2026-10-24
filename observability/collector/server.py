@@ -36,6 +36,15 @@ READ_TOKEN_VAR = "COLLECTOR_READ_TOKEN"
 WRITE_TOKENS_VAR = "COLLECTOR_WRITE_TOKENS"
 
 
+#: Where the collector listens; unchanged since the development server.
+HOST = "0.0.0.0"
+PORT = 8787
+
+#: Request threads (`docs/decisions.md` ADR 417): each request is one SQLite
+#: insert or one bounded select, and waitress queues the rest.
+THREADS = 4
+
+
 class ConfigError(Exception):
     """The collector's credentials are missing or do not make sense.
 
@@ -188,5 +197,15 @@ def main(environ=None) -> Flask:
     )
 
 
+def run(environ=None) -> None:
+    """Serve the collector from waitress (`docs/decisions.md` ADR 417)."""
+    app = main(environ)
+    # Imported after `main`: a refused configuration exits 2 whether or not
+    # waitress is installed.
+    from waitress import serve
+
+    serve(app, host=HOST, port=PORT, threads=THREADS)
+
+
 if __name__ == "__main__":
-    main().run(host="0.0.0.0", port=8787)
+    run()
