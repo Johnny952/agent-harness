@@ -17121,3 +17121,113 @@ declaration as `what (introduced) — …`, and the entry file opens with
   every fingerprint the index dedupes by, for a cosmetic fault.
 - *A gate refusing the word:* a new blocking check for a wording slip
   `backlog_item` already absorbs.
+
+## ADR 435 — The dispatcher and the worker reach Docker through a socket proxy that allows exec and nothing else
+
+**Status:** accepted (2026-10-24), T-176's arquitecto. Narrows ADR 142
+decision 1 and ADR 166: the `worker` and `dispatcher` services keep their
+other mounts, but no longer mount `/var/run/docker.sock`.
+
+**Context.** `docs/plans/backlog.md` item 6: both services bind-mount the
+host's socket, which is root on the host, while agent containers run
+arbitrary code from cloned repos on the same network. The dispatcher's real
+use of the host daemon, inventoried from every `docker` argv under
+`dispatcher/`:
+
+- `dispatcher/docker_exec.py` `_docker_exec_argv` builds `docker exec -w
+  <dir> [-e K=V]... <container> <argv>`, run by `run_docker_exec` and
+  `open_docker_exec`. Every other call goes through these two: the phases,
+  the gates, the git and worktree helpers, `kill_in_container`,
+  `task_process_seen`, `dispatcher/projects.py`, `dispatcher/dispatcher.py`
+  `_git_lines`, `dispatcher/command_run.py`.
+- `dispatcher/command_targets.py` `running_services` runs `docker ps` and
+  `dispatcher/command_run.py` `_command_for` runs `docker compose exec`, but
+  both *inside* the account's dind through `run_docker_exec`, against the
+  dind's own daemon (its `DOCKER_HOST`), never the host's.
+- The container is always a config name, `account.container` or
+  `account.dind` (`dispatcher/dispatcher.py` `container_for`), which
+  `scripts/configure.sh` renders as `agent-<name>` and `dind-<name>`.
+- Nothing runs `docker inspect`, `ps`, `run`, `cp`, `logs`, `start`,
+  `stop`, an image, volume or network command against the host. No `-t`,
+  no `-i`.
+
+What the `docker` CLI (27, from `docker/dispatcher/Dockerfile`) sends for
+that one verb: `HEAD`/`GET /_ping` (version negotiation), `GET
+/containers/<name>/json` (the existence check before exec), `POST
+/containers/<name>/exec` (exec create, the env in its body), `POST
+/exec/<id>/start` (hijacked by a `101` upgrade, the output stream), `GET
+/exec/<id>/json` (the exit code). Paths may carry a `/v1.NN` prefix.
+
+**Decision.**
+1. **A `docker-proxy` service** in `docker/compose/docker-compose.yml` and,
+   mirrored, `docker-compose.coolify.yml` (above the agent pairs):
+   image `wollomatic/socket-proxy:1.10.0`, pinned; the only mount
+   `/var/run/docker.sock:/var/run/docker.sock:ro`; no `ports`; network
+   `docker_proxy_net` only; `profiles: ["dispatcher", "worker"]`, so it runs
+   only when one of its two clients can; `restart: unless-stopped`;
+   `user: "0:0"`, `read_only: true`, `cap_drop: [ALL]`,
+   `security_opt: ["no-new-privileges:true"]`. Root in the container is
+   what opens the root-owned socket without a host-specific group id;
+   with every capability dropped it holds nothing the socket does not
+   already give it.
+2. **The allowlist**, as the proxy's flags (Go RE2, written `$$` in compose):
+   - `-allowHEAD=^(/v[0-9]+\.[0-9]+)?/_ping$`
+   - `-allowGET=^(/v[0-9]+\.[0-9]+)?/(_ping|containers/(agent|dind)-[a-zA-Z0-9_.-]+/json|exec/[a-f0-9]+/json)$`
+   - `-allowPOST=^(/v[0-9]+\.[0-9]+)?/(containers/(agent|dind)-[a-zA-Z0-9_.-]+/exec|exec/[a-f0-9]+/start)$`
+   - no `PUT`, `DELETE` or other method; plus `-listenip=0.0.0.0`,
+     `-proxyport=2375`, `-allowfrom=0.0.0.0/0`.
+   `allowfrom` is open because the boundary is the network: a container
+   started by `docker compose run` gets no service alias, so a hostname
+   list would refuse the `dispatcher` run, and a fixed subnet would collide
+   with someone's host.
+3. **`docker_proxy_net`** is a top-level network with `internal: true` and
+   no `name:` key, like `console_net` (ADR 109), so the agents file cannot
+   join it. Its members are exactly `docker-proxy`, `dispatcher` and
+   `worker`.
+4. **The clients.** `dispatcher` and `worker` drop the socket mount, gain
+   `DOCKER_HOST=tcp://docker-proxy:2375` in `environment`, join
+   `docker_proxy_net` beside `ia_harness_net`, and depend on
+   `docker-proxy` beside `collector`; they stay equal to each other
+   (ADR 342, ADR 360). No Python changes: the `docker` CLI reads
+   `DOCKER_HOST`, and `run_docker_exec` never replaces the process env.
+5. **The invariant**, in `tests/integration/test_compose_invariants.py` over
+   both files: `docker-proxy` is the only service in any compose file,
+   the agents file included, that mounts `docker.sock`, and mounts it
+   `:ro`; its image has a fixed tag; it publishes nothing; its network is
+   internal and has those three members; both clients carry `DOCKER_HOST`
+   and no socket; and the three patterns admit the five calls above and
+   refuse container create, start, stop, kill and delete, exec into a
+   container not named `agent-*`/`dind-*`, and every `/images`, `/volumes`,
+   `/networks`, `/build` and `/containers/json` path.
+
+**Consequences.**
+- An account's `container` and `dind` must be named `agent-…` and
+  `dind-…`, as `scripts/configure.sh` writes them; another name gets a
+  `403` from the proxy and the phase fails at its first exec. Widening it
+  is an edit to the two patterns.
+- What stays reachable: exec, as any user and with `--privileged` (the
+  proxy cannot read the request body), into the agent and dind containers.
+  That is the dispatcher's whole job. It is no longer host root by itself:
+  no new container, mount, image or network can be made through it.
+- `docker compose run --rm dispatcher …` now also starts `docker-proxy`;
+  it keeps running after the run until stopped. `scripts/backup.sh` and
+  `scripts/restore.sh` need no change.
+- Not verified against a daemon in a phase (`docker` is refused there).
+  The operator recreates `dispatcher`/`worker` after review, and one
+  `docker compose run --rm dispatcher --config /app/config.yaml status`
+  or a task start is the check; a `403` in the proxy's log names any call
+  this inventory missed.
+
+**Ruled out.**
+- *`tecnativa/docker-socket-proxy`:* its switches are per section, so
+  exec needs `CONTAINERS=1`, `EXEC=1` and `POST=1`, which also admits
+  `POST /containers/create`, `start`, `stop`, `kill` and delete — the
+  writes this ADR exists to refuse.
+- *No name restriction (`containers/[^/]+/exec`):* it would admit exec into
+  the proxy, caddy or any other container on the host.
+- *A proxy that also filters the exec body (user, privileged):* no pinned,
+  maintained image does; a custom one is a new service to own.
+- *Setting `DOCKER_HOST` in `docker/dispatcher/Dockerfile`:* the image is
+  also run by hand, and compose is where the proxy is named.
+- *Publishing the proxy on loopback for host tooling:* nothing on the host
+  needs it, and the task forbids a published port.
