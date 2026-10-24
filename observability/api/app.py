@@ -46,6 +46,7 @@ import shlex
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 from flask import Flask, jsonify, request
@@ -236,7 +237,8 @@ MAX_ROADMAP_PLANS = 500
 #: a few tasks a day for years still fits. The clamp is taken on the sorted task
 #: ids before any file is opened, so a hive past it costs a bounded read rather
 #: than one that grows with every task this harness has run, and it reports
-#: itself in `warnings`. A task row is four scalars, so a count is bound enough.
+#: itself in `warnings`. A task row is four scalars, and an epic row only nests rows already
+#: counted, so a count is bound enough.
 MAX_ROADMAP_TASKS = 2000
 
 #: The most task files one `/api/command-requests` answer reads, for the reason
@@ -1079,8 +1081,17 @@ def create_app(
         """The project's plans in three bands, with the tasks under them.
 
         The api piece of `docs/plans/roadmap-view.md`'s cheap form: plans from
-        their frontmatter, tasks from the hive, and no epics, backlog or ADR
-        relations yet. The plans are the checkout's own `docs/plans/`, chosen by
+        their frontmatter and tasks from the hive, with epics (ADR 447) and no
+        ADR relations yet. An epic, a task file with `split_into`, is a row in
+        the same lists a task is (a plan's `tasks`, `no_plan.now`, a month's
+        `tasks`), with `kind: "epic"`, `place` (`board` or `backlog`),
+        `merged_tasks` and its sub-tasks nested in `tasks` in `split_into`
+        order; they are no longer flat rows. A sub-task with no `plan` takes
+        its epic's. A backlog epic (`proposed` or `deferred`) is in the future
+        band under its plan, as a second row for that plan file when the
+        plan is `building` or past, or in `no_plan.now` with none. A `plan` is
+        a plan file name or `docs/plans/` plus it. Odd epics (no sub-tasks,
+        an `epic` naming no file, an unreadable epic file) are warnings. The plans are the checkout's own `docs/plans/`, chosen by
         `?project=` the way `/api/debt` chooses it, because the image carries no
         copy of this repository's docs. The tasks are per harness, not per
         project: no task file carries a project key today, so every task in the
@@ -1096,9 +1107,14 @@ def create_app(
         warnings: list[str] = []
         plans_dir = os.path.join(cfg.projects_root, slug, project_docs.PLANS_DIR)
         plan_rows = _roadmap_plans(plans_dir, warnings)
-        task_rows = []
+        entries: list[_RoadmapEntry] = []
+        # Ids that have a file but no row, and why: an epic's `split_into`
+        # or a sub-task's `epic` naming one is told apart from a missing file.
+        absent: dict[str, str] = {}
         task_ids = sorted(context_transfer.list_task_ids(cfg.hive_tasks_dir))
         if len(task_ids) > MAX_ROADMAP_TASKS:
+            for left_out in task_ids[MAX_ROADMAP_TASKS:]:
+                absent[left_out] = "past the task cap"
             warnings.append(
                 f"{len(task_ids)} task files are in the hive and this service answers at "
                 f"most {MAX_ROADMAP_TASKS}: the first {MAX_ROADMAP_TASKS} by task id are "
@@ -1116,15 +1132,31 @@ def create_app(
                 front = _task_frontmatter(path)
                 project = front.get("project")
                 if project is not None and project != slug:
+                    absent[task_id] = "it belongs to another project"
                     continue
                 row, merged, month = _roadmap_task(task)
-                plan = front.get("plan")
+                title = front.get("title")
+                entry = _RoadmapEntry(
+                    row=row,
+                    plan=front.get("plan"),
+                    merged=merged,
+                    month=month,
+                    epic=task.epic,
+                    is_epic="split_into" in front or task.status == "epic",
+                    split_into=front.get("split_into"),
+                    title=title if isinstance(title, str) else None,
+                    key=task_store.order_key(
+                        task_id, task_store.bucket_of(task), task_store.rank_of(task)
+                    ),
+                )
                 app.json.dumps(row)
             except _UNREADABLE as exc:
                 warnings.append(f"{path}: unreadable task file: {exc}")
+                absent[task_id] = "its file did not read"
                 continue
-            task_rows.append((row, plan, merged, month))
-        return _envelope(_roadmap(slug, plan_rows, task_rows, warnings), warnings)
+            entries.append(entry)
+        placed = _roadmap_epics(entries, absent, warnings)
+        return _envelope(_roadmap(slug, plan_rows, placed, warnings), warnings)
 
     @app.get("/api/command-requests")
     @requires_auth
@@ -2188,30 +2220,192 @@ def _band_order(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda row: row["built"] or row["approved"] or "", reverse=True)
 
 
-def _roadmap(slug: str, plan_rows: list[dict], task_rows: list, warnings: list[str]) -> dict:
-    """The answer: plans banded and ordered, tasks under their plan or under `no_plan`."""
+class _RoadmapEntry(NamedTuple):
+    """One task file as `/api/roadmap` reads it, before epics are nested."""
+
+    row: dict
+    plan: object
+    merged: bool
+    month: str | None
+    epic: object
+    is_epic: bool
+    split_into: object
+    title: str | None
+    key: tuple
+
+
+class _Placed(NamedTuple):
+    """A row to place: a flat task or an epic with its sub-tasks nested."""
+
+    row: dict
+    plan: object
+    merged: bool
+    month: str | None
+    backlog: bool
+    key: tuple
+
+
+def _plan_name(plan: object) -> object:
+    """A `plan` value as a plan file name: `docs/plans/x.md` is `x.md` (ADR 447)."""
+    prefix = project_docs.PLANS_DIR + "/"
+    if isinstance(plan, str) and plan.startswith(prefix):
+        return plan[len(prefix):]
+    return plan
+
+
+def _latest(stamps: list[str | None]) -> str | None:
+    """The latest of ISO timestamps, or None when any is missing or will not compare."""
+    try:
+        parsed = [dt.datetime.fromisoformat(stamp) for stamp in stamps if stamp is not None]
+        if len(parsed) != len(stamps) or not parsed:
+            return None
+        return stamps[parsed.index(max(parsed))]
+    except (ValueError, TypeError):
+        return None
+
+
+def _month_of(at: str | None) -> str | None:
+    try:
+        parsed = dt.datetime.fromisoformat(at) if at is not None else None
+    except ValueError:
+        return None
+    return f"{parsed.year:04d}-{parsed.month:02d}" if parsed else None
+
+
+def _roadmap_epics(
+    entries: list[_RoadmapEntry], absent: dict[str, str], warnings: list[str]
+) -> list[_Placed]:
+    """Nest each epic's sub-tasks in it; the rows to place, in id order (ADR 447).
+
+    A sub-task is nested when its epic's `split_into` lists it. One whose
+    `epic` is not so listed, or names an id with no row, stays flat, with a
+    warning. `absent` says why an id with a file has no row. Every odd case
+    is a warning here and never an exception.
+    """
+    by_id = {entry.row["id"]: entry for entry in entries}
+    members: dict[str, list[str]] = {}
+    nested: dict[str, str] = {}
+    for entry in entries:
+        if not entry.is_epic:
+            continue
+        epic_id = entry.row["id"]
+        listed = entry.split_into
+        if listed is None:
+            listed = []
+        if not isinstance(listed, list) or not all(isinstance(item, str) for item in listed):
+            warnings.append(f"epic {epic_id}: split_into is not a list of task ids")
+            listed = []
+        members[epic_id] = []
+        for sub_id in listed:
+            sub = by_id.get(sub_id)
+            if sub is None:
+                why = absent.get(sub_id, "no task file")
+                warnings.append(f"epic {epic_id}: sub-task {sub_id} is skipped: {why}")
+            elif sub.is_epic or sub_id == epic_id:
+                warnings.append(f"epic {epic_id}: sub-task {sub_id} is an epic, left flat")
+            elif sub_id in nested:
+                warnings.append(
+                    f"task {sub_id}: listed by epics {nested[sub_id]} and {epic_id}; "
+                    f"nested under {nested[sub_id]}"
+                )
+            else:
+                nested[sub_id] = epic_id
+                members[epic_id].append(sub_id)
+        if not members[epic_id]:
+            warnings.append(f"epic {epic_id}: no sub-tasks")
+    for entry in entries:
+        sub_id, epic_id = entry.row["id"], entry.epic
+        if not isinstance(epic_id, str) or nested.get(sub_id) == epic_id:
+            continue
+        if epic_id in by_id:
+            warnings.append(
+                f"task {sub_id}: names epic {epic_id}, whose split_into does not list it; "
+                "it is left flat"
+            )
+        else:
+            why = absent.get(epic_id, "no task file")
+            warnings.append(f"task {sub_id}: names epic {epic_id}, which has no row: {why}")
+    placed: list[_Placed] = []
+    for entry in entries:
+        row, task_id = entry.row, entry.row["id"]
+        if task_id in nested:
+            continue
+        if not entry.is_epic:
+            placed.append(_Placed(row, entry.plan, entry.merged, entry.month, False, entry.key))
+            continue
+        subs = [by_id[sub_id] for sub_id in members[task_id]]
+        for sub in subs:
+            if sub.plan is not None and _plan_name(sub.plan) != _plan_name(entry.plan):
+                warnings.append(
+                    f"task {sub.row['id']}: plan {sub.plan!r} differs from epic "
+                    f"{task_id}'s {entry.plan!r}; it stays under the epic"
+                )
+        all_merged = bool(subs) and all(sub.merged for sub in subs)
+        merged_at = _latest([sub.row["merged_at"] for sub in subs]) if all_merged else None
+        epic_row = {
+            "id": task_id,
+            "title": entry.title,
+            "state": row["state"],
+            "merged_at": merged_at,
+            "kind": "epic",
+            "place": "backlog" if row["state"] in _BACKLOG_STATES else "board",
+            "merged_tasks": sum(1 for sub in subs if sub.merged),
+            "tasks": [sub.row for sub in subs],
+        }
+        backlog = row["state"] in ("proposed", "deferred")
+        placed.append(_Placed(epic_row, entry.plan, all_merged, _month_of(merged_at), backlog, entry.key))
+    return placed
+
+
+_BACKLOG_STATES = ("proposed", "deferred", "dropped")
+
+
+def _is_future(plan_row: dict) -> bool:
+    """A plan row is in the future band: no readable status, or not yet building."""
+    return plan_row["status"] is None or plan_row["status"] in _FUTURE
+
+
+def _roadmap(slug: str, plan_rows: list[dict], task_rows: list[_Placed], warnings: list[str]) -> dict:
+    """The answer: plans banded and ordered, rows under their plan or under `no_plan`.
+
+    Rows are tasks and epics (with their sub-tasks nested). A backlog epic
+    goes after the other rows of its list, in board order, and in the future
+    band: in its plan's row when that is a future one, else in a second row
+    for the plan file (ADR 447, part 5).
+    """
     by_file = {row["file"]: row for row in plan_rows}
     no_plan_now: list[dict] = []
     months: dict[str | None, list[dict]] = {}
-    for row, plan, merged, month in task_rows:
+    echoes: dict[str, dict] = {}
+    ordered = [item for item in task_rows if not item.backlog]
+    ordered += sorted((item for item in task_rows if item.backlog), key=lambda item: item.key)
+    for row, plan, merged, month, backlog, _ in ordered:
+        name = _plan_name(plan)
         if plan is not None:
-            if isinstance(plan, str) and plan in by_file:
-                by_file[plan]["tasks"].append(row)
+            if isinstance(name, str) and name in by_file:
+                target = by_file[name]
+                if backlog and not _is_future(target):
+                    if name not in echoes:
+                        echoes[name] = dict(
+                            target, tasks=[], superseded_by=list(target["superseded_by"])
+                        )
+                    target = echoes[name]
+                target["tasks"].append(row)
                 continue
             warnings.append(
                 f"task {row['id']}: plan {plan!r} is not a plan file of {slug}; "
                 "it is listed under no_plan"
             )
-        if merged:
+        if merged and not backlog:
             months.setdefault(month, []).append(row)
         else:
             no_plan_now.append(row)
-    bands: dict[str, list[dict]] = {"future": [], "now": [], "past": []}
+    bands: dict[str, list[dict]] = {"future": list(echoes.values()), "now": [], "past": []}
     for row in plan_rows:
         status = row["status"]
         # A plan with no readable status is in `future`: it is not known to be
         # built, and the warning beside it says why it has none.
-        if status is None or status in _FUTURE:
+        if _is_future(row):
             bands["future"].append(row)
         elif status in _NOW:
             bands["now"].append(row)

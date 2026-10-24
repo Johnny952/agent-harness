@@ -586,3 +586,9 @@ operator no longer has to edit `config.yaml` to set or clear it.
 the `docs/plans/` prefix, a task naming a plan this way still shows under
 *no plan*. ADR 450 records that gap as a consequence, so it is not filed as
 debt.
+**T-178-S2** declared no debt and resolved none. `GET /api/roadmap` now serves
+epics as rows with their sub-tasks nested in `split_into` order, backlog
+epics in the future band marked `place: backlog`, and a warning for an empty
+epic, a missing epic file or an unreadable one (`docs/decisions.md` ADR 447).
+A plan file can now sit in two bands, which the screen half, T-178-S3, keys
+by band and file.
