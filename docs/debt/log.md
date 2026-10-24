@@ -537,6 +537,11 @@ logger, so a waitress line no longer prints a second time through the root
 handler that `waitress.serve()`'s own `basicConfig()` adds
 (`docs/decisions.md` ADR 423, amending ADR 420 Decision 3).
 
+**T-170** resolved `T-168-D1`. Inside the ADR 411 window the account reaper
+now probes the account's container for a process working under the task's
+worktrees and releases a dead orphan's holder as soon as none is left; a probe
+that cannot answer, or a card with no project, still waits the full window
+(`docs/decisions.md` ADR 429). It declared no debt.
 **T-174** resolved no earlier row and declared no debt. 25 index rows end
 their **what** cell with the entry's origin word (` Introduced` or ` Found`),
 which is not part of the what: `T-037-D1`, `T-039-D1`, `T-065-D1`, `T-100-D1`,

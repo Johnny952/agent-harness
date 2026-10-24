@@ -16991,6 +16991,90 @@ root logger is still not touched.
   be whatever root was given. It also leaves nothing for a test to pin but
   the absence of a handler, since pytest's root never prints.
 
+## ADR 429 — The account reaper looks in the container before holding an orphan for the window
+
+**Status:** accepted (2026-10-24), T-170's arquitecto. Resolves `T-168-D1`.
+Narrows ADR 411, 2 and 5, and takes the first entry of its *Ruled out*; ADR
+411, 1, 3 and 4 stand as written.
+
+**Context.** ADR 411 keeps an account `BUSY` with a task whose card heartbeat
+has expired for `phase_timeout_seconds` plus one TTL from its anchor, because
+an orphaned `claude` may still be writing the worktree. When the orphan died
+with the host or its container, the account and the task wait out that
+window, about two hours, for nothing. ADR 411 ruled out looking because a
+`pgrep` per holder on every pick is a container round trip and `claude`'s argv
+does not name its task. Neither holds for the probe below: it runs only for a
+holder already past the heartbeat test, and it reads a process's working
+directory, which does name the task, not its argv.
+
+**Decision.**
+1. **What is probed.** A phase's every `claude` call is a `docker exec -w
+   <worktree>` whose in-container `timeout` wrapper keeps that working
+   directory until `claude` exits, and every worktree of task *T* lies under
+   `docker_exec.task_worktrees_dir(projects_root, slug, T)`. So the phase is
+   *seen* when some process in the account's container has a working
+   directory equal to that directory or under it (a deleted one, which
+   `/proc` shows with a ` (deleted)` suffix, included).
+2. **The probe.** `docker_exec.task_process_seen(container, task_dir) -> bool
+   | None`, one `run_docker_exec(container, "/", argv,
+   timeout=PROCESS_PROBE_TIMEOUT_SECONDS)` (30) with the argv
+   `["sh", "-c", PROCESS_PROBE_SCRIPT, "ia-harness-probe", task_dir]`, where
+   the script walks `/proc/[0-9]*`, reads each `cwd` with `readlink`, skips a
+   process it cannot read, prints `seen` and exits 0 on the first match and
+   prints `gone` otherwise. Only `sh`, `readlink` and `/proc` are needed: the
+   agent image has no `procps`. The probe's own shell runs in `/`, so it
+   never matches itself. It returns True on `seen`, False on exit 0 with
+   `gone`, and None on anything else — another output, a non-zero exit, an
+   `OSError` or `subprocess.SubprocessError` (the container is down, `docker`
+   is missing, the call timed out). The agent containers run as root, so
+   every process's `cwd` is readable.
+3. **Where it runs.** `reap_stale_busy_accounts` only, in the branch ADR 411,
+   2 added: a holder whose card has a heartbeat, the heartbeat has expired
+   and `_phase_may_be_running` still says True. There it calls a dispatcher
+   helper `_task_process_seen(cfg, account, task)` that returns None when the
+   card has no `project` (no directory to name) and otherwise probes
+   `container_for(cfg, account)` for `task_worktrees_dir(cfg.projects_root,
+   task.project, task_id)`. **False releases the holder** at once, logged by
+   the existing warning with the reason "no process of task *T* is left in
+   container *C*"; **True or None keeps it**, as ADR 411 does today. A holder
+   with a live heartbeat, inside the claim floor, with no card or no
+   heartbeat, or past the window is judged exactly as before and never
+   probed.
+4. **What is not changed.** `orphan_holders`, `reap_expired_locks`,
+   `tasks.acquire_lock` and `dispatch release-account` do not probe. Every
+   dispatch reaches `acquire_lock` through `pick_idle_account`, which runs the
+   reaper first, so a holder the probe found dead is gone from the state file
+   before `orphan_holders` reads it, and the expired lock is taken as ADR
+   411, 4 already allows. `reap_expired_locks` at the top of a cycle may
+   still log the lock as held once; the pick that follows frees it.
+5. **Tests.** An autouse fixture in a new `tests/dispatcher/conftest.py`
+   stubs `dispatcher.dispatcher._task_process_seen` to return None, so no
+   test ever runs `docker`; a test that wants a probe answer patches it
+   again. The probe itself is tested by patching
+   `docker_exec.run_docker_exec`.
+
+**Consequences.**
+- After a host or container restart the dead orphan's account is released
+  by the first pick that probes it, and the task can be taken by that same
+  dispatch; `dispatch release-account` is no longer the only fast way out.
+- A live orphan (the Ctrl+C case, `claude` still running) costs one `docker
+  exec` per pick for as long as it runs, up to the ADR 411 window. Nothing
+  caches the answer.
+- A probe that cannot answer never frees anything, so a container that is
+  unreachable rather than restarted still waits the window.
+- A dispatcher that is alive but whose heartbeat has stalled past the TTL,
+  probed while no call of its phase is in the container, loses its holder;
+  ADR 411 would have kept it. The heartbeat thread beats every
+  `heartbeat_interval_seconds` for the whole phase, so this needs that thread
+  to fail for a full TTL.
+
+**Ruled out.**
+- *Matching `claude` by name or argv:* the argv does not name the task, and a
+  turn or another task's phase on the same account runs a `claude` too.
+- *Probing in `orphan_holders` as well:* the reaper has already run on the
+  same pick, so it would be a second round trip for the same answer.
+- *Releasing on a failed probe:* a docker hiccup would free a live orphan's
+  account and hand its task to a second writer, the race ADR 411 closed.
 ## ADR 426 — a debt row's **what** carries no origin word; the filing note says so and `backlog_item` strips one
 
 **Status:** accepted (2026-10-24), T-174's arquitecto.
