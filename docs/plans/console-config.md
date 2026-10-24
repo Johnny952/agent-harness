@@ -297,3 +297,14 @@ writer never holds a credential.
 cover the queue, the worker, and how the console sees whether a credential
 exists. Whether `update_project_before_task` becomes editable waits on
 that. It does not wait on tasks 1–3 and does not block them.
+
+**Designed, 2026-10-24 (T-179, `docs/decisions.md` ADR 456).** Two new
+action kinds, `git_token` and `account_login`; deploy keys keep ADR 212's
+`keygen` with `replace` and its `check`. A pasted token or code never sits in
+an action record: the board service writes it to a `0600` file under
+`<state_dir>/actions/secrets/` and the worker reads and unlinks it. The
+console sees each credential through `GET /api/credentials`, a snapshot the
+worker writes from `stat` and public halves alone.
+`update_project_before_task` becomes editable once the Tokens screen is
+merged. The eight build tasks, one surface each and in order, are the ADR's
+*Consequences*. None is built.

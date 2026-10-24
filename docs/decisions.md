@@ -17593,3 +17593,319 @@ by `file` alone, and draws every row as a task link.
   in the task list in id order, and a separate group would reorder them.
 - *Hiding a kept epic's merged sub-tasks under Full history too:* full
   history is the default and hides nothing.
+
+## ADR 456 — The Tokens screen's credentials: two new action kinds, a secret handed to the worker in a file of its own, and a status snapshot the worker writes without reading a secret
+
+**Status:** accepted (T-179, 2026-10-24). A design: it builds nothing, and
+the tasks under *Consequences* build it. It is task 4 of
+`docs/plans/console-config.md` and the Tokens task of `docs/plans/front.md`.
+It narrows ADR 142 decision 3 (the board service writes one more kind of
+file under `actions/`) and ADR 75 part 5 (the `update_project_before_task`
+row); it supersedes nothing.
+
+**Context.** ADR 75 named three credentials for this task and left it the
+queue, the worker and how the console sees that a credential exists. What is
+already built or decided:
+
+- *The GitHub token* is ADR 36's `store` file at `git_credentials_path`, a
+  single-file bind mount from the host's `.data/credentials/git-credentials`,
+  `:ro` in both agents of `docker/compose/docker-compose.agents.yml`. No
+  service of `docker/compose/docker-compose.yml` mounts it, and the Coolify
+  compose mounts it nowhere (ADR 91). The push uses it too (ADR 78).
+- *Deploy keys* are ADR 56's `{project_keys_dir}/<slug>/id_ed25519`, made
+  from the console by the `keygen` action, which already takes
+  `params.replace` and answers the public half and its fingerprint (ADR 212);
+  `check` tells read and write access (ADR 214). The worker mounts
+  `project_keys_dir` read-write in both compose files.
+- *The Claude login* lives in each agent's `claude_creds_<name>` volume, at
+  `CLAUDE_CONFIG_DIR=/root/.claude-account` (`docker/agent/Dockerfile`), as
+  `.credentials.json`. An expired one parks the account `AUTH_EXPIRED`,
+  which only a re-login and `release` clear (ADR 76).
+  `docs/plans/server-deployment.md` *Decisions*, 3 sketches the flow: the
+  worker runs the CLI's login, shows its URL, and writes the pasted code into
+  the waiting login and nothing else.
+- The operator answered yes, 2026-10-15, to rendering a sign-in URL and
+  taking a pasted code or token in the console, for the Claude login and for
+  the GitHub token (`docs/plans/backlog.md` item 0, `front.md` *Bound to the
+  Tokens task*). That is the authorization ADR 142 decision 6 asks a kind
+  that reaches a credential to name. Neither kind spends quota (C-4).
+- The worker reaches containers through ADR 435's proxy, which admits `exec`
+  create, start and inspect into `agent-*` and `dind-*` and nothing else,
+  `/exec/<id>/resize` included.
+- An action record is not private: `GET /api/actions` and
+  `GET /api/actions/<id>` serve `pending/`, `claimed/` and `done/` to the
+  console (ADR 142 step 4, ADR 216), `done/` is kept for good, and a backup
+  copies `/state` (ADR 327). So no secret may sit in a record, even briefly.
+
+**Decision.**
+
+1. *The kinds.* Two new kinds in `dispatcher/actions.py` `KINDS`, and none
+   for deploy keys:
+   - **`git_token`** — `project` null, `task_id` null, `params` `{username}`:
+     a GitHub login, `^[A-Za-z0-9-]{1,39}$`, default `x-access-token`. The
+     token is not in the record (decision 2). Serial key `credential:git`;
+     a second pending or claimed `git_token` is 409. `spends_quota` false.
+     Recovery `interrupt`, "interrupted while writing the GitHub token; look
+     at the Tokens screen before renewing again".
+   - **`account_login`** — `project` null, `task_id` null, `params`
+     `{account}`: an account name, the `accounts[]` name shape. The code is
+     not in the record. Serial key `account:<name>` (ADR 142 decision 8); a
+     second pending or claimed `account_login` for the same account is 409.
+     `spends_quota` false. Recovery `interrupt`, "interrupted during the
+     sign-in; start it again". Never rerun: the login may have half-written
+     the account's credentials (ADR 142 decision 7).
+   - **Deploy keys** keep `keygen` with `replace: true` as their renewal,
+     and `check` as its proof (ADR 212, ADR 214). The Tokens screen queues
+     them through the routes ADR 212 built; nothing is added for them but
+     the status of decision 4.
+2. *A secret travels in a file of its own, never in a record.* Under
+   `<state_dir>/actions/secrets/`, one file per action, named by the action
+   id, mode `0600`, written to a dot-named temp file in that directory with
+   `O_CREAT|O_EXCL` and renamed into place.
+   - *Who writes.* The board service only, inside its `write.lock`. For a
+     `git_token` it writes the token's file **before** it renames the record
+     into `pending/`, so the worker never claims one without its secret. For
+     an `account_login` it writes the code's file when the code is pasted
+     (decision 3). That is the one write ADR 142 decision 3 did not give it.
+   - *Who reads.* The worker only: it opens the file, reads it, unlinks it
+     at once, and keeps the value in a local variable until it is written
+     where it goes. One creator and one consumer per file, as for records.
+   - *What never reads it.* `actions.read_all`, `actions.find` and every
+     api route list `pending/`, `claimed/` and `done/` by name and never
+     `secrets/`. `dispatcher/backup.py` `NEVER_COPIED` gains `secrets`, so a
+     backup taken while one waits does not copy it.
+   - *The sweep.* Each worker pass unlinks a secret whose action is not
+     pending or claimed, and one older than fifteen minutes; recovery
+     unlinks the secret of every record it interrupts. A secret outlives its
+     use only by a crash, and then by one pass.
+   - *What may name it.* Nothing: no `error`, `result`, log line, comment,
+     notification or answer quotes a token or a code, or the CLI output
+     around one. A refusal says which rule the value broke ("the token is
+     not a GitHub personal access token"), never the value, as ADR 213 does
+     for a remote.
+3. *The routes,* in the board service, behind `BOARD_ACTIONS_TOKEN`, with
+   ADR 151's guard order and the sign-in checks of the other action routes;
+   when the request carries a session, owner only (`server-deployment.md`
+   *Decisions*, 2, as ADR 75 part 3 for a save). Each answers 201 with the
+   record, which holds no secret.
+   - `POST /api/credentials/git-token`, body `{token, username?}`. `token`
+     must match `^(ghp_|github_pat_)[A-Za-z0-9_]{20,250}$`, else 400. Queues
+     a `git_token` with its secret file.
+   - `POST /api/accounts/<name>/login`, body `{}`. A name the config's
+     `accounts[]` does not hold is 404. Queues an `account_login`.
+   - `POST /api/actions/<id>/login-code`, body `{code}`. `code` must be 1 to
+     512 printable ASCII characters with no whitespace, else 400. 409 unless
+     `claimed/<id>.json` is an `account_login` whose `result.awaiting` is
+     `"code"`, and 409 when a code for it is already waiting. Writes the
+     code's file and creates no record.
+4. *What the console sees: a snapshot the worker writes, read by the api.*
+   `snapshot(cfg)`, in a new `credentials` module of the dispatcher package,
+   builds, and the worker writes
+   atomically to `<state_dir>/credentials.json`, a record that holds no
+   secret and was made without opening one. Every field comes from `stat`
+   (existence, type, size, `mtime`) or from a public half:
+   - `version: 1`, `written_at`;
+   - `git_token`: `{path, state, modified_at}`, `state` one of `present` (a
+     non-empty regular file), `empty`, `absent`, `directory` (Docker made one
+     for a missing host file, ADR 36) or `not_mounted` (the worker has no
+     such path, as under the Coolify compose);
+   - `deploy_keys`: one row per project with a record or a key directory,
+     `{project, state, modified_at, fingerprint}`, `state` `present` or
+     `absent`, the fingerprint from `ssh-keygen -l -f` on `id_ed25519.pub`;
+   - `accounts`: one row per configured account, `{account, container,
+     state, modified_at, logged_in_at}`, where `state` and `modified_at`
+     come from `stat -c '%s %Y'` on `/root/.claude-account/.credentials.json`
+     run in the agent by exec (`present`, `absent`, or `unreachable` when the
+     exec fails), and `logged_in_at` is the time of the last console sign-in
+     that ended `done`, carried forward from the previous snapshot.
+   `modified_at` is when the file was last written: for the token and a key
+   that is their last renewal, since nothing else writes them; for a login it
+   also moves on the CLI's own refresh, which is why `logged_in_at` is kept
+   beside it. Whether a login *works* is the account's state on
+   `/api/accounts` (`AUTH_EXPIRED`, ADR 76), which the screen reads beside
+   this one.
+
+   The worker writes it at start, every 300 seconds
+   (`CREDENTIALS_SNAPSHOT_SECONDS`), and after every `git_token`,
+   `account_login` and `keygen` ends. The read api serves it at
+   `GET /api/credentials` through its `/state:ro`, in the `{data, warnings}`
+   envelope, with `stale: true` when `written_at` is older than 900 seconds
+   (served staleness, `docs/ui.md`). No file is `data: null` with the warning
+   "no credentials snapshot: the worker has not written one"; a file that
+   does not parse is `data: null` with its reason. That is `listTokens`, the
+   read `front.md` tier 2 could not serve: it no longer reaches into a
+   container, because the worker already does.
+5. *The `git_token` handler.* Takes the secret; refuses a token that fails
+   decision 3's shape again (`failed`). Reads `stat` on
+   `cfg.git_credentials_path`: `not_mounted`, `absent` and `directory` fail
+   with a fixed sentence naming the host file
+   (`.data/credentials/git-credentials`) and that the worker must be
+   recreated after it exists. Otherwise it writes
+   `https://<username>:<token>@github.com\n` **in place**: open `r+`,
+   truncate, write, `fsync`. Not a temp file and `os.replace`: the path is a
+   single-file bind mount, a rename onto it fails, and the agents' `:ro`
+   binds keep the inode they were given, so only an in-place write reaches
+   them. The file is the harness's GitHub credential, one line, replaced
+   whole; a line for another host is not kept. Result `{written_at}`. It
+   does not try the token: no remote is known to it (project records are SSH,
+   ADR 213), and the next fetch or push says, in git's words.
+6. *The `account_login` handler.*
+   - *On claim.* The account must be configured, and its state file must
+     hold no holder unless its state is `AUTH_EXPIRED`; otherwise `failed`,
+     "the account is running a phase; sign in again once it is idle". A
+     phase the picker starts on an `IDLE` account during the sign-in uses
+     whichever credential is on disk when it starts; that is accepted, not
+     guarded.
+   - *The login.* `docker exec -i <container> script -qfec 'claude auth
+     login' /dev/null`, through `open_docker_exec` with a stdin pipe: `script`
+     (Debian `bsdutils`, essential) gives the CLI the terminal it wants inside
+     the container, so the docker client asks for no TTY and no `resize`,
+     which ADR 435's proxy refuses. The worker reads the output into memory
+     only, strips ANSI sequences, and takes the first `https://` URL whose
+     host is `claude.ai`, `console.anthropic.com` or
+     `platform.claude.com`. It writes `result` `{url, awaiting: "code",
+     url_at}` by `actions.rewrite`; the record stays in `claimed/`. The URL is
+     not a credential (it carries a challenge, not the verifier, which stays
+     in the CLI's process). No URL within 60 seconds kills the exec and fails,
+     "the login printed no sign-in URL within 60 seconds".
+   - *The code.* The handler polls `secrets/<id>` each second for up to 600
+     seconds. It takes the code, writes it and `\r` to the exec's stdin,
+     rewrites `result` to `{url: null, awaiting: null, code_at}`, and waits
+     up to 120 seconds for the exec to exit. No code in time kills the exec
+     and fails, "no code arrived within 10 minutes; start the sign-in again".
+   - *The end.* Exit 0 and the credentials file's `mtime` later than the
+     claim is `done`, `result` `{logged_in_at, released}`: when the account
+     was `AUTH_EXPIRED` the handler releases it as `release-account` does
+     (ADR 76's "the operator's re-login and `release`", here one act), and
+     `released` says whether it did. Anything else is `failed` with a fixed
+     sentence by case ("the login exited 1 after the code was sent"), never
+     the CLI's output, which may echo what was pasted. The output buffer is
+     dropped when the handler returns. The worker's log line names the kind,
+     the id, the account and the outcome only.
+   - *Cancel.* A `cancel` on a running `account_login` kills the exec and
+     ends it `cancelled`, as on a running `turn` (ADR 142 decision 7). On a
+     running `git_token` it ends `failed` and changes nothing, as on a
+     running `command_verdict`.
+   - *Where the code goes.* From the console's input, through the console's
+     forward and the board service's route, into `secrets/<id>`, into the
+     worker's memory, into the CLI's stdin. Not a record, a log, the hive,
+     the board, a comment, a notification or a backup.
+7. *The Tokens screen,* `front/src/routes/tokens.tsx`, rewired off
+   `ContainerToken` and `reauthContainer` onto `GET /api/credentials`,
+   `GET /api/accounts`, the three routes of decision 3, ADR 212's `keygen`
+   and `check`, and `GET /api/actions/<id>` for each outcome (ADR 216).
+   Desktop first (`server-deployment.md` *Decisions*, 6).
+   - *Regions,* one per credential: **GitHub token** (one row: state,
+     modified time absolute and its age relative, `docs/ui.md`); **Deploy
+     keys** (a row per project: state, fingerprint, modified); **Claude
+     logins** (a row per account: the account's pool state with its tone,
+     the file's state and modified, *signed in from the console* with its
+     time or "never from the console").
+   - *Controls.* GitHub token: a password field, an optional username, and
+     *Renew*; the field is cleared when the request returns, accepted or
+     not. Deploy key: *Replace key* behind a confirmation that says the
+     project's fetch and push fail until the new public half is added on
+     GitHub, then the public half, its fingerprint and *Check*. Login:
+     *Sign in again*, then "waiting for the sign-in URL", then the URL as a
+     link opening a new tab, a code field and *Send code* (the field cleared
+     on return), then "signing in", then the outcome; *Cancel* while the
+     action is pending or running.
+   - *States.* Loading is per page. A failed `/api/credentials` read is an
+     `ErrorState` and no control is drawn (tier 3's floor). `data: null`
+     with the no-snapshot warning is a degraded banner naming the worker,
+     with no rows and no control. `stale: true` is a warning banner with the
+     snapshot's age; the rows and the controls are drawn, since a queued
+     action waits for the worker and the queue screen says whether it runs.
+     A row of the wrong shape is `Malformed`. A refused write (400, 409,
+     503) is quoted under its control, which a refusal never fills with the
+     value.
+8. *`update_project_before_task` becomes editable*, a boolean, once the
+   Tokens screen of decision 7 is merged, so a person turning it on can see
+   whether the token or the project's key exists. The writer checks no
+   credential: it never holds or reads one (ADR 109), and with none present
+   the flag costs a warning per task (ADR 36's `unavailable`), never a stop.
+   Its row's reason becomes "Fetches before each task; the Tokens screen
+   shows whether a credential exists."
+
+**Consequences.** The build, in order, one surface each; `after` names what
+must be merged first.
+
+1. *`dispatcher/actions.py`'s contract.* The two kinds of decision 1, their
+   validation, serial keys, one-per refusals and recovery lines; the
+   `secrets/` directory: a `secret` argument to `create` written before the
+   rename, `put_login_code` (the 409s of decision 3 under `write.lock`),
+   `take_secret` (read and unlink), the sweep and recovery's unlink;
+   `read_all` and `find` never listing `secrets/`; and
+   `dispatcher/backup.py` `NEVER_COPIED` gaining `secrets`. Tests: the
+   secret lands `0600` before the record is pending; a take is once; the
+   sweep; recovery; `read_all` with a secret present.
+2. *The new `credentials` module, the snapshot of decision 4,* and the
+   worker's calls to it at start and on its 300-second timer. Tests: each
+   `state` of each region from files and a faked exec, a file that is
+   never opened (asserted on a `0000` file), `logged_in_at` carried forward.
+3. *The worker's `git_token` and `account_login` handlers* in
+   `dispatcher/worker.py` `HANDLERS`, `open_docker_exec` gaining a stdin
+   pipe (`-i`), the cancel of a running login, and the snapshot after each
+   end and after `keygen`. After 1 and 2. Tests with the exec faked: the
+   in-place write keeps the inode; each fixed failure; the URL taken and
+   rewritten; the code written once and in no `error`, `result` or log;
+   both timeouts; the release from `AUTH_EXPIRED`.
+4. *The board service's three routes* of decision 3. After 1. Tests: the
+   guards, each 400 and 409, the secret written and absent from the answer.
+5. *The read api's `GET /api/credentials`.* After 2. Tests: a snapshot,
+   stale, none, a bad file.
+6. *Compose:* the `worker` service mounts
+   `../../.data/credentials/git-credentials` at `git_credentials_path`
+   read-write in `docker/compose/docker-compose.yml`; `scripts/configure.sh`
+   creates that host file empty and `0600` when it is missing, so Docker does
+   not make a directory there; the root `README.md` says so. The Coolify
+   compose keeps no token (ADR 91), and its screen shows `not_mounted`. A
+   change to `docker/compose/` needs the user's approval. After 3. Tests:
+   the invariants (the token file read-write in `worker` only, `:ro` in the
+   agents).
+7. *The console:* the forward of the three routes and of
+   `GET /api/credentials` (`forward.ts`, the api's `FORWARDED` list), the
+   `client.ts` calls, and the Tokens screen of decision 7. After 4 and 5.
+   Its arquitecto may split the screen into its reads first and its
+   controls second, as T-066 did the settings screen.
+8. *`update_project_before_task` editable* in `dispatcher/config.py`
+   `CONFIG_KEYS`, with the counts that name it in the docs. After 7.
+
+Also:
+- The URL pattern, the prompt and the exit status of `claude auth login`
+  under `script` in the pinned CLI were not seen by this design (no docker
+  in a phase). Build task 3's handler is written against decision 6's
+  rules; the operator's first sign-in from the console is its measurement,
+  and a host or wording it misses is an edit to the handler, under an ADR
+  like ADR 215.
+- A GitHub personal access token is accepted with any non-empty username;
+  `username` is in `params` so an operator whose token needs their own login
+  can give it, and it is not a secret.
+- `git_credentials_path` now holds the token the console was given, so a
+  token pasted with more scope than `contents: read` (ADR 36) is as wide in
+  the agents as it would be by hand. The screen says which scope ADR 36
+  asks for, and the push's (ADR 78) is the operator's choice.
+- The server-deployment kinds `account_add`, `account_pause`,
+  `account_remove` and `account_delete_volume` stay named for later; this
+  `account_login` is the one they will reuse for a new account.
+
+**Ruled out.**
+- *The token or the code in `params`, scrubbed on claim:* the record is
+  served by `/api/actions` and copied by a backup in the seconds before the
+  worker claims it.
+- *A `login_code` action kind:* a second record that would hold the code
+  in `done/` for good.
+- *The board service writing the credential file itself:* it would hold a
+  credential, which ADR 124 and ADR 142 keep on the dispatcher's side.
+- *The config writer for any of this:* ADR 109's writer never holds a
+  credential, and ADR 75 sends this task elsewhere.
+- *`docker exec -it` from a pty in the worker:* the docker client then
+  calls `/exec/<id>/resize`, which ADR 435's proxy refuses.
+- *A long-lived token from `claude setup-token` pasted once:* it is the
+  credential itself rather than a one-time code, which is what
+  `server-deployment.md` *What it is not* keeps out of the console.
+- *Reading `expiresAt` from `.credentials.json`:* it opens the secret; the
+  account's `AUTH_EXPIRED` state already says when a login stopped working.
+- *A credentials status read by the api through exec:* the api has no
+  socket and must not (C-8, `docs/plans/front.md` on `listTokens`).
+- *A temp file and `os.replace` for the token:* see decision 5.
