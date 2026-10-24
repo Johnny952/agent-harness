@@ -16990,3 +16990,50 @@ root logger is still not touched.
   `_quiet`, and not in a future waitress that stops — and its format would
   be whatever root was given. It also leaves nothing for a test to pin but
   the absence of a handler, since pytest's root never prints.
+
+## ADR 426 — a debt row's **what** carries no origin word; the filing note says so and `backlog_item` strips one
+
+**Status:** accepted (2026-10-24), T-174's arquitecto.
+
+**Context.** 25 rows of `docs/debt/README.md` end their **what** cell with
+` Introduced` or ` Found` — the entry's origin — and `debt.backlog_item`
+copies it into every backlog title built from such a row. No code writes
+the word: `debt.declared_row` and `debt.filing_note` hand on the
+declaration's `what` alone, and `git log -S` shows every such row written
+by an auditor (T-037's first), each one copying the habit from the rows
+above it. The auditor sees the origin twice — `handoff._debt` renders a
+declaration as `what (introduced) — …`, and the entry file opens with
+`**Origin:**` — and nothing tells it where the word belongs.
+
+**Decision.**
+1. **The filing note names the cell's content.** `debt.filing_note` says
+   that the **what** cell is the entry's what as listed and ends there, and
+   that the origin (`introduced` or `found`) goes on the entry file's
+   `**Origin:**` line, never in the row. This is the source fix: the
+   auditor is the index's only writer (ADR 297), so its instructions are
+   the only place to stop the word.
+2. **`backlog_item` strips one trailing origin word** from the what it
+   reads — ` Introduced` or ` Found`, capitalised, as the last word of the
+   cell — before building the title and the goal, so the rows already
+   written give clean titles. Only `backlog_item`: `index_rows`,
+   `/api/debt` and `index_fingerprints` read the cell as written.
+3. **The 25 rows stay as written.** ADR 297 decision 1 forbids editing a
+   row, so they are not rewritten; T-174's paragraph in `docs/debt/log.md`
+   names them and says the trailing word is an origin, not part of the
+   what.
+
+**Consequences.**
+- Backlog items already filed keep their titles; retitling them is the
+  operator's.
+- An auditor can still copy the habit from the 25 rows; the filing note's
+  sentence is what counters it, and `backlog_item` absorbs a slip.
+- A row whose what genuinely ends in the word `Found` or `Introduced` loses
+  it in its backlog title.
+
+**Ruled out.**
+- *Rewriting the 25 rows in place:* ADR 297 decision 1; a union merge of an
+  edited row against another branch's copy duplicates it.
+- *Stripping in `_raw_rows`:* it would move every reader of the cell and
+  every fingerprint the index dedupes by, for a cosmetic fault.
+- *A gate refusing the word:* a new blocking check for a wording slip
+  `backlog_item` already absorbs.
