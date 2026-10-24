@@ -232,6 +232,18 @@ def _phase_may_be_running(
     return now - anchor <= cfg.phase_timeout_seconds + cfg.heartbeat_ttl_seconds
 
 
+def _task_process_seen(cfg: Config, account: str, task: context_transfer.TaskFile) -> bool | None:
+    """Whether a process of `task` is left in `account`'s container (ADR 429).
+
+    None when the card names no project, so there is no directory to look in."""
+    if task.project is None:
+        return None
+    return docker_exec.task_process_seen(
+        container_for(cfg, account),
+        docker_exec.task_worktrees_dir(cfg.projects_root, task.project, task.task_id),
+    )
+
+
 def orphan_holders(
     cfg: Config, task_id: str, exclude: Sequence[str] = (), now: float | None = None,
 ) -> list[str]:
@@ -307,11 +319,20 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
                 if not context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
                     continue
                 if _phase_may_be_running(cfg, busy_since, task.heartbeat, now):
-                    continue
-                why = (
-                    f"the heartbeat on card {task_id} is more than "
-                    f"{cfg.heartbeat_ttl_seconds}s old and the phase timeout window has passed"
-                )
+                    # Inside the ADR 411 window: look in the container before
+                    # holding it (ADR 429). Only a definite "gone" frees it.
+                    if _task_process_seen(cfg, acc.name, task) is not False:
+                        continue
+                    why = (
+                        f"the heartbeat on card {task_id} is more than "
+                        f"{cfg.heartbeat_ttl_seconds}s old and no process of task "
+                        f"{task_id} is left in container {acc.container}"
+                    )
+                else:
+                    why = (
+                        f"the heartbeat on card {task_id} is more than "
+                        f"{cfg.heartbeat_ttl_seconds}s old and the phase timeout window has passed"
+                    )
             else:
                 # Nothing to read but the wall clock, so it is given the whole
                 # phase timeout rather than the heartbeat TTL: past that the phase

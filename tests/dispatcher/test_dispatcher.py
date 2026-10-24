@@ -1679,6 +1679,22 @@ def test_dispatch_phase_takes_the_task_once_the_orphan_is_past_the_timeout(tmp_p
     assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).owner == result.account
 
 
+def test_dispatch_phase_takes_the_task_inside_the_window_once_the_probe_says_gone(
+    tmp_path, monkeypatch,
+) -> None:
+    """ADR 429: the holder is inside the ADR 411 window, but no process of the
+    task is left in its container, so the pick's reaper frees it."""
+    cfg = _two_accounts(tmp_path)
+    ran = _orphan_setup(cfg, monkeypatch, busy_task="task-1", busy_age=999, heartbeat_age=999)
+    monkeypatch.setattr(dispatcher_mod, "_task_process_seen", lambda cfg, account, task: False)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.success is True
+    assert len(ran) == 1
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).owner == result.account
+
+
 def test_run_task_cycle_reports_an_orphan_phase_without_a_traceback(
     tmp_path, monkeypatch, fake_git, caplog,
 ) -> None:
