@@ -2569,9 +2569,10 @@ def _worker_heartbeat(path: Path, warnings: list[str]) -> dict:
 
 
 def _log_waitress() -> None:
-    """Send waitress's start line and queue warnings to stderr (ADR 420)."""
+    """Send waitress's start line and queue warnings to stderr once (ADR 420, 423)."""
     logger = logging.getLogger("waitress")
     logger.setLevel(logging.INFO)
+    logger.propagate = False  # waitress.serve() gives root a handler too (ADR 423)
     if not logger.handlers:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))

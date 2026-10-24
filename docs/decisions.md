@@ -16944,3 +16944,49 @@ not this task's to change.
   could pin it.
 - *One shared helper module:* it would need a Dockerfile `COPY` in at least
   two images, which this task may not touch.
+
+## ADR 423 — The `waitress` logger stops propagating, so each waitress line prints once
+
+**Status:** accepted (2026-10-24), T-173's arquitecto. Amends ADR 420
+*Decision* 3; the rest of ADR 420 stands, and ADR 420 is not edited.
+
+**Context.** After T-172's redeploy, `docker logs` of all four services shows
+`INFO:waitress:Serving on http://0.0.0.0:<port>` twice. `waitress.serve()`
+calls `logging.basicConfig()` itself before it builds the server (waitress's
+`__init__.py`, "idempotent if logging has already been set up"), so in a
+container root has a stderr handler by the time waitress logs. ADR 420's
+`_log_waitress()` gives the `waitress` logger its own stderr handler and
+leaves `propagate` at its default, `True`: a record goes out through that
+handler and then up to root's, and every waitress line — the
+`waitress.queue` warning included — prints twice. ADR 420 did not know
+about waitress's own `basicConfig()`, and its test could not see it: under
+pytest root already holds pytest's capture handlers, so `basicConfig()` is
+a no-op and nothing on root writes to stderr.
+
+**Decision.** `_log_waitress()` keeps ADR 420's handler, level and format and
+also sets `logging.getLogger("waitress").propagate = False`, in all four
+entry points (`observability/collector/server.py`, `observability/api/app.py`,
+`board_service/app.py`, `config_writer/app.py`). A waitress record then has
+exactly one way out — the handler on `waitress` — whatever root holds. The
+root logger is still not touched.
+
+**Consequences.**
+- One `Serving on` line and one line per `waitress.queue` warning, after the
+  operator rebuilds the images.
+- A waitress record no longer reaches root's handlers: a root-level
+  configuration added later (a JSON formatter, say) does not apply to
+  waitress, and pytest's `caplog` does not see waitress records from a test
+  that ran an entry point. Whoever adds one sets it on `waitress` too.
+- The tests count lines: the fake `serve` stands in for waitress's
+  `basicConfig()` by putting a stderr handler on root for the duration of
+  the call, which is what makes the doubling observable under pytest.
+- `tests/conftest.py`'s fixture restores `propagate` as well as the level and
+  the handlers.
+
+**Ruled out.**
+- *Drop the handler and leave the line to root's handler, as the task
+  suggested:* the line would then exist only because waitress happens to
+  call `basicConfig()` on the `serve()` path the containers take — not on
+  `_quiet`, and not in a future waitress that stops — and its format would
+  be whatever root was given. It also leaves nothing for a test to pin but
+  the absence of a handler, since pytest's root never prints.

@@ -928,20 +928,30 @@ def test_run_serves_the_app_from_waitress_with_the_same_environment(
 def test_run_sends_waitress_start_line_and_queue_warnings_to_stderr(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    root = logging.getLogger()
+
     def serve(app, **kwargs):
-        logging.getLogger("waitress").info("Serving on http://0.0.0.0:8789")
-        logging.getLogger("waitress.queue").warning("Task queue depth is 1")
+        # waitress.serve() runs logging.basicConfig(): a stderr handler on root
+        handler = logging.StreamHandler()
+        root.addHandler(handler)
+        try:
+            logging.getLogger("waitress").info("Serving on http://0.0.0.0:8789")
+            logging.getLogger("waitress.queue").warning("Task queue depth is 1")
+        finally:
+            root.removeHandler(handler)
 
     monkeypatch.setitem(sys.modules, "waitress", types.SimpleNamespace(serve=serve))
     harness = _harness(tmp_path)
-    root = logging.getLogger()
     before = (root.level, list(root.handlers))
 
     api_app.run(_run_env(harness), config_path=harness.config_path)
 
     err = capsys.readouterr().err
-    assert "INFO:waitress:Serving on" in err
-    assert "WARNING:waitress.queue:Task queue depth" in err
+    assert err.count("INFO:waitress:Serving on") == 1  # ADR 423
+    assert err.count("WARNING:waitress.queue:Task queue depth") == 1
+    waitress_logger = logging.getLogger("waitress")
+    assert waitress_logger.propagate is False
+    assert len(waitress_logger.handlers) == 1
     assert (root.level, list(root.handlers)) == before  # only `waitress` changed
 
 

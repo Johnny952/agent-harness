@@ -22,12 +22,19 @@ logging, not just the library's.
 ## Rule
 
 Configure the library's own logger (`logging.getLogger("waitress")`: level,
-plus a `StreamHandler()` if it has none) from the entry point, never at import,
+plus a `StreamHandler()` if it has none, plus `propagate = False`) from the
+entry point, never at import,
 and restore that logger after each test with an autouse fixture. The handler
 binds `sys.stderr` when it is built, so a handler left over from one test
 writes to a capture stream that is closed by the next. `tests/conftest.py`
 `_restore_the_waitress_logger` and each service's `_log_waitress`
 (`docs/decisions.md` ADR 420) are the example.
+
+Corrected by T-173: without `propagate = False` the line printed twice in
+production, because `waitress.serve()` runs `basicConfig()` itself and root's
+handler printed the record a second time (`docs/decisions.md` ADR 423). To make
+that visible in a test, see
+`a-root-stand-in-for-basicconfig-needs-basic-format.md`.
 
 ## Evidence
 
