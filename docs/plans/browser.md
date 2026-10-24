@@ -1,13 +1,13 @@
 ---
-status: building
+status: built
 approved: 2026-10-09
-built: null
+built: 2026-10-24
 supersedes: []
 ---
 
 # Browser — giving the phases a headless Chromium, shared from one volume
 
-**Status:** decided, being built. `docs/decisions.md` **ADR 43** records the
+**Status:** built 2026-10-24, all five steps of *Order of work*. `docs/decisions.md` **ADR 43** records the
 decision; this page is the plan for building it, and where the two differ the
 ADR wins. Steps 1 and 2 are built and run: written by ADR 223, then built, installed,
 smoke-checked and measured on 2026-10-24 (the Results log row of that date).
