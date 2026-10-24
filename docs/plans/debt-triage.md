@@ -9,7 +9,8 @@ supersedes: []
 
 **Status:** design, approved by the user on 2026-10-23. S1 (the `follow_up`
 ruling) is built by T-164-S1 (ADR 393, 394) and S2 (`blocked_by`) by T-164-S2
-(ADR 396); the rest is not built.
+(ADR 396), and S3 (the role prompts and the debt rules) by T-164-S3; only R5,
+the operator's, is left.
 The implementing task assigns the ADR its number (*Proposed ADR* below).
 
 ## 1. Why the index keeps growing
