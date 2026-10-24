@@ -1586,7 +1586,7 @@ number and title.
    - The four HTTP services run Flask's development server —
      **built**: the collector and the read API are served by waitress
      (`docs/decisions.md` ADR 417), the board service and the config writer
-     too (ADR 420), which also sends waitress's start line to stderr.
+     too (ADR 420), which also sends waitress's start line to stderr once (ADR 423).
    - A per-task view — **built**: the dock's execution thread shows a task's
      phases and their hook events (`GET /api/tasks/<id>/events`,
      `docs/decisions.md` ADR 197), over the phase rows and the usage log
