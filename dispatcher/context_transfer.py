@@ -46,6 +46,18 @@ class LockHeldError(RuntimeError):
         self.owner = owner
 
 
+class OrphanPhaseError(LockHeldError):
+    """The lock is expired but an account is still BUSY with the task (ADR 411)."""
+
+    def __init__(self, task_id: str, owner: str, accounts: list[str]) -> None:
+        super().__init__(task_id, owner)
+        self.args = (
+            f"task {task_id} is held by an orphan phase: account(s) "
+            f"{', '.join(accounts)} still BUSY with it, its phase may still be running",
+        )
+        self.accounts = accounts
+
+
 @dataclasses.dataclass
 class TaskFile:
     task_id: str

@@ -282,7 +282,11 @@ Unlike most of this file it was not moved from the README.
   live lock on the task, but two runs of different tasks still race on
   account state files.
 - […]
-- An orphan phase after Ctrl+C: the heartbeat stops with the host
+- **Done 2026-10-24 by T-168**: an expired lock is held, and the task
+  not taken, while an account is `BUSY` with it and its phase may still
+  run (`orphan_holders` in `dispatcher/dispatcher.py`):
+  `docs/decisions.md` ADR 411. The original text follows.
+  An orphan phase after Ctrl+C: the heartbeat stops with the host
   process, so the task lock expires after `heartbeat_ttl_seconds`
   (120 by default) while that orphan `claude` may run for up to
   `phase_timeout_seconds` (7200). A re-run in that window takes the

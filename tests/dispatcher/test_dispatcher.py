@@ -1521,6 +1521,180 @@ def test_dispatch_phase_takes_over_lock_with_no_heartbeat_via_ttl_pass_through(t
     assert task.owner == "cuenta1"
 
 
+def _orphan_setup(cfg, monkeypatch, *, busy_task, busy_age, heartbeat_age):
+    """task-1's lock is cuenta1's and expired; cuenta1 is BUSY with `busy_task`
+    since `busy_age`s ago. Returns the list of non-/usage claude calls."""
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", heartbeat_age)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id=busy_task)
+    _age_busy_since(cfg, "cuenta1", busy_age)
+    ran = []
+
+    def fake_exec_claude(container, workdir, prompt, resume_session_id=None, model=None, effort=None, timeout_seconds=None, **kwargs):
+        if "usage" in prompt.lower():
+            return ClaudeResult(
+                session_id=None,
+                result_text=(
+                    "Current session: 10% used · resets later\n"
+                    "Current week (all models): 10% used · resets later"
+                ),
+                raw={},
+            )
+        ran.append(container)
+        return ClaudeResult(session_id="sess-3", result_text="phase done", raw={"is_error": False})
+
+    monkeypatch.setattr(dispatcher_mod.docker_exec, "exec_claude", fake_exec_claude)
+    monkeypatch.setattr(
+        dispatcher_mod.docker_exec, "create_worktree",
+        lambda container, projects_root, slug, task_id, role: f"{projects_root}/{slug}/worktrees/{task_id}",
+    )
+    return ran
+
+
+def test_phase_may_be_running_follows_the_claim_and_the_heartbeat(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    window = cfg.phase_timeout_seconds + cfg.heartbeat_ttl_seconds
+    now = 1_000_000.0
+
+    assert dispatcher_mod._phase_may_be_running(cfg, None, None, now)
+    assert dispatcher_mod._phase_may_be_running(cfg, now - window + 5, None, now)
+    assert not dispatcher_mod._phase_may_be_running(cfg, now - window - 5, None, now)
+    # A heartbeat newer than the claim extends the window.
+    beat = dt.datetime.fromtimestamp(now - 60, dt.timezone.utc).isoformat()
+    assert dispatcher_mod._phase_may_be_running(cfg, now - window - 5, beat, now)
+    # One that cannot be read is ignored.
+    assert not dispatcher_mod._phase_may_be_running(cfg, now - window - 5, "garbage", now)
+
+
+def test_reap_expired_locks_keeps_a_lock_while_its_account_is_busy_with_the_task(
+    tmp_path, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", 999)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", 999)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        assert dispatcher_mod.reap_expired_locks(cfg) == []
+
+    task = read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1"))
+    assert task.owner == "cuenta1"
+    assert "ADR 411" in caplog.text
+
+
+def test_reap_expired_locks_takes_a_lock_whose_account_is_busy_with_another_task(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", 999)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-2")
+
+    assert dispatcher_mod.reap_expired_locks(cfg) == ["task-1"]
+
+
+def test_reap_expired_locks_takes_a_lock_once_the_orphan_window_has_passed(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", _ORPHAN_WINDOW_PAST(cfg))
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", _ORPHAN_WINDOW_PAST(cfg))
+
+    assert dispatcher_mod.reap_expired_locks(cfg) == ["task-1"]
+
+
+def test_acquire_lock_refuses_an_expired_lock_while_orphan_holders_are_named(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", 999)
+    path = task_file_path(cfg.hive_tasks_dir, "task-1")
+    before = read_task_file(path)
+
+    with pytest.raises(dispatcher_mod.context_transfer.OrphanPhaseError) as info:
+        acquire_lock(
+            cfg.hive_tasks_dir, "task-1", owner="cuenta2",
+            ttl_seconds=cfg.heartbeat_ttl_seconds, orphan_holders=["cuenta1"],
+        )
+
+    assert isinstance(info.value, LockHeldError)
+    assert info.value.accounts == ["cuenta1"]
+    assert read_task_file(path).owner == before.owner == "cuenta1"
+    assert read_task_file(path).heartbeat == before.heartbeat
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta2", ttl_seconds=cfg.heartbeat_ttl_seconds)
+    assert read_task_file(path).owner == "cuenta2"
+
+
+def test_the_reaper_keeps_a_holder_whose_heartbeat_expired_inside_the_window(tmp_path) -> None:
+    cfg = _make_config(tmp_path)
+    acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
+    _age_heartbeat(cfg, "task-1", 999)
+    set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
+    _age_busy_since(cfg, "cuenta1", 999)
+
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+
+
+def _two_accounts(tmp_path):
+    return _make_config(tmp_path, accounts=[
+        AccountConfig(name="cuenta1", container="agent-cuenta1"),
+        AccountConfig(name="cuenta2", container="agent-cuenta2"),
+    ])
+
+
+def test_dispatch_phase_refuses_a_task_whose_orphan_may_still_run(tmp_path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    ran = _orphan_setup(cfg, monkeypatch, busy_task="task-1", busy_age=999, heartbeat_age=999)
+
+    with pytest.raises(dispatcher_mod.context_transfer.OrphanPhaseError):
+        dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert ran == []
+    assert get_state(cfg.state_dir, "cuenta2") == AccountState.IDLE
+    assert get_state(cfg.state_dir, "cuenta1") == AccountState.BUSY
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).owner == "cuenta1"
+
+
+def test_dispatch_phase_takes_the_task_when_the_busy_account_holds_another(tmp_path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    ran = _orphan_setup(cfg, monkeypatch, busy_task="task-2", busy_age=999, heartbeat_age=999)
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.success is True
+    assert result.account == "cuenta2"
+    assert len(ran) == 1
+
+
+def test_dispatch_phase_takes_the_task_once_the_orphan_is_past_the_timeout(tmp_path, monkeypatch) -> None:
+    cfg = _two_accounts(tmp_path)
+    ran = _orphan_setup(
+        cfg, monkeypatch, busy_task="task-1",
+        busy_age=_ORPHAN_WINDOW_PAST(cfg), heartbeat_age=_ORPHAN_WINDOW_PAST(cfg),
+    )
+
+    result = dispatcher_mod.dispatch_phase(cfg, "task-1", "myproj", "arquitecto", "do the thing")
+
+    assert result.success is True
+    assert len(ran) == 1
+    assert read_task_file(task_file_path(cfg.hive_tasks_dir, "task-1")).owner == result.account
+
+
+def test_run_task_cycle_reports_an_orphan_phase_without_a_traceback(
+    tmp_path, monkeypatch, fake_git, caplog,
+) -> None:
+    cfg = _make_config(tmp_path)
+
+    def orphaned(cfg_arg, task_id, slug, role, prompt, **kwargs):
+        raise dispatcher_mod.context_transfer.OrphanPhaseError(task_id, "cuenta1", ["cuenta1"])
+
+    monkeypatch.setattr(dispatcher_mod, "dispatch_phase", orphaned)
+
+    with caplog.at_level("WARNING", logger=dispatcher_mod.logger.name):
+        dispatcher_mod.run_task_cycle(cfg, "task-1", "myproj", description=_DESCRIPTION)
+
+    assert any("orphan phase on cuenta1" in r.getMessage() for r in caplog.records)
+
+
 def _phase_seen_by(cfg, ran: list, result_text: str = "phase done", is_error: bool = False):
     """An `exec_claude` that answers /usage, and records the task's `phase`
     while the phase itself runs: what a reader of the task file sees then."""
@@ -5620,6 +5794,11 @@ def _age_busy_since(cfg, account_name, seconds) -> None:
         json.dump(data, fh)
 
 
+def _ORPHAN_WINDOW_PAST(cfg) -> int:
+    """Seconds that put a phase past the window an orphan may still run (ADR 411)."""
+    return cfg.phase_timeout_seconds + cfg.heartbeat_ttl_seconds + 1
+
+
 def _age_heartbeat(cfg, task_id, seconds) -> None:
     path = task_file_path(cfg.hive_tasks_dir, task_id)
     task = read_task_file(path)
@@ -6242,8 +6421,8 @@ def test_a_phase_whose_heartbeat_died_gives_its_account_back(tmp_path) -> None:
     cfg = _make_config(tmp_path)
     acquire_lock(cfg.hive_tasks_dir, "task-1", owner="cuenta1")
     set_state(cfg.state_dir, "cuenta1", AccountState.BUSY, current_task_id="task-1")
-    _age_busy_since(cfg, "cuenta1", 9999)
-    _age_heartbeat(cfg, "task-1", 999)
+    _age_busy_since(cfg, "cuenta1", _ORPHAN_WINDOW_PAST(cfg))
+    _age_heartbeat(cfg, "task-1", _ORPHAN_WINDOW_PAST(cfg))
 
     assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
     assert get_state(cfg.state_dir, "cuenta1") == AccountState.IDLE

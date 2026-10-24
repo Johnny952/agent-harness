@@ -210,8 +210,56 @@ def _capacity_for(cfg: Config, account: str) -> int:
     raise ValueError(f"Unknown account: {account}")
 
 
+def _phase_may_be_running(
+    cfg: Config, busy_since: float | None, heartbeat: str | None, now: float,
+) -> bool:
+    """Whether a phase BUSY since `busy_since` can still be alive (ADR 411).
+
+    The anchor is the later of the claim and the card's last heartbeat, and the
+    window is `phase_timeout_seconds` plus one heartbeat TTL: the in-container
+    `timeout` kills claude that long after its last call, and a dispatcher that
+    died just after a heartbeat leaves that call running. No claim stamp means
+    no evidence it is over, so it may be running.
+    """
+    if busy_since is None:
+        return True
+    anchor = busy_since
+    if heartbeat:
+        try:
+            anchor = max(anchor, dt.datetime.fromisoformat(heartbeat).timestamp())
+        except (ValueError, TypeError):
+            pass
+    return now - anchor <= cfg.phase_timeout_seconds + cfg.heartbeat_ttl_seconds
+
+
+def orphan_holders(
+    cfg: Config, task_id: str, exclude: Sequence[str] = (), now: float | None = None,
+) -> list[str]:
+    """Accounts BUSY with `task_id` whose phase may still be running (ADR 411)."""
+    now = time.time() if now is None else now
+    path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    heartbeat = None
+    if os.path.exists(path):
+        heartbeat = context_transfer.read_task_file(path).heartbeat
+    held = []
+    for acc in cfg.accounts:
+        if acc.name in exclude:
+            continue
+        for holder in state_machine.get_holders(cfg.state_dir, acc.name):
+            if holder.task_id == task_id and _phase_may_be_running(
+                cfg, holder.busy_since, heartbeat, now,
+            ):
+                held.append(acc.name)
+                break
+    return held
+
+
 def reap_stale_busy_accounts(cfg: Config) -> list[str]:
     """Free accounts left BUSY by a phase that is no longer running.
+
+    A holder whose heartbeat expired is still kept while its phase may be
+    running, `phase_timeout_seconds` plus a TTL from its claim or last beat,
+    because the orphan claude of a Ctrl+C keeps writing the worktree (ADR 411).
 
     BUSY carries no expiry of its own, so a dispatcher that dies mid-phase — a
     Ctrl+C, a host reboot, an OOM — leaves its account BUSY for the life of the
@@ -258,9 +306,11 @@ def reap_stale_busy_accounts(cfg: Config) -> list[str]:
             if task is not None and task.heartbeat is not None:
                 if not context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
                     continue
+                if _phase_may_be_running(cfg, busy_since, task.heartbeat, now):
+                    continue
                 why = (
                     f"the heartbeat on card {task_id} is more than "
-                    f"{cfg.heartbeat_ttl_seconds}s old"
+                    f"{cfg.heartbeat_ttl_seconds}s old and the phase timeout window has passed"
                 )
             else:
                 # Nothing to read but the wall clock, so it is given the whole
@@ -1500,6 +1550,14 @@ def reap_expired_locks(cfg: Config) -> list[str]:
     for task_id in context_transfer.list_task_ids(cfg.hive_tasks_dir):
         task = context_transfer.read_task_file(context_transfer.task_file_path(cfg.hive_tasks_dir, task_id))
         if task.status == "in_progress" and context_transfer.is_lock_expired(task, cfg.heartbeat_ttl_seconds):
+            held = orphan_holders(cfg, task_id)
+            if held:
+                logger.warning(
+                    "task %s: lock expired but account(s) %s still hold it and its "
+                    "phase may be running (ADR 411); left locked",
+                    task_id, ", ".join(held),
+                )
+                continue
             tasks.release_stale_lock(cfg.hive_tasks_dir, task_id)
             reaped.append(task_id)
     return reaped
@@ -2123,6 +2181,7 @@ def dispatch_phase(
             tasks.acquire_lock(
                 cfg.hive_tasks_dir, task_id, owner=account,
                 ttl_seconds=cfg.heartbeat_ttl_seconds, phase=role,
+                orphan_holders=orphan_holders(cfg, task_id, exclude=(account,)),
             )
             lock_acquired = True
             # The keyword goes only when asked for: every other phase calls
@@ -4244,7 +4303,15 @@ def run_phase(
         # foreign lock is left alone: after a Ctrl+C the in-container
         # claude keeps running until its own timeout, so the heartbeat
         # TTL, not this run, decides when the task can be taken over.
-        logger.warning("task %s is locked by another owner: %s", ctx.task_id, exc)
+        if isinstance(exc, context_transfer.OrphanPhaseError):
+            logger.warning(
+                "task %s is held by an orphan phase on %s: %s; it can be taken once "
+                "that account is released (dispatch release-account) or its phase "
+                "timeout has passed",
+                ctx.task_id, ", ".join(exc.accounts), exc,
+            )
+        else:
+            logger.warning("task %s is locked by another owner: %s", ctx.task_id, exc)
         ctx.foreign_lock = True
         return None
     if not result.no_account:

@@ -1521,8 +1521,11 @@ number and title.
    - A reaper for accounts left `BUSY` — **built**:
      `reap_stale_busy_accounts` in `dispatcher/dispatcher.py`, and
      `release_account` in `dispatcher/operator.py`.
-   - An orphan phase after Ctrl+C — **open**. V4.2 in
-     [`docs/ROADMAP.md`](docs/ROADMAP.md) only sizes the race.
+   - An orphan phase after Ctrl+C — **built**: `orphan_holders` and
+     `reap_stale_busy_accounts` in `dispatcher/dispatcher.py` hold an
+     expired lock while an account is `BUSY` with the task and its phase
+     may still run (`docs/decisions.md` ADR 411). V4.2 in
+     [`docs/ROADMAP.md`](docs/ROADMAP.md) still owes the live run.
    - Logging setup — **built**: `main` in `dispatcher/cli.py` configures it.
    - A short "continue where you left off" prompt after a rate limit —
      **built**: `_CONTINUE_PROMPT` in `dispatcher/dispatcher.py`,
