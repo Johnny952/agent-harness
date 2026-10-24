@@ -17416,3 +17416,51 @@ to the unknown-kind fallback and offers Reset only.
   and the empty field already has no other meaning ADR 441 allows.
 - *Refusing an empty field client-side, as the number fields do:* empty is
   a legal value for this kind, not a typo.
+
+## ADR 450 — a task's `plan` is `docs/plans/<name>.md`, checked by shape and not by the file being there
+
+**Status:** accepted (T-178-S1, 2026-10-24). Item 2 of
+`docs/plans/roadmap-view.md` *What it needs underneath*; extends ADR 127's
+backlog fields and ADR 129's write tools by one field.
+
+**Context.** `/api/roadmap` reads a raw `plan` key off task frontmatter and
+nothing writes one. `backlog_propose` takes no project and the board
+service reads the hive, not a project checkout, so it cannot tell which
+`docs/plans/` a card's plan would live in; and an arquitecto may propose
+work for a plan its own phase is still writing, which is on no base yet.
+
+**Decision.**
+
+1. *The field.* `TaskFile.plan`, a string, written as `plan:` only when
+   set, like `epic`. `backlog_propose` (task and epic) and `task_edit` take
+   an optional `plan`; an epic's goes on the epic and on each of its tasks,
+   as `tags` does, and a repeat proposal neither compares nor changes it.
+2. *The shape.* A value is the path inside the project,
+   `docs/plans/<name>.md`, where `<name>` is one path component matching
+   `[A-Za-z0-9][A-Za-z0-9._-]*` (`tasks.is_plan_path`). Anything else — a
+   bare `x.md`, `docs/plans/sub/x.md`, `..`, a leading slash, another
+   suffix, a non-string — is refused in the writer's one `BoardWriteError`
+   as `plan is '<value>', not a path like docs/plans/<name>.md`.
+3. *No existence check.* The writer does not look for the file: rule 2 is
+   the whole check, for the two reasons in the context.
+4. *Clearing.* `task_edit` with `plan: ""` removes the key; `null` or
+   leaving it out keeps it (the service's rule that null is left out).
+   Both only while `_started` says the task has not started.
+
+**Consequences.**
+- A `plan` naming a file that does not exist is stored; `/api/roadmap`
+  already lists such a task under `no_plan` with a warning.
+- `/api/roadmap` matches `plan` against a plan's bare file name
+  (`roadmap-view.md`), so a value written under rule 2 does not match
+  until the api's grouping task strips the `docs/plans/` prefix. That is
+  the sibling task's, not this one's.
+- `field_problems` does not check `plan`: a hand-edited value is read as
+  YAML made it, and the roadmap's warning is its report.
+
+**Ruled out.**
+- *Storing the bare file name:* the task names the path inside the
+  project, which also says where to open it.
+- *Checking the file exists:* needs a project and a checkout the board
+  service has neither of, and refuses a plan written in the same phase.
+- *`null` to clear:* the service drops a null argument before the writer
+  sees it, so it already means "leave as it is".
