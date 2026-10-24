@@ -536,3 +536,9 @@ services' `_log_waitress()` now sets `propagate = False` on the `waitress`
 logger, so a waitress line no longer prints a second time through the root
 handler that `waitress.serve()`'s own `basicConfig()` adds
 (`docs/decisions.md` ADR 423, amending ADR 420 Decision 3).
+
+**T-170** resolved `T-168-D1`. Inside the ADR 411 window the account reaper
+now probes the account's container for a process working under the task's
+worktrees and releases a dead orphan's holder as soon as none is left; a probe
+that cannot answer, or a card with no project, still waits the full window
+(`docs/decisions.md` ADR 429). It declared no debt.
