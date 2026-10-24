@@ -128,6 +128,23 @@ RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g playwright@${PLAYWRIGHT_VE
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV NODE_PATH=/usr/local/lib/node_modules
 
+# playwright-cli, the shell front end the `playwright-cli` skill drives
+# (skills/playwright-cli, docs/plans/browser.md option B). Pinned like
+# everything else in this image, never @latest. It brings its own Playwright
+# client, so it is pointed at the browser the mount above already provides
+# instead of downloading one: PLAYWRIGHT_MCP_EXECUTABLE_PATH names that
+# build's binary by revision (1194 is Chromium 141, the one PLAYWRIGHT_VERSION
+# 1.56.1 asks for), so the two move together. The sandbox is off because the
+# agent runs as root, where Chromium refuses to start with it. Headless and an
+# in-memory profile are the CLI's defaults and are left that way. Auto-named
+# output goes to /tmp, out of the worktree a phase commits from.
+ARG PLAYWRIGHT_CLI_VERSION=0.1.22
+RUN npm install -g @playwright/cli@${PLAYWRIGHT_CLI_VERSION}
+ENV PLAYWRIGHT_MCP_EXECUTABLE_PATH=/ms-playwright/chromium_headless_shell-1194/chrome-linux/headless_shell
+ENV PLAYWRIGHT_MCP_SANDBOX=false
+ENV PLAYWRIGHT_MCP_OUTPUT_DIR=/tmp/playwright-cli
+ENV PLAYWRIGHT_MCP_VIEWPORT_SIZE=1280x800
+
 # The dispatcher parses this CLI's --output-format json shape, /usage text,
 # and rate-limit messages, so bump this version deliberately and re-verify.
 ARG CLAUDE_CODE_VERSION=2.1.296
@@ -155,9 +172,9 @@ COPY hooks/install_settings.py /usr/local/lib/ia-harness/install_settings.py
 # CLI auto-updater above does. The dispatcher delivers them per call, one
 # --plugin-dir per skill, from dispatcher/role_skills.py; SKILLS_ROOT there
 # is this destination path, and a test asserts the two still agree. The whole
-# directory is copied, loose NOTICE.md and README.md included: the three
-# upstreams are MIT, which requires their notices to travel with the copies,
-# and --plugin-dir ignores files that are not plugins.
+# directory is copied, loose NOTICE.md and README.md included: the upstream
+# licences (MIT, and Apache-2.0 for playwright-cli) require their notices to
+# travel with the copies, and --plugin-dir ignores files that are not plugins.
 COPY skills /opt/ia-harness/skills
 
 COPY docker/agent/entrypoint.sh /usr/local/bin/entrypoint.sh

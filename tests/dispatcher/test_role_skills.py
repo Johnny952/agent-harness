@@ -79,6 +79,7 @@ def test_plugin_dirs_are_one_absolute_path_per_skill_in_table_order() -> None:
         f"{SKILLS_ROOT}/systematic-debugging",
         f"{SKILLS_ROOT}/verification-before-completion",
         f"{SKILLS_ROOT}/blocking-review",
+        f"{SKILLS_ROOT}/playwright-cli",
     ]
 
 

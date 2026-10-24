@@ -1,10 +1,10 @@
 # Vendored role skills
 
-Eight skills, vendored rather than installed, and delivered per role.
+Nine skills, vendored rather than installed, and delivered per role.
 
 A skill is a set of instructions that only loads when it is relevant. These
-eight are the ones the agent roles need: how to plan, how to test, how to
-debug, how to review, how to take review. They live here, in the repo, for
+nine are the ones the agent roles need: how to plan, how to test, how to
+debug, how to review, how to take review, how to drive a browser. They live here, in the repo, for
 three reasons:
 
 - **Pruning.** Upstream skills are written for a human sitting in a terminal.
@@ -49,6 +49,7 @@ a list of directories — no bundle groupings to invent or keep in sync.
 | `verification-before-completion` | | ● | ● | |
 | `blocking-review` | | | ● | |
 | `code-quality-review` | | | | ● |
+| `playwright-cli` | | ● | ● | |
 
 Two of these cross-reference each other, and the reference is hedged
 ("if it was delivered to you") exactly where the table says the pair does not
@@ -77,20 +78,20 @@ docker exec agent-cuenta1 \
 
 Pointed at the parent directory instead, `--plugin-dir <dir>` loads every
 child plugin and ignores the loose files, so `claude --plugin-dir <dir> plugin
-list` checks all eight at once. Both are how a delivery set is validated
+list` checks all nine at once. Both are how a delivery set is validated
 without spending a token of quota.
 
 ## Cost
 
 Measured with `plugin details`, per skill: ~40–80 always-on tokens for the
-frontmatter line the model always sees, and 1.3k–4.1k on-invoke for the body
+frontmatter line the model always sees, and 1.3k–4.8k on-invoke for the body
 it reads when the skill fires. Always-on totals per role, at the table above:
 
 | Role | Always-on |
 |---|---|
 | arquitecto | ~150 tok |
-| implementador | ~310 tok |
-| revisor | ~190 tok |
+| implementador | ~350 tok |
+| revisor | ~230 tok |
 | auditor | ~110 tok |
 
 Always-on is charged on every call the role makes, so a skill added to every
@@ -107,7 +108,8 @@ is relevant.
   file too, or delete the link. A pointer to a file that is not there is the
   exact defect the auditor is meant to catch; it should not start here.
 - **Record provenance in `NOTICE.md`** — upstream name, source URL, and what
-  you changed. All three upstreams are MIT, which requires their copyright
-  notices to travel with the copies; that file is where they live.
+  you changed. The upstream licences (MIT, and Apache-2.0 for
+  `playwright-cli`) require their copyright notices to travel with the
+  copies; that file is where they live.
 - **Nothing role-specific in a SKILL.md.** The role is chosen by which
   directories get delivered, not by a conditional inside the skill.

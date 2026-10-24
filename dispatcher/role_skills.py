@@ -37,11 +37,13 @@ ROLE_SKILLS: dict[str, tuple[str, ...]] = {
         "systematic-debugging",
         "receiving-code-review",
         "verification-before-completion",
+        "playwright-cli",
     ),
     "revisor": (
         "systematic-debugging",
         "verification-before-completion",
         "blocking-review",
+        "playwright-cli",
     ),
     "auditor": (
         "systematic-debugging",

@@ -12,7 +12,8 @@ decision; this page is the plan for building it, and where the two differ the
 ADR wins. Steps 1 and 2 are built and run: written by ADR 223, then built, installed,
 smoke-checked and measured on 2026-10-24 (the Results log row of that date).
 A headless shell screenshots `about:blank` inside `agent-cuenta1`, and the
-container peaked at 384 MiB with the browser open. Step 3's entry is in `config.yaml` (2026-10-24); steps 4 and 5 are open. Written 2026-10-09 by the operator, after
+container peaked at 384 MiB with the browser open. Step 3's entry is in `config.yaml` (2026-10-24), step 4 was walked by
+T-178-S3, and step 5 installed option B on 2026-10-24. Written 2026-10-09 by the operator, after
 walking `docs/ROADMAP.md` **V0.6e** with a Playwright script from the host
 (the Results log row of that date; scripts and screenshots in
 `.data/verify/v06e/`). That walk took about forty lines of Python and found a
@@ -173,7 +174,7 @@ Checked 2026-10-09. None is installed on this host; the only mentions under
 | Option | What it is | For this harness |
 |---|---|---|
 | **A. Plain script** | The agent writes a Playwright script (Python or Node) and runs it with Bash. What V0.6e used. | No dependency beyond the client. Fewest tokens: only what the script prints enters the context. The script *is* the evidence, and the revisor can rerun it. The agent has to know the API. |
-| **B. `playwright-cli` + its skills** (`microsoft/playwright-cli`, `npm i -g @playwright/cli`, then `playwright-cli install --skills`) | A CLI whose commands drive a browser session, plus skill files that teach Claude Code to use it. Microsoft recommends it over the MCP for coding agents, because it does not load tool schemas and accessibility trees into context; screenshots are saved to disk and the path is returned. | The best fit for interactive exploration inside a phase. Skills would go in `claude_shared` (`/root/.claude/skills`), so every account gets them. One more global npm package to pin in the image, and the session state has to survive between Bash calls. |
+| **B. `playwright-cli` + its skills** (`microsoft/playwright-cli`, `npm i -g @playwright/cli`, then `playwright-cli install --skills`) | A CLI whose commands drive a browser session, plus skill files that teach Claude Code to use it. Microsoft recommends it over the MCP for coding agents, because it does not load tool schemas and accessibility trees into context; screenshots are saved to disk and the path is returned. | The best fit for interactive exploration inside a phase. Skills would go in `claude_shared` (`/root/.claude/skills`), so every account gets them. *Built otherwise (step 5): vendored under `skills/playwright-cli/` and copied into the image, loaded per role by `dispatcher/role_skills.py`, so the skill and the pinned CLI it describes cannot drift apart.* One more global npm package to pin in the image, and the session state has to survive between Bash calls. |
 | **C. Playwright MCP** (`microsoft/playwright-mcp`, `claude mcp add playwright npx @playwright/mcp@latest`; flags `--headless`, `--isolated`, `--executable-path`, `--no-sandbox`) | An MCP server exposing browser actions as tools, reading pages as accessibility snapshots. | The most capable for long exploratory loops, and the most expensive: every action returns a snapshot into context, which `docs/plans/token-economy.md` shows is the cost that compounds. `@latest` via npx also contradicts this harness's pinned-version rule. Not for phases. |
 | **D. Anthropic's `webapp-testing` skill** (`anthropics/skills`, Apache-2.0) | A skill that tells the agent to write Python Playwright scripts, with a `with_server.py` helper that starts and stops the dev servers around them. | Option A with instructions and a server-lifecycle helper. Needs Python Playwright in the image rather than Node, which the image does not have. Worth reading for its recon-then-script workflow even if not installed. |
 
@@ -204,6 +205,13 @@ beside it.
    fixtures, to test the recording rules on a real row. *Done 2026-10-24 by
    T-178-S3: the Roadmap screen, walked headless against route fixtures; the
    row is the last of the Results log in `docs/ROADMAP.md`.*
-5. Then, separately, whether to install option B's skills.
+5. Then, separately, whether to install option B's skills. *Done 2026-10-24:
+   `@playwright/cli@0.1.22` pinned in `docker/agent/Dockerfile`, driving the
+   image's headless Chromium through `PLAYWRIGHT_MCP_EXECUTABLE_PATH`, with an
+   in-memory profile and output under `/tmp/playwright-cli`; the pruned skill
+   vendored as `skills/playwright-cli/` for the implementador and revisor; and
+   `Bash(playwright-cli:*)` in `config.yaml` `allowed_tools`. The auditor keeps
+   option A's scripts. The skill lives in the image rather than
+   `claude_shared`, so it versions with the CLI.*
 
 Each step is one surface, per `docs/plans/token-economy.md` P4.
