@@ -537,6 +537,12 @@ logger, so a waitress line no longer prints a second time through the root
 handler that `waitress.serve()`'s own `basicConfig()` adds
 (`docs/decisions.md` ADR 423, amending ADR 420 Decision 3).
 
+**T-175** resolved no earlier row and declared `T-175-D1`. The opt-in
+`escalated_model` runs an escalated implementador round, under the repeated
+finding or the round count, on that model; the handoff envelope records the
+model and the signal so a resumed round decides the same way
+(`docs/decisions.md` ADR 432). The key is read-only in `CONFIG_KEYS`, so the
+console cannot edit it, which is `T-175-D1`.
 **T-170** resolved `T-168-D1`. Inside the ADR 411 window the account reaper
 now probes the account's container for a process working under the task's
 worktrees and releases a dead orphan's holder as soon as none is left; a probe

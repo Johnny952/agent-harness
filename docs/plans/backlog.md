@@ -312,9 +312,13 @@ a finding the previous review sent one back for. It reads no freeform
 `result_text`: the revisor's schema gained a `findings` list, a finding that
 still holds is copied verbatim, and the comparison is set intersection on
 `debt.fingerprint` of those lines and the debt it rejected (`docs/decisions.md`
-ADR 73). The other half is still **open**: no signal reads a result text
-"suspiciously short", for the reasons that ADR records, and switching model
-on a signal is not built. The text is kept as it was moved.
+ADR 73). Switching model on that signal is **built** too: the opt-in
+`escalated_model` (unset by default) runs an escalated implementador round on
+it, under the repeated finding and under the round count, and a resumed round
+decides the same way (`docs/decisions.md` ADR 432). Still **open**: no signal
+reads a result text "suspiciously short", for the reasons ADR 73 records, and
+the console cannot yet edit `escalated_model` (it is read-only in
+`CONFIG_KEYS`). The text is kept as it was moved.
 
 […] Two
 refinements were discussed but not implemented: (1) a per-role model

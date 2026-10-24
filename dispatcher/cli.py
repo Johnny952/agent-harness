@@ -561,7 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="The revision round this phase belongs to, for the roles that have "
         "rounds (implementador, revisor). It is what the phase is told it is "
         "on, what labels its section in the task file, and what decides "
-        "whether the escalated effort applies — so a resumed round 2 has to "
+        "whether the escalated effort and model apply — so a resumed round 2 has to "
         "say 2, or it is dispatched as though the first round never happened.",
     )
     phase_parser.add_argument(

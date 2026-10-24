@@ -163,6 +163,10 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "non_negative_int", "A round count. The override must be a non-negative integer."
     ),
     "escalate_effort_on_repeated_finding": _editable("bool", "A boolean switch (ADR 73)."),
+    "escalated_model": _read_only(
+        "A model ID or null (ADR 432). Editing it in the console is a follow-up: "
+        "the override kinds have no nullable string."
+    ),
     "max_revision_rounds": _editable(
         "positive_int", "It bounds a cycle's spend. The override must be a positive integer."
     ),
@@ -343,7 +347,8 @@ class Config:
     #: A model per role over `default_model`, such as
     #: `{"implementador": "claude-sonnet-5-5"}` (`docs/decisions.md` ADR 65).
     #: A model the phase call names itself, the cartografo's `mapping_model`,
-    #: still wins over both. The effort escalation does not touch it. Also
+    #: still wins over both, and so does `escalated_model` on an escalated
+    #: implementador round (ADR 432); the effort escalation alone does not touch it. Also
     #: takes `DRAFT_ROLE`, the arquitecto's `draft-specs` run (ADR 82), and
     #: `INTEGRADOR_ROLE`, which falls back to the implementador's (ADR 277).
     role_model: dict[str, str] = dataclasses.field(default_factory=dict)
@@ -358,6 +363,10 @@ class Config:
     #: by default, which is exactly the round-count rule alone. On, the
     #: round-count rule still applies: this can only escalate sooner.
     escalate_effort_on_repeated_finding: bool = False
+    #: The model an escalated implementador round runs on, under either rule
+    #: of `effort_for` (`docs/decisions.md` ADR 432). None, the default, keeps
+    #: the role's own model: nothing changes. Other roles never escalate.
+    escalated_model: str | None = None
     #: The projects whose finished tasks merge only when every condition of
     #: the automatic approve holds (`docs/plans/autonomy.md` *Decisions*, 1;
     #: `docs/decisions.md` ADR 77), as a map of slug to boolean until the
@@ -415,6 +424,13 @@ class Config:
         slots = sum(a.max_concurrent_phases for a in self.accounts)
         return max(1, min(self.project_parallel.get(slug, 1), slots))
 
+    def _escalates(self, round_num: int | None, repeated_finding: bool) -> bool:
+        """Whether a round escalates: past `escalate_effort_after_round`, or on
+        a repeated finding with `escalate_effort_on_repeated_finding` on."""
+        if round_num is not None and round_num > self.escalate_effort_after_round:
+            return True
+        return repeated_finding and self.escalate_effort_on_repeated_finding
+
     def effort_for(
         self, role: str, round_num: int | None = None, repeated_finding: bool = False,
     ) -> str:
@@ -424,18 +440,26 @@ class Config:
         finding of the one before it; it counts only with
         `escalate_effort_on_repeated_finding` on.
         """
-        if round_num is not None and round_num > self.escalate_effort_after_round:
-            return self.escalated_effort
-        if repeated_finding and self.escalate_effort_on_repeated_finding:
+        if self._escalates(round_num, repeated_finding):
             return self.escalated_effort
         return self.role_effort.get(role, self.default_effort)
 
-    def model_for(self, role: str) -> str:
+    def model_for(
+        self, role: str, round_num: int | None = None, repeated_finding: bool = False,
+    ) -> str:
         """The `--model` a phase of `role` runs on, every call of it included.
 
-        `DRAFT_ROLE` falls back to the arquitecto's model before the default,
-        and `INTEGRADOR_ROLE` to the implementador's (ADR 277).
+        An implementador round that escalates (the same rule as `effort_for`)
+        runs on `escalated_model` when it is set (ADR 432). `DRAFT_ROLE` falls
+        back to the arquitecto's model before the default, and `INTEGRADOR_ROLE`
+        to the implementador's (ADR 277), without a round: they never escalate.
         """
+        if (
+            self.escalated_model is not None
+            and role == "implementador"
+            and self._escalates(round_num, repeated_finding)
+        ):
+            return self.escalated_model
         if role == DRAFT_ROLE and role not in self.role_model:
             return self.model_for("arquitecto")
         if role == INTEGRADOR_ROLE and role not in self.role_model:
@@ -558,6 +582,17 @@ def _load_role_model(raw: dict) -> dict[str, str]:
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"role_model.{role} must be a non-empty model ID")
     return dict(block)
+
+
+def _load_escalated_model(raw: dict) -> str | None:
+    """`escalated_model`: None when absent or null, else a non-empty model ID
+    (ADR 432), checked the way `default_model` and `role_model` are."""
+    value = raw.get("escalated_model")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("escalated_model must be a non-empty model ID or null")
+    return value
 
 
 def _load_allowed_tools(raw: dict, key: str = "allowed_tools") -> list[str]:
@@ -1035,6 +1070,7 @@ def _build_config(raw: dict) -> Config:
         default_effort=_check_effort("default_effort", raw.get("default_effort", "medium")),
         role_effort=_load_role_effort(raw),
         role_model=_load_role_model(raw),
+        escalated_model=_load_escalated_model(raw),
         max_handoff_resumes=_load_max_handoff_resumes(raw),
         phase_timeout_seconds=phase_timeout_seconds,
         # Off by default: merging is the one thing a run does to the branch the

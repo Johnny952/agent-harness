@@ -871,7 +871,7 @@ one* below), and still exits 0.
 
 `--round` is not cosmetic. It is what the phase is told it is on, what
 labels its section in the task file (`## revisor (round 2)`), and what
-decides whether `escalated_effort` applies — so a resumed second round that
+decides whether `escalated_effort` and `escalated_model` apply — so a resumed second round that
 does not say `2` is dispatched as though the first had never happened. It
 counts from 1, and 0 is a usage error. `--role` is checked against the roles
 the prompt builder has a case for, so a typo costs a usage error rather than

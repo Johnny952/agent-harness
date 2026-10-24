@@ -4299,6 +4299,7 @@ def run_phase(
         )
         return None
     effort = cfg.effort_for(role, round_num, repeated_finding=repeated_finding)
+    chosen_model = model or cfg.model_for(role, round_num, repeated_finding=repeated_finding)
     if role == "arquitecto":
         note = "\n\n".join(part for part in (_adr_block_note(cfg, ctx.task_id, ctx.slug), note) if part)
     try:
@@ -4311,7 +4312,7 @@ def run_phase(
                 round_num=round_num, max_turns=max_turns, note=note,
             ),
             resume_session_id=resume_session_id,
-            model=model or cfg.model_for(role),
+            model=chosen_model,
             effort=effort,
             round_num=round_num,
             max_turns=max_turns,
@@ -4427,6 +4428,9 @@ def run_phase(
         # and the note its cycle carried for the arquitecto (ADR 273).
         session_id=result.session_id, account=result.account,
         changes_requested=ctx.changes_requested,
+        # What a resumed round needs to decide its effort and model the same
+        # way (ADR 432).
+        model=chosen_model, repeated_finding=repeated_finding,
     )
     return result
 
@@ -5356,8 +5360,12 @@ def _cycle_rounds(
     stale_note: str | None = None,
     resumed: tuple[int, DispatchResult] | None = None,
     start_round: int = 1,
+    repeated_finding: bool = False,
 ) -> CycleOutcome:
     """The implementador and revisor rounds, then the auditor and the merge.
+
+    `repeated_finding` seeds the signal for a resumed round's later rounds
+    (ADR 432): a verdict's resume has no earlier review in memory.
 
     `start_round` is the round the implementador starts at (ADR 354); the
     stale note goes to the first round run.
@@ -5378,7 +5386,6 @@ def _cycle_rounds(
     # whether the one after it repeated any of it (ADR 73). A round the
     # gates blocked has no review, so it changes neither.
     previous_reasons: dict[str, str] = {}
-    repeated_finding = False
     unfinished_note: str | None = None
     first_round = start_round
     if resumed is not None:
@@ -5485,10 +5492,11 @@ def _cycle_rounds(
             and round_num < cfg.max_revision_rounds
         ):
             repeated_finding = True
+            on_model = f" on model {cfg.escalated_model}" if cfg.escalated_model else ""
             logger.info(
-                "task %s: round %d runs the implementador at effort %s, "
+                "task %s: round %d runs the implementador at effort %s%s, "
                 "the revisor sent back the same finding(s) twice: %s",
-                task_id, round_num + 1, cfg.escalated_effort, "; ".join(repeated),
+                task_id, round_num + 1, cfg.escalated_effort, on_model, "; ".join(repeated),
             )
 
     if not approved:

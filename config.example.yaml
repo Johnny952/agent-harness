@@ -137,7 +137,7 @@ default_model: claude-opus-5-5
 # takes the arquitecto's model when unset). A cartografo entry is refused at
 # load: the cartografo's model is mapping_model, below. An unknown role, or a value that is not a non-empty
 # model ID, is refused at load too. Precedence: role_model, then
-# default_model. The effort escalation changes the effort, never the model.
+# default_model. The effort escalation changes the effort; only escalated_model, below, changes the model.
 # Optional; defaults to none.
 # The integrador (`dispatch resolve-conflict`, docs/decisions.md ADR 277)
 # takes the implementador's entry when it has none of its own, then
@@ -258,6 +258,13 @@ escalated_effort: high
 # to matter once escalate_effort_after_round is raised. Optional; defaults to
 # false, which is the round-count rule alone.
 escalate_effort_on_repeated_finding: false
+
+# The model an escalated implementador round runs on, under either rule above
+# (the round count, or the repeated finding with its switch on), so a round
+# the effort alone did not unstick can go to a stronger model. It wins over
+# role_model on that round; the other roles never escalate. Optional; unset by
+# default, which changes nothing (docs/decisions.md ADR 432).
+# escalated_model: claude-opus-5-5
 
 # A phase that ends without its structured handoff (a turn closed on a
 # progress report, say) is resumed with one short "continue" line, up to this

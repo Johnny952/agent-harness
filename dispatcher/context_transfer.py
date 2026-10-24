@@ -251,6 +251,8 @@ def save_handoff(
     session_id: str | None = None,
     account: str | None = None,
     changes_requested: str | None = None,
+    model: str | None = None,
+    repeated_finding: bool = False,
 ) -> str:
     """Keep the structured return of a phase, not just its prose rendering.
 
@@ -292,6 +294,11 @@ def save_handoff(
     `changes_requested` is the cycle's note for a request for changes (ADR
     272), written only when given (ADR 273): a verdict that resumes this phase
     opens a new cycle, and the arquitecto after it reads the note from here.
+
+    `model` is the model the call ran on, and `repeated_finding` is the
+    cycle's signal for the round (ADR 432), each written only when given
+    (`repeated_finding` only when true): a resumed round decides its effort
+    and model from the envelope, days after the cycle's memory is gone.
     """
     path = handoff_path(hive_dir, task_id, role)
     envelope = {
@@ -310,6 +317,10 @@ def save_handoff(
         envelope["account"] = account
     if changes_requested:
         envelope["changes_requested"] = changes_requested
+    if model is not None:
+        envelope["model"] = model
+    if repeated_finding:
+        envelope["repeated_finding"] = True
     # Made here rather than by `_write_atomic`'s own mkdir, which cannot tell
     # the hive from what is under it: `handoffs/` and the scratch dir have to
     # be traversable by `/api/phases`' uid, the file alone is not enough.
