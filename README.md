@@ -1502,12 +1502,18 @@ number and title.
      D3 in [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*.
    - Compaction for a long-lived main thread — **planned**:
      `docs/plans/balancer.md` *Context compaction is the primary thread's
-     problem, not a phase's*.
+     problem, not a phase's*. The thread records a compacted thread rereads
+     are **built** (`dispatcher/threads.py`, `docs/decisions.md` ADR 170);
+     compacting only between tasks is not.
 3. **Unattended 24/7 operation.**
-   - A long-running loop that picks up ready tasks — **planned**:
-     `docs/plans/server-deployment.md` *The order across the plans*, and
-     `docs/plans/board-service.md` *Starting development: a button on the
-     board*. Refusing a task whose dependency is not merged is **built**
+   - A long-running loop that picks up ready tasks — **built** as the
+     `worker` service, which runs each start a person queues
+     (`dispatcher/worker.py`, `docs/decisions.md` ADR 142 and ADR 148): from
+     *Start development* (ADR 151, ADR 160), or *Start epic*, which queues an
+     epic's tasks as their dependencies merge (ADR 207, ADR 218). `run-queue`
+     tops up from the Ready order (ADR 132). Starting stays a person's act
+     (`docs/plans/board-service.md` *Starting development: a button on the
+     board*). Refusing a task whose dependency is not merged is **built**
      (`docs/decisions.md` ADR 60).
    - Telling quota-blocked apart from failed — **built**: a held cycle
      exits 75 (`docs/decisions.md` ADR 52), and `_recheck_cooling_accounts`
@@ -1535,7 +1541,11 @@ number and title.
      ADR 57 sets an effort per role.
    - A per-role model map — **built**: `role_model` and `Config.model_for` in
      `dispatcher/config.py`, `docs/decisions.md` ADR 65 and ADR 66.
-   - Escalating on signals other than the round count — **open**.
+   - Escalating on signals other than the round count — **built** for one
+     signal: a review repeating the last one's finding escalates the next
+     round's effort, opt-in under `escalate_effort_on_repeated_finding`
+     (`docs/decisions.md` ADR 73). A result text read as too short, and
+     switching model on a signal, are **open**.
 5. **Task profiles: skill packs per kind of task, not new roles.**
    - The profile mechanism, a project's default profiles, and the pack
      rules — **open**.
@@ -1552,8 +1562,11 @@ number and title.
    - *Other roles*, Documenter — **built**, as the rule it defends: the
      auditor is the single writer of the indexes
      (`dispatcher/project_docs.py`).
-   - *Other roles*, Integrator — **planned**: `docs/plans/review.md` *6. A
-     conflict is caught early, and resolved by the integrador*.
+   - *Other roles*, Integrator — **built**: `dispatch resolve-conflict`
+     (`resolve_conflict` in `dispatcher/dispatcher.py`), `docs/decisions.md`
+     ADR 277, and *Resolve conflict* from the board and the console (ADR 285,
+     ADR 288). Its `role_model` and `role_effort` keys are not in the config
+     writer's role list yet (`config_writer/app.py`).
    - *Other roles*, Epic decomposition — **built**: `docs/decisions.md`
      ADR 60, `docs/plans/task-split.md`.
    - *Other roles*, a security reviewer pack, and bug fixing, infra,
@@ -1564,24 +1577,33 @@ number and title.
    - Redacting hook payloads — **built**: `docs/decisions.md` ADR 74,
      `hooks/emit_event.py` redacts before the POST by fixed rules and fails
      closed.
-   - A salted password digest — **planned**:
-     `docs/plans/server-deployment.md` *1. Sign-in is a real login, with
-     sessions, behind HTTPS*. The constant-time compare is **built**
-     (`observability/auth.py`).
+   - A salted password digest — **built**: stdlib `hashlib.scrypt` with a
+     random salt, `hash_password` in `board_service/signin.py`,
+     `docs/decisions.md` ADR 324. Left: the console's sign-in screen and the
+     first-user command (`docs/plans/server-deployment.md` *How it would be
+     built*, step 2), so the console still signs in with Basic auth and its
+     constant-time compare (`observability/auth.py`).
    - The collector and the read API run Flask's development server —
      **open**.
-   - A per-task view — **planned**: Phase 5 in `docs/plans/board.md`
-     *Phases*. The phase rows and the usage log are **built**
-     (`docs/decisions.md` ADR 27 and ADR 54).
+   - A per-task view — **built**: the dock's execution thread shows a task's
+     phases and their hook events (`GET /api/tasks/<id>/events`,
+     `docs/decisions.md` ADR 197), over the phase rows and the usage log
+     (ADR 27 and ADR 54). A phase's own text between its prompt and its end
+     is not in it (ADR 197 *Consequences*), which Phase 5 in
+     `docs/plans/board.md` *Phases* would add.
    - A socket proxy for the dispatcher's `docker.sock` — **open**.
 7. **Code-inspection/code-intelligence tooling in agent containers.**
    **Open**, whole. Its checks are D4 and D7 in
    [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*.
 8. **Mid-phase context-window compaction.** **Open**, whole.
-9. **Parallel/load-balanced dispatch across accounts.** **Planned**:
-   `docs/plans/projects.md` *5. Parallel work: across projects now, within a
-   project later*, and [`docs/ROADMAP.md`](docs/ROADMAP.md) *Stage 2 —
-   Prioritized future work*.
+9. **Parallel/load-balanced dispatch across accounts.** **Built**:
+   `run-queue --parallel N` up to the pool's phase slots
+   (`docs/decisions.md` ADR 83 and ADR 252), `max_concurrent_phases` per
+   account (ADR 88), and the worker's `project_parallel` (ADR 306). A fair
+   share of quota between projects is **planned**: `docs/plans/projects.md`
+   *5. Parallel work: across projects now, within a project later*, and
+   [`docs/ROADMAP.md`](docs/ROADMAP.md) *Stage 2 — Prioritized future
+   work*.
 10. **Multi-provider agent containers.** **Open**, whole. A different route
     to other models, through the same CLI, is planned in
     `docs/plans/omniroute.md`.
