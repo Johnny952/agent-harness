@@ -149,6 +149,22 @@ def test_edit_over_mcp(client, hive):
     assert ok(client, "board_get", {"task_id": "T-001"})["item"]["description"] == OTHER
 
 
+def test_plan_over_mcp_propose_edit_and_clear(client, hive):
+    propose(client, plan="docs/plans/x.md")
+    assert read(hive, "T-001").plan == "docs/plans/x.md"
+    assert ok(client, "task_edit", {"task_id": "T-001", "plan": ""}) == {"id": "T-001", "changed": ["plan"]}
+    assert read(hive, "T-001").plan is None
+    assert ok(client, "task_edit", {"task_id": "T-001", "plan": "docs/plans/y.md"})["changed"] == ["plan"]
+    assert read(hive, "T-001").plan == "docs/plans/y.md"
+
+
+def test_plan_refusals_over_mcp(client, hive):
+    args = {"title": "A", "description": DESCRIPTION}
+    assert "plan must be a string" in error(client, "backlog_propose", {**args, "plan": 7})
+    assert "docs/plans/<name>.md" in error(client, "backlog_propose", {**args, "plan": "x.md"})
+    assert list(hive.iterdir()) == []
+
+
 def test_edit_refuses_a_started_task(client, hive):
     task(hive, "T-001", status="in_progress")
     assert "has started" in error(client, "task_edit", {"task_id": "T-001", "priority": "low"})

@@ -579,6 +579,13 @@ saves trimmed, and *Reset* still goes back to `config.yaml`
 (`docs/decisions.md` ADR 444). With the server half from T-177-S1 the
 operator no longer has to edit `config.yaml` to set or clear it.
 
+**T-178-S1** declared no debt and resolved none. `backlog_propose` and
+`task_edit` now take an optional `plan`, a path under `docs/plans/` ending in
+`.md`, written to the task file only when given and cleared with `""`
+(`docs/decisions.md` ADR 450). Until a later task makes `/api/roadmap` strip
+the `docs/plans/` prefix, a task naming a plan this way still shows under
+*no plan*. ADR 450 records that gap as a consequence, so it is not filed as
+debt.
 **T-178-S2** declared no debt and resolved none. `GET /api/roadmap` now serves
 epics as rows with their sub-tasks nested in `split_into` order, backlog
 epics in the future band marked `place: backlog`, and a warning for an empty

@@ -126,6 +126,8 @@ class TaskFile:
     dropped_by: str | None = None
     # Who filed it from the console (ADR 390); set by `board_service`'s HTTP path.
     proposed_by: str | None = None
+    # The plan it builds, `docs/plans/<name>.md` (ADR 450).
+    plan: str | None = None
 
 
 def hive_root(hive_dir: str) -> str:
@@ -718,6 +720,7 @@ def read_task_file(path: str) -> TaskFile:
         dropped_reason=fm.get("dropped_reason"),
         dropped_by=fm.get("dropped_by"),
         proposed_by=fm.get("proposed_by"),
+        plan=fm.get("plan"),
     )
 
 
@@ -865,6 +868,8 @@ def write_task_file(path: str, task: TaskFile) -> None:
         fm["dropped_by"] = task.dropped_by
     if task.proposed_by is not None:
         fm["proposed_by"] = task.proposed_by
+    if task.plan is not None:
+        fm["plan"] = task.plan
     dumped = yaml.dump(fm, Dumper=_TaskDumper, sort_keys=False, default_flow_style=False)
     _write_atomic(path, f"{_FRONTMATTER_DELIM}\n{dumped}{_FRONTMATTER_DELIM}\n\n{task.body}")
 

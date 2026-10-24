@@ -373,7 +373,7 @@ def backlog_propose(
 
 
 def task_edit(hive_dir: str, role: str, task_id: str, **fields) -> dict:
-    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, `tags`, `rank`, while not started."""
+    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, `tags`, `rank`, `plan`, while not started."""
     return _writing(task_store.edit_task, hive_dir, task_id, **fields)
 
 
@@ -584,6 +584,10 @@ _TAGS = {
         "characters; trimmed and kept once, in order"
     ),
 }
+_PLAN = {
+    "type": "string",
+    "description": "the plan this builds, as a path inside the project: docs/plans/<name>.md",
+}
 _WRITES = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False}
 _DESCRIPTION = {
     "type": "string",
@@ -643,6 +647,7 @@ TOOLS: dict[str, dict] = {
                 "description": _DESCRIPTION,
                 "priority": _PRIORITY,
                 "tags": _TAGS,
+                "plan": _PLAN,
                 "depends_on": {**_IDS, "description": "task ids; not for an epic"},
                 "tasks": {
                     "type": "array",
@@ -671,8 +676,9 @@ TOOLS: dict[str, dict] = {
     "task_edit": {
         "name": "task_edit",
         "description": (
-            "Change a task's title, description, depends_on, priority, tags or rank, while "
-            "it has not started. Fields left out are kept; tags [] clears them. A new "
+            "Change a task's title, description, depends_on, priority, tags, rank or plan, "
+            "while it has not started. Fields left out are kept; tags [] and plan \"\" clear "
+            "them. A new "
             "priority puts the task at the end of that bucket unless rank is given."
         ),
         "inputSchema": {
@@ -684,6 +690,7 @@ TOOLS: dict[str, dict] = {
                 "depends_on": _IDS,
                 "priority": _PRIORITY,
                 "tags": _TAGS,
+                "plan": {**_PLAN, "description": _PLAN["description"] + '; "" clears it'},
                 "rank": {
                     "type": "integer",
                     "minimum": 0,
