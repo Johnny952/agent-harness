@@ -33,7 +33,7 @@
 #     over SSH) runs it ad hoc. See the README's "Deploying with Coolify"
 #     section.
 #   - `worker` is gated the same way, behind the `worker` profile: the one
-#     long-running service with the docker socket, started with
+#     long-running Docker client (through `docker-proxy`, ADR 435), started with
 #     `--profile worker up -d worker` (docs/decisions.md ADR 142, ADR 166).
 #   - `playwright-install` is gated the same way, behind its own profile: a
 #     one-shot that fills `<repo-root>/.data/ms-playwright` with the headless
@@ -222,6 +222,32 @@ services:
     networks:
       - ia_harness_net
 
+  # The only service that mounts the docker socket, read-only, and the only
+  # Docker access the dispatcher and the worker have: an allowlist of exec into
+  # agent-* and dind-* containers; mirrored from docker-compose.yml (see its
+  # comment), docs/decisions.md ADR 435. Publishes nothing.
+  docker-proxy:
+    profiles: ["dispatcher", "worker"]
+    image: wollomatic/socket-proxy:1.10.0
+    restart: unless-stopped
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - -listenip=0.0.0.0
+      - -proxyport=2375
+      - -allowfrom=0.0.0.0/0
+      - -allowHEAD=^(/v[0-9]+\.[0-9]+)?/_ping$$
+      - -allowGET=^(/v[0-9]+\.[0-9]+)?/(_ping|containers/(agent|dind)-[a-zA-Z0-9_.-]+/json|exec/[a-f0-9]+/json)$$
+      - -allowPOST=^(/v[0-9]+\.[0-9]+)?/(containers/(agent|dind)-[a-zA-Z0-9_.-]+/exec|exec/[a-f0-9]+/start)$$
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_proxy_net
+
   # Not a persistent service: gated behind the "dispatcher" profile so
   # `docker compose up` / Coolify's default deploy never starts it. Run it
   # ad hoc: `docker compose -f docker-compose.coolify.yml --profile dispatcher
@@ -237,8 +263,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - BACKUP_KEEP=${BACKUP_KEEP:-}
+      - DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
@@ -252,11 +278,13 @@ services:
       - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
+      - docker-proxy
     networks:
       - ia_harness_net
+      - docker_proxy_net
 
   # The worker, mirrored from docker-compose.yml (see its comment): the one
-  # long-running service with the docker socket, behind the `worker` profile,
+  # long-running Docker client, through `docker-proxy` (ADR 435), behind the `worker` profile,
   # with the dispatcher's mounts, backup directory included; docs/decisions.md
   # ADR 142, ADR 166, ADR 342 and ADR 360.
   worker:
@@ -269,8 +297,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - BACKUP_KEEP=${BACKUP_KEEP:-}
+      - DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - ../../dispatcher_state:/state
       - ../../.hive:/data/.hive
       - claude_shared:/root/.claude
@@ -280,8 +308,10 @@ services:
       - ${BACKUP_DIR:-../../.data/backups}:/backups
     depends_on:
       - collector
+      - docker-proxy
     networks:
       - ia_harness_net
+      - docker_proxy_net
 
   # The browser install, mirrored from docker-compose.yml (see its comment):
   # the agent image with its entrypoint replaced, behind the
@@ -409,6 +439,10 @@ networks:
   ia_harness_net:
     name: ia_harness_net
   console_net:
+  # docker-proxy and its clients, dispatcher and worker (ADR 435); internal,
+  # no name: key, so the agents file cannot join it.
+  docker_proxy_net:
+    internal: true
 
 volumes:
   observability_data:

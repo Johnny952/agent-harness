@@ -587,8 +587,13 @@ the two-liner above:
 - `dispatcher` (`profiles: ["dispatcher"]`) is a template, not a service
   (`restart: "no"`, placeholder `--task-id`/`--project`). Ungated, a bare
   `up -d` fired it and ran a task. See step 5.
-- `worker` (`profiles: ["worker"]`) is the one long-running service with the
-  docker socket, with the dispatcher's mounts. Start it with
+- `docker-proxy` (`profiles: ["dispatcher", "worker"]`) is the only service
+  that mounts the docker socket, read-only; it publishes nothing and allows
+  only exec into `agent-*`/`dind-*` containers (ADR 435). Either profile
+  starts it, and `dispatcher` and `worker` reach Docker through it with
+  `DOCKER_HOST`.
+- `worker` (`profiles: ["worker"]`) is the one long-running Docker client,
+  with the dispatcher's mounts. Start it with
   `docker compose -f docker/compose/docker-compose.yml --profile worker up -d worker`.
   It carries out the queue actions the console files, so Start and Cancel from
   the console need it running. `dispatcher_state/actions` does not exist until
@@ -1594,7 +1599,9 @@ number and title.
      (ADR 27 and ADR 54). A phase's own text between its prompt and its end
      is not in it (ADR 197 *Consequences*), which Phase 5 in
      `docs/plans/board.md` *Phases* would add.
-   - A socket proxy for the dispatcher's `docker.sock` — **open**.
+   - A socket proxy for the dispatcher's `docker.sock` — **built**: the
+     `docker-proxy` service, exec into `agent-*`/`dind-*` only
+     (`docs/decisions.md` ADR 435).
 7. **Code-inspection/code-intelligence tooling in agent containers.**
    **Open**, whole. Its checks are D4 and D7 in
    [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*.

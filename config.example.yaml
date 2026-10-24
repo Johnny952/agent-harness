@@ -23,6 +23,8 @@
 # points at. A command request of kind dind or service resolves to it, and an
 # account without one refuses those kinds; it is never guessed from the name
 # (docs/decisions.md ADR 118).
+# Both names must start `agent-` and `dind-`: the docker socket proxy admits
+# exec into no other container (docs/decisions.md ADR 435).
 accounts:
   - name: cuenta1
     container: agent-cuenta1
