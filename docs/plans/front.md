@@ -459,7 +459,9 @@ an unwired console.
 lives inside each agent container, and reading it means reaching into another
 container — a docker socket, which C-8 forbids this service and
 `observability/api/app.py` is built without. It is privileged on the read path
-alone, so it sits with tier 3 and not here.
+alone, so it sits with tier 3 and not here. `docs/decisions.md` ADR 456
+(T-179) settles it without a socket: the worker writes a credentials snapshot
+made from `stat` alone, and this api serves it as `GET /api/credentials`.
 
 **`listApprovals`** is tier 3's by the same logic: an approval has a lifecycle,
 and a lifecycle has a store, and no store exists.
@@ -711,7 +713,8 @@ Bound to the **Tokens task**:
   terminal, and this repo already treats login codes as things that do not get
   pasted around. A ruling, not an ADR. The operator answered yes on
   2026-10-15, for the Claude login and for renewing the GitHub token; see
-  item 0 of [`backlog.md`](backlog.md).
+  item 0 of [`backlog.md`](backlog.md). The Tokens task is designed in
+  `docs/decisions.md` ADR 456 (T-179).
 
 Bound to the **Role models write**, if it happens here:
 
