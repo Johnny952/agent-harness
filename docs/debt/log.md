@@ -496,6 +496,11 @@ that spans surfaces is split, not narrowed into debt; a mechanical fix is
 applied to every copy and debt deferring it is rejected; the next slice of a
 goal is ruled `follow_up` and gets no row; gated debt carries `blocked_by`.
 
+**T-166** resolved no earlier row and declared no debt. It brought the
+`**Status:**` line of six files in line with their last index row, which
+already resolved them: `T-146-D1`, `T-146-D2`, `T-150-D1`, `T-152-D1`,
+`T-154-S1-D1` and `T-162-D1` now say `resolved <date> by <task>.`. No row was
+appended, since each resolution row was already there; `T-163-D1` stays open.
 **T-165** resolved `T-163-D1` and declared no debt. The front's `Task` row
 type (the debt entry called it `TaskRow`) gains `proposed_by`, and the backlog
 screen's source cell prints ` · by <name>` when it is set. `TaskSource` gains
