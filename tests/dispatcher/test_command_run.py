@@ -253,6 +253,62 @@ def test_deny_with_a_comment_resumes_with_it_and_runs_nothing(tmp_path, monkeypa
     assert verdict["verdict"] == "deny" and verdict["comment"] == "use the lockfile"
 
 
+def _resumed_effort_and_model(tmp_path, monkeypatch, **cfg_overrides):
+    """Block an implementador round on a request, resume it, return the resume's call."""
+    efforts = []
+    real = _Phases.__call__
+
+    def with_effort(self, *args, effort=None, **kwargs):
+        efforts.append(effort)
+        return real(self, *args, effort=effort, **kwargs)
+
+    monkeypatch.setattr(_Phases, "__call__", with_effort)
+    cfg, phases = _blocked(tmp_path, monkeypatch, **cfg_overrides)
+    efforts.clear()
+    _exec(monkeypatch)
+    command_run.run_command_request(cfg, "task-1", "myproj", 1, "deny")
+    return cfg, phases, efforts
+
+
+def test_a_resume_of_a_round_the_round_count_escalated_runs_on_the_escalated_model(tmp_path, monkeypatch) -> None:
+    cfg, phases, efforts = _resumed_effort_and_model(
+        tmp_path, monkeypatch, escalate_effort_after_round=0, escalated_effort="max",
+        escalated_model="claude-opus-5-5",
+    )
+
+    assert phases.calls[0]["resume_session_id"] is not None
+    assert phases.calls[0]["model"] == "claude-opus-5-5"
+    assert efforts[0] == "max"
+
+
+def test_a_resume_with_the_escalated_model_unset_keeps_the_default(tmp_path, monkeypatch) -> None:
+    cfg, phases, efforts = _resumed_effort_and_model(
+        tmp_path, monkeypatch, escalate_effort_after_round=0, escalated_effort="max",
+    )
+
+    assert phases.calls[0]["model"] == cfg.default_model
+
+
+def test_a_resume_reads_the_repeated_finding_from_the_envelope(tmp_path, monkeypatch) -> None:
+    """The filing round ran on the signal, which the cycle no longer remembers."""
+    cfg, phases = _blocked(
+        tmp_path, monkeypatch, escalated_model="claude-opus-5-5",
+        escalate_effort_after_round=5, escalate_effort_on_repeated_finding=True,
+    )
+    envelope = context_transfer.read_handoff_envelope(cfg.hive_tasks_dir, "task-1", "implementador")
+    assert envelope["model"] == cfg.default_model and "repeated_finding" not in envelope
+    context_transfer.save_handoff(
+        cfg.hive_tasks_dir, "task-1", "implementador", envelope["handoff"], round_num=2,
+        command_requests=envelope["command_requests"], session_id=envelope["session_id"],
+        account=envelope["account"], repeated_finding=True,
+    )
+    _exec(monkeypatch)
+
+    command_run.run_command_request(cfg, "task-1", "myproj", 1, "deny")
+
+    assert phases.calls[0]["model"] == "claude-opus-5-5"
+
+
 def test_deny_without_a_comment_says_so(tmp_path, monkeypatch) -> None:
     cfg, phases = _blocked(tmp_path, monkeypatch)
     _exec(monkeypatch)
