@@ -16721,3 +16721,84 @@ neither, and the backlog screen did not show who proposed a card.
 **Ruled out.**
 - *`Absent` for a missing proposer:* most cards have none on purpose, and a
   mark on every role-filed row is noise.
+
+## ADR 411 — An account `BUSY` with a task holds that task's expired lock until its phase cannot be running
+
+**Status:** accepted (2026-10-24), T-168's arquitecto. Closes the orphan-phase
+race of `docs/plans/backlog.md` item 3 (*Unattended 24/7 operation*), sized by
+V4.2 in `docs/ROADMAP.md`. Narrows how `reap_stale_busy_accounts` judges a
+holder whose card heartbeat has expired (`docs/ROADMAP.md`, the 2026-09-28
+entry on the TTL, and ADR 88); leaves ADR 71 and ADR 126 as they are.
+
+**Context.** A Ctrl+C on the host kills the dispatcher and its heartbeat
+thread, but not the `claude` it started with `docker exec`: that runs on in
+the container until its in-container `timeout --kill-after=30
+<phase_timeout_seconds>` (`dispatcher/docker_exec.py`). The task lock expires
+after `heartbeat_ttl_seconds`, and two things then hand the task to a re-run:
+`reap_expired_locks` clears the card's owner at the start of `run_task_cycle`,
+and `reap_stale_busy_accounts`, run by every `pick_idle_account`, releases the
+orphan's account on the same expired heartbeat. A re-run then claims another
+account and `tasks.acquire_lock` takes the task, so two phases write one
+worktree. The account state is the one record the Ctrl+C leaves behind that
+names the task: `KeyboardInterrupt` is not an `Exception`, so `dispatch_phase`
+does not release its claim.
+
+**Decision.**
+1. **When a phase may still be running.** A holder of task *T* on an account
+   may still be running when its `busy_since` is unset, or when fewer than
+   `phase_timeout_seconds + heartbeat_ttl_seconds` have passed since its
+   *anchor*: the later of its `busy_since` and *T*'s card heartbeat (a
+   heartbeat that is missing or will not parse is left out of the anchor).
+   The anchor is the last sign of life, not the claim: a phase makes several
+   `claude` calls (the resume, the gate retries, the shrink), each with the
+   full timeout, so the claim does not bound the last one, while the call a
+   Ctrl+C orphans started before the heartbeat stopped. The
+   `heartbeat_ttl_seconds` margin covers the gap between two beats and the
+   30 s `--kill-after`. One predicate in `dispatcher/dispatcher.py` answers
+   this for both reapers and the lock, so they cannot disagree.
+2. **The account reaper keeps it.** `reap_stale_busy_accounts` releases a
+   holder whose card heartbeat has expired only once the predicate says its
+   phase cannot be running. A live heartbeat and a holder with no card (or a
+   card with no heartbeat) are judged as before.
+3. **The lock reaper skips it.** `reap_expired_locks` leaves an expired lock
+   in place while any account holds that task id and the predicate says its
+   phase may be running, and logs one line naming the account.
+4. **The lock refuses it.** `tasks.acquire_lock` takes a keyword
+   `orphan_holders` (account names, default empty). Where it would take over
+   an expired or heartbeat-less foreign lock and that list is not empty, it
+   raises `context_transfer.OrphanPhaseError`, a subclass of `LockHeldError`
+   carrying the accounts. `dispatch_phase` computes the list just before the
+   call, from every account but the one it has just claimed (`claim` already
+   refuses an account that holds the task, so that one cannot be the
+   orphan's). Being a `LockHeldError`, it takes today's path out: the claimed
+   account is given back, the lock is not touched, `run_phase` sets
+   `foreign_lock` and the run ends without a traceback; `run_phase` logs it as
+   a task held by an orphan phase, naming the account and how to free it.
+5. **What frees it.** The orphan's holder going away by any path — the
+   reaper past the window, `dispatch release-account`, or a dispatcher that
+   finishes the phase — or the window passing. Nothing kills the orphan.
+
+**Consequences.**
+- After a Ctrl+C the orphan's account stays `BUSY` for up to about two hours
+  (`phase_timeout_seconds` 7200 plus the TTL), which is right while the
+  orphan runs: it is spending that account. When the `claude` died with the
+  dispatcher (a host or container restart) the account and the task wait out
+  the same window for nothing; `dispatch release-account <account>` frees
+  both at once, without `--force`, since the card's heartbeat is stale.
+- A second dispatcher racing a first on the same task before the first's
+  `acquire_lock` can now be refused as an orphan rather than as a live lock;
+  both are refusals, and the wording is the only difference.
+- V4.2's expected result "re-run after 120 s: the expired lock is reaped"
+  no longer holds; the live run is not part of this decision.
+
+**Ruled out.**
+- *Seeing the process in the container* (a `pgrep` through `docker exec`):
+  it would free a dead orphan's account sooner, but puts a container round
+  trip per holder into every account pick, and a `claude` argv that names its
+  task is not something the harness guarantees today. The window alone is
+  sufficient because the in-container `timeout` bounds the orphan.
+- *Guarding only `acquire_lock`:* the account reaper frees the orphan's
+  holder on the same expired heartbeat, before the re-run reaches the lock,
+  so the guard would never see it.
+- *Anchoring on `busy_since` alone:* a phase whose later `claude` call was
+  orphaned could be reaped while that call still runs.

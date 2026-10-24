@@ -89,6 +89,7 @@ import socket
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -812,8 +813,12 @@ def acquire_lock(
     owner: str,
     ttl_seconds: int | None = None,
     phase: str | None = None,
+    orphan_holders: Sequence[str] = (),
 ) -> context_transfer.TaskFile:
     """Take the task's lock for `owner`, and record which phase holds it.
+
+    A takeover of an expired foreign lock is refused with `OrphanPhaseError`
+    while `orphan_holders` names accounts whose phase may still run (ADR 411).
 
     `phase` is the role about to run (ADR 126). It is written with the lock and
     replaces whatever was there, so a call without one leaves no stale role
@@ -838,6 +843,8 @@ def acquire_lock(
             heartbeat_missing or context_transfer.is_lock_expired(task, ttl_seconds)
         ):
             raise context_transfer.LockHeldError(task_id, task.owner)
+        if orphan_holders:
+            raise context_transfer.OrphanPhaseError(task_id, task.owner, list(orphan_holders))
     task.owner = owner
     task.heartbeat = dt.datetime.now(dt.timezone.utc).isoformat()
     # Running a blocked task again is the operator's decision to retry (the

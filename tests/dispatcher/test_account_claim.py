@@ -18,6 +18,7 @@ from dispatcher.tasks import acquire_lock
 from tests.dispatcher.test_dispatcher import (  # noqa: F401
     _age_busy_since,
     _age_heartbeat,
+    _ORPHAN_WINDOW_PAST,
     _make_config,
     fake_git,
 )
@@ -346,6 +347,10 @@ def test_the_reaper_floor_covers_a_probe_at_its_worst_case(tmp_path) -> None:
         cfg, "cuenta1",
         cfg.heartbeat_ttl_seconds + dispatcher_mod._PROBE_WORST_CASE_SECONDS + 1,
     )
+    # Past the floor the heartbeat still has to be older than the orphan window.
+    assert dispatcher_mod.reap_stale_busy_accounts(cfg) == []
+    _age_busy_since(cfg, "cuenta1", _ORPHAN_WINDOW_PAST(cfg))
+    _age_heartbeat(cfg, "task-1", _ORPHAN_WINDOW_PAST(cfg))
 
     assert dispatcher_mod.reap_stale_busy_accounts(cfg) == ["cuenta1"]
 
@@ -478,7 +483,7 @@ def test_the_reaper_frees_a_dead_holder_beside_a_live_one(tmp_path) -> None:
     cfg = _slots_config(tmp_path, 2)
     acquire_lock(cfg.hive_tasks_dir, "T-dead", owner="cuenta1")
     acquire_lock(cfg.hive_tasks_dir, "T-live", owner="cuenta1")
-    _age_heartbeat(cfg, "T-dead", 999)
+    _age_heartbeat(cfg, "T-dead", _ORPHAN_WINDOW_PAST(cfg))
     assert sm.claim(cfg.state_dir, "cuenta1", "T-live", capacity=2)
     assert sm.claim(cfg.state_dir, "cuenta1", "T-dead", capacity=2)
     # Only the first holder is mirrored at the top level; the second one's
@@ -486,7 +491,7 @@ def test_the_reaper_frees_a_dead_holder_beside_a_live_one(tmp_path) -> None:
     path = os.path.join(cfg.state_dir, "cuenta1.json")
     with open(path) as fh:
         data = json.load(fh)
-    old = time.time() - (cfg.heartbeat_ttl_seconds + dispatcher_mod._PROBE_WORST_CASE_SECONDS + 1)
+    old = time.time() - _ORPHAN_WINDOW_PAST(cfg)
     data["holders"][0]["busy_since"] = old
     data["holders"][1]["busy_since"] = old
     data["busy_since"] = old
