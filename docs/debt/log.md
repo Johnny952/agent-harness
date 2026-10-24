@@ -512,3 +512,10 @@ looks an entry up once on a real row (inside `propose_debt`), and each result
 carries `unknown_blocker`, true when `blocked_by` is a task id the board cannot
 read; the after-cycle mirror logs a warning for it and `import-debt` prints it.
 The row is still filed with no dependency (`docs/decisions.md` ADR 396).
+
+**T-168** resolved no earlier row and declared `T-168-D1`. An expired task
+lock is now held, and the task not taken, while an account is `BUSY` with it
+inside `phase_timeout_seconds` plus a TTL of its claim or last heartbeat
+(`docs/decisions.md` ADR 411). The window is the only liveness evidence: no
+probe looks for the `claude` process, so a phase that died with its container
+is held as long as a live one, which is `T-168-D1`.
