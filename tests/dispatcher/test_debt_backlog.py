@@ -128,6 +128,29 @@ def test_backlog_item_cuts_a_long_title_and_fills_an_empty_fix() -> None:
     assert tasks._description_problems(description, "it") == []
 
 
+def test_the_filing_note_keeps_the_origin_out_of_the_row() -> None:
+    note = debt.filing_note([("T-1-D1", debt.Declaration(what="w", origin=debt.FOUND))])
+    assert "`what` cell" in note and "`**Origin:**`" in note and "never in the row" in note
+
+
+def test_a_declared_row_keeps_its_what_verbatim_whatever_its_origin() -> None:
+    row = debt.declared_row("T-1-D1", debt.Declaration(what="No probe (TTL).", origin=debt.FOUND))
+    assert row["what"] == "No probe (TTL)."
+
+
+@pytest.mark.parametrize("word", ["Introduced", "Found"])
+def test_backlog_item_drops_a_trailing_origin_word(word) -> None:
+    title, description, _ = debt.backlog_item(_row(what=f"No probe: held (TTL). {word}"))
+    assert title == "T-1-D1: No probe: held (TTL)."
+    assert description.startswith("## Goal\n\nNo probe: held (TTL).\n\n")
+
+
+@pytest.mark.parametrize("what", ["Found by the operator while x", "Nothing was found"])
+def test_backlog_item_leaves_other_uses_of_the_word(what) -> None:
+    title, _, _ = debt.backlog_item(_row(what=what))
+    assert title == f"T-1-D1: {what}"
+
+
 # --- propose_debt --------------------------------------------------------------
 
 

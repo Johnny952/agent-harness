@@ -426,6 +426,11 @@ _MAX_TITLE_CHARS = 200
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
 
+#: An entry's origin, spilled into the end of its what cell by an auditor
+#: copying earlier rows (ADR 426); it is not part of the what.
+_ORIGIN_TAIL_RE = re.compile(r"\s+(?:Introduced|Found)\s*\Z")
+
+
 def _one_line(text: str) -> str:
     return " ".join(_BOLD_RE.sub(r"\1", text or "").split())
 
@@ -440,7 +445,7 @@ def backlog_item(row: dict) -> tuple[str, str, str]:
     says the rest. The priority comes from the row's impact (`priority_for`).
     """
     entry = row["id"]
-    what = _one_line(row.get("what", "")) or "No description in the index."
+    what = _ORIGIN_TAIL_RE.sub("", _one_line(row.get("what", ""))) or "No description in the index."
     title = f"{entry}: {what}"
     if len(title) > _MAX_TITLE_CHARS:
         title = title[: _MAX_TITLE_CHARS - 3].rstrip() + "..."
@@ -570,7 +575,9 @@ def filing_note(filed: list[tuple[str, Declaration]]) -> str:
     lines = [
         "The debt the revisor accepted in this task already has its ids. Append one row per "
         f"entry at the end of the table in `{project_docs.DEBT_INDEX}`, with these columns in this order: {columns}. "
-        "Use the id given here, and write `none` in the `card` column. In the `impact` "
+        "Use the id given here, and write `none` in the `card` column. Write each entry's what in "
+        "the `what` cell as listed below and end it there: its origin (`introduced` or `found`) "
+        "goes on the entry file's `**Origin:**` line, never in the row. In the `impact` "
         "column write one of `risk` (left as it is, it can break or lose something), "
         "`cost` (it slows or costs work) or `cosmetic` (wording or polish): the dispatcher "
         "files each entry as a backlog item and its impact sets the item's priority. "
