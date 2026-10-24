@@ -489,3 +489,9 @@ cycle mirror and `dispatch import-debt` file an entry blocked by a task as a
 backlog item that depends on it, and file nothing for one blocked by a plan
 step, whose row here is the record. A hand-written row carries the blocker as
 a `Blocked by <value>;` lead in its **where** (`docs/decisions.md` ADR 396).
+
+**T-164-S3** resolved no earlier row and declared no debt. It wrote the rules
+into the role prompts and above the table in `docs/debt/README.md`: a goal
+that spans surfaces is split, not narrowed into debt; a mechanical fix is
+applied to every copy and debt deferring it is rejected; the next slice of a
+goal is ruled `follow_up` and gets no row; gated debt carries `blocked_by`.
