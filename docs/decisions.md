@@ -16686,3 +16686,38 @@ when the task id names no task.
   append-only table and the auditor's resolution-row rule (S3's prompt), for
   a value that ADR 393 already places in **where**.
 - *Refusing an unknown task id:* see 6.
+
+## ADR 402 — The backlog's source cell names who proposed a card, and `TaskSource` takes `follow_up`
+
+**Status:** accepted (2026-10-24), T-165's arquitecto. Carries out ADR 390,
+*Consequences*, and resolves `docs/debt/T-163-D1.md`; follows ADR 372's shape.
+
+**Context.** Since ADR 390 both task readers serve `proposed_by` on every row,
+and since ADR 393 a task's `source` may be `follow_up`
+(`dispatcher/tasks.py` `SOURCES`). The console's `Task` type
+(`front/src/lib/api/types.ts`, the row T-165's card calls `TaskRow`) had
+neither, and the backlog screen did not show who proposed a card.
+
+**Decision.**
+1. **Types.** `Task` gains `proposed_by: string | null`, required like
+   `dropped_by` because the api always serves it. No `TaskRow` alias is
+   added: `Task` is the `/api/tasks` row. `TaskSource` becomes
+   `"operator" | "arquitecto" | "debt" | "follow_up"`. Every `Task` literal,
+   fixture and test helper carries `proposed_by`, `null` unless the case needs
+   a value.
+2. **The cell.** The backlog row's source cell keeps what it prints (the
+   source or *not recorded*, then ` · <debt id>` on a debt item) and, when
+   `proposed_by` is a non-blank string, appends ` · by <proposed_by>` in a
+   span with `data-testid="proposed-by"`. Anything else — `null`, blank, not a
+   string — appends nothing: no `Absent` mark, because a card filed by a role
+   or before ADR 390 has no proposer by design, not by a gap. Guarded with the
+   screen's `filled`, never trusted from the type.
+
+**Consequences.**
+- Only the backlog screen shows it; the task detail and the board do not.
+- The source filter already lists the sources the rows carry, so a
+  `follow_up` item gets its own option with no code change.
+
+**Ruled out.**
+- *`Absent` for a missing proposer:* most cards have none on purpose, and a
+  mark on every role-filed row is noise.
