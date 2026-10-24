@@ -17416,3 +17416,82 @@ to the unknown-kind fallback and offers Reset only.
   and the empty field already has no other meaning ADR 441 allows.
 - *Refusing an empty field client-side, as the number fields do:* empty is
   a legal value for this kind, not a typo.
+
+## ADR 447 — `/api/roadmap` serves epics as rows in the task lists, with their sub-tasks nested
+
+**Status:** accepted (T-178-S2, 2026-10-24). The api half of step 2 of
+`docs/plans/roadmap-view.md` (*How it would be built*). Extends the
+route T-072 built; the screen is T-178-S3's.
+
+**Context.** The route serves plan rows with a flat `tasks` list and
+`no_plan` with `now` (a list) and `past` (months, each with `tasks`). An
+epic (`docs/plans/task-split.md` section 2) is a task file with
+`split_into`; its sub-tasks name it in `epic`. Backlog epics belong in
+the future band (*Decisions*, 3). T-178-S1 writes `plan` as a path,
+`docs/plans/x.md`, where T-072's reader matched the file name `x.md`.
+
+**Decision.**
+
+1. *An epic is a task file whose raw frontmatter has a `split_into` key,
+   or whose `status` is `epic`.* Its row rides in the same lists a task row
+   does — a plan's `tasks`, `no_plan.now`, a month's `tasks` — at its own
+   id's place in id order. A task row keeps its four keys. An epic row is
+   `{"id", "title", "state", "merged_at", "kind": "epic", "place",
+   "merged_tasks", "tasks"}`: `kind` is only on epic rows and tells them
+   apart; `title` is the frontmatter `title` or `null` (no description is
+   read); `place` is `backlog` for `proposed`, `deferred` and `dropped` and
+   `board` otherwise, as `board_list` has it (ADR 125, part 5);
+   `merged_tasks` counts its sub-tasks with a `merged` block; `tasks` is
+   its sub-task rows in `split_into` order; `merged_at` is the latest
+   sub-task `merged_at` when every sub-task is merged, else `null`.
+2. *Membership is the epic's `split_into`.* A sub-task listed there is
+   nested and is no longer a flat row. A task whose `epic` names an epic
+   whose `split_into` does not list it, or names an id with no task file,
+   one that did not read, or one this project left out, stays a flat row
+   and gets a warning naming both ids. An id in `split_into` with no row
+   (no file, unreadable, another project, past the task cap) is skipped
+   with a warning. A `split_into` that is not a list of strings is a
+   warning and the epic has zero sub-tasks. A task listed by two epics
+   nests under the first by id, with a warning.
+3. *Plans.* An epic is placed by its own `plan`. A sub-task with no `plan`
+   takes its epic's; one whose `plan` differs (including an epic with none)
+   stays nested and gets a warning naming it. A `plan` matches a plan row
+   when it is the file name or `docs/plans/` plus the file name
+   (`project_docs.PLANS_DIR`); anything else is T-072's unknown-plan
+   warning, and the row goes to `no_plan`.
+4. *No plan.* An epic in `no_plan` is in `past`, in the month of
+   `merged_at`, when it has at least one sub-task and every one is
+   merged; in the `null` month when that date is `null`; otherwise in
+   `now`. Zero sub-tasks is a warning and `now`.
+5. *Backlog epics* (`proposed` or `deferred`; a `dropped` epic is placed
+   as a board epic is, by point 4 or its plan's band). With a matching
+   plan whose row is in `future`, they ride in that row's `tasks`. With a
+   plan whose row is in `now` or `past`, the future band gets a second row
+   for that plan file, its frontmatter fields the same and its `tasks`
+   only those backlog epics; the plan's own row does not carry them. With
+   no plan, they are in `no_plan.now`. In each list they come after the
+   other rows, in the board's order (`tasks.order_key` on `bucket_of` and
+   `rank_of`).
+6. *Never a 500.* Every case above is a warning in `warnings`; an
+   unreadable epic file is T-072's "unreadable task file" warning, and its
+   sub-tasks then warn by point 2.
+
+**Consequences.**
+- Every existing key keeps its shape, so the T-072 tests and the T-075
+  screen read the new answer unchanged; until T-178-S3 the screen draws an
+  epic as a task link, which opens the epic's own task page.
+- A plan file can appear in two bands. A reader keys a plan row by band
+  and file, not by file alone.
+- Backlog *tasks* that are not epics are placed as before (their plan, or
+  `no_plan.now`); only epics are moved to the future band.
+- Task rows still serve `title: null` (ADR 125, part 6); epic
+  rows serve the frontmatter title because the epic row needs a name and
+  every epic the board or a split files carries one.
+
+**Ruled out.**
+- *A separate `epics` key on plan rows and on `no_plan`:* it changes the
+  shape the T-072 tests pin whole and the screen reads, for no
+  information the `kind` key does not carry.
+- *Backlog epics nested under the plan in whichever band it is in:* the
+  plan doc puts them in the future band, and a `building` plan's next
+  epics are future work.
