@@ -131,7 +131,10 @@ stands.
    piece of the cheap form is written, the backfill, route and screen are not.
 2. **An optional `plan` field on tasks and epics.** It is written only when
    set, like `epic`, and the arquitecto fills it when it proposes. So is
-   `supersedes`, the task or epic the new work replaces.
+   `supersedes`, the task or epic the new work replaces. Writable since
+   T-178-S1 (`backlog_propose`, `task_edit`; ADR 450), as a path
+   `docs/plans/<name>.md`; `/api/roadmap` still matches bare file names, so
+   such values land in `no_plan` until the api task strips the prefix.
 3. **A one-time backfill of the past.** A script reads the merge commits from
    git and the `docs/implementations/T-*.md` notes, and writes `plan` (and
    `merged`, where the task file lacks it) onto the old tasks. A task it

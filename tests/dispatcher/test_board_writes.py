@@ -1199,6 +1199,75 @@ def test_propose_refuses_a_blank_proposed_by(tmp_path: Path) -> None:
     assert "proposed_by" in str(err.value)
 
 
+def _raw_frontmatter(hive: str, task_id: str) -> str:
+    return Path(task_file_path(hive, task_id)).read_text()
+
+
+def test_propose_with_a_plan_writes_it_and_without_leaves_the_key_out(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    tasks.propose(hive, title="Planned", description=_DESCRIPTION, source="operator",
+                  plan="docs/plans/x.md")
+    tasks.propose(hive, title="Plain", description=_OTHER, source="operator")
+    assert _read(hive, "T-001").plan == "docs/plans/x.md"
+    assert "plan: docs/plans/x.md" in _raw_frontmatter(hive, "T-001")
+    assert _read(hive, "T-002").plan is None
+    assert "plan" not in _raw_frontmatter(hive, "T-002")
+
+
+def test_propose_an_epic_with_a_plan_puts_it_on_every_file(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    epic = tasks.propose(
+        hive, title="Epic", description=_DESCRIPTION, source="operator", plan="docs/plans/x.md",
+        tasks=[{"title": "One", "description": _DESCRIPTION},
+               {"title": "Two", "description": _OTHER}],
+    )
+    for task_id in [epic["id"], *epic["tasks"]]:
+        assert _read(hive, task_id).plan == "docs/plans/x.md"
+
+
+@pytest.mark.parametrize(
+    "plan",
+    ["x.md", "docs/plans/x.txt", "docs/plans/../x.md", "docs/plans/sub/x.md", "/docs/plans/x.md",
+     "", "docs/plans/x.md\n", "docs/plans/.md", 7, ["docs/plans/x.md"]],
+)
+def test_propose_refuses_a_plan_that_is_not_a_plans_file(tmp_path: Path, plan) -> None:
+    hive = _hive(tmp_path)
+    with pytest.raises(tasks.BoardWriteError) as err:
+        tasks.propose(hive, title="Alone", description=_DESCRIPTION, source="operator", plan=plan)
+    assert "plan" in _problems(err)
+    assert list(Path(hive).iterdir()) == []
+
+
+def test_edit_sets_and_clears_a_plan(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed")
+    assert tasks.edit_task(hive, "T-001", plan="docs/plans/x.md") == {"id": "T-001", "changed": ["plan"]}
+    assert _read(hive, "T-001").plan == "docs/plans/x.md"
+    assert tasks.edit_task(hive, "T-001", plan="docs/plans/x.md")["changed"] == []
+    assert tasks.edit_task(hive, "T-001", plan="")["changed"] == ["plan"]
+    assert _read(hive, "T-001").plan is None
+    assert "plan" not in _raw_frontmatter(hive, "T-001")
+
+
+@pytest.mark.parametrize("plan", ["x.md", "docs/plans/x.txt", "docs/plans/x.md\n", 3])
+def test_edit_refuses_a_bad_plan_and_keeps_the_old_one(tmp_path: Path, plan) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="proposed", plan="docs/plans/old.md")
+    with pytest.raises(tasks.BoardWriteError) as err:
+        tasks.edit_task(hive, "T-001", plan=plan)
+    assert "plan" in _problems(err)
+    assert _read(hive, "T-001").plan == "docs/plans/old.md"
+
+
+def test_edit_refuses_a_plan_on_a_started_task(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-001", status="in_progress")
+    with pytest.raises(tasks.BoardWriteError) as err:
+        tasks.edit_task(hive, "T-001", plan="docs/plans/x.md")
+    assert "has started" in _problems(err)
+    assert _read(hive, "T-001").plan is None
+
+
 def test_deferring_an_epic_leaves_its_tasks(tmp_path: Path) -> None:
     hive = _hive(tmp_path)
     epic = _epic(hive)

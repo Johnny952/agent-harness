@@ -2409,6 +2409,7 @@ def _proposed(
     tags: list[str] | None = None,
     rank: int | None = None,
     proposed_by: str | None = None,
+    plan: str | None = None,
 ) -> context_transfer.TaskFile:
     return context_transfer.TaskFile(
         task_id=task_id,
@@ -2425,11 +2426,29 @@ def _proposed(
         tags=list(tags) if tags else None,
         rank=rank,
         proposed_by=proposed_by,
+        plan=plan,
     )
 
 
 def _tags_problems(tags: object) -> list[str]:
     return [] if tags is None else tag_problems(tags)
+
+
+#: A plan is a file straight under `docs/plans/`, named in plain characters (ADR 450).
+_PLAN_PATH = re.compile(r"docs/plans/[A-Za-z0-9][A-Za-z0-9._-]*\.md")
+
+
+def is_plan_path(value: object) -> bool:
+    # `fullmatch`: a `$` anchor would admit a trailing newline.
+    return isinstance(value, str) and _PLAN_PATH.fullmatch(value) is not None and ".." not in value
+
+
+def _plan_problems(plan: object, allow_empty: bool = False) -> list[str]:
+    if plan is None or (allow_empty and plan == ""):
+        return []
+    if is_plan_path(plan):
+        return []
+    return [f"plan is {plan!r}, not a path like docs/plans/<name>.md"]
 
 
 def _rank_problems(rank: object) -> list[str]:
@@ -2499,6 +2518,7 @@ def propose(
     tasks: list[dict] | None = None,
     tags: list[str] | None = None,
     proposed_by: str | None = None,
+    plan: str | None = None,
 ) -> dict:
     """Section 6's `backlog_propose`: a task, or an epic with its tasks, as `proposed`.
 
@@ -2510,7 +2530,8 @@ def propose(
     to 4 tasks are `<epic>-S<n>`, as `file_split` names them, each `proposed`
     with `epic` set and `depends_on` from its `after`. `source` is required
     (ADR 127, point 9) and `priority` is the proposer's suggestion; both go on
-    every file written, as do `tags`, stripped and without repeats. Each file
+    every file written, as do `tags`, stripped and without repeats, and `plan`.
+    Each file
     written enters its bucket at the end, `_end_of_bucket` under the create
     lock, an epic's tasks after the epic in their order (ADR 130).
 
@@ -2528,6 +2549,7 @@ def propose(
         problems.append(f"its source is {source!r}, not one of {', '.join(SOURCES)}")
     problems += _priority_problems(priority)
     problems += _tags_problems(tags)
+    problems += _plan_problems(plan)
     if proposed_by is not None and (not isinstance(proposed_by, str) or not proposed_by.strip()):
         problems.append(f"its proposed_by is {proposed_by!r}, not a non-blank string")
     deps: list[str] = [] if depends_on is None else depends_on
@@ -2557,7 +2579,7 @@ def propose(
                 hive_dir,
                 _proposed(
                     task_id, title, source, priority, deps, tags=tags, rank=rank,
-                    proposed_by=proposed_by,
+                    proposed_by=proposed_by, plan=plan,
                 ),
                 description,
             )
@@ -2570,7 +2592,7 @@ def propose(
                 hive_dir,
                 _proposed(
                     task_id, title, source, priority, [], split_into=ids, tags=tags, rank=rank,
-                    proposed_by=proposed_by,
+                    proposed_by=proposed_by, plan=plan,
                 ),
                 description,
             )
@@ -2581,7 +2603,7 @@ def propose(
                     child_id, child_title, source, priority,
                     [ids[i - 1] for i in after], epic=task_id, tags=tags,
                     rank=min(rank + position * RANK_STEP, MAX_RANK),
-                    proposed_by=proposed_by,
+                    proposed_by=proposed_by, plan=plan,
                 )
                 _write_new(hive_dir, child, child_text)
         return {"id": task_id, "created": True, "tasks": ids}
@@ -2764,7 +2786,7 @@ def _propose_again(
                 child_id, child_title, task.source or source, child_priority,
                 child_deps, epic=task_id, tags=task.tags,
                 rank=_end_of_bucket(hive_dir, child_priority or DEFAULT_PRIORITY),
-                proposed_by=task.proposed_by,
+                proposed_by=task.proposed_by, plan=task.plan,
             )
             _write_new(hive_dir, child, child_text)
     return {"id": task_id, "created": False, "tasks": ids}
@@ -2807,11 +2829,13 @@ def edit_task(
     priority: str | None = None,
     tags: list[str] | None = None,
     rank: int | None = None,
+    plan: str | None = None,
 ) -> dict:
-    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, `tags`, `rank`.
+    """Section 6's `task_edit`: title, description, `depends_on`, `priority`, `tags`, `rank`, `plan`.
 
     While the task has not started. `None` leaves a field as it is. `tags`
-    replaces the list, stripped and without repeats; `[]` clears it. `rank`
+    replaces the list, stripped and without repeats; `[]` clears it, as `""`
+    clears `plan` (ADR 450). `rank`
     puts the task at that position in its bucket, and a `priority` that moves
     it to another bucket without one puts it at that bucket's end (ADR 130). The title stays unique within its epic,
     so a later propose cannot be confused about what it names. A task of an
@@ -2821,11 +2845,11 @@ def edit_task(
     Returns `{"id", "changed"}`, the fields whose value changed.
     """
     task_id = _check_id(task_id)
-    given = (title, description, depends_on, priority, tags, rank)
+    given = (title, description, depends_on, priority, tags, rank, plan)
     if all(value is None for value in given):
         raise BoardWriteError(
             f"task {task_id}",
-            ["nothing to change: give title, description, depends_on, priority, tags or rank"],
+            ["nothing to change: give title, description, depends_on, priority, tags, rank or plan"],
         )
     problems = [] if title is None else _title_problems(title, "the title")
     if description is not None:
@@ -2833,6 +2857,7 @@ def edit_task(
     problems += _priority_problems(priority)
     problems += _tags_problems(tags)
     problems += _rank_problems(rank)
+    problems += _plan_problems(plan, allow_empty=True)
     if problems:
         raise BoardWriteError(f"task {task_id}", problems)
     title = None if title is None else title.strip()
@@ -2875,6 +2900,9 @@ def edit_task(
         if tags_given and task.tags != tags:
             task.tags = tags
             changed.append("tags")
+        if plan is not None and task.plan != (plan or None):
+            task.plan = plan or None
+            changed.append("plan")
         if rank is None and bucket_of(task) != old_bucket:
             rank = _end_of_bucket(hive_dir, bucket_of(task), exclude={task_id})
         if rank is not None and task.rank != rank:
