@@ -519,3 +519,9 @@ inside `phase_timeout_seconds` plus a TTL of its claim or last heartbeat
 (`docs/decisions.md` ADR 411). The window is the only liveness evidence: no
 probe looks for the `claude` process, so a phase that died with its container
 is held as long as a live one, which is `T-168-D1`.
+
+**T-171** resolved no earlier row and declared `T-171-D1`. The collector and
+the read API are served by waitress from a `run()` their `__main__` calls,
+with 4 and 8 request threads (`docs/decisions.md` ADR 417). The board service
+and the config writer were out of scope and still run Werkzeug's development
+server, which is `T-171-D1`.

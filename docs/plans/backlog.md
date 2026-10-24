@@ -496,7 +496,7 @@ run arbitrary code from cloned repos on the same network:
 - **Done 2026-10-24 by T-171** (`docs/decisions.md` ADR 417): both
   services are served by waitress from a `run()` that `__main__` calls;
   the board service and the config writer keep the development server
-  (filed as debt). The original text follows.
+  (debt `T-171-D1`). The original text follows.
   […] The collector and the read API also run
   Flask's development server rather than a production WSGI server.
 - […]
