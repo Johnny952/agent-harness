@@ -1583,10 +1583,10 @@ number and title.
      first-user command (`docs/plans/server-deployment.md` *How it would be
      built*, step 2), so the console still signs in with Basic auth and its
      constant-time compare (`observability/auth.py`).
-   - The collector and the read API run Flask's development server —
-     **built**: both are served by waitress (`docs/decisions.md` ADR 417).
-     The board service and the config writer still run the development
-     server (filed as debt).
+   - The four HTTP services run Flask's development server —
+     **built**: the collector and the read API are served by waitress
+     (`docs/decisions.md` ADR 417), the board service and the config writer
+     too (ADR 420), which also sends waitress's start line to stderr.
    - A per-task view — **built**: the dock's execution thread shows a task's
      phases and their hook events (`GET /api/tasks/<id>/events`,
      `docs/decisions.md` ADR 197), over the phase rows and the usage log
