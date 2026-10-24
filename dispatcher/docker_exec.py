@@ -98,6 +98,44 @@ def kill_in_container(container: str, pid: int) -> None:
         logger.warning("could not signal pid %s in %s", pid, container)
 
 
+PROCESS_PROBE_TIMEOUT_SECONDS = 30
+
+# The agent image has no procps, so this walks /proc with sh and readlink. $1 is
+# the task's worktrees directory; a cwd equal to it or under it (a deleted one
+# shows a " (deleted)" suffix) means a call of the task's phase is running. The
+# probe's own shell runs in "/", so it never matches itself.
+PROCESS_PROBE_SCRIPT = (
+    'for p in /proc/[0-9]*; do '
+    'c=$(readlink "$p/cwd" 2>/dev/null) || continue; '
+    'case "$c" in "$1"|"$1"/*|"$1 (deleted)"|"$1"/*" (deleted)") echo seen; exit 0;; esac; '
+    'done; echo gone'
+)
+
+
+def task_process_seen(container: str, task_dir: str) -> bool | None:
+    """Whether a process in `container` works in `task_dir` or under it (ADR 429).
+
+    True on a match, False when none is left, None when the probe could not
+    answer: a non-zero exit, unexpected output, a container that is down, a
+    missing `docker` or a timed-out call. None never frees anything."""
+    try:
+        proc = run_docker_exec(
+            container, "/",
+            ["sh", "-c", PROCESS_PROBE_SCRIPT, "ia-harness-probe", task_dir],
+            timeout=PROCESS_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    answer = proc.stdout.strip()
+    if answer == "seen":
+        return True
+    if answer == "gone":
+        return False
+    return None
+
+
 def _output_tail(proc: subprocess.CompletedProcess, limit: int = 500) -> str:
     tail = (proc.stderr.strip() or proc.stdout.strip())[-limit:]
     # Collapse to one line so a multi-line stack trace doesn't blow up the
