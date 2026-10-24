@@ -37,6 +37,7 @@ function task(id: string, over: Partial<Task> = {}): Task {
     debt_id: null,
     dropped_reason: null,
     dropped_by: null,
+    proposed_by: null,
     project: null,
     epic: null,
     split_into: [],
@@ -79,6 +80,24 @@ describe("the project on a backlog row (ADR 204)", () => {
     expect(within(without).queryByTestId("project-mark")).toBeNull();
     expect(without.textContent).toContain("no project");
     expect(without.textContent).not.toContain("null");
+  });
+});
+
+describe("who proposed a backlog row (ADR 402)", () => {
+  it("prints the person beside the source, and nothing extra when none is recorded", async () => {
+    await open([
+      task("T-1", { proposed_by: "alice" }),
+      task("T-2"),
+      task("T-3", { source: "follow_up" }),
+    ]);
+    const named = await screen.findByTestId("row-T-1");
+    expect(within(named).getByTestId("proposed-by").textContent).toBe("by alice");
+    expect(named.textContent).toContain("operator");
+    const unnamed = screen.getByTestId("row-T-2");
+    expect(within(unnamed).queryByTestId("proposed-by")).toBeNull();
+    expect(unnamed.textContent).not.toContain("by ");
+    expect(unnamed.textContent).not.toContain("null");
+    expect(screen.getByTestId("row-T-3").textContent).toContain("follow_up");
   });
 });
 
