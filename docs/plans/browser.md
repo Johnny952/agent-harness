@@ -212,6 +212,9 @@ beside it.
    vendored as `skills/playwright-cli/` for the implementador and revisor; and
    `Bash(playwright-cli:*)` in `config.yaml` `allowed_tools`. The auditor keeps
    option A's scripts. The skill lives in the image rather than
-   `claude_shared`, so it versions with the CLI.*
+   `claude_shared`, so it versions with the CLI. From the agent container the
+   harness console does not resolve (ADR 109 keeps `console` off
+   `ia_harness_net`), which is the design, not a gap: a dev server on the
+   container's loopback was walked instead, and the skill says so.*
 
 Each step is one surface, per `docs/plans/token-economy.md` P4.

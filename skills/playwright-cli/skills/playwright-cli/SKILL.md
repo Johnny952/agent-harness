@@ -366,6 +366,12 @@ go to `/tmp/playwright-cli`. A `--filename=` you pass is relative to the
 current directory, so pass an absolute path under `/tmp` unless the file
 belongs in the repository.
 
+The harness's own console and api are not reachable from this container:
+`console`, `caddy` and `config-writer` do not resolve here, by design. To walk
+a screen, start its dev server in your own worktree and open it on loopback,
+for example `http://127.0.0.1:5173/`, with route fixtures standing in for the
+api.
+
 ## Example: Form submission
 
 ```bash
