@@ -201,7 +201,9 @@ beside it.
    `allowed_tools`; a probe on CLI 2.1.296 ran a script under `*/verify/`
    and refused one outside it.*
 4. One console task whose done-means includes a phase walk against route
-   fixtures, to test the recording rules on a real row.
+   fixtures, to test the recording rules on a real row. *Done 2026-10-24 by
+   T-178-S3: the Roadmap screen, walked headless against route fixtures; the
+   row is the last of the Results log in `docs/ROADMAP.md`.*
 5. Then, separately, whether to install option B's skills.
 
 Each step is one surface, per `docs/plans/token-economy.md` P4.

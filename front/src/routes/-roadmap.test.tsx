@@ -6,10 +6,10 @@
  * The `-` on the filename is load-bearing; see `-index.test.tsx`'s header.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route } from "./roadmap";
 import { renderRoute } from "@/test/render-route";
-import type { Roadmap, RoadmapPlan, RoadmapTask } from "@/lib/api/types";
+import type { Roadmap, RoadmapEpic, RoadmapPlan, RoadmapRow, RoadmapTask } from "@/lib/api/types";
 
 // `vitest.config.ts` sets `globals: false`, so the library's own cleanup hook
 // never runs, and every render would stack in one document.
@@ -26,7 +26,7 @@ const plan = (
   file: string,
   title: string,
   status: string,
-  tasks: RoadmapTask[] = [],
+  tasks: RoadmapRow[] = [],
 ): RoadmapPlan => ({
   file,
   title,
@@ -150,5 +150,103 @@ describe("the Roadmap screen", () => {
       },
     });
     expect(await screen.findByText("This project has no roadmap yet")).toBeTruthy();
+  });
+});
+
+const epic = (
+  id: string,
+  title: string,
+  tasks: RoadmapTask[],
+  over: Partial<RoadmapEpic> = {},
+): RoadmapEpic => ({
+  id,
+  title,
+  state: "in_progress",
+  merged_at: null,
+  kind: "epic",
+  place: "board",
+  merged_tasks: tasks.filter((t) => t.merged_at !== null).length,
+  tasks,
+  ...over,
+});
+
+/** A roadmap whose one plan file is a row in Future and in Now (ADR 447), with the given rows. */
+const withEpics = (now: RoadmapRow[], future: RoadmapRow[] = []): Roadmap => ({
+  project: "ia-harness",
+  bands: {
+    future: future.length ? [plan("building.md", "Plan being built", "building", future)] : [],
+    now: now.length ? [plan("building.md", "Plan being built", "building", now)] : [],
+    past: [],
+  },
+  no_plan: { now: [], past: [] },
+});
+
+const openEpics = (data: Roadmap, path = "/roadmap") =>
+  renderRoute(Route, "/roadmap", { "/api/roadmap": { data, warnings: [] } }, path);
+
+describe("epics on the Roadmap screen", () => {
+  it("is a collapsed row that opens to its sub-tasks, each with a link", async () => {
+    const e = epic("T-200", "Split epic", [
+      task("T-201", "in_progress"),
+      task("T-202", "done", "2026-10-12T10:00:00+00:00"),
+    ]);
+    await openEpics(withEpics([e]));
+    fireEvent.click(await screen.findByRole("button", { name: /Plan being built/ }));
+
+    const toggle = screen.getByRole("button", { name: /Split epic/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText("1/2 merged")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "T-201" })).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("link", { name: "T-201" }).getAttribute("href")).toBe("/tasks/T-201");
+    expect(screen.getByRole("link", { name: "T-202" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "T-200" }).getAttribute("href")).toBe("/tasks/T-200");
+  });
+
+  it("marks a backlog epic in the future band, and opens one row of a two-band file alone", async () => {
+    const backlog = epic("T-300", "Backlog epic", [task("T-301", "pending")], {
+      state: "proposed",
+      place: "backlog",
+    });
+    await openEpics(withEpics([task("T-600", "pending")], [backlog]));
+    const future = await screen.findByRole("region", { name: "Future" });
+    fireEvent.click(within(future).getByRole("button", { name: /Plan being built/ }));
+    expect(within(future).getByText("backlog")).toBeTruthy();
+    // The same file in Now stays shut: the key is band plus file.
+    const now = screen.getByRole("region", { name: "Now" });
+    expect(
+      within(now)
+        .getByRole("button", { name: /Plan being built/ })
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+  });
+
+  it("opens an epic with no sub-tasks to a line saying so", async () => {
+    await openEpics(withEpics([epic("T-400", "Empty epic", [])]));
+    fireEvent.click(await screen.findByRole("button", { name: /Plan being built/ }));
+    expect(screen.getByText("0/0 merged")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Empty epic/ }));
+    expect(screen.getByText("No sub-task is listed in this epic's split_into.")).toBeTruthy();
+  });
+
+  it("hides a merged epic, and a kept epic's merged sub-tasks, under Current only", async () => {
+    const kept = epic("T-500", "Kept epic", [
+      task("T-501", "in_progress"),
+      task("T-502", "done", "2026-10-12T10:00:00+00:00"),
+    ]);
+    const merged = epic("T-510", "Merged epic", [], {
+      state: "done",
+      merged_at: "2026-10-11T10:00:00+00:00",
+    });
+    await openEpics(withEpics([kept, merged]), "/roadmap?view=current");
+    fireEvent.click(await screen.findByRole("button", { name: /Plan being built/ }));
+    expect(screen.queryByText("Merged epic")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Kept epic/ }));
+    expect(screen.getByRole("link", { name: "T-501" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "T-502" })).toBeNull();
+    // The count still reads all of the sub-tasks.
+    expect(screen.getByText("1/2 merged")).toBeTruthy();
   });
 });

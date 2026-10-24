@@ -104,7 +104,29 @@ export interface RoadmapTask {
    * `no_plan.past` is merged, whatever this says.
    */
   merged_at: string | null;
+  /** Absent on a task row; `"epic"` on an epic row, which narrows the union. */
+  kind?: undefined;
 }
+
+/**
+ * An epic row, which rides in every list a task row does (ADR 447, drawn by
+ * ADR 453). `title` is the epic's frontmatter title; `tasks` are its sub-tasks.
+ */
+export interface RoadmapEpic {
+  id: string;
+  title: string | null;
+  state: string;
+  merged_at: string | null;
+  kind: "epic";
+  /** `backlog` or `board` as served; only `backlog` is drawn differently. */
+  place: string;
+  /** How many of the sub-tasks are merged, counted over all of them. */
+  merged_tasks: number;
+  tasks: RoadmapTask[];
+}
+
+/** What a roadmap list holds: a task row or an epic row. */
+export type RoadmapRow = RoadmapTask | RoadmapEpic;
 
 /** One plan in `docs/plans/`, with the tasks that name it. */
 export interface RoadmapPlan {
@@ -121,14 +143,14 @@ export interface RoadmapPlan {
   built: string | null;
   supersedes: string[];
   superseded_by: string[];
-  tasks: RoadmapTask[];
+  tasks: RoadmapRow[];
 }
 
 /** The tasks of `no_plan.past` that were merged in one month. */
 export interface RoadmapMonth {
   /** `YYYY-MM`, or `null` for merged tasks whose `merged.at` is missing or not ISO. */
   month: string | null;
-  tasks: RoadmapTask[];
+  tasks: RoadmapRow[];
 }
 
 /**
@@ -140,7 +162,7 @@ export interface RoadmapMonth {
 export interface Roadmap {
   project: string;
   bands: { future: RoadmapPlan[]; now: RoadmapPlan[]; past: RoadmapPlan[] };
-  no_plan: { now: RoadmapTask[]; past: RoadmapMonth[] };
+  no_plan: { now: RoadmapRow[]; past: RoadmapMonth[] };
 }
 
 /**
