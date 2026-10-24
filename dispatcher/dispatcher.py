@@ -2433,6 +2433,11 @@ def _mirror_filed_debt(
                 task_id, result["debt_id"], result["blocked_by"],
             )
             continue
+        if result["unknown_blocker"]:
+            logger.warning(
+                "task %s: debt entry %s is blocked by %s, which the board cannot read; "
+                "filed with no dependency", task_id, result["debt_id"], result["blocked_by"],
+            )
         logger.info(
             "task %s: debt entry %s %s backlog item %s (priority %s)",
             task_id, result["debt_id"],

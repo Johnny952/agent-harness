@@ -314,6 +314,7 @@ def test_file_debt_follows_blocked_by_in_all_three_cases(tmp_path: Path) -> None
         ("T-1-D3", True, [], False), ("T-1-D4", False, [], True),
     ]
     assert out[2]["id"] is None and out[2]["blocked_by"] == "docs/plans/x.md step 2"
+    assert [r["unknown_blocker"] for r in out] == [False, False, False, True]
     items = {t.debt_id: t.depends_on for t in tasks.read_all_tasks(hive).values() if t.debt_id}
     assert items == {"T-1-D1": [], "T-1-D2": ["T-050"], "T-1-D4": []}
 
@@ -330,6 +331,25 @@ def test_file_debt_dry_run_follows_blocked_by_and_a_gated_row_names_an_existing_
         (None, True, False, ["T-050"]), ("T-051", False, True, []),
     ]
     assert not [t for t in tasks.read_all_tasks(hive).values() if t.debt_id == "T-1-D2"]
+    assert [r["unknown_blocker"] for r in out] == [False, False]
+    [lost] = tasks.file_debt(hive, [_row("T-1-D4", blocked_by="T-999")], dry_run=True)
+    assert lost["unknown_blocker"] is True
+
+
+def test_file_debt_looks_an_entry_up_once_on_a_real_row(tmp_path: Path, monkeypatch) -> None:
+    hive = _hive(tmp_path)
+    _task(hive, "T-050")
+    calls = []
+    real = tasks.find_debt_item
+    monkeypatch.setattr(
+        tasks, "find_debt_item", lambda h, d: calls.append(d) or real(h, d)
+    )
+    tasks.file_debt(hive, [_row("T-1-D1"), _row("T-1-D2", blocked_by="T-050")])
+    assert calls == ["T-1-D1", "T-1-D2"]
+    calls.clear()
+    tasks.file_debt(hive, [_row("T-1-D3")], dry_run=True)
+    tasks.file_debt(hive, [_row("T-1-D4", blocked_by="docs/x.md step 1")])
+    assert calls == ["T-1-D3", "T-1-D4"]
 
 
 def test_propose_debt_depends_on_is_written_and_an_unreadable_dep_is_refused(

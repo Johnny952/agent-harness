@@ -4796,10 +4796,11 @@ def test_the_debt_the_auditor_filed_becomes_a_backlog_item_at_its_impact(
 
 @pytest.mark.parametrize(
     "blocked_by, depends_on, filed",
-    [("", [], True), ("T-050", ["T-050"], True), ("docs/plans/x.md step 2", [], False)],
+    [("", [], True), ("T-050", ["T-050"], True), ("T-999", [], True),
+     ("docs/plans/x.md step 2", [], False)],
 )
 def test_blocked_by_decides_how_the_mirror_files_the_entry(
-    tmp_path, monkeypatch, fake_git, debt_index, blocked_by, depends_on, filed,
+    tmp_path, monkeypatch, fake_git, debt_index, caplog, blocked_by, depends_on, filed,
 ) -> None:
     """ADR 396: none files as before, a task id gates the item on it (even when
     the auditor's row lacks the lead), a plan step files no item at all."""
@@ -4826,6 +4827,15 @@ def test_blocked_by_decides_how_the_mirror_files_the_entry(
     note = _by_role(calls)["auditor"]
     assert (f'"Blocked by {blocked_by};"' in note) == bool(blocked_by)
     assert ("the row is the record" in note) == (not filed)
+    warned = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == "WARNING" and "which the board cannot read" in r.getMessage()
+    ]
+    if blocked_by == "T-999":
+        [message] = warned
+        assert "task-1-D1" in message and "T-999" in message
+    else:
+        assert warned == []
 
 
 _FOLLOW_UP = {

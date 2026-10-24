@@ -361,6 +361,8 @@ Files every open entry of a debt index as a proposed backlog item (ADR 131).
 A row whose **where** opens with `Blocked by <task id>;` is filed depending on
 that task (`filed as T-007 after T-003`); one blocked by a plan step is not
 filed and prints `gated on <step>, not filed` (ADR 396). The summary adds
-`, <n> gated on a plan step` when there are any.
+`, <n> gated on a plan step` when there are any. A row blocked by a task id the
+board cannot read is still filed, with no dependency, and its line adds
+`, blocked by <id>, which the board cannot read`.
 
 Exits: 0, 1, 2.
