@@ -105,6 +105,14 @@ const ROWS = [
     value: "opus",
     source: "config.yaml",
   },
+  {
+    key: "escalated_model",
+    class: "editable",
+    kind: "nullable_model",
+    reason: "The model a task escalates to; null is off.",
+    value: null,
+    source: "override",
+  },
 ];
 
 const ROLES = ["arquitecto", "implementador", "auditor"];
@@ -415,6 +423,71 @@ describe("a save", () => {
       "1.5 is not a whole number, so nothing was sent.",
     );
     expect(writes(sent)).toHaveLength(0);
+  });
+});
+
+describe("the nullable_model control", () => {
+  it("shows an input and the hint, not the fallback", async () => {
+    await openWith({ data: settings() });
+    const row = line("escalated_model");
+    expect(within(row).getByRole("combobox")).toBeTruthy();
+    expect(row.textContent).not.toContain("This console has no control");
+    expect(row.textContent).toContain(
+      "Empty saves null: no escalated model. Reset falls back to config.yaml.",
+    );
+  });
+
+  it("starts a null value as an empty field, still shown as not set", async () => {
+    await openWith({ data: settings() });
+    const row = line("escalated_model");
+    expect((within(row).getByRole("combobox") as HTMLInputElement).value).toBe("");
+    expect(row.textContent).toContain("not set");
+  });
+
+  it("saves an empty or blank field as null", async () => {
+    const { sent } = await openWith(
+      { data: settings() },
+      { "PUT /api/settings/escalated_model": { data: settings() } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save escalated_model" }));
+    await waitFor(() => expect(writes(sent)).toHaveLength(1));
+    expect(writes(sent)[0]!.body).toEqual({ value: null, revision: "r2" });
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Save escalated_model" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+    fireEvent.change(within(line("escalated_model")).getByRole("combobox"), {
+      target: { value: "   " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save escalated_model" }));
+    await waitFor(() => expect(writes(sent)).toHaveLength(2));
+    expect(writes(sent)[1]!.body).toEqual({ value: null, revision: "r2" });
+  });
+
+  it("saves a model ID as the trimmed string", async () => {
+    const { sent } = await openWith(
+      { data: settings() },
+      { "PUT /api/settings/escalated_model": { data: settings() } },
+    );
+    fireEvent.change(within(line("escalated_model")).getByRole("combobox"), {
+      target: { value: "  claude-opus-5-5 " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save escalated_model" }));
+    await waitFor(() => expect(writes(sent)).toHaveLength(1));
+    expect(writes(sent)[0]!.body).toEqual({ value: "claude-opus-5-5", revision: "r2" });
+  });
+
+  it("still offers Reset, which deletes the override", async () => {
+    const { sent } = await openWith(
+      { data: settings() },
+      { "DELETE /api/settings/escalated_model": { data: settings() } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Reset escalated_model" }));
+    await waitFor(() => expect(writes(sent)).toHaveLength(1));
+    expect(writes(sent)[0]!.method).toBe("DELETE");
+    expect(writes(sent)[0]!.path).toBe("/api/settings/escalated_model");
   });
 });
 
