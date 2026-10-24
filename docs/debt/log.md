@@ -495,3 +495,8 @@ into the role prompts and above the table in `docs/debt/README.md`: a goal
 that spans surfaces is split, not narrowed into debt; a mechanical fix is
 applied to every copy and debt deferring it is rejected; the next slice of a
 goal is ruled `follow_up` and gets no row; gated debt carries `blocked_by`.
+
+**T-165** resolved `T-163-D1` and declared no debt. The front's `Task` row
+type (the debt entry called it `TaskRow`) gains `proposed_by`, and the backlog
+screen's source cell prints ` · by <name>` when it is set. `TaskSource` gains
+`follow_up` (`docs/decisions.md` ADR 402).
