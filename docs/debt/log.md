@@ -599,3 +599,10 @@ indented task rows, with a muted `backlog` label on a backlog epic, and keys a
 plan row by band and file (`docs/decisions.md` ADR 453). It is the first task
 walked headless against route fixtures (`docs/plans/browser.md` step 4); the
 walk is recorded in `docs/ROADMAP.md` *Results log*.
+
+**T-179** declared no debt and resolved none. It is a design only:
+`docs/decisions.md` ADR 456 adds the `git_token` and `account_login` action
+kinds, hands their secret to the worker in a file of its own under the action
+queue, and gives the Tokens screen a credentials snapshot the worker writes
+without opening a secret. Its eight build tasks are listed in that ADR's
+*Consequences*; they are the next tasks, not debt.
