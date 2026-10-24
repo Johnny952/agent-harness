@@ -55,8 +55,8 @@ export type BacklogStatus = "proposed" | "deferred" | "dropped";
 /** The three priority buckets (`dispatcher/tasks.py:PRIORITIES`, ADR 130). */
 export type TaskPriority = "high" | "normal" | "low";
 
-/** Who proposed a task (`dispatcher/tasks.py:SOURCES`, ADR 129 and ADR 131). */
-export type TaskSource = "operator" | "arquitecto" | "debt";
+/** Who proposed a task (`dispatcher/tasks.py:SOURCES`, ADR 129, ADR 131 and ADR 393). */
+export type TaskSource = "operator" | "arquitecto" | "debt" | "follow_up";
 
 /**
  * A debt index row's `impact`, as `dispatcher/debt.py:impact_of` reads it: one
@@ -434,8 +434,8 @@ export interface UsageGroup {
 }
 
 /**
- * The nineteen keys `/api/tasks` answers, as `observability/api/app.py:_task`
- * shapes them (ADR 133, ADR 137, ADR 199). `body` is not one of them — it is the detail
+ * The 22 keys `/api/tasks` answers, as `observability/api/app.py:_task`
+ * shapes them (ADR 133, ADR 137, ADR 199, ADR 390). `body` is not one of them — it is the detail
  * route's alone (`docs/decisions.md` ADR 21) — and neither is a debt list: that is
  * a filter over `/api/debt` by the task prefix of a debt id (ADR 17). Nor is a
  * card: the task file is the board's data and nothing mirrors it (ADR 59).
@@ -476,6 +476,11 @@ export interface Task {
   dropped_reason: string | null;
   /** The role that dropped it: `operator` over HTTP, a role over MCP; else `null` (ADR 366). */
   dropped_by: string | null;
+  /**
+   * Who proposed it from the console: the signed-in person, else `null` (a
+   * role's or a pre-ADR-390 card) (ADR 390).
+   */
+  proposed_by: string | null;
   /** The epic this task belongs to, as its id, else `null` (ADR 137). */
   epic: string | null;
   /**

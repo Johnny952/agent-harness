@@ -501,3 +501,7 @@ goal is ruled `follow_up` and gets no row; gated debt carries `blocked_by`.
 already resolved them: `T-146-D1`, `T-146-D2`, `T-150-D1`, `T-152-D1`,
 `T-154-S1-D1` and `T-162-D1` now say `resolved <date> by <task>.`. No row was
 appended, since each resolution row was already there; `T-163-D1` stays open.
+**T-165** resolved `T-163-D1` and declared no debt. The front's `Task` row
+type (the debt entry called it `TaskRow`) gains `proposed_by`, and the backlog
+screen's source cell prints ` · by <name>` when it is set. `TaskSource` gains
+`follow_up` (`docs/decisions.md` ADR 402).

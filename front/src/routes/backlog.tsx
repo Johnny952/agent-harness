@@ -427,6 +427,12 @@ function ItemRow({
             </Link>
           </>
         ) : null}
+        {filled(task.proposed_by) ? (
+          <>
+            {" · "}
+            <span data-testid="proposed-by">by {task.proposed_by}</span>
+          </>
+        ) : null}
       </td>
       <td className="px-3 py-1.5">
         <StatusPill status={task.status} />
