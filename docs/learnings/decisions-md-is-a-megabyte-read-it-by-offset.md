@@ -3,8 +3,9 @@
 **When it applies:** you need one ADR out of `docs/decisions.md` and are about
 to Read the whole file.
 
-**Status:** unconfirmed — proposed by T-164-S2's arquitecto; the auditor
-measured the file at 1,020,756 bytes on 2026-10-23.
+**Status:** confirmed — proposed by T-164-S2's arquitecto; the auditor
+measured the file at 1,020,756 bytes on 2026-10-23. T-177-S1's arquitecto and
+implementador proposed it again, a second task.
 
 ## What is true
 

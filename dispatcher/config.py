@@ -95,7 +95,7 @@ class ConfigKey:
     reason: str
     #: The strict check an override of an editable key is held to; None on any
     #: other key. One of bool, positive_int, non_negative_int, string, effort,
-    #: list, mapping (see `_check_override_value`).
+    #: list, mapping, nullable_model (see `_check_override_value`).
     kind: str | None = None
 
 
@@ -163,9 +163,9 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "non_negative_int", "A round count. The override must be a non-negative integer."
     ),
     "escalate_effort_on_repeated_finding": _editable("bool", "A boolean switch (ADR 73)."),
-    "escalated_model": _read_only(
-        "A model ID or null (ADR 432). Editing it in the console is a follow-up: "
-        "the override kinds have no nullable string."
+    "escalated_model": _editable(
+        "nullable_model",
+        "A model ID, or null for off (ADR 432, ADR 441). Reset goes back to config.yaml.",
     ),
     "max_revision_rounds": _editable(
         "positive_int", "It bounds a cycle's spend. The override must be a positive integer."
@@ -828,6 +828,9 @@ def _check_override_value(key: str, value: object, kind: str) -> str | None:
         return None if isinstance(value, list) else "must be a list"
     if kind == "mapping":
         return None if isinstance(value, dict) else "must be a mapping"
+    if kind == "nullable_model":
+        ok = value is None or (isinstance(value, str) and value.strip())
+        return None if ok else "must be a non-empty model ID or null"
     raise ValueError(f"{key}: unknown kind {kind!r}")
 
 
@@ -865,7 +868,7 @@ def _read_overrides(overrides_path: str) -> dict:
             detail = f"{key!r} is not a config key"
         elif spec.key_class != EDITABLE:
             detail = f"{key} is {spec.key_class} and cannot be overridden: {spec.reason}"
-        elif value is None:
+        elif value is None and spec.kind != "nullable_model":
             detail = f"{key} is null; null is not a value, a reset is deleting the key"
         else:
             problem = _check_override_value(key, value, spec.kind)

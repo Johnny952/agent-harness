@@ -1123,6 +1123,48 @@ def test_load_config_refuses_a_bad_overrides_file_naming_it(tmp_path: Path, text
     assert "delete" in str(err.value)
 
 
+def test_escalated_model_is_an_editable_nullable_model() -> None:
+    spec = CONFIG_KEYS["escalated_model"]
+    assert (spec.key_class, spec.kind) == (EDITABLE, "nullable_model")
+
+
+def test_a_null_escalated_model_override_turns_it_off_over_config_yaml(tmp_path: Path) -> None:
+    base = "escalated_model: claude-opus-5-5\n"
+    path, _ = _write(tmp_path, "escalated_model: null\n", base)
+
+    assert load_config(path).escalated_model is None
+
+
+def test_an_escalated_model_override_loads(tmp_path: Path) -> None:
+    path, _ = _write(
+        tmp_path, "escalated_model: claude-sonnet-5-5\n", "escalated_model: claude-opus-5-5\n"
+    )
+
+    assert load_config(path).escalated_model == "claude-sonnet-5-5"
+
+
+@pytest.mark.parametrize("text", ["escalated_model: ''\n", "escalated_model: '  '\n", "escalated_model: 3\n"])
+def test_a_bad_escalated_model_override_is_refused_naming_the_file(tmp_path: Path, text: str) -> None:
+    path, overrides_path = _write(tmp_path, text)
+
+    with pytest.raises(ValueError) as err:
+        load_config(path)
+
+    assert str(overrides_path) in str(err.value)
+    assert "must be a non-empty model ID or null" in str(err.value)
+
+
+@pytest.mark.parametrize("key", ["default_model", "reserve_pct", "merge_on_done"])
+def test_a_null_override_of_any_other_key_is_still_refused(tmp_path: Path, key: str) -> None:
+    path, overrides_path = _write(tmp_path, f"{key}: null\n")
+
+    with pytest.raises(ValueError) as err:
+        load_config(path)
+
+    assert str(overrides_path) in str(err.value)
+    assert "null is not a value" in str(err.value)
+
+
 def test_load_config_attributes_a_merged_result_error_to_the_overrides(tmp_path: Path) -> None:
     path, overrides_path = _write(tmp_path, "reserve_pct: 95\n")
 
@@ -1211,8 +1253,8 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     assert set(values) | set(REMOVED_BOARD_KEYS) == set(CONFIG_KEYS)
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
-        23,
-        22,
+        24,
+        21,
         3,
     )
     for spec in CONFIG_KEYS.values():

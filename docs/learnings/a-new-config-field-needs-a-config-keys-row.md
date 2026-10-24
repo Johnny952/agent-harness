@@ -1,13 +1,17 @@
 # A new `Config` field needs a `CONFIG_KEYS` row, and the table test counts it
 
 **When it applies:** you added, renamed or removed a key `load_config` reads in
-`dispatcher/config.py`, or a field on its `Config`.
+`dispatcher/config.py`, or a field on its `Config`, or moved a `CONFIG_KEYS`
+row from one class to another.
 
 **Status:** confirmed. T-064's arquitecto and implementador both reported it
 (one source, one task). The auditor checked it against the test. T-109 hit it
 again adding the editable `thread_models` (ADR 169): the editable count went
 22 to 23 and the key joined the test's `values` dict. T-140 hit it adding
 the read-only `project_parallel` (ADR 306): the counts read 23/21/3 after it.
+T-177-S1 hit it with no new key at all: making `escalated_model` editable
+(ADR 441) moved one key from read-only to editable, 24/21/3 after it, while the
+implementador's first run expected the old 23/22/3.
 
 ## What fails
 

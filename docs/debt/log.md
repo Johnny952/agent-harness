@@ -565,3 +565,9 @@ on an internal network with nothing published; the dispatcher and the worker
 reach Docker through it with `DOCKER_HOST`, and it admits only `docker exec`
 into `agent-*`/`dind-*` containers (`docs/decisions.md` ADR 435, backlog
 item 6).
+
+**T-177-S1** resolved no row and declared no debt. It did the server half of
+`T-175-D1`: `escalated_model` is editable through the overrides with the new
+`nullable_model` kind, where a null override means off and a reset goes back
+to `config.yaml` (`docs/decisions.md` ADR 441). `T-175-D1` stays open for the
+front half, a console control for that kind in `front/src/routes/models.tsx`.
