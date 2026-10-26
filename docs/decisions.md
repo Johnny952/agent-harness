@@ -18321,3 +18321,98 @@ built as private helpers of `dispatcher/credentials.py`.
   either.
 - *Fake clocks for the waits:* the waits are on events and a pipe, so a
   lowered constant tests them in real time with nothing to drive.
+
+## ADR 483 — The console's forward of the credentials read and the three credential writes, and their client calls
+
+**Status:** accepted (T-186-S1, 2026-10-26). Builds the forward and client
+half of ADR 456 *Consequences*, 7, on ADR 468's routes and ADR 471's read.
+Narrows ADR 456 decision 7 where it left the forward's body handling, the
+client's signatures and the snapshot's TypeScript shape open; supersedes
+nothing. The Tokens screen itself is the epic's later sub-tasks.
+
+**Context.** `front/src/lib/api/forward.ts` is a whitelist: api reads in
+`FORWARDED`, board-service writes matched by method and path in
+`boardTarget`, each write behind `forwardBoard`'s CSRF checks. ADR 468 makes
+all three credential routes `_action` routes behind `BOARD_ACTIONS_TOKEN`,
+each refusing an unknown body field itself and echoing no value. ADR 471
+serves `GET /api/credentials` with no parameter, hive-wide, `data` the
+snapshot plus `stale` and `stale_after_seconds`, or `data: null` with one
+warning. Two of the bodies carry a secret (`token`, `code`), and ADR 456
+decision 2 says nothing may quote one.
+
+**Decision.**
+
+1. *The read.* `"/api/credentials": []` in `FORWARDED`: no parameter copied,
+   not `PROJECT_SCOPED`, so no `?project=`. Any other method on the path is
+   the console's 405, as for every api read.
+2. *The writes.* Three `POST` pairs in `boardTarget`, with a new `action`
+   value `"credential"` on `Resolution`: `POST /api/credentials/git-token`
+   (exact path), `POST /api/accounts/<name>/login` and
+   `POST /api/actions/<id>/login-code`, the last two entries of the
+   `actionRoutes` table, the segment decoded and re-encoded (an undecodable
+   one the console's 404 naming the path, never a value). No shape check on
+   the name or the id: the board service answers an unknown account 404 and
+   any id it cannot use 409 (ADR 468 decisions 3 and 4), and a second copy
+   here would disagree with it. Every other method on the three paths keeps
+   the answer it had (the 405 for a write, the whitelist's 404 for a `GET`).
+3. *What `"credential"` does in `forwardBoard`.* The CSRF checks, then the
+   503 naming `BOARD_ACTIONS_TOKEN` (its message says "credential routes"),
+   then the 64 KiB cap, then the bearer. The body crosses **unchanged** —
+   not rebuilt as a start's, not replaced by `{}` as a cancel's — because
+   ADR 468 decision 1 has the route refuse an unknown field by name, and a
+   console that parsed the body would hold the secret in one more place. No
+   `CONSOLE_PROJECT` is needed: none of the three names a project.
+4. *Nothing echoes a secret.* Every answer the console makes itself on these
+   paths (415, 403, 404, 413, 503, 502, 504) is a fixed sentence or names the
+   path, and nothing logs a body; the board service's answer is passed back
+   as it came, ADR 468 having made it secret-free.
+   `front/src/lib/api/forward.test.ts` asserts a
+   token and a code absent from each such answer's body and headers and from
+   every `console.error` call.
+5. *The client,* `front/src/lib/api/client.ts`:
+   - `getCredentials(): Promise<ApiResult<CredentialsSnapshot | null>>`
+     through `readEnvelope("/api/credentials")`; `data: null` is not an
+     error (ADR 471 decisions 4 and 5).
+   - `renewGitToken(token: string, username: string | null = null):
+     Promise<ActionRecord>`, body `{token}` or `{token, username}`.
+   - `startAccountLogin(account: string): Promise<ActionRecord>`, body `{}`,
+     the name `encodeURIComponent`ed.
+   - `sendLoginCode(actionId: string, code: string):
+     Promise<LoginCodeResult>`, body `{code}`, where `LoginCodeResult =
+     ActionRecord | { id: string }` (ADR 468 decision 4's two answers).
+   - The three go through `readBare`, whose messages are built from the path,
+     the status and the service's `error` only, so no `ApiError` built here
+     holds a token or a code. No function here logs or stores either value.
+6. *The type,* `front/src/lib/api/types.ts`: `CredentialsSnapshot` is
+   ADR 456 decision 4 as ADR 462 writes it — `version`, `written_at`,
+   `git_token: {path, state, modified_at}`, `deploy_keys: {project, state,
+   modified_at, fingerprint}[]`, `accounts: {account, container, state,
+   modified_at, logged_in_at}[]`, every time and the fingerprint
+   `string | null` — plus ADR 471's `stale: boolean` and
+   `stale_after_seconds: number`. Each `state` is a union of its region's
+   literals. The type is what the api is written to serve, not a check: the
+   api validates no row (ADR 471 decision 2), and telling a malformed row is
+   the screen's (ADR 456 decision 7).
+7. *The query,* `credentialsQuery` in `front/src/lib/api/queries.ts`, key
+   `["credentials"]`, polled at `POLL_MS * 2`: the worker rewrites the file
+   after each credential action ends, which the screen wants to see within
+   seconds, and the 300-second timer is no reason to poll faster.
+
+**Consequences.**
+- The api read count in `front/src/lib/api/forward.ts` moves from
+  twenty-one to twenty-two (its header and `resolveTarget`'s 404, which the
+  test file beside it pins), and
+  the board-write count from twenty-four to twenty-seven.
+- `listTokens`, `reauthContainer` and `ContainerToken` stay until the Tokens
+  screen is rewired off them; this task adds no screen code.
+- A field the snapshot grows reaches the console untyped until
+  `front/src/lib/api/types.ts` names it; nothing breaks.
+
+**Ruled out.**
+- *Checking the token's or the code's pattern in the forward:* ADR 459
+  keeps one copy, in `dispatcher/actions.py`, and the refusal must not
+  depend on which side caught it.
+- *Checking the action id against `ACTION_ID` for the login code:* the
+  board's 409 already covers it, and `ACTION_CANCEL` does not check either.
+- *Mutation helpers in `queries.ts`:* the screen sub-task decides what each
+  write invalidates.
