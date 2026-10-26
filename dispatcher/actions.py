@@ -10,6 +10,8 @@ moving it is an `os.rename`, which is atomic and succeeds once.
     claimed/   taken by the worker (running)
     done/      finished, whatever the status
     epics/     one run per started epic (ADR 218); not an action
+    secrets/   one `0600` secret per action (a token, a sign-in code); never
+               listed, taken once, swept (ADR 456, ADR 459)
     write.lock the creator's lock
 
 One creator (`create`, under `write.lock`) and one mover (the worker): the
@@ -36,6 +38,14 @@ from dispatcher.tasks import _COMMIT_RE, MAX_COMMENT_CHARS
 ACTIONS_DIR = "actions"
 TMP, PENDING, CLAIMED, DONE = "tmp", "pending", "claimed", "done"
 EPICS = "epics"
+SECRETS = "secrets"
+#: A secret older than this, in seconds, is swept even with its record held.
+SECRET_MAX_AGE_SECONDS = 15 * 60
+#: The shapes a secret and a git username must have (ADR 459, 2); `fullmatch`ed.
+GIT_TOKEN_RE = re.compile(r"(ghp_|github_pat_)[A-Za-z0-9_]{20,250}")
+GIT_USERNAME_RE = re.compile(r"[A-Za-z0-9-]{1,39}")
+LOGIN_CODE_RE = re.compile(r"[!-~]{1,512}")
+DEFAULT_GIT_USERNAME = "x-access-token"
 WRITE_LOCK = "write.lock"
 VERSION = 1
 STATUSES = ("pending", "running", "done", "failed", "cancelled", "interrupted")
@@ -257,6 +267,37 @@ def _validate_project_setup(record: dict) -> list[str]:
     return problems
 
 
+def _validate_git_token(record: dict) -> list[str]:
+    """A git token names no project or task (ADR 456); the token is the
+    `secret` of `create`, never a param."""
+    problems = []
+    if record.get("project") is not None:
+        problems.append("project must be null")
+    if record.get("task_id") is not None:
+        problems.append("task_id must be null")
+    params = record["params"]
+    problems += _extra_keys(params, ("username",))
+    username = params.get("username")
+    if not isinstance(username, str) or not GIT_USERNAME_RE.fullmatch(username):
+        problems.append("params.username must be a GitHub login")
+    return problems
+
+
+def _validate_account_login(record: dict) -> list[str]:
+    problems = []
+    if record.get("project") is not None:
+        problems.append("project must be null")
+    if record.get("task_id") is not None:
+        problems.append("task_id must be null")
+    params = record["params"]
+    problems += _extra_keys(params, ("account",))
+    account = params.get("account")
+    problems += _slug_problem("params.account", account)
+    if _is_text(account) and not _is_text(account, whitespace_ok=False):
+        problems.append("params.account must not contain whitespace")
+    return problems
+
+
 @dataclass(frozen=True)
 class Kind:
     name: str
@@ -337,6 +378,21 @@ KINDS: dict[str, Kind] = {
             lambda r: f"base:{r['project']}", True, "interrupt",
             "interrupted during the resolution; the task's writers' checkout may "
             "hold a half-made merge: look at it before resolving again",
+        ),
+        # The credential kinds (ADR 456, ADR 459). The token and the sign-in
+        # code travel in `secrets/`, never in the record. One key for the git
+        # credential, one per account: a half-done write or sign-in is a
+        # person's to look at, so neither is rerun.
+        Kind(
+            "git_token", _validate_git_token, lambda r: "credential:git", False,
+            "interrupt",
+            "interrupted while writing the GitHub token; look at the Tokens "
+            "screen before renewing again",
+        ),
+        Kind(
+            "account_login", _validate_account_login,
+            lambda r: f"account:{r['params']['account']}", False, "interrupt",
+            "interrupted during the sign-in; start it again",
         ),
     )
 }
@@ -456,6 +512,7 @@ def create(
     actor: str = "operator",
     note=None,
     ready: Callable[[str, str], bool] | None = None,
+    secret: str | None = None,
 ) -> dict:
     """Validate, then write a pending action; returns the record.
 
@@ -463,9 +520,20 @@ def create(
     task is in that project's Ready list.
     ADR 142 decision 7 has it made while the creator holds the lock, so it is
     called here, inside `write.lock`; `None` skips it.
+
+    `secret` is a `git_token`'s token (required) and no other kind's (ADR 459,
+    3): it is written `0600` to `secrets/<id>` before the record reaches
+    `pending/`, and no refusal names its value.
     """
+    if kind == "git_token":
+        if secret is None:
+            raise ActionRefused(400, "a git_token needs its token")
+        if not isinstance(secret, str) or not GIT_TOKEN_RE.fullmatch(secret):
+            raise ActionRefused(400, "the token is not a GitHub personal access token")
+    elif secret is not None:
+        raise ActionRefused(400, f"{kind} takes no secret")
     record = _new_record(kind, project, task_id, params, actor, note)
-    return _write_all(state_dir, [record], ready)[0]
+    return _write_all(state_dir, [record], ready, secret)[0]
 
 
 def check_new(
@@ -573,6 +641,10 @@ def _new_record(kind, project, task_id, params, actor, note) -> dict:
         raise ActionRefused(400, f"unknown kind {kind!r}")
     if kind == "start" and not params:
         params = {"limit": None}
+    if kind == "git_token" and isinstance(params, dict) and params.get("username") is None:
+        params = {**params, "username": DEFAULT_GIT_USERNAME}
+    elif kind == "git_token" and params is None:
+        params = {"username": DEFAULT_GIT_USERNAME}
     record = {
         "version": VERSION, "id": None, "kind": kind, "project": project,
         "task_id": task_id, "params": params, "actor": actor, "note": note,
@@ -622,22 +694,137 @@ def _refuse_locked(root: Path, record: dict, ready) -> None:
             for e in held
         ):
             raise ActionRefused(409, f"a {kind} for project {project} is already queued")
+    if kind == "git_token":
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        if any(e.record.get("kind") == kind for e in held):
+            raise ActionRefused(409, "a git_token is already queued")
+    if kind == "account_login":
+        held, _ = _scan(root, (PENDING, CLAIMED))
+        account = record["params"]["account"]
+        if any(
+            e.record.get("kind") == kind
+            and (e.record.get("params") or {}).get("account") == account
+            for e in held
+        ):
+            raise ActionRefused(409, f"a sign-in for account {account} is already queued")
     if kind == "start" and ready is not None and not ready(project, task_id):
         raise ActionRefused(409, f"task {task_id} is not in Ready")
 
 
-def _write_all(state_dir, records: list[dict], ready) -> list[dict]:
+def _write_all(state_dir, records: list[dict], ready, secret: str | None = None) -> list[dict]:
     """Check, then write `records` into `pending/` in their order: all, or none refused."""
     root = ensure_dirs(state_dir)
     with _write_locked(root):
         for record in records:
             _refuse_locked(root, record, ready)
-        _place(root, records)
+        _place(root, records, secret)
     return records
 
 
-def _place(root: Path, records: list[dict]) -> None:
-    """Give `records` their ids and write them into `pending/`; `write.lock` is held."""
+# ---- the secrets --------------------------------------------------------------
+
+
+def _write_secret(root: Path, action_id: str, value: str) -> None:
+    """`secrets/<id>`, `0600`, whole or not at all: a dot-named temp made with
+    `O_EXCL`, then renamed. `write.lock` is held. (`secrets` is the stdlib
+    module here: the directory is `SECRETS`.)"""
+    directory = root / SECRETS
+    directory.mkdir(mode=0o700, exist_ok=True)
+    tmp = directory / f".{action_id}.{secrets.token_hex(4)}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(value)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, directory / action_id)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _drop_secret(root: Path, action_id: str) -> None:
+    (root / SECRETS / action_id).unlink(missing_ok=True)
+
+
+def put_login_code(state_dir, action_id: str, code: str) -> None:
+    """The sign-in code of a claimed `account_login` that waits for it (ADR 456, 3).
+
+    400 for a code of the wrong shape (never echoed); 409 when the action is
+    not a sign-in awaiting its code, or when a code already waits.
+    """
+    if not isinstance(code, str) or not LOGIN_CODE_RE.fullmatch(code):
+        raise ActionRefused(
+            400, "the code must be 1 to 512 printable characters with no whitespace"
+        )
+    not_waiting = ActionRefused(
+        409, f"action {action_id} is not a sign-in waiting for its code"
+    )
+    if not isinstance(action_id, str) or not ID_RE.fullmatch(action_id):
+        raise not_waiting
+    root = ensure_dirs(state_dir)
+    with _write_locked(root):
+        try:
+            record = _load(root / CLAIMED / f"{action_id}.json")
+        except (OSError, ValueError):
+            raise not_waiting from None
+        if record.get("kind") != "account_login" or (
+            record.get("result") or {}
+        ).get("awaiting") != "code":
+            raise not_waiting
+        if (root / SECRETS / action_id).exists():
+            raise ActionRefused(409, f"a code for action {action_id} is already waiting")
+        _write_secret(root, action_id, code)
+
+
+def take_secret(state_dir, action_id: str) -> str | None:
+    """Read and unlink `secrets/<id>`; None when it is not there, so a second
+    take is None. It takes no lock: a writer only renames a whole file in."""
+    if not isinstance(action_id, str) or not ID_RE.fullmatch(action_id):
+        return None
+    path = actions_dir(state_dir) / SECRETS / action_id
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = f.read()
+        path.unlink()
+    except FileNotFoundError:
+        return None
+    return value
+
+
+def sweep_secrets(state_dir) -> list[str]:
+    """Unlink the secrets nobody will take, under `write.lock` (ADR 459, 5):
+    a dot-named temp, one with no record in `pending/` or `claimed/`, and one
+    older than `SECRET_MAX_AGE_SECONDS`. Returns the names unlinked."""
+    root = ensure_dirs(state_dir)
+    directory = root / SECRETS
+    swept: list[str] = []
+    with _write_locked(root):
+        try:
+            names = sorted(os.listdir(directory))
+        except FileNotFoundError:
+            return []
+        now = _utc_now().timestamp()
+        for name in names:
+            path = directory / name
+            try:
+                held = (
+                    (root / PENDING / f"{name}.json").exists()
+                    or (root / CLAIMED / f"{name}.json").exists()
+                )
+                stale = now - path.stat().st_mtime > SECRET_MAX_AGE_SECONDS
+                if name.startswith(".") or not held or stale:
+                    path.unlink()
+                    swept.append(name)
+            except FileNotFoundError:
+                continue
+    return swept
+
+
+def _place(root: Path, records: list[dict], secret: str | None = None) -> None:
+    """Give `records` their ids and write them into `pending/`; `write.lock` is held.
+
+    A `secret` (one record only) lands in `secrets/<id>` first (ADR 459, 4)."""
     # The ids are taken under the lock, so ids sort in the order creates land;
     # within one batch each is made to sort after the one before.
     last = None
@@ -648,6 +835,8 @@ def _place(root: Path, records: list[dict]) -> None:
         last = record["id"]
     tmps = [root / TMP / f"{record['id']}.json" for record in records]
     try:
+        if secret is not None:
+            _write_secret(root, records[0]["id"], secret)
         for tmp, record in zip(tmps, records):
             tmp.write_text(json.dumps(record))
         for tmp in tmps:
@@ -655,6 +844,8 @@ def _place(root: Path, records: list[dict]) -> None:
     except BaseException:
         for tmp in tmps:
             tmp.unlink(missing_ok=True)
+        if secret is not None:
+            _drop_secret(root, records[0]["id"])
         raise
 
 
@@ -969,6 +1160,7 @@ def finish(
     record.update(status=status, finished_at=_now(), result=result, error=error)
     _store(root, path, record)
     os.rename(path, root / DONE / path.name)
+    _drop_secret(root, action_id)
     return record
 
 
@@ -1011,6 +1203,7 @@ def recover(state_dir) -> list[tuple[str, str]]:
         kind = KINDS.get(record.get("kind"))
         if record.get("status") in FINAL:
             os.rename(root / state / f"{aid}.json", root / DONE / f"{aid}.json")
+            _drop_secret(root, aid)
             done.append((aid, "moved to done"))
         elif kind is None:
             finish(state_dir, aid, "failed", error=UNKNOWN_KIND)

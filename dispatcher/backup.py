@@ -28,6 +28,7 @@ from dispatcher.project_lock import ProjectLock, ProjectBusy
 NEVER_COPIED = (
     "users", "users.*", "sessions", "sessions.*", "claude_creds_*", "claude_shared",
     ".credentials.json", "push-subscriptions.json", "*.pem", "id_ed25519*", ".data",
+    "secrets",
 )
 NOT_RECORDS = ("*.lock", "surface-locks")
 NAME_FORMAT = "%Y%m%dT%H%M%SZ"

@@ -18009,3 +18009,56 @@ agent that does not answer can take seconds, and the worker's loop runs every
   not a second source of this field.
 - *`/proc/self/mountinfo` to tell `not_mounted`:* the parent rule answers the
   two compose files without parsing mounts.
+## ADR 459 — The secret file's rules in `dispatcher/actions.py`: one copy of each shape, a sweep under `write.lock`, and `finish` unlinking too
+
+**Status:** accepted (T-180, 2026-10-26). Narrows ADR 456 decisions 1 to 3
+for its *Consequences* task 1; supersedes nothing.
+
+**Context.** ADR 456 left five things to the build of `dispatcher/actions.py`:
+"the `accounts[]` name shape", which `dispatcher/config.py` `_build_config`
+never checks (an account name is any string); where the token's and the
+code's patterns live, which the route (task 4) and the handler (task 3) both
+check; how the sweep's "not pending or claimed" can be read while `create`
+writes a secret *before* its record reaches `pending/`; whether a secret
+outlives a `finish`; and where `username`'s default is filled.
+
+**Decision.**
+
+1. *The account name* is `_slug_problem`'s rule plus no whitespace: a
+   non-empty string with no `/`, `\`, NUL or whitespace and no leading `.`,
+   the shape `state_machine` can make a file of. The route's 404 for a name
+   `accounts[]` does not hold stays the route's (ADR 456, 3).
+2. *One copy of each shape,* in `dispatcher/actions.py`: `GIT_TOKEN_RE`
+   (`(ghp_|github_pat_)[A-Za-z0-9_]{20,250}`), `LOGIN_CODE_RE` (`[!-~]{1,512}`)
+   and `GIT_USERNAME_RE` (`[A-Za-z0-9-]{1,39}`), all `fullmatch`ed. `create`
+   refuses a `git_token` whose `secret` fails `GIT_TOKEN_RE` with 400 and
+   `put_login_code` a code failing `LOGIN_CODE_RE`; the route and the handler
+   import them. A refusal names the rule, never the value.
+3. *`secret` at create* is required for `git_token` and refused (400) for
+   every other kind; `account_login`'s code arrives only by `put_login_code`.
+   `_new_record` fills `params.username` with `x-access-token` when absent, as
+   it fills a start's `limit`, so a record always names its username.
+4. *The order inside `write.lock`:* the refusals, the id, the secret's
+   dot-named temp (`O_WRONLY|O_CREAT|O_EXCL`, `0600`) renamed to
+   `secrets/<id>`, then the record's temp renamed into `pending/`. A failure
+   anywhere unlinks the secret and the temp. `secrets/` is made `0700` on
+   first write, not by `ensure_dirs`, so the read api's and a restore's view
+   of `actions/` is unchanged.
+5. *The sweep holds `write.lock`.* `sweep_secrets` unlinks a dot-named temp
+   (only a crashed writer leaves one, every writer holding the lock), a
+   secret with no record in `pending/` or `claimed/`, and one whose `mtime`
+   is more than `SECRET_MAX_AGE_SECONDS` (900) old. Without the lock it could
+   unlink a `git_token`'s secret between the secret's rename and the record's.
+6. *`finish` unlinks the action's secret* after its rename into `done/`, and
+   `recover` does for every record it ends or moves to `done/`. So a secret
+   outlives its action only by a crash, and then by one sweep, as ADR 456
+   decision 2 asks; a cancelled pending `git_token` does not wait for one.
+7. *`take_secret` takes no lock:* open, read, unlink; `None` when the file is
+   not there, so a second take is `None`. A writer only ever renames a whole
+   file in.
+
+**Consequences.** Calling `sweep_secrets` from each worker pass is
+ADR 456 task 3's, beside its handlers; until then `finish` and `recover` are
+what unlink, and no route creates a secret before task 4. A `put_login_code`
+that lands after the handler took the first code but before it rewrote
+`awaiting` leaves a second file that `finish` or the sweep removes.
