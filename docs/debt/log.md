@@ -619,3 +619,12 @@ of ADR 456 and ADR 459: written `0600` before the record is pending, taken
 once, unlinked by `finish`, `recover` and `sweep_secrets`. Nothing calls
 `sweep_secrets` yet and no route creates a secret; those are ADR 456
 *Consequences* tasks 3 and 4, the next tasks, not debt.
+
+**T-182** declared no debt and resolved none. It builds ADR 456
+*Consequences* 3: the worker's `git_token` and `account_login` handlers of
+ADR 465, which write the token in place, run `claude auth login` under
+`script`, release an `AUTH_EXPIRED` account on success, sweep `secrets/` each
+tick and call the credentials snapshot with `logins`. The login output is
+scanned for the URL and never kept, where ADR 465 4 says a list
+(`docs/implementations/T-182.md`). The CLI's real output under `script` is
+unmeasured; ADR 456 *Consequences* 4, the routes, is the next task, not debt.
