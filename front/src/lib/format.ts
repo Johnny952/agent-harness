@@ -1,4 +1,13 @@
-import { type GateFinding, type Role } from "./api/types";
+import { type AccountState, type GateFinding, type Role } from "./api/types";
+
+/** A pool account's state pill, read by the Pool and Tokens screens (ADR 489 decision 7). */
+export const accountStateTone: Record<AccountState, string> = {
+  IDLE: "text-muted-foreground border-border-strong",
+  BUSY: "text-info border-info/50 bg-info/10",
+  PRE_COOLDOWN: "text-warning border-warning/50 bg-warning/10",
+  COOLING_DOWN: "text-destructive border-destructive/60 bg-destructive/10",
+  AUTH_EXPIRED: "text-destructive border-destructive/60 bg-destructive/10",
+};
 
 /**
  * How long ago, in whole seconds, or `null` when there is nothing to subtract

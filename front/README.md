@@ -17,7 +17,9 @@ reference, and `git log` is where it went.
 the live tail, the task detail's phase timeline, the learnings inbox and the
 task detail's usage region read
 `observability/api/` through
-this console's own server half; every other screen still reads mock fixtures, and
+this console's own server half, and the Tokens screen reads `/api/credentials` and
+`/api/accounts` (ADR 489); the approvals, session logs and role models still read
+mock fixtures, and
 says so on itself where a region is waiting for a route. See *What is real and
 what is not* below.
 
@@ -129,7 +131,7 @@ on `127.0.0.1:8790`, built for Node by `docker/console/Dockerfile`
   CDN.
 - **Types mirror the api, not the screens.** `src/lib/api/types.ts` is the
   served contract. `src/lib/api/ops-types.ts` is the half that has no backend
-  at all — approvals, tokens, sessions, role models — and the
+  at all — approvals, sessions, role models — and the
   separation is deliberate: it is the list of what would have to be built.
 - **One shell.** Every screen renders inside
   `src/components/console/app-shell.tsx`, which owns the rail, the keyboard

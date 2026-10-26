@@ -419,12 +419,6 @@ export const credentialsQuery = queryOptions({
   refetchInterval: POLL_MS * 2,
 });
 
-export const tokensQuery = queryOptions({
-  queryKey: ["tokens"],
-  queryFn: () => api.listTokens(),
-  refetchInterval: POLL_MS,
-});
-
 /**
  * The config writer's settings table, read once per visit and never polled
  * (`docs/decisions.md` ADR 113 part 2). The plan's *Stale* state is answered by

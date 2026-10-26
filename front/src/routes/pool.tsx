@@ -14,8 +14,8 @@ import {
   WarningBanner,
 } from "@/components/console/primitives";
 import { accountsQuery, tasksQuery } from "@/lib/api/queries";
-import type { Account, AccountState, LastProbe, Task } from "@/lib/api/types";
-import { agoEpochSeconds, formatAge } from "@/lib/format";
+import type { Account, LastProbe, Task } from "@/lib/api/types";
+import { accountStateTone, agoEpochSeconds, formatAge } from "@/lib/format";
 import { useNow } from "@/hooks/use-console";
 import { cn } from "@/lib/utils";
 
@@ -309,14 +309,6 @@ export function AccountCard({
   const probe = account.last_probe;
   const over = probe ? overWindows(probe) : [];
 
-  const stateTone: Record<AccountState, string> = {
-    IDLE: "text-muted-foreground border-border-strong",
-    BUSY: "text-info border-info/50 bg-info/10",
-    PRE_COOLDOWN: "text-warning border-warning/50 bg-warning/10",
-    COOLING_DOWN: "text-destructive border-destructive/60 bg-destructive/10",
-    AUTH_EXPIRED: "text-destructive border-destructive/60 bg-destructive/10",
-  };
-
   return (
     <article className="panel px-3 py-3">
       <div className="flex items-center gap-2">
@@ -336,7 +328,7 @@ export function AccountCard({
             <span
               className={cn(
                 "rounded-sm border px-1.5 py-[1px] text-[10px] uppercase tracking-wide",
-                stateTone[account.state],
+                accountStateTone[account.state],
               )}
             >
               {account.state}

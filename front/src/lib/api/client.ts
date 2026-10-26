@@ -920,17 +920,9 @@ export async function pingActionBackend(): Promise<boolean> {
   return !actionBackendDown;
 }
 
-/* ── Sessions and tokens ─────────────────────────────────────── */
-import type { ContainerToken, SessionInfo, SessionLogLine } from "./ops-types";
-import {
-  initialTokens,
-  mockSessionLines,
-  mockSessions,
-  nextSessionLine,
-} from "./mock/ops-fixtures";
-
-let tokenState: ContainerToken[] | null = null;
-const tokens = () => (tokenState ??= initialTokens());
+/* ── Sessions ────────────────────────────────────────────────── */
+import type { SessionInfo, SessionLogLine } from "./ops-types";
+import { mockSessionLines, mockSessions, nextSessionLine } from "./mock/ops-fixtures";
 
 export async function listSessions(): Promise<SessionInfo[]> {
   await latency();
@@ -942,49 +934,4 @@ export async function listSessionLines(afterSeq?: number): Promise<SessionLogLin
   await latency();
   if (afterSeq === undefined) return mockSessionLines();
   return Array.from({ length: 1 + Math.floor(Math.random() * 3) }, () => nextSessionLine());
-}
-
-export async function listTokens(): Promise<ContainerToken[]> {
-  await latency();
-  // A pending device-code login completes after ~10s in the mock.
-  tokenState = tokens().map((t) =>
-    t.state === "reauthenticating" &&
-    t.last_refreshed_at &&
-    Date.now() - Date.parse(t.last_refreshed_at) > 10_000
-      ? {
-          ...t,
-          state: "valid",
-          device_code: null,
-          last_error: null,
-          expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
-        }
-      : t,
-  );
-  return tokenState;
-}
-
-export async function reauthContainer(container: string): Promise<ContainerToken> {
-  await latency();
-  if (actionBackendDown) throw new ApiError("Action backend unreachable", 503);
-  const code =
-    Math.random().toString(36).slice(2, 6).toUpperCase() +
-    "-" +
-    Math.random().toString(36).slice(2, 6).toUpperCase();
-  let updated: ContainerToken | undefined;
-  tokenState = tokens().map((t) => {
-    if (t.container !== container) return t;
-    updated = {
-      ...t,
-      state: "reauthenticating",
-      last_refreshed_at: new Date().toISOString(),
-      device_code: {
-        user_code: code,
-        verification_url: "https://login.provider.example/device",
-        expires_at: new Date(Date.now() + 900_000).toISOString(),
-      },
-    };
-    return updated;
-  });
-  if (!updated) throw new ApiError(`Container ${container} not found`, 404);
-  return updated;
 }

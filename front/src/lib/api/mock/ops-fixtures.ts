@@ -1,6 +1,5 @@
 import type { Role } from "../types";
 import type {
-  ContainerToken,
   ModelOption,
   RoleModelConfig,
   SessionInfo,
@@ -9,7 +8,6 @@ import type {
 } from "../ops-types";
 
 const iso = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
-const inFuture = (s: number) => new Date(Date.now() + s * 1000).toISOString();
 
 export function mockSessions(): SessionInfo[] {
   return [
@@ -95,25 +93,6 @@ function makeLine(s: SessionInfo, ago: number): SessionLogLine {
     ts: iso(ago),
     text,
   };
-}
-
-export function initialTokens(): ContainerToken[] {
-  const acc = ["cuenta1", "cuenta2", "cuenta3", "cuenta4", "cuenta5", "cuenta6"];
-  return acc.map((a, i) => ({
-    container: `agent-${a}`,
-    account: a,
-    state: i === 1 ? "expired" : i === 4 ? "expiring" : i === 5 ? "revoked" : "valid",
-    expires_at:
-      i === 1 ? iso(3600) : i === 4 ? inFuture(900) : i === 5 ? null : inFuture(86400 * (3 + i)),
-    last_refreshed_at: i === 5 ? null : iso(3600 * (i + 2)),
-    last_error:
-      i === 1
-        ? "401 invalid_grant: refresh token expired"
-        : i === 5
-          ? "403 token revoked by provider"
-          : null,
-    device_code: null,
-  }));
 }
 
 // The Claude IDs are the ones config.yaml passes as `--model`
