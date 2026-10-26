@@ -11,7 +11,8 @@ usage log (ADR 54), and `observability/api/plans.py` reads a plan's frontmatter
 (T-072; it lives here and not in `dispatcher/` because no dispatcher code reads
 a plan, and its test imports it), and `dispatcher/command_run.py` answers which
 block of command requests a task is held on and what verdict it has (T-078),
-and `dispatcher/projects.py` reads the project records (ADR 209). This is an HTTP surface over those, and nothing more:
+and `dispatcher/projects.py` reads the project records (ADR 209), and
+`dispatcher/credentials.py` reads the worker's credentials snapshot (ADR 471). This is an HTTP surface over those, and nothing more:
 every route is a `GET`, every mount is `:ro`, and there is no second copy of any
 file format here — a parser this service needs and does not have is one to make
 reachable in `dispatcher/`, not one to rewrite.
@@ -72,6 +73,8 @@ from dispatcher import tasks as task_store
 # Aliased: `/api/actions` reads the worker's heartbeat; for two constants,
 # never called, as `docker_exec` is.
 from dispatcher import worker as action_worker
+# Aliased: `create_app` names its `/api/credentials` view `credentials`.
+from dispatcher import credentials as credential_snapshot
 from dispatcher.config import Config, load_config, refresh_primary
 from observability import auth
 from observability.api import plans as plan_frontmatter
@@ -300,6 +303,11 @@ _TASK_EVENTS_SQL = (
 #: run past this and read stale until it ends; `beat_at` is served beside the
 #: flag, so a reader can tell a long pass from a dead worker.
 WORKER_STALE_SECONDS = 15 * action_worker.POLL_SECONDS
+
+#: How old the credentials snapshot's `written_at` may be before
+#: `/api/credentials` calls it stale: three missed passes of the worker's
+#: snapshot cadence (ADR 456 decision 4, ADR 471).
+CREDENTIALS_STALE_SECONDS = 3 * action_worker.CREDENTIALS_SNAPSHOT_SECONDS
 
 #: What SQLite can hold in an INTEGER column, and therefore what `limit` and
 #: `since` may be: they are bound into `LIMIT ?` and `WHERE id > ?`. Not the cap
@@ -1294,6 +1302,34 @@ def create_app(
             except (OSError, ValueError) as exc:
                 return _envelope(None, [f"{path}: unreadable action: {exc}"])
         return _error(f"no action {action_id!r} in {root}", 404)
+
+    @app.get("/api/credentials")
+    @requires_auth
+    def credentials():
+        """The worker's credentials snapshot, with `stale` beside it (ADR 471).
+
+        `data` is the file's object as written plus `stale` and
+        `stale_after_seconds`. No file is `data: null` and a fixed warning; a
+        file that does not parse is `data: null` and the reason. Read through
+        `/state:ro` by `dispatcher.credentials.read`: nothing is made here.
+        """
+        rejected = _reject_unknown_parameters(frozenset())
+        if rejected is not None:
+            return rejected
+        try:
+            record = credential_snapshot.read(cfg.state_dir)
+        except credential_snapshot.SnapshotError as exc:
+            return _envelope(None, [f"unreadable credentials snapshot: {exc}"])
+        if record is None:
+            return _envelope(
+                None, ["no credentials snapshot: the worker has not written one"]
+            )
+        warnings: list[str] = []
+        path = os.path.join(cfg.state_dir, credential_snapshot.SNAPSHOT)
+        data = dict(record)
+        data["stale_after_seconds"] = CREDENTIALS_STALE_SECONDS
+        data["stale"] = _snapshot_stale(record.get("written_at"), path, warnings)
+        return _envelope(data, warnings)
 
     def _epic_runs(warnings: list[str]) -> list[dict]:
         """Each started epic's run, with its measured spend and limit (ADR 218)."""
@@ -2757,6 +2793,23 @@ def _worker_heartbeat(path: Path, warnings: list[str]) -> dict:
     age = (dt.datetime.now(dt.timezone.utc) - beat).total_seconds()
     answer["stale"] = age > WORKER_STALE_SECONDS
     return answer
+
+
+def _snapshot_stale(written_at, path: str, warnings: list[str]) -> bool:
+    """Whether the credentials snapshot is older than its window (ADR 471, 3).
+
+    A `written_at` that is missing, not a string, not ISO 8601 or without a
+    time zone is stale, with a warning saying why. One in the future is not.
+    """
+    try:
+        written = dt.datetime.fromisoformat(written_at)
+        if written.tzinfo is None:
+            raise ValueError("no time zone")
+    except (TypeError, ValueError) as exc:
+        warnings.append(f"{path}: written_at {written_at!r} is not an ISO time: {exc}")
+        return True
+    age = (dt.datetime.now(dt.timezone.utc) - written).total_seconds()
+    return age > CREDENTIALS_STALE_SECONDS
 
 
 def _log_waitress() -> None:

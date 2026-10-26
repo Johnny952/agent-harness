@@ -620,6 +620,12 @@ once, unlinked by `finish`, `recover` and `sweep_secrets`. Nothing calls
 `sweep_secrets` yet and no route creates a secret; those are ADR 456
 *Consequences* tasks 3 and 4, the next tasks, not debt.
 
+**T-184** declared no debt and resolved none. It builds ADR 456
+*Consequences* 5: `GET /api/credentials` in `observability/api/app.py` serves
+the worker's credentials snapshot with `stale` and `stale_after_seconds`, and
+`data: null` with its reason when there is none or it does not parse
+(`docs/decisions.md` ADR 471). The console forward is build task 7, the next
+task and not debt.
 **T-182** declared no debt and resolved none. It builds ADR 456
 *Consequences* 3: the worker's `git_token` and `account_login` handlers of
 ADR 465, which write the token in place, run `claude auth login` under

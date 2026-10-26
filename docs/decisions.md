@@ -18063,6 +18063,60 @@ what unlink, and no route creates a secret before task 4. A `put_login_code`
 that lands after the handler took the first code but before it rewrote
 `awaiting` leaves a second file that `finish` or the sweep removes.
 
+## ADR 471 — `GET /api/credentials`: the snapshot served whole with `stale` beside it, and what an unreadable `written_at` is
+
+**Status:** accepted (T-184, 2026-10-26). Builds ADR 456 *Consequences*, 5.
+Narrows ADR 456 decision 4's last paragraph where it left the answer's shape
+open; supersedes nothing.
+
+**Context.** ADR 456 decision 4 says the read api serves the snapshot through
+`/state:ro` in the `{data, warnings}` envelope, `stale: true` past 900
+seconds, `data: null` with a fixed warning when there is no file and with its
+reason when the file does not parse. It does not say where `stale` sits, what
+a snapshot whose `written_at` is missing or not a time is, or how much of the
+record the api checks. ADR 462 decision 1 gives `credentials.read(state_dir)`:
+`None` for no file, `SnapshotError` for a file that does not parse or is not
+a JSON object. The envelope has no third key
+(`docs/learnings/a-new-field-on-an-api-row-has-two-questions.md`).
+
+**Decision.**
+
+1. *The route.* `GET /api/credentials` in `observability/api/app.py`
+   `create_app`, behind `requires_auth`, no query parameter (any is ADR 5's
+   400 by `_reject_unknown_parameters(frozenset())`). It reads through
+   `dispatcher.credentials.read(cfg.state_dir)` and nothing else: no second
+   parser, no directory made, no exec.
+2. *A snapshot.* `data` is the file's object as written, every key kept and
+   none checked, plus two keys the api adds: `stale` (bool) and
+   `stale_after_seconds`, the constant `CREDENTIALS_STALE_SECONDS = 3 *
+   worker.CREDENTIALS_SNAPSHOT_SECONDS` (900, ADR 462's three missed passes),
+   as `/api/actions` serves its heartbeat's. `stale` is true when `now -
+   written_at` is above it. `version` and the rows' shapes are served, not
+   checked: a row of the wrong shape is the screen's `Malformed` (ADR 456
+   decision 7).
+3. *An unreadable `written_at`.* Missing, not a string, not ISO 8601, or
+   with no time zone: `data` is still served, `stale: true`, and one warning
+   `"<path>: written_at <repr> is not an ISO time: <reason>"`, as
+   `_worker_heartbeat` treats `beat_at`. A `written_at` in the future is not
+   stale.
+4. *No file.* `data: null`, warnings exactly `["no credentials snapshot: the
+   worker has not written one"]`, 200.
+5. *A bad file.* `SnapshotError` (does not parse, is not an object, or an
+   `OSError` reading it): `data: null`, warnings `["unreadable credentials
+   snapshot: <the error's text>"]`, which already names the path; 200,
+   never 500.
+
+**Consequences.** The console's forward of this route is ADR 456 task 7's,
+with the `FORWARDED` count it moves. A snapshot that grows a field reaches
+the console with no change here. The 900 seconds follow the worker's
+constant at the api's restart.
+
+**Ruled out.**
+- *`data: {snapshot, stale}`:* nests the record the worker wrote one level
+  down for no reader's benefit; the keys the api adds do not collide with
+  the snapshot's.
+- *Validating the rows here:* a second copy of ADR 462's shapes, and one bad
+  row would cost the screen the good ones.
 ## ADR 465 — The worker's `git_token` and `account_login` handlers: the login's argv and pid, its three waits, its fixed sentences, and the snapshot after each end
 
 **Status:** accepted (T-182, 2026-10-26). Builds ADR 456 *Consequences*, 3.
