@@ -17910,6 +17910,105 @@ Also:
   socket and must not (C-8, `docs/plans/front.md` on `listTokens`).
 - *A temp file and `os.replace` for the token:* see decision 5.
 
+## ADR 462 — `dispatcher/credentials.py`: how each state of ADR 456's snapshot is told apart, how `logged_in_at` reaches it, and the worker's timer thread
+
+**Status:** accepted (T-181, 2026-10-26). Builds ADR 456 *Consequences*, 2.
+It narrows ADR 456 decision 4 where that left a state's boundary or the
+module's interface open; it supersedes nothing.
+
+**Context.** ADR 456 decision 4 names the snapshot's fields and states but
+not how `absent` differs from `not_mounted` for a path that is missing either
+way, what a zero-byte login file is, how a login the build task 3 handler
+finishes gets its `logged_in_at` in, or where the timer runs. An exec into an
+agent that does not answer can take seconds, and the worker's loop runs every
+2 seconds and runs a `cancel` at once (ADR 148).
+
+**Decision.**
+
+1. *The interface.* `dispatcher/credentials.py`, stdlib plus `docker_exec`,
+   `project_keys`, `projects` and `context_transfer`:
+   - `SNAPSHOT = "credentials.json"`, `VERSION = 1`,
+     `CLAUDE_CREDENTIALS = "/root/.claude-account/.credentials.json"`
+     (`docker/agent/Dockerfile`'s `CLAUDE_CONFIG_DIR`),
+     `STAT_TIMEOUT_SECONDS = 15`.
+   - `snapshot(cfg, previous=None, *, logins=None, now=None) -> dict` builds
+     the record and writes nothing. `previous` is the last snapshot (a dict,
+     or None); `logins` maps an account name to the `logged_in_at` of a
+     sign-in that just ended `done`.
+   - `read(state_dir) -> dict | None`: None when the file is missing,
+     `SnapshotError` (a `ValueError`) when it does not parse or is not a JSON
+     object. Build task 5's route may use it.
+   - `write(cfg, *, logins=None, now=None) -> dict`: under one module-level
+     `threading.Lock`, reads the previous file (a `SnapshotError` is logged
+     and taken as None), builds, and writes `<state_dir>/credentials.json`
+     atomically (a dot-named temp file in `state_dir`, `os.replace`). The lock
+     is what keeps a timer pass from writing over a `logins` write made by a
+     handler thread at the same moment; one worker per state dir already
+     holds `worker.lock`, so a process-local lock is enough.
+   - Build task 3 calls `write(cfg, logins={account: logged_in_at})` after an
+     `account_login` ends `done`, and `write(cfg)` after a `git_token` or a
+     `keygen` ends. This task adds no such call.
+2. *Times.* Every `modified_at` is the file's `mtime` as an ISO 8601 UTC
+   string, `timespec="seconds"`; `written_at` is `now.isoformat()`. A field
+   for a file that is not there is `null`.
+3. *`git_token`.* `os.stat` on `cfg.git_credentials_path`: a regular file is
+   `present` when its size is above 0, `empty` at 0; a directory is
+   `directory`. A missing path (`FileNotFoundError`, `NotADirectoryError`) is
+   `absent` when its parent directory exists and `not_mounted` when it does
+   not: a single-file bind mount brings no parent of its own, so a worker with
+   no mount there has no `/run/secrets` either. Anything else at the path, or
+   any other `OSError`, is `absent`. `modified_at` is set for `present`,
+   `empty` and `directory`.
+4. *`deploy_keys`.* Rows for the union of `projects.slugs` (record file
+   names, never their contents) and the directories directly under
+   `cfg.project_keys_dir` whose name passes `projects.is_slug`, sorted by
+   slug; a missing or unlistable keys dir adds no row. `present` when
+   `project_keys.key_path(...)` is a regular file by `os.stat`, else
+   `absent`; `modified_at` is the private half's `mtime` from that `stat`.
+   `fingerprint` is `project_keys.fingerprint` on the `.pub` beside it when
+   the key is `present` and the `.pub` is a regular file, and `null` when
+   either is not or `ssh-keygen` fails (`OSError`,
+   `subprocess.CalledProcessError`).
+5. *`accounts`.* One row per `cfg.accounts`, in config order. One
+   `docker_exec.run_docker_exec(container, "/", ["sh", "-c", script, "sh",
+   CLAUDE_CREDENTIALS], timeout=STAT_TIMEOUT_SECONDS)`, `script` being
+   `if [ -f "$1" ]; then stat -c '%s %Y' "$1"; else echo absent; fi`, so a
+   missing file exits 0 and a failed exec does not: exit 0 and `absent` is
+   `absent`; exit 0 and two integers is `present` when the size is above 0
+   and `absent` at 0 (a zero-byte file holds no login), with `modified_at`
+   from the second integer; a non-zero exit, a timeout, an `OSError` or any
+   other output is `unreachable`. `modified_at` is null unless `present`.
+6. *`logged_in_at`.* The account's own row in `previous`, when that row's
+   `logged_in_at` is a string, else null; `logins[account]` replaces it. A
+   row in `previous` for an account no longer configured is dropped with it.
+7. *The worker.* `CREDENTIALS_SNAPSHOT_SECONDS = 300` in
+   `dispatcher/worker.py`. Each pass of `Worker.run`'s loop, before `tick`,
+   calls `_maybe_snapshot`: when no snapshot thread is alive and none has
+   started or the last one started 300 or more seconds ago by `_utc_now`, it
+   starts a daemon thread, `credentials-snapshot`, that calls
+   `credentials.write(self.cfg)` and logs any exception it raises
+   (`logger.exception`) rather than ending. The first pass is the snapshot
+   "at start". `run` does not join it at stop: the write is atomic, so a
+   killed one leaves the previous file.
+
+**Consequences.**
+- No path ADR 456 names as a secret is opened by this module: the token
+  file and each private key get `os.stat` only, a key's `.pub` is the one
+  file handed to `ssh-keygen`, and a login file is `stat`ed inside its agent.
+  A test asserts it on `0000` files with every `open` patched to refuse those
+  paths, since root, which runs the suite, ignores mode `0000`.
+- An account whose agent is down reads `unreachable` and costs the
+  snapshot thread up to 15 seconds, never the loop.
+- `stale` (ADR 456 decision 4, 900 seconds) is three missed passes.
+
+**Ruled out.**
+- *The snapshot on the loop thread:* an unreachable agent would hold every
+  `cancel` behind its exec's timeout.
+- *`logged_in_at` from `done/` records:* ADR 456 decision 4 says carried
+  forward from the previous snapshot, and `done/` is the console's to read,
+  not a second source of this field.
+- *`/proc/self/mountinfo` to tell `not_mounted`:* the parent rule answers the
+  two compose files without parsing mounts.
 ## ADR 459 — The secret file's rules in `dispatcher/actions.py`: one copy of each shape, a sweep under `write.lock`, and `finish` unlinking too
 
 **Status:** accepted (T-180, 2026-10-26). Narrows ADR 456 decisions 1 to 3

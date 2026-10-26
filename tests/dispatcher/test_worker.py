@@ -132,6 +132,37 @@ def clock(monkeypatch):
     return now
 
 
+class SnapshotRecorder:
+    def __init__(self):
+        self.calls = 0
+        self.gate = None
+        self.fail = False
+        self.entered = threading.Event()
+
+    def __call__(self, cfg, **kw):
+        self.calls += 1
+        self.entered.set()
+        if self.gate is not None:
+            self.gate.wait(5)
+        if self.fail:
+            raise RuntimeError("boom")
+
+
+@pytest.fixture(autouse=True)
+def snapshots(monkeypatch):
+    """No test execs docker for the credentials snapshot."""
+    fake = SnapshotRecorder()
+    monkeypatch.setattr(worker_mod.credentials, "write", fake)
+    yield fake
+    if fake.gate is not None:
+        fake.gate.set()
+
+
+def _settle(w):
+    if w._snapshot_thread is not None:
+        w._snapshot_thread.join(5)
+
+
 @pytest.fixture
 def worker(cfg, cycle, accounts):
     w = worker_mod.Worker(cfg, account_poll=0)
@@ -1806,6 +1837,56 @@ def test_run_beats_and_returns_once_stopped(cfg, cycle, accounts):
     w.run(interval=0.01)
     timer.join()
     assert (actions.actions_dir(cfg.state_dir) / worker_mod.HEARTBEAT).exists()
+
+
+def test_run_writes_one_snapshot_at_start(cfg, cycle, accounts, snapshots):
+    w = worker_mod.Worker(cfg)
+    timer = threading.Timer(0.1, w.stop)
+    timer.start()
+    w.run(interval=0.01)
+    timer.join()
+    _settle(w)
+    assert snapshots.calls == 1
+
+
+def test_snapshot_waits_for_the_interval(worker, snapshots, clock):
+    worker._maybe_snapshot()
+    _settle(worker)
+    clock["t"] += timedelta(seconds=299)
+    worker._maybe_snapshot()
+    _settle(worker)
+    assert snapshots.calls == 1
+    clock["t"] += timedelta(seconds=1)
+    worker._maybe_snapshot()
+    _settle(worker)
+    assert snapshots.calls == 2
+
+
+def test_snapshot_does_not_overlap_a_running_one(worker, snapshots, clock):
+    snapshots.gate = threading.Event()
+    worker._maybe_snapshot()
+    assert snapshots.entered.wait(5)
+    clock["t"] += timedelta(seconds=600)
+    worker._maybe_snapshot()
+    assert snapshots.calls == 1
+    snapshots.gate.set()
+    _settle(worker)
+    worker._maybe_snapshot()
+    _settle(worker)
+    assert snapshots.calls == 2
+
+
+def test_snapshot_failure_is_logged_and_the_next_due_pass_writes(
+        worker, snapshots, clock, caplog):
+    snapshots.fail = True
+    worker._maybe_snapshot()
+    _settle(worker)
+    assert "credentials snapshot failed" in caplog.text
+    snapshots.fail = False
+    clock["t"] += timedelta(seconds=300)
+    worker._maybe_snapshot()
+    _settle(worker)
+    assert snapshots.calls == 2
 
 
 def test_stop_holds_the_running_start_and_claims_nothing_more(cfg, worker, cycle):
