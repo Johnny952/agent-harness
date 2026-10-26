@@ -638,6 +638,22 @@ fi
 # writer reaches it either way.
 mkdir -p "$(dirname "$CONFIG_OUT")/config.d"
 
+# The git token file the worker mounts read-write and the agents read-only
+# (docs/decisions.md ADR 456 Consequences 6, ADR 486). Absent at the first
+# `up`, docker makes a directory of it and the console cannot renew the token.
+# Empty and 0600 here; one already there is kept. Under set -e the create sits
+# in an if condition so a failure prints a line and the wizard goes on.
+git_token="$(dirname "$CONFIG_OUT")/.data/credentials/git-credentials"
+if [ -d "$git_token" ]; then
+    echo "$git_token is a directory (docker made it); remove it (sudo rmdir) and rerun, or the console cannot renew the GitHub token."
+elif [ -e "$git_token" ] || [ -L "$git_token" ]; then
+    echo "Kept $git_token"
+elif mkdir -p "$(dirname "$git_token")" && (umask 077 && : > "$git_token"); then
+    echo "Created $git_token"
+else
+    echo "Could not create $git_token; the console cannot renew the GitHub token until it exists."
+fi
+
 # The list the repo ships with is the shipped agents file already; rendering
 # it again would only trade its comments for the generated ones.
 sorted_input=$(printf '%s\n' "${ACCOUNT_NAMES[@]}" | sort | paste -sd, -)

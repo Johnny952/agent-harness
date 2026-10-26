@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -176,6 +177,8 @@ def test_a_rendered_pool_holds_the_compose_invariants(tmp_path, monkeypatch, nam
     invariants.test_every_agent_service_mounts_the_shared_hive_directory()
     invariants.test_every_dind_sidecar_uses_sysbox_runc_and_nothing_is_privileged()
     invariants.test_every_agent_service_isolates_its_config_home("docker-compose.agents.yml")
+    invariants.test_the_git_token_is_writable_in_the_worker_only_and_read_only_in_every_agent()
+    invariants.test_no_coolify_service_mounts_the_git_token()
     invariants.test_every_agent_service_has_collector_url_and_source_app()
     invariants.test_every_agent_mounts_the_deploy_keys_read_only("docker-compose.agents.yml")
     for check in (
@@ -296,6 +299,42 @@ def test_config_d_is_made_beside_config_yaml(tmp_path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "config.d").is_dir()
+
+
+def test_the_git_token_file_is_made_empty_and_0600(tmp_path) -> None:
+    """ADR 456 Consequences 6, ADR 486: made here so docker does not make a
+    directory of the mount."""
+    result = _run(tmp_path, _answers("solo"))
+
+    token = tmp_path / ".data" / "credentials" / "git-credentials"
+    assert result.returncode == 0, result.stderr
+    assert token.is_file()
+    assert token.stat().st_size == 0
+    assert stat.S_IMODE(token.stat().st_mode) == 0o600
+
+
+def test_an_existing_git_token_file_is_kept(tmp_path) -> None:
+    token = tmp_path / ".data" / "credentials" / "git-credentials"
+    token.parent.mkdir(parents=True)
+    token.write_text("https://x:tok@github.com\n")
+    token.chmod(0o644)
+
+    result = _run(tmp_path, _answers("solo"))
+
+    assert result.returncode == 0, result.stderr
+    assert token.read_text() == "https://x:tok@github.com\n"
+    assert stat.S_IMODE(token.stat().st_mode) == 0o644
+
+
+def test_a_git_token_directory_is_reported_and_the_wizard_goes_on(tmp_path) -> None:
+    token = tmp_path / ".data" / "credentials" / "git-credentials"
+    token.mkdir(parents=True)
+
+    result = _run(tmp_path, _answers("solo"))
+
+    assert result.returncode == 0, result.stderr
+    assert token.is_dir()
+    assert "is a directory" in result.stdout
 
 
 def test_three_accounts_write_three_pairs_and_three_tokens(tmp_path) -> None:

@@ -387,6 +387,14 @@ root-owned at the first `up` (a host that skips the script still works: the
 root writer writes it, and a hand repair then needs `sudo`). See
 `docs/decisions.md` ADR 75 and ADR 110.
 
+`scripts/configure.sh` also creates `.data/credentials/git-credentials` empty
+and `0600` when nothing is there, and keeps one that exists. The worker mounts
+that file read-write to renew the console's GitHub token in it, and the agents
+mount it `:ro`; if it does not exist at the first `up`, docker makes a
+directory of it and the Tokens screen can never write the token. If docker
+already made a directory, remove it (`sudo rmdir`) and rerun the script
+(`docs/decisions.md` ADR 486).
+
 ### 2. Build the account-specific images
 
 `dispatcher`, `collector` and `api` have `build:` stanzas in
@@ -593,7 +601,8 @@ the two-liner above:
   starts it, and `dispatcher` and `worker` reach Docker through it with
   `DOCKER_HOST`.
 - `worker` (`profiles: ["worker"]`) is the one long-running Docker client,
-  with the dispatcher's mounts. Start it with
+  with the dispatcher's mounts plus `.data/credentials/git-credentials`
+  read-write (the dispatcher does not mount it). Start it with
   `docker compose -f docker/compose/docker-compose.yml --profile worker up -d worker`.
   It carries out the queue actions the console files, so Start and Cancel from
   the console need it running. `dispatcher_state/actions` does not exist until
@@ -1331,7 +1340,8 @@ A private project is reached through its SSH deploy key: run
 `.data/credentials/projects` (mounted into the dispatcher and, read-only, into
 the agents), and add the public key to the repository with write access when
 the project pushes. This file does not mount the https:// `git-credentials`
-token file, so a project without a key reaches only public https:// remotes.
+token file, so a project without a key reaches only public https:// remotes,
+and the console's Tokens screen shows `not_mounted` for the GitHub token.
 
 Two things still can't be automated by any compose file, Coolify import
 included:
