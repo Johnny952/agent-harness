@@ -18655,3 +18655,116 @@ entry, and its test fails on any difference.
 - *Failing the wizard when the file cannot be made:* the rest of the
   configuration is still good, and a token typed by hand later is the same
   fix.
+
+## ADR 492 — The Tokens screen's controls: where a queued action's id lives, how each action's progress reads, a secret field's life, and the confirmation
+
+**Status:** accepted (T-186-S3, 2026-10-26). Builds the controls half of
+ADR 456 *Consequences*, 7, into ADR 489's regions, on ADR 483's three client
+calls and ADR 212's `keygenProject(slug, true)` and `checkProject`, followed
+on ADR 216's `getAction` and cancelled by `cancelAction`. Narrows ADR 456
+decision 7's *Controls* and *States* where they left the id's keeping, the
+progress wording, the refusal's form and the confirmation's shape open;
+supersedes nothing.
+
+**Context.** ADR 456 decision 7 lists the controls and their order, clears a
+secret field "when the request returns, accepted or not", quotes a 400, 409
+or 503 under its control, and draws controls whenever a snapshot is served,
+stale included. A queued action's record is `GET /api/actions/<id>`
+(`actionQuery`, polled until final); a claimed record's `status` is
+`"running"` (`dispatcher/actions.py` `claim`), and `FINAL` holds
+`cancelled`, which `front/src/lib/api/queries.ts` `FINISHED` lacks, so a
+cancelled login would be polled for good. An `account_login` waits up to
+ten minutes for its code and a second one for the account is 409, so a page
+reloaded mid-sign-in would otherwise be stuck behind its own refusal.
+React Query keeps a mutation's `variables` and its `mutationFn` closure in
+its cache after it settles.
+
+**Decision.**
+
+1. *Where controls are.* In the rows ADR 489 draws, only when a snapshot is
+   served (stale included); a row whose `project` / `account` is malformed
+   has none; the `ErrorState` and the no-snapshot banner draw none.
+2. *The id of a queued action* is component state of the row that queued
+   it, one per kind (git token: the renewal; deploy key: the keygen and the
+   check; login: the sign-in and its cancel), followed with `actionQuery`.
+   A login row holding none adopts the open `account_login` for its account
+   from `actionQueueQuery`'s `pending` and `claimed` (kind `account_login`,
+   `params.account` equal), so a reload resumes the sign-in. A failed queue
+   read adds the `BrokenBanner` line "/api/actions did not answer: a sign-in
+   started elsewhere is not shown"; nothing else changes. Nothing goes in
+   the URL.
+3. *Progress,* one line under the control from the followed record:
+   `pending` "queued as <id>, waiting for the worker"; `running` "running";
+   `failed` / `interrupted` a `Banner` tone `danger` "<Kind> <status>:
+   <error>" ("no error was recorded" when null); `cancelled` "cancelled";
+   a 404 on the read "the queue has no record of <id>"; `data: null` "its
+   record is unreadable" with the warnings. `done` per kind:
+   - *renewal:* "written" with `finished_at`'s clock and age;
+   - *keygen:* `result.public` in a `pre` (`data-testid="public-key"`), its
+     `result.fingerprint`, and "Add it on GitHub: the repository's Settings →
+     Deploy keys → Add deploy key. The replaced key stays there until it is
+     deleted. Then press Check."; no `public` is a warning "the finished
+     keygen reported no public key";
+   - *check:* `projects.new.tsx` `CheckLine`'s four sentences without the
+     `push_task_branch` clauses (this screen reads no project record):
+     answers and would take a push (`info`); answers but refuses a push
+     (`warning`); answers, write not tested (`info`); does not answer
+     (`warning`), each followed by `result.detail`;
+   - *login:* see 5.
+   When a followed record reaches a final status the screen invalidates
+   `["credentials"]` once, since the worker rewrites the snapshot then.
+4. *A secret field* (the token; the login code) is `type="password"`,
+   `autoComplete="off"`, in a `form` whose submit calls `preventDefault`.
+   The write is a plain async handler, not `useMutation`: it reads the
+   field's state, awaits the client call, and in `finally` sets the field to
+   `""`, so the value is in no mutation cache, query key, URL, toast or log
+   line. The username is not a secret and is kept; empty sends `null`.
+   *Renew* and *Send code* are disabled while the field is empty or the
+   request is out.
+5. *The login,* by the followed record: no record yet, `pending`, or
+   `running` with no `result.url` and no `result.code_at` is "waiting for
+   the sign-in URL"; `running` with `result.awaiting === "code"` and a
+   `result.url` whose `new URL(...).protocol` is `https:` is that URL as a
+   link (`target="_blank"`, `rel="noopener noreferrer"`), the code field and
+   *Send code* (a `url` that is not such a string is `Malformed` and no
+   link); `running` with `awaiting` null is "signing in"; `done` is "signed
+   in" with `result.logged_in_at`'s clock, plus "; the account was released
+   from AUTH_EXPIRED" when `result.released` is true. *Cancel* is drawn
+   while the login is `pending` or `running` and calls `cancelAction`
+   (`cancelActionMutation`); accepted, "cancel queued as <id>", and the
+   login's own record ends `cancelled`. *Sign in again* is disabled while
+   the row's login is open or its request is out.
+6. *Replace key* is an inline confirmation in the row, not a dialog:
+   "Replacing <project>'s key makes its fetch and push fail until the new
+   public half is added on GitHub as a deploy key." with *Replace the key*
+   (calls `keygenProject(project, true)`) and *Keep it*. *Check* is drawn on
+   every well-formed deploy key row. Each is disabled while its own action
+   is open or its request is out.
+7. *A refusal* is any `ApiError` from a write, quoted in a `Banner` tone
+   `danger` under the control that sent it: "Refused (<status>): <message>",
+   or "Not sent: <message>" for status 0. The message is the service's
+   `error` (ADR 468 and ADR 483 hold no value in it); the field stays
+   cleared. A new request clears the previous refusal.
+8. *After every write settles* the screen invalidates `["credentials"]` and
+   `["action-queue"]`.
+9. `FINISHED` in `front/src/lib/api/queries.ts` gains `"cancelled"`, so
+   `actionQuery` stops polling a cancelled record, as `FINAL` does.
+
+**Consequences.**
+- A reload loses a followed renewal, keygen or check (the snapshot and the
+  Queue screen still show their effect); only a sign-in is resumed.
+- New project's `actionQuery` reads stop polling a cancelled setup action.
+- `projects.new.tsx` `isOpen` and `Progress` test `"claimed"`, a status no
+  record carries, so a running setup action reads as not open there; this
+  ADR does not change that screen.
+
+**Ruled out.**
+- *`useMutation` for the token or the code:* its cache keeps `variables`
+  after the request returns.
+- *The ids in the URL, as New project keeps them:* a URL is the one place
+  ADR 456 decision 7 names beside the toast and the log, and adoption from
+  the queue already resumes the only long action.
+- *An `AlertDialog` for the confirmation:* no screen here uses one, and an
+  inline confirmation keeps the row's other controls in view.
+- *Checking the URL's host against the worker's list:* ADR 465 decision 5
+  keeps that list; the screen only refuses a non-`https:` link.
