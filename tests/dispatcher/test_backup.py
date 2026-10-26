@@ -100,12 +100,12 @@ def test_no_credential_path_lands_in_a_copy(env, tmp_path: Path) -> None:
     shapes = [
         "users.json", "sessions.json", "users", "claude_creds_cuenta1", "claude_shared",
         ".credentials.json", "push-subscriptions.json", "key.pem", "id_ed25519",
-        "id_ed25519.pub", ".data", "x.lock",
+        "id_ed25519.pub", ".data", "x.lock", "secrets",
     ]
     for root in (hive, state):
         for where in (root, root / "auth", root / "deep" / "er"):
             for shape in shapes:
-                _write(where / shape / "inner" if shape in ("users", "claude_shared", ".data", "claude_creds_cuenta1") else where / shape, SECRET)
+                _write(where / shape / "inner" if shape in ("users", "claude_shared", ".data", "claude_creds_cuenta1", "secrets") else where / shape, SECRET)
         (root / "link").symlink_to(outside)
         (root / "surface-locks").mkdir()
         _write(root / "surface-locks" / "s", SECRET)
@@ -120,6 +120,15 @@ def test_no_credential_path_lands_in_a_copy(env, tmp_path: Path) -> None:
         ), path
         if path.is_file():
             assert SECRET not in path.read_text(), path
+
+
+def test_a_waiting_action_secret_is_not_in_a_copy(env) -> None:
+    hive, state, dest = env
+    _write(state / "actions" / "secrets" / "a", SECRET)
+    result = backup.backup(str(hive), str(state), str(dest), 7, now=T0)
+    copy = dest / result.name / "state" / "actions"
+    assert (copy / "pending" / "a.json").exists()
+    assert not (copy / "secrets").exists()
 
 
 def test_a_held_project_lock_refuses_and_writes_nothing(env) -> None:

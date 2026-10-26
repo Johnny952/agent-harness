@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -690,3 +692,239 @@ def test_create_epic_cancels_refuses_an_epic_with_nothing_queued(tmp_path):
     assert refused.value.status == 409
     assert refused.value.reason == "epic T-9 has no start queued"
     assert len(names(tmp_path, "pending")) == 3
+
+
+# ---- the credential kinds and the secrets directory (ADR 456, ADR 459) ----------
+
+TOKEN = "ghp_" + "a1B2c3D4e5" * 4
+LOGIN = dict(params={"account": "cuenta1"})
+
+
+def secret_path(tmp_path, aid):
+    return tmp_path / "actions" / "secrets" / aid
+
+
+def waiting_login(tmp_path, account="cuenta1"):
+    """A claimed account_login whose handler waits for the code."""
+    rec = create(tmp_path, "account_login", params={"account": account})
+    actions.claim(tmp_path, rec["id"])
+    claimed = read(tmp_path, "claimed", rec["id"])
+    claimed["result"] = {"awaiting": "code"}
+    actions.rewrite(tmp_path, claimed)
+    return rec["id"]
+
+
+def test_git_token_fills_its_username_and_keeps_an_explicit_one(tmp_path):
+    rec = create(tmp_path, "git_token", secret=TOKEN)
+    assert rec["params"] == {"username": "x-access-token"}
+    actions.finish(tmp_path, rec["id"], "done")
+    other = {"username": "octo-cat"}
+    again = create(tmp_path, "git_token", params=other, secret=TOKEN)
+    assert again["params"] == {"username": "octo-cat"}
+    assert other == {"username": "octo-cat"}
+
+
+@pytest.mark.parametrize("over", [
+    {"params": {"username": "bad name"}},
+    {"params": {"username": ""}},
+    {"params": {"username": "a" * 40}},
+    {"params": {"username": "x", "extra": 1}},
+    {"project": "proj"},
+    {"task_id": "T-1"},
+])
+def test_a_bad_git_token_is_refused(tmp_path, over):
+    actions.ensure_dirs(tmp_path)
+    with pytest.raises(ActionRefused) as refused:
+        create(tmp_path, "git_token", secret=TOKEN, **over)
+    assert refused.value.status == 400
+    assert names(tmp_path, "pending") == []
+    assert not (tmp_path / "actions" / "secrets").exists()
+
+
+@pytest.mark.parametrize("account", ["../x", "a b", "", ".hid", "a/b"])
+def test_a_bad_account_name_is_refused(tmp_path, account):
+    with pytest.raises(ActionRefused) as refused:
+        create(tmp_path, "account_login", params={"account": account})
+    assert refused.value.status == 400
+
+
+def test_credential_kinds_serial_keys_and_recovery(tmp_path):
+    git = record_of("git_token", project=None, task_id=None, params={"username": "x"})
+    login = record_of("account_login", project=None, task_id=None, params=LOGIN["params"])
+    assert actions.serial_key(git) == "credential:git"
+    assert actions.serial_key(login) == "account:cuenta1"
+    for name, line in (
+        ("git_token", "interrupted while writing the GitHub token; look at the "
+                      "Tokens screen before renewing again"),
+        ("account_login", "interrupted during the sign-in; start it again"),
+    ):
+        kind = actions.KINDS[name]
+        assert not kind.spends_quota
+        assert kind.recovery == "interrupt" and kind.interrupted_error == line
+
+
+def test_one_git_token_and_one_sign_in_per_account(tmp_path):
+    first = create(tmp_path, "git_token", secret=TOKEN)
+    with pytest.raises(ActionRefused) as refused:
+        create(tmp_path, "git_token", secret=TOKEN)
+    assert refused.value.status == 409
+    actions.claim(tmp_path, first["id"])
+    with pytest.raises(ActionRefused):
+        create(tmp_path, "git_token", secret=TOKEN)
+    create(tmp_path, "account_login", **LOGIN)
+    with pytest.raises(ActionRefused) as refused:
+        create(tmp_path, "account_login", **LOGIN)
+    assert refused.value.status == 409
+    create(tmp_path, "account_login", params={"account": "cuenta2"})
+
+
+def test_the_secret_rules_at_create(tmp_path):
+    actions.ensure_dirs(tmp_path)
+    for kind, extra, secret in (
+        ("git_token", {}, None),
+        ("git_token", {}, "ghp_short"),
+        ("git_token", {}, "gho_" + "a" * 30),
+        ("start", START, "whatever"),
+        ("account_login", LOGIN, "123456"),
+    ):
+        with pytest.raises(ActionRefused) as refused:
+            create(tmp_path, kind, secret=secret, **extra)
+        assert refused.value.status == 400
+        assert "ghp_short" not in refused.value.reason
+        assert "whatever" not in refused.value.reason
+    assert names(tmp_path, "pending") == []
+    assert not (tmp_path / "actions" / "secrets").exists()
+
+
+def test_the_secret_lands_0600_before_the_record_is_pending(tmp_path, monkeypatch):
+    real = actions.os.rename
+    seen = []
+
+    def watch(src, dst):
+        dst = actions.Path(dst)
+        if dst.parent.name == "pending":
+            path = secret_path(tmp_path, dst.stem)
+            seen.append((stat.S_IMODE(path.stat().st_mode), path.read_text()))
+        return real(src, dst)
+
+    monkeypatch.setattr(actions.os, "rename", watch)
+    rec = create(tmp_path, "git_token", secret=TOKEN)
+    assert seen == [(0o600, TOKEN)]
+    assert TOKEN not in (tmp_path / "actions" / "pending" / f"{rec['id']}.json").read_text()
+    assert names(tmp_path, "secrets") == [rec["id"]]
+    assert stat.S_IMODE((tmp_path / "actions" / "secrets").stat().st_mode) == 0o700
+
+
+def test_a_failed_record_rename_leaves_no_secret(tmp_path, monkeypatch):
+    real = actions.os.rename
+
+    def boom(src, dst):
+        if actions.Path(dst).parent.name == "pending":
+            raise OSError("disk")
+        return real(src, dst)
+
+    monkeypatch.setattr(actions.os, "rename", boom)
+    with pytest.raises(OSError):
+        create(tmp_path, "git_token", secret=TOKEN)
+    assert names(tmp_path, "secrets") == []
+    assert names(tmp_path, "pending") == [] and names(tmp_path, "tmp") == []
+
+
+def test_a_secret_is_taken_once(tmp_path):
+    rec = create(tmp_path, "git_token", secret=TOKEN)
+    assert actions.take_secret(tmp_path, rec["id"]) == TOKEN
+    assert actions.take_secret(tmp_path, rec["id"]) is None
+    assert names(tmp_path, "secrets") == []
+    assert actions.take_secret(tmp_path, "../pending") is None
+
+
+def test_put_login_code_needs_a_sign_in_awaiting_its_code(tmp_path):
+    pending = create(tmp_path, "account_login", **LOGIN)
+    with pytest.raises(ActionRefused) as refused:
+        actions.put_login_code(tmp_path, pending["id"], "123456")
+    assert refused.value.status == 409
+    actions.claim(tmp_path, pending["id"])
+    with pytest.raises(ActionRefused) as refused:  # claimed, awaiting null
+        actions.put_login_code(tmp_path, pending["id"], "123456")
+    assert refused.value.status == 409
+    token = create(tmp_path, "git_token", secret=TOKEN)
+    actions.claim(tmp_path, token["id"])
+    with pytest.raises(ActionRefused) as refused:  # claimed, not a sign-in
+        actions.put_login_code(tmp_path, token["id"], "123456")
+    assert refused.value.status == 409
+    with pytest.raises(ActionRefused) as refused:  # not an id
+        actions.put_login_code(tmp_path, "nope", "123456")
+    assert refused.value.status == 409
+
+
+def test_put_login_code_writes_once_and_checks_the_shape(tmp_path):
+    aid = waiting_login(tmp_path)
+    for bad in ("a b", "", "x" * 513, 12):
+        with pytest.raises(ActionRefused) as refused:
+            actions.put_login_code(tmp_path, aid, bad)
+        assert refused.value.status == 400
+        assert "a b" not in refused.value.reason
+    actions.put_login_code(tmp_path, aid, "123-456")
+    assert stat.S_IMODE(secret_path(tmp_path, aid).stat().st_mode) == 0o600
+    with pytest.raises(ActionRefused) as refused:
+        actions.put_login_code(tmp_path, aid, "999999")
+    assert refused.value.status == 409
+    assert actions.take_secret(tmp_path, aid) == "123-456"
+    assert names(tmp_path, "secrets") == []
+
+
+def test_the_sweep_unlinks_orphans_temps_and_the_stale(tmp_path):
+    held = create(tmp_path, "git_token", secret=TOKEN)
+    old = waiting_login(tmp_path)
+    actions.put_login_code(tmp_path, old, "123456")
+    os.utime(secret_path(tmp_path, old), (1, 1))
+    orphan = "a-20200101T000000000000Z-0001"
+    secret_path(tmp_path, orphan).write_text("x")
+    temp = secret_path(tmp_path, f".{held['id']}.deadbeef")
+    temp.write_text("x")
+    assert sorted(actions.sweep_secrets(tmp_path)) == sorted([orphan, temp.name, old])
+    assert names(tmp_path, "secrets") == [held["id"]]
+    assert actions.sweep_secrets(tmp_path) == []
+
+
+def test_the_sweep_without_a_directory_is_empty(tmp_path):
+    assert actions.sweep_secrets(tmp_path) == []
+
+
+def test_recovery_interrupts_a_claimed_credential_and_drops_its_secret(tmp_path):
+    git = create(tmp_path, "git_token", secret=TOKEN)
+    actions.claim(tmp_path, git["id"])
+    login = waiting_login(tmp_path)
+    actions.put_login_code(tmp_path, login, "123456")
+    assert sorted(names(tmp_path, "secrets")) == sorted([git["id"], login])
+    assert sorted(actions.recover(tmp_path)) == sorted(
+        [(git["id"], "interrupted"), (login, "interrupted")]
+    )
+    assert names(tmp_path, "secrets") == []
+    assert read(tmp_path, "done", git["id"])["error"] == actions.KINDS["git_token"].interrupted_error
+    assert read(tmp_path, "done", login)["error"] == actions.KINDS["account_login"].interrupted_error
+
+
+def test_recovery_of_a_final_record_drops_its_secret(tmp_path):
+    rec = create(tmp_path, "git_token", secret=TOKEN)
+    final = read(tmp_path, "pending", rec["id"])
+    final["status"] = "done"
+    (tmp_path / "actions" / "pending" / f"{rec['id']}.json").write_text(json.dumps(final))
+    assert actions.recover(tmp_path) == [(rec["id"], "moved to done")]
+    assert names(tmp_path, "secrets") == []
+
+
+def test_finish_drops_the_secret_of_a_cancelled_pending_token(tmp_path):
+    rec = create(tmp_path, "git_token", secret=TOKEN)
+    actions.finish(tmp_path, rec["id"], "cancelled")
+    assert names(tmp_path, "secrets") == []
+    assert names(tmp_path, "done") == [f"{rec['id']}.json"]
+
+
+def test_read_all_and_find_ignore_the_secrets_directory(tmp_path):
+    rec = create(tmp_path, "git_token", secret=TOKEN)
+    secret_path(tmp_path, "stray").write_text("x")
+    entries, warnings = actions.read_all(tmp_path)
+    assert [e.record["id"] for e in entries] == [rec["id"]] and warnings == []
+    assert actions.find(tmp_path, rec["id"]).state == "pending"
+    assert actions.find(tmp_path, "stray") is None
