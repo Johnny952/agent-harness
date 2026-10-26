@@ -1089,6 +1089,35 @@ def test_the_docker_proxy_allowlist_admits_exec_and_refuses_the_rest(
         assert not _allowed(patterns, method, path), (method, path)
 
 
+# --- the git token (docs/decisions.md ADR 456 decision 5, ADR 486) ----------
+
+GIT_TOKEN_SOURCE = "../../.data/credentials/git-credentials"
+GIT_TOKEN_TARGET = "/run/secrets/git-credentials"
+GIT_TOKEN_WORKER_MOUNT = f"{GIT_TOKEN_SOURCE}:{GIT_TOKEN_TARGET}"
+GIT_TOKEN_AGENT_MOUNT = f"{GIT_TOKEN_WORKER_MOUNT}:ro"
+
+
+def _git_token_lines(service: dict) -> list[str]:
+    return [v for v in service.get("volumes", []) if GIT_TOKEN_TARGET in str(v) or GIT_TOKEN_SOURCE in str(v)]
+
+
+def test_the_git_token_is_writable_in_the_worker_only_and_read_only_in_every_agent() -> None:
+    services = _deployment_services("split")
+    agents = {name for name in services if name.startswith("agent-")}
+
+    holders = {name for name, service in services.items() if _git_token_lines(service)}
+    assert agents
+    assert holders == {"worker"} | agents
+    assert _git_token_lines(services["worker"]) == [GIT_TOKEN_WORKER_MOUNT]
+    for name in agents:
+        assert _git_token_lines(services[name]) == [GIT_TOKEN_AGENT_MOUNT], name
+
+
+def test_no_coolify_service_mounts_the_git_token() -> None:
+    for name, service in _deployment_services("coolify").items():
+        assert not _git_token_lines(service), name
+
+
 @pytest.mark.parametrize("compose_file", BOTH_FILES)
 def test_the_worker_is_the_dispatchers_mounts_behind_its_own_profile(
     compose_file: str,
@@ -1103,8 +1132,12 @@ def test_the_worker_is_the_dispatchers_mounts_behind_its_own_profile(
     assert worker["networks"] == ["ia_harness_net", PROXY_NETWORK]
     assert worker["networks"] == dispatcher["networks"]
     assert "ports" not in worker
-    # ADR 342, ADR 360: both mount the backup directory, so they are equal
-    assert worker["volumes"] == dispatcher["volumes"]
+    # ADR 342, ADR 360: both mount the backup directory, so they are equal;
+    # ADR 486: the plain file's worker adds the git token, Coolify mounts none
+    if compose_file == "docker-compose.yml":
+        assert worker["volumes"] == dispatcher["volumes"] + [GIT_TOKEN_WORKER_MOUNT]
+    else:
+        assert worker["volumes"] == dispatcher["volumes"]
     assert "${BACKUP_DIR:-../../.data/backups}:/backups" in dispatcher["volumes"]
     assert worker["depends_on"] == dispatcher["depends_on"]
     assert worker["build"] == dispatcher["build"]
