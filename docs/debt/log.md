@@ -641,3 +641,9 @@ tick and call the credentials snapshot with `logins`. The login output is
 scanned for the URL and never kept, where ADR 465 4 says a list
 (`docs/implementations/T-182.md`). The CLI's real output under `script` is
 unmeasured; ADR 456 *Consequences* 4, the routes, is the next task, not debt.
+**T-185-S1** declared no debt and resolved none. ADR 480 narrows ADR 462
+decision 3: `credentials.git_token_row` reads a missing token path as
+`not_mounted` when `/.dockerenv` or `/run/.containerenv` exists and `absent`
+otherwise, so the Coolify worker, which mounts `/run/secrets/projects` but no
+token, now reads `not_mounted` (`docs/implementations/T-185-S1.md`). A runtime
+writing neither marker reads `absent`; ADR 480 accepts that, so it is not debt.

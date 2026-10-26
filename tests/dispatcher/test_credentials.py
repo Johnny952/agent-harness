@@ -30,6 +30,11 @@ def cfg(tmp_path):
     return c
 
 
+@pytest.fixture(autouse=True)
+def outside_a_container(monkeypatch, tmp_path):
+    monkeypatch.setattr(credentials, "CONTAINER_MARKERS", (str(tmp_path / "none"),))
+
+
 class Exec:
     def __init__(self):
         self.calls = []
@@ -84,14 +89,49 @@ def test_token_empty(cfg):
     assert got["state"] == "empty" and got["modified_at"] is not None
 
 
-def test_token_absent_when_parent_exists(cfg):
-    assert _token(cfg)["state"] == "absent"
-    assert _token(cfg)["modified_at"] is None
+def _in_container(monkeypatch, tmp_path, name=".dockerenv"):
+    marker = tmp_path / name
+    marker.write_text("")
+    monkeypatch.setattr(credentials, "CONTAINER_MARKERS", (str(tmp_path / "none"), str(marker)))
 
 
-def test_token_not_mounted_when_parent_missing(cfg, tmp_path):
+def test_token_absent_outside_a_container(cfg):
+    got = _token(cfg)
+    assert got["state"] == "absent" and got["modified_at"] is None
+
+
+def test_token_absent_outside_a_container_without_parent(cfg, tmp_path):
     cfg.git_credentials_path = str(tmp_path / "nowhere" / "git-credentials")
+    assert _token(cfg)["state"] == "absent"
+
+
+def test_token_not_mounted_in_a_coolify_like_container(cfg, tmp_path, monkeypatch):
+    # the parent exists and holds projects/, as /run/secrets does in every worker
+    (tmp_path / "secrets" / "projects").mkdir()
+    _in_container(monkeypatch, tmp_path)
+    got = _token(cfg)
+    assert got["state"] == "not_mounted" and got["modified_at"] is None
+
+
+def test_token_not_mounted_by_the_podman_marker(cfg, tmp_path, monkeypatch):
+    _in_container(monkeypatch, tmp_path, ".containerenv")
     assert _token(cfg)["state"] == "not_mounted"
+
+
+@pytest.mark.parametrize("in_container", [False, True])
+@pytest.mark.parametrize("make,state", [("present", "present"), ("empty", "empty"),
+                                        ("directory", "directory")])
+def test_token_file_states_do_not_depend_on_the_container(cfg, tmp_path, monkeypatch,
+                                                          in_container, make, state):
+    if in_container:
+        _in_container(monkeypatch, tmp_path)
+    p = Path(cfg.git_credentials_path)
+    if make == "directory":
+        p.mkdir()
+    else:
+        p.write_text("x" if make == "present" else "")
+    got = _token(cfg)
+    assert got["state"] == state and got["modified_at"] is not None
 
 
 def test_token_directory(cfg):

@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from dispatcher import actions, state_machine, worker as worker_mod
+from dispatcher import actions, credentials, state_machine, worker as worker_mod
 from tests.dispatcher.test_worker import (  # noqa: F401  (fixtures)
     WAIT, accounts, cancel, cfg, cycle, snapshots, where, worker,
 )
@@ -74,10 +74,13 @@ def test_git_token_writes_into_an_empty_file(cfg, worker, token_file):
      ".data/credentials/git-credentials; replace it with a file on the host, then "
      "recreate the worker"),
 ])
-def test_git_token_fixed_failures_for_the_file(cfg, worker, tmp_path, make, sentence):
+def test_git_token_fixed_failures_for_the_file(cfg, worker, tmp_path, monkeypatch, make, sentence):
+    markers = (str(tmp_path / "no-marker"),)
     if make == "not_mounted":
-        cfg.git_credentials_path = str(tmp_path / "nodir" / "git-credentials")
-    elif make == "absent":
+        (tmp_path / ".dockerenv").write_text("")
+        markers = (str(tmp_path / ".dockerenv"),)
+    monkeypatch.setattr(credentials, "CONTAINER_MARKERS", markers)
+    if make in ("not_mounted", "absent"):
         cfg.git_credentials_path = str(tmp_path / "git-credentials")
     else:
         (tmp_path / "git-credentials").mkdir()

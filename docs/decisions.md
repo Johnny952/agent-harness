@@ -18416,3 +18416,48 @@ decision 2 says nothing may quote one.
   board's 409 already covers it, and `ACTION_CANCEL` does not check either.
 - *Mutation helpers in `queries.ts`:* the screen sub-task decides what each
   write invalidates.
+## ADR 480 — `git_token`'s `not_mounted` is told by running in a container, not by the parent directory
+
+**Status:** accepted (T-185-S1, 2026-10-26). Narrows ADR 462 decision 3's
+rule for a missing path; the rest of decision 3 stands. It supersedes no ADR
+whole; it shows the premise of ADR 462's *Ruled out* `/proc/self/mountinfo`
+entry ("the parent rule answers the two compose files") false.
+
+**Context.** ADR 462 decision 3 reads a missing `cfg.git_credentials_path`
+as `absent` when its parent exists, on the premise that a worker with no
+token mount has no `/run/secrets`. Every worker in both compose files mounts
+`../../.data/credentials/projects:/run/secrets/projects`, so Docker makes
+`/run/secrets` and the Coolify worker, which mounts no token (ADR 91, ADR
+456 *Consequences* 6), reads `absent` where ADR 456 decision 4 says
+`not_mounted`. Inside a container a single-file bind mount always makes its
+target exist: Docker makes a directory when the host file is missing (ADR
+36, the `directory` state), and a host file deleted after start leaves the
+mounted inode at the path.
+
+**Decision.**
+1. `dispatcher/credentials.py` holds `CONTAINER_MARKERS = ("/.dockerenv",
+   "/run/.containerenv")`, the files Docker and Podman put at a container's
+   root. The process is in a container when `os.path.exists` is true for
+   any of them. Only those marker paths are `stat`ed; nothing is opened.
+2. In `git_token_row`, a missing path (`FileNotFoundError`,
+   `NotADirectoryError`) is `not_mounted` in a container and `absent`
+   outside one (a worker run on the host from a checkout), whatever its
+   parent. The parent directory is no longer looked at.
+3. `present`, `empty`, `directory`, the other-`OSError` and the
+   other-file-type answers are unchanged, in or out of a container.
+
+**Consequences.**
+- The Coolify worker's snapshot reads `not_mounted`, and its `git_token`
+  action fails with `dispatcher/worker.py` `GIT_TOKEN_FILE_ERRORS`'
+  `not_mounted` sentence, which fits as written. Under the plain compose
+  once T-185-S2 mounts the token, a missing host file reads `directory`.
+- A worker on the host with no parent directory now reads `absent` where it
+  read `not_mounted`; there is no mount to speak of there.
+- Tests set `CONTAINER_MARKERS` to paths under `tmp_path`, since the suite
+  itself may run inside a container.
+
+**Ruled out.**
+- *`/proc/self/mountinfo`:* parsing mounts to answer what the markers answer
+  with one `stat`; and it is Linux-only.
+- *Keeping the parent rule outside a container:* outside Docker nothing is
+  mounted, so `not_mounted` there names a cause that cannot be the one.
