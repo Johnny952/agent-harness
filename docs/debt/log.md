@@ -653,3 +653,10 @@ reads: `front/src/routes/tokens.tsx` draws `getCredentials` joined with
 `listTokens`, `reauthContainer` and their fixtures are gone
 (`docs/implementations/T-186-S2.md`). The controls are the next sub-task of
 T-186, not debt.
+**T-185-S2** declared no debt and resolved none. ADR 486 builds ADR 456
+*Consequences* 6 for the plain compose: `worker` mounts
+`.data/credentials/git-credentials` read-write and `dispatcher` does not, the
+Coolify file mounts no token, and `scripts/configure.sh` makes the host file
+empty and `0600` so Docker does not make a directory of it. Its failed-create
+branch has no test, the suite running as root; ADR 486 decision 4 fixes its
+shape, so it is not debt.

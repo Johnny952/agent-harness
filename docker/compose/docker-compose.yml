@@ -314,7 +314,8 @@ services:
   # <state_dir>/actions/, the queue the board service writes (ADR 142, ADR 148),
   # so the console's Start and Cancel only happen while it runs. Behind the
   # `worker` profile: `docker compose --profile worker up -d worker`. Its mounts
-  # are the dispatcher's, copied, and must stay equal to them, backup directory
+  # are the dispatcher's, copied, plus the git token below (docs/decisions.md
+  # ADR 486), and must stay equal to them otherwise, backup directory
   # included (docs/decisions.md ADR 342, ADR 360): the approve copies the hive
   # and state there before it merges, with the same BACKUP_DIR / BACKUP_KEEP the
   # host's `backup` verb reads.
@@ -337,6 +338,12 @@ services:
       - ../../config.yaml:/app/config.yaml:ro
       - ../../config.d:/app/config.d:ro
       - ${BACKUP_DIR:-../../.data/backups}:/backups
+      # The console's GitHub token, read-write: the worker renews it in place,
+      # so the agents' read-only mounts of the same file see the new one
+      # (docs/decisions.md ADR 456 decision 5, ADR 486). Not the dispatcher's.
+      # An overridden `git_credentials_path` needs this line edited. configure.sh
+      # creates the host file so docker does not make a directory of it.
+      - ../../.data/credentials/git-credentials:/run/secrets/git-credentials
     depends_on:
       - collector
       - docker-proxy
