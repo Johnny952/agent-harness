@@ -18461,3 +18461,94 @@ mounted inode at the path.
   with one `stat`; and it is Linux-only.
 - *Keeping the parent rule outside a container:* outside Docker nothing is
   mounted, so `not_mounted` there names a cause that cannot be the one.
+
+## ADR 486 — The plain compose's `worker` mounts the git token read-write and the `dispatcher` does not; `configure.sh` makes the host file empty and `0600`
+
+**Status:** accepted (T-185-S2, 2026-10-26). Builds ADR 456 *Consequences*,
+6. Narrows ADR 166 decision 1 (the worker's volumes equal the
+dispatcher's) for `docker/compose/docker-compose.yml` only; the Coolify
+file keeps it whole. Supersedes nothing. The user approved the
+`docker/compose/` change on 2026-10-26.
+
+**Context.** ADR 456 decision 5 has the worker's `git_token` handler write
+`cfg.git_credentials_path` in place, so the agents' `:ro` single-file binds
+of `.data/credentials/git-credentials`
+(`docker/compose/docker-compose.agents.yml`) see the new token on the inode
+they were given. No service of `docker/compose/docker-compose.yml` mounts
+that file today, so the plain worker reads
+`not_mounted` (ADR 480). A single-file bind whose host file is missing makes
+Docker create a root-owned directory there (ADR 36, the `directory` state),
+which the handler refuses (`dispatcher/worker.py` `GIT_TOKEN_FILE_ERRORS`).
+ADR 166 decision 1 made the worker's volumes the dispatcher's, entry for
+entry, and its test fails on any difference.
+
+**Decision.**
+1. *The worker mounts the token, last.* In
+   `docker/compose/docker-compose.yml`, `worker`'s
+   `volumes` end with
+   `../../.data/credentials/git-credentials:/run/secrets/git-credentials`,
+   no `:ro`, after the backup mount. Its comment says: the console's GitHub
+   token is written there in place (ADR 456 decision 5, this ADR); the
+   target is `git_credentials_path`'s default, so an operator who overrides
+   that key edits this line too; and Docker makes a directory for a missing
+   host file, which `scripts/configure.sh` prevents. The comment above the
+   service changes "its mounts are the dispatcher's, copied, and must stay
+   equal to them" to "the dispatcher's plus the git token".
+2. *The dispatcher does not.* `run-task`'s fetch and push run `git` in the
+   agents (ADR 36, ADR 78), which already mount the file `:ro`; nothing in
+   the one-off service writes or reads it. A credential is mounted only
+   where a writer or a reader is.
+3. *The Coolify file is unchanged.* No service there mounts the token
+   (ADR 91), its worker still equals its dispatcher, and its Tokens screen
+   reads `not_mounted` (ADR 480).
+4. *`scripts/configure.sh` makes the host file.* After the `config.d`
+   `mkdir`, rooted at the same `$(dirname "$CONFIG_OUT")`, for
+   `<root>/.data/credentials/git-credentials`, every run:
+   - a directory there: print that Docker made it at an `up` before the
+     file existed and to remove it (`sudo rmdir`) and rerun or create the
+     file by hand, and go on;
+   - anything else there, a symlink included (`-e` or `-L`): kept as is,
+     contents and mode untouched;
+   - nothing there: `mkdir -p` the parent with the caller's umask, then
+     create the file empty in a `( umask 077; : > file )` subshell, so it is
+     born `0600` with no window at a wider mode, and print one line naming
+     the path and why (the worker writes the console's token there; made
+     now so Docker does not make a directory);
+   - a failed `mkdir` or create: one line naming the path and that the
+     token cannot be renewed from the console until it exists, and go on.
+     The wizard never stops on this file (`set -e` is not tripped: the
+     commands sit in an `if !` condition).
+   The umask covers the file only, not `.data` or `.data/credentials`,
+   whose modes other mounts (`ms-playwright`, `projects`, the VAPID key)
+   already live with.
+5. *The tests.* `tests/integration/test_compose_invariants.py`: in the split
+   deployment the token's holders, by target `/run/secrets/git-credentials`,
+   are `worker` (exactly the line above, no options) and every `agent-*`
+   (exactly the `:ro` line) and no other service; in the Coolify file no
+   service mounts it; the worker test asserts, for the plain file,
+   `worker["volumes"] == dispatcher["volumes"] + [that line]` and, for
+   Coolify, equality. `tests/scripts/test_configure.py`: a run makes
+   `tmp_path/.data/credentials/git-credentials` empty and `0600`; an
+   existing file keeps its bytes; a directory there is kept, the run exits
+   0 and says so.
+
+**Consequences.**
+- ADR 166's "a mount added to `dispatcher` must be added to `worker`" still
+  holds; the reverse no longer does, for this one line in the plain file.
+- An `up` of the worker before `configure.sh` ran leaves a root-owned
+  directory; the snapshot reads `directory` and the handler names the fix.
+- The worker writes a host file the operator owns: it runs as root, so
+  `0600` does not stop it, and nothing but the agents' `:ro` binds and the
+  worker reads it.
+- `config.example.yaml`'s `git_credentials_path` comment still names only
+  the agents' mount; the README is where the worker's is told.
+
+**Ruled out.**
+- *Mounting it in `dispatcher` too, to keep ADR 166's equality:* a writable
+  credential in a service that never touches it.
+- *The parent directory `.data/credentials` mounted instead of the file:*
+  it would hand the worker the VAPID key and every deploy key under one
+  path, and change the agents' mounts too, which are out of this task.
+- *Failing the wizard when the file cannot be made:* the rest of the
+  configuration is still good, and a token typed by hand later is the same
+  fix.
