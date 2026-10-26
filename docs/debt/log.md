@@ -647,3 +647,10 @@ decision 3: `credentials.git_token_row` reads a missing token path as
 otherwise, so the Coolify worker, which mounts `/run/secrets/projects` but no
 token, now reads `not_mounted` (`docs/implementations/T-185-S1.md`). A runtime
 writing neither marker reads `absent`; ADR 480 accepts that, so it is not debt.
+**T-185-S2** declared no debt and resolved none. ADR 486 builds ADR 456
+*Consequences* 6 for the plain compose: `worker` mounts
+`.data/credentials/git-credentials` read-write and `dispatcher` does not, the
+Coolify file mounts no token, and `scripts/configure.sh` makes the host file
+empty and `0600` so Docker does not make a directory of it. Its failed-create
+branch has no test, the suite running as root; ADR 486 decision 4 fixes its
+shape, so it is not debt.
