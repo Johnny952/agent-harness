@@ -606,3 +606,10 @@ kinds, hands their secret to the worker in a file of its own under the action
 queue, and gives the Tokens screen a credentials snapshot the worker writes
 without opening a secret. Its eight build tasks are listed in that ADR's
 *Consequences*; they are the next tasks, not debt.
+
+**T-180** declared no debt and resolved none. `dispatcher/actions.py` now has
+the `git_token` and `account_login` kinds and the per-action `secrets/` file
+of ADR 456 and ADR 459: written `0600` before the record is pending, taken
+once, unlinked by `finish`, `recover` and `sweep_secrets`. Nothing calls
+`sweep_secrets` yet and no route creates a secret; those are ADR 456
+*Consequences* tasks 3 and 4, the next tasks, not debt.
