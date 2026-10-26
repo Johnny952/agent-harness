@@ -97,7 +97,7 @@ describe("the whitelist", () => {
     const answer = await forwardApiRequest(get("/api/sessions"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/sessions is not one of the twenty-one routes the console forwards.",
+      error: "/api/sessions is not one of the twenty-two routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -592,7 +592,7 @@ describe("the settings forward", () => {
     const answer = await forwardApiRequest(get("/api/settingsx"));
     expect(answer?.status).toBe(404);
     expect(await answer?.json()).toEqual({
-      error: "/api/settingsx is not one of the twenty-one routes the console forwards.",
+      error: "/api/settingsx is not one of the twenty-two routes the console forwards.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -2090,5 +2090,220 @@ describe("the board-service push routes", () => {
       expect((await forwardApiRequest(save(CHANGE, {}, "DELETE")))?.status).toBe(405);
       expect(fetchMock).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("the credentials read (ADR 471, ADR 483)", () => {
+  it("forwards to the api with its bearer and no ?project=, dropping the browser's parameters", async () => {
+    const fetchMock = stubApi('{"data":null,"warnings":[]}');
+    const answer = await forwardApiRequest(get("/api/credentials?project=other&x=1"));
+    expect(answer?.status).toBe(200);
+    expect(target(fetchMock)).toBe(`${BASE}/api/credentials`);
+    expect(fetchMock.mock.calls[0]![1]!.headers).toEqual({
+      Authorization: "Bearer test-token",
+      Accept: "application/json",
+    });
+  });
+
+  it("answers a write with the console's 405, sending nothing", async () => {
+    const fetchMock = stubApi();
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      const answer = await forwardApiRequest(get("/api/credentials", { method }));
+      expect(answer?.status).toBe(405);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("the board-service credential routes (ADR 468, ADR 483)", () => {
+  const TOKEN = "ghp_SECRETSECRETSECRETSECRET";
+  const CODE = "CODE-SECRET-123";
+  const ROUTES: [string, string, string][] = [
+    ["/api/credentials/git-token", `{"token":"${TOKEN}","username":"bot"}`, "git-token"],
+    ["/api/accounts/work/login", "{}", "login"],
+    ["/api/actions/a-1/login-code", `{"code":"${CODE}"}`, "login-code"],
+  ];
+  const HEADERS = { "Content-Type": "application/json", Authorization: "Bearer actions-token" };
+
+  function post(path: string, body: string, headers = {}, method = "POST"): Request {
+    return get(path, {
+      method,
+      body,
+      headers: {
+        "content-type": "application/json",
+        "sec-fetch-site": "same-origin",
+        origin: "http://console.test",
+        authorization: "Bearer from-the-browser",
+        ...headers,
+      },
+    });
+  }
+
+  function sent(fetchMock: ReturnType<typeof stubApi>): RequestInit {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return fetchMock.mock.calls[0]![1]!;
+  }
+
+  it("forwards each to the same path with the bearer and the body unchanged", async () => {
+    for (const [path, body] of ROUTES) {
+      const fetchMock = stubApi('{"id":"a-1"}', 201);
+      const answer = await forwardApiRequest(post(path, body));
+      expect(answer?.status).toBe(201);
+      expect(await answer!.text()).toBe('{"id":"a-1"}');
+      expect(target(fetchMock)).toBe(`${BOARD}${path}`);
+      const init = sent(fetchMock);
+      expect(init.method).toBe("POST");
+      expect(init.headers).toEqual(HEADERS);
+      expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe(body);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("re-encodes a name and an id, and 404s one it cannot read, sending nothing", async () => {
+    const fetchMock = stubApi();
+    await forwardApiRequest(post("/api/accounts/..%2fx/login", "{}"));
+    expect(target(fetchMock)).toBe(`${BOARD}/api/accounts/..%2Fx/login`);
+    vi.restoreAllMocks();
+    const second = stubApi();
+    await forwardApiRequest(post("/api/actions/..%2fx/login-code", "{}"));
+    expect(target(second)).toBe(`${BOARD}/api/actions/..%2Fx/login-code`);
+    vi.restoreAllMocks();
+    const third = stubApi();
+    for (const path of ["/api/accounts/%zz/login", "/api/actions/%zz/login-code"]) {
+      expect((await forwardApiRequest(post(path, "{}")))?.status).toBe(404);
+    }
+    expect(third).not.toHaveBeenCalled();
+  });
+
+  it("keeps the answer every other method had, sending nothing", async () => {
+    const fetchMock = stubApi();
+    for (const [path] of ROUTES) {
+      expect((await forwardApiRequest(get(path)))?.status).toBe(404);
+      for (const method of ["PUT", "PATCH", "DELETE"]) {
+        expect((await forwardApiRequest(post(path, "{}", {}, method)))?.status).toBe(405);
+      }
+    }
+    expect((await forwardApiRequest(post("/api/credentials", "{}")))?.status).toBe(405);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("checks CSRF first: 415 for another type, 403 for a cross-site request", async () => {
+    const fetchMock = stubApi();
+    for (const [path, body] of ROUTES) {
+      expect(
+        (await forwardApiRequest(post(path, body, { "content-type": "text/plain" })))?.status,
+      ).toBe(415);
+      expect(
+        (await forwardApiRequest(post(path, body, { "sec-fetch-site": "cross-site" })))?.status,
+      ).toBe(403);
+      expect(
+        (await forwardApiRequest(post(path, body, { origin: "http://evil.test" })))?.status,
+      ).toBe(403);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never echoes a token or a code in an answer or a log", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const seen: string[] = [];
+    async function collect(answer: Response | null) {
+      expect(answer).not.toBeNull();
+      seen.push(await answer!.text(), JSON.stringify([...answer!.headers]));
+      return answer!.status;
+    }
+    const statuses: number[] = [];
+    const padded = (secret: string) => `{"x":"${secret.repeat(4000)}"}`;
+    for (const [path, body] of ROUTES) {
+      const secret = body.includes(TOKEN) ? TOKEN : CODE;
+      stubApi();
+      statuses.push(
+        await collect(await forwardApiRequest(post(path, body, { "content-type": "text/plain" }))),
+        await collect(
+          await forwardApiRequest(post(path, body, { "sec-fetch-site": "cross-site" })),
+        ),
+        await collect(
+          await forwardApiRequest(post(path, body, { origin: `http://${secret}.test` })),
+        ),
+        await collect(await forwardApiRequest(post(path, padded(secret)))),
+      );
+      vi.restoreAllMocks();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error(`connect failed for ${body}`));
+      statuses.push(await collect(await forwardApiRequest(post(path, body))));
+      vi.restoreAllMocks();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(
+        Object.assign(new Error(`timed out sending ${body}`), { name: "TimeoutError" }),
+      );
+      statuses.push(await collect(await forwardApiRequest(post(path, body))));
+      vi.restoreAllMocks();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    }
+    expect(statuses.slice(0, 6)).toEqual([415, 403, 403, 413, 502, 504]);
+    const everything = seen.join("\n");
+    expect(everything).not.toContain(TOKEN);
+    expect(everything).not.toContain(CODE);
+    const logs = vi.mocked(console.error).mock.calls;
+    expect(JSON.stringify(logs)).not.toContain("SECRET");
+    logged.mockRestore();
+  });
+});
+
+describe("the credential routes without their configuration", () => {
+  async function configured(overrides: Record<string, unknown>) {
+    vi.resetModules();
+    vi.doMock("./server-env", () => ({
+      API_BASE_URL: "http://api.test:8789",
+      API_TOKEN: "test-token",
+      CONSOLE_PROJECT: null,
+      API_TIMEOUT_MS: 5000,
+      CONFIG_WRITER_URL: "http://writer.test:8791",
+      CONFIG_WRITER_TOKEN: "writer-token",
+      CONFIG_WRITER_TIMEOUT_MS: 5000,
+      BOARD_SERVICE_URL: "http://board.test:8792",
+      BOARD_SERVICE_TIMEOUT_MS: 5000,
+      BOARD_ACTIONS_TOKEN: "actions-token",
+      ...overrides,
+    }));
+    const forward = await import("./forward");
+    vi.doUnmock("./server-env");
+    return forward.forwardApiRequest;
+  }
+
+  const PATHS = [
+    "/api/credentials/git-token",
+    "/api/accounts/work/login",
+    "/api/actions/a-1/login-code",
+  ];
+
+  function post(path: string): Request {
+    return get(path, {
+      method: "POST",
+      body: "{}",
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("503s naming BOARD_ACTIONS_TOKEN, sending nothing", async () => {
+    const forward = await configured({ BOARD_ACTIONS_TOKEN: null });
+    const fetchMock = stubApi();
+    for (const path of PATHS) {
+      const answer = await forward(post(path));
+      expect(answer?.status).toBe(503);
+      const { error } = await answer!.json();
+      expect(error).toContain("BOARD_ACTIONS_TOKEN is not set");
+      expect(error).toContain("credential routes");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards with the token and no CONSOLE_PROJECT", async () => {
+    const forward = await configured({});
+    for (const path of PATHS) {
+      const fetchMock = stubApi('{"id":"a-1"}', 201);
+      expect((await forward(post(path)))?.status).toBe(201);
+      expect(target(fetchMock)).toBe(`http://board.test:8792${path}`);
+      vi.restoreAllMocks();
+    }
   });
 });

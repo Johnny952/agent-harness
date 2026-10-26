@@ -739,6 +739,54 @@ export interface ActionRecord {
   error: string | null;
 }
 
+/** The git token file's state (ADR 456 decision 4, ADR 462). */
+export type GitTokenState = "present" | "empty" | "absent" | "directory" | "not_mounted";
+
+/** A project's deploy key state (ADR 462). */
+export type DeployKeyState = "present" | "absent";
+
+/** An account's login state in its container (ADR 462). */
+export type AccountLoginState = "present" | "absent" | "unreachable";
+
+export interface GitTokenRow {
+  path: string;
+  state: GitTokenState;
+  modified_at: string | null;
+}
+
+export interface DeployKeyRow {
+  project: string;
+  state: DeployKeyState;
+  modified_at: string | null;
+  fingerprint: string | null;
+}
+
+export interface AccountLoginRow {
+  account: string;
+  container: string;
+  state: AccountLoginState;
+  modified_at: string | null;
+  logged_in_at: string | null;
+}
+
+/**
+ * `GET /api/credentials` `data` (ADR 456 decision 4, ADR 462, ADR 471): the
+ * worker's snapshot plus the api's `stale` and `stale_after_seconds`. A type for
+ * what the api is written to serve, not a check: it validates no row.
+ */
+export interface CredentialsSnapshot {
+  version: number;
+  written_at: string;
+  git_token: GitTokenRow;
+  deploy_keys: DeployKeyRow[];
+  accounts: AccountLoginRow[];
+  stale: boolean;
+  stale_after_seconds: number;
+}
+
+/** `POST /api/actions/<id>/login-code`: the action, or just its id (ADR 468 decision 4). */
+export type LoginCodeResult = ActionRecord | { id: string };
+
 /** `POST /api/epics/<id>/start` (`board_service/app.py:epic_start`, ADR 207). */
 export interface EpicStartResult {
   epic: string;

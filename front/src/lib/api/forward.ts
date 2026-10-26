@@ -9,8 +9,8 @@
  * entry in the generated `routeTree.gen.ts`, which no phase here can regenerate)
  * or a server function.
  *
- * **It is a whitelist and not a proxy.** Twenty-one console paths map one-to-one
- * onto twenty-one api routes; anything else under `/api/` is a JSON 404 from the
+ * **It is a whitelist and not a proxy.** Twenty-two console paths map one-to-one
+ * onto twenty-two api routes; anything else under `/api/` is a JSON 404 from the
  * console and never reaches the api. Query parameters are copied by name per route — the
  * same posture `observability/api/app.py:_reject_unknown_parameters` takes on the
  * other side, so a parameter the console did not mean to send cannot come back as
@@ -24,7 +24,7 @@
  * `/api/settings/` go to the config writer instead (`docs/decisions.md` ADR 112):
  * another upstream, another token, another timeout, and the only paths here that
  * accept a write. They are dispatched before the api's read-only check and are
- * deliberately not entries of `FORWARDED`, whose twenty-one routes, count and
+ * deliberately not entries of `FORWARDED`, whose twenty-two routes, count and
  * rejection message describe the api alone.
  *
  * **Seventeen method and path pairs go to the board-service** (`docs/decisions.md`
@@ -59,11 +59,19 @@
  * checks as the action routes, the body unchanged, and so does
  * `PUT /api/push/settings` (ADR 237, ADR 246), which saves which kinds are
  * pushed and the quiet hours; with the twenty-one above they make twenty-four
- * writes. `GET /api/push/key`, the VAPID public key, and
+ * writes (twenty-seven with the three below). `GET /api/push/key`, the VAPID public key, and
  * `GET /api/push/settings` are reads of the board-service and not of the api:
  * no token, no query parameter, no header of the browser's
  * (`forwardBoardRead`). Every other method on these three paths keeps the
  * answer it had: the 405 for a write, the whitelist's 404 for a read.
+ *
+ * **Three more go to the board-service for credentials** (ADR 468, ADR 483):
+ * `POST /api/credentials/git-token`, `POST /api/accounts/<name>/login` and
+ * `POST /api/actions/<id>/login-code`. They carry the actions bearer and the
+ * same CSRF checks, the 64 KiB cap and the body unchanged (two of the bodies
+ * hold a secret, which the console neither parses nor echoes nor logs). The
+ * api's one credentials read, `GET /api/credentials` (ADR 471), is an entry of
+ * `FORWARDED`. Every other method on these paths keeps the answer it had.
  */
 import {
   API_BASE_URL,
@@ -126,6 +134,9 @@ const FORWARDED: Record<string, readonly string[]> = {
   // `?project=` is added. Only the `GET`: `POST /api/projects` is the board
   // service's (ADR 203, ADR 206), matched in `boardTarget` first.
   "/api/projects": [],
+  // The credentials snapshot (ADR 471, ADR 483). Hive-wide and without a
+  // parameter: nothing is copied and no `?project=` is added.
+  "/api/credentials": [],
 };
 
 /**
@@ -326,6 +337,16 @@ const PUSH_SUBSCRIPTIONS = "/api/push/subscriptions";
  */
 const PUSH_SETTINGS = "/api/push/settings";
 
+/**
+ * The credential writes (ADR 468, ADR 483): `POST`s to the board-service with
+ * the actions bearer and the body unchanged. The account name and the action id
+ * are decoded and re-encoded, not shape-checked: the board service refuses
+ * what it cannot use.
+ */
+const CREDENTIALS_GIT_TOKEN = "/api/credentials/git-token";
+const ACCOUNT_LOGIN = /^\/api\/accounts\/([^/]+)\/login$/;
+const ACTION_LOGIN_CODE = /^\/api\/actions\/([^/]+)\/login-code$/;
+
 /** The words every failure body uses for the board-service: never its address. */
 const BOARD = "the board-service";
 
@@ -375,7 +396,8 @@ type Resolution =
         | "push"
         | "approve"
         | "request_changes"
-        | "resolve_conflict";
+        | "resolve_conflict"
+        | "credential";
     }
   | { kind: "reject"; status: number; error: string };
 
@@ -401,7 +423,7 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
     return forwardBoardRead(PUSH_SETTINGS);
   }
 
-  // Also before the read-only check, and only for the twenty-four exact pairs: a method
+  // Also before the read-only check, and only for the twenty-seven exact pairs: a method
   // or a path that is not one of them falls through to the answer it had.
   const board = boardTarget(request.method, url.pathname);
   if (board) return forwardBoard(request, url, board);
@@ -586,7 +608,7 @@ function capitalise(text: string): string {
 }
 
 /**
- * Where on the board-service one of the twenty-four writes goes, or `null` for any
+ * Where on the board-service one of the twenty-seven writes goes, or `null` for any
  * other method and path, which then gets the answer it had before ADR 136.
  * The id is decoded and re-encoded as `TASK_DETAIL`'s is, so a `%2f` stays one
  * segment for the board-service to refuse; an undecodable one is a 404 here.
@@ -596,7 +618,8 @@ function capitalise(text: string): string {
  * take. The two project-record writes carry `action` "project" (ADR 206). The
  * two epic actions carry `action` "start" and "cancel", since their bodies are
  * a task start's and a cancel's (ADR 211). The two push-subscription writes
- * and the settings `PUT` carry `action` "push" (ADR 232, ADR 246).
+ * and the settings `PUT` carry `action` "push" (ADR 232, ADR 246). The three
+ * credential writes carry `action` "credential" (ADR 483).
  */
 function boardTarget(method: string, path: string): Resolution | null {
   if (method === "PUT" && path === PUSH_SETTINGS) {
@@ -613,6 +636,13 @@ function boardTarget(method: string, path: string): Resolution | null {
   }
   if (method === "POST" && path === PROJECTS) {
     return { kind: "forward", target: `${BOARD_SERVICE_URL}${PROJECTS}`, action: "project" };
+  }
+  if (method === "POST" && path === CREDENTIALS_GIT_TOKEN) {
+    return {
+      kind: "forward",
+      target: `${BOARD_SERVICE_URL}${CREDENTIALS_GIT_TOKEN}`,
+      action: "credential",
+    };
   }
   if (method === "PATCH") {
     const project = PROJECT_RECORD.exec(path);
@@ -688,6 +718,20 @@ function boardTarget(method: string, path: string): Resolution | null {
       },
       { pattern: EPIC_START, route: "epics", tail: "start", what: "epic", action: "start" },
       { pattern: EPIC_STOP, route: "epics", tail: "stop", what: "epic", action: "cancel" },
+      {
+        pattern: ACCOUNT_LOGIN,
+        route: "accounts",
+        tail: "login",
+        what: "account",
+        action: "credential",
+      },
+      {
+        pattern: ACTION_LOGIN_CODE,
+        route: "actions",
+        tail: "login-code",
+        what: "action",
+        action: "credential",
+      },
     ] as const;
     for (const { pattern, route, tail, what, action } of actionRoutes) {
       const hit = pattern.exec(path);
@@ -779,7 +823,7 @@ function projectSlug(path: string, raw: string): string | Resolution {
 }
 
 /**
- * The board-service's answer to one of its twenty-four writes (`docs/decisions.md`
+ * The board-service's answer to one of its twenty-seven writes (`docs/decisions.md`
  * ADR 136).
  *
  * On CSRF. These are the first writes here a cross-site page could send without
@@ -831,6 +875,10 @@ function projectSlug(path: string, raw: string): string | Resolution {
  * the bearer, the 64 KiB cap and the body unchanged, the route checking the
  * subscription whole. The settings `PUT` (ADR 246) is their twin: the route
  * validates the kinds and the quiet hours itself and answers a 400 `{error}`.
+ * The three credential writes (ADR 468, ADR 483) are their twins: the bearer
+ * (503 naming "credential routes" when unset), no `CONSOLE_PROJECT`, the 64 KiB
+ * cap, and the body unchanged. It is never parsed here, so the console holds a
+ * token or a login code in no variable, answer or log but the request's bytes.
  * The token is in no response and no log.
  */
 async function forwardBoard(request: Request, url: URL, resolved: Resolution): Promise<Response> {
@@ -862,7 +910,7 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     return jsonResponse(
       {
         error:
-          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s ${action === "project" || action === "push" ? action : "action"} routes. ` +
+          `BOARD_ACTIONS_TOKEN is not set, so the console cannot authenticate to ${BOARD}'s ${action === "project" || action === "push" || action === "credential" ? action : "action"} routes. ` +
           "Set it to the board-service's token and restart the console.",
       },
       503,
@@ -1254,7 +1302,7 @@ function resolveTarget(url: URL): Resolution {
     try {
       id = decodeURIComponent(raw);
     } catch {
-      // `%zz` and friends. A path the console cannot read is not one of the twenty-one.
+      // `%zz` and friends. A path the console cannot read is not one of the twenty-two.
       return { kind: "reject", status: 404, error: `${path} is not a readable task id.` };
     }
     // Re-encoded rather than passed through. `_is_bare_task_id` on the api
@@ -1269,7 +1317,7 @@ function resolveTarget(url: URL): Resolution {
     return {
       kind: "reject",
       status: 404,
-      error: `${path} is not one of the twenty-one routes the console forwards.`,
+      error: `${path} is not one of the twenty-two routes the console forwards.`,
     };
   }
 
