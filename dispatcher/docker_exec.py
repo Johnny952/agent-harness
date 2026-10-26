@@ -71,20 +71,25 @@ def run_docker_exec(
 
 def _docker_exec_argv(
     container: str, workdir: str, command: list[str], env: dict[str, str] | None = None,
+    stdin: bool = False,
 ) -> list[str]:
-    full_command = ["docker", "exec", "-w", workdir]
+    full_command = ["docker", "exec", *(["-i"] if stdin else []), "-w", workdir]
     for key, value in (env or {}).items():
         full_command += ["-e", f"{key}={value}"]
     return [*full_command, container, *command]
 
 
-def open_docker_exec(container: str, workdir: str, command: list[str]) -> subprocess.Popen:
+def open_docker_exec(
+    container: str, workdir: str, command: list[str], *, stdin: bool = False,
+) -> subprocess.Popen:
     """`run_docker_exec`'s argv, started and not waited for: stdout is a pipe
     the caller reads line by line, stderr goes to a temporary file (read it
-    from `proc.stderr` after `wait()`), so neither pipe can fill and block."""
+    from `proc.stderr` after `wait()`), so neither pipe can fill and block.
+    `stdin` adds `-i` and a pipe the caller writes to (the login's code)."""
     return subprocess.Popen(
-        _docker_exec_argv(container, workdir, command),
+        _docker_exec_argv(container, workdir, command, stdin=stdin),
         stdout=subprocess.PIPE, stderr=tempfile.TemporaryFile(mode="w+"),
+        stdin=subprocess.PIPE if stdin else None,
         text=True, bufsize=1,
     )
 

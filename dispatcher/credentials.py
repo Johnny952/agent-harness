@@ -41,7 +41,7 @@ def _iso(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds")
 
 
-def _git_token(path: str) -> dict:
+def git_token_row(path: str) -> dict:
     try:
         st = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
@@ -101,7 +101,7 @@ def _deploy_key(cfg, slug: str) -> dict:
     return row
 
 
-def _account(account, previous_row: dict | None) -> dict:
+def account_row(account, previous_row: dict | None = None) -> dict:
     row = {"account": account.name, "container": account.container,
            "state": "unreachable", "modified_at": None, "logged_in_at": None}
     if previous_row is not None and isinstance(previous_row.get("logged_in_at"), str):
@@ -142,14 +142,14 @@ def snapshot(cfg, previous: dict | None = None, *, logins: dict | None = None,
         prior = {r.get("account"): r for r in previous["accounts"] if isinstance(r, dict)}
     accounts = []
     for account in cfg.accounts:
-        row = _account(account, prior.get(account.name))
+        row = account_row(account, prior.get(account.name))
         if logins and account.name in logins:
             row["logged_in_at"] = logins[account.name]
         accounts.append(row)
     return {
         "version": VERSION,
         "written_at": now.isoformat(),
-        "git_token": _git_token(cfg.git_credentials_path),
+        "git_token": git_token_row(cfg.git_credentials_path),
         "deploy_keys": [_deploy_key(cfg, slug) for slug in _key_slugs(cfg)],
         "accounts": accounts,
     }
