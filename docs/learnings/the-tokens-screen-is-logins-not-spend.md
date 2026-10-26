@@ -27,9 +27,11 @@ subtitle="Provider login of each container. Expired or revoked tokens make the a
 ## Why
 
 "Tokens" names two unrelated objects in this repo, and the console's is the
-credential. The Tokens screen's row is
-`front/src/lib/api/ops-types.ts:ContainerToken` — `state`, `expires_at`,
-`device_code` — and all three mentions of the Tokens task in
+credential. The Tokens screen's row was `ContainerToken` (`state`,
+`expires_at`, `device_code`); since T-186-S2 the screen reads the worker's
+credentials snapshot (`getCredentials`) joined with `/api/accounts` —
+the GitHub token, deploy keys and Claude logins, `docs/decisions.md`
+ADR 489 — still credentials, never spend. All three mentions of the Tokens task in
 `docs/plans/front.md` are credential too: a tier-3 privileged read, gated on a
 docker socket and on a charter ruling about a secret leaving a container.
 
@@ -60,3 +62,5 @@ and `grep -rniE "cost|num_turns" front/src`, in
 discarded). Re-checked first-hand by T-024's implementador in round 2 against
 `front/src/routes/tokens.tsx` and `front/src/lib/api/ops-types.ts`, which is
 how the four wrong pointers were corrected before the branch landed.
+T-186-S2's auditor corrected the row type after `ContainerToken` was deleted
+(`grep -rn ContainerToken front/src` empty).
