@@ -4,10 +4,10 @@
  * join with `/api/accounts`, and a row of the wrong shape. The `-` on the
  * filename is load-bearing, as in `-index.test.tsx`.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { Route } from "./tokens";
-import { renderRoute, type Served } from "@/test/render-route";
+import { renderRoute, type Sent, type Served } from "@/test/render-route";
 
 afterEach(cleanup);
 
@@ -52,10 +52,43 @@ const POOL = [
   },
 ];
 
+const queue = (over: Record<string, unknown> = {}) => ({
+  pending: [],
+  claimed: [],
+  done: [],
+  done_total: 0,
+  worker: { heartbeat: null, stale: false, stale_after_seconds: 60 },
+  ...over,
+});
+const QUEUE = queue();
+
+function record(id: string, kind: string, over: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    id,
+    kind,
+    project: null,
+    task_id: null,
+    params: null,
+    actor: "operator",
+    note: null,
+    created_at: iso(10),
+    claimed_at: null,
+    started_at: null,
+    finished_at: null,
+    status: "pending",
+    waiting: null,
+    result: null,
+    error: null,
+    ...over,
+  };
+}
+
 function serve(snap: unknown, warnings: string[] = [], over: Served = {}): Served {
   return {
     "/api/credentials": { data: snap, warnings },
     "/api/accounts": { data: POOL },
+    "/api/actions": { data: QUEUE },
     ...over,
   };
 }
@@ -113,8 +146,6 @@ describe("a fresh snapshot", () => {
     expect(t).toContain("signed in from the console");
     expect(t).toContain("1h 0m ago");
     expect(t).not.toContain("stale");
-    // The shell draws buttons of its own; the regions draw none (7c's controls are not here).
-    expect(document.querySelectorAll("section button")).toHaveLength(0);
   });
 
   it.each([
@@ -263,5 +294,398 @@ describe("wrong shapes and empty lists", () => {
     await page(serve(snapshot({ deploy_keys: [], accounts: [] })));
     expect(await screen.findByText("No project has a record or a key directory")).toBeTruthy();
     expect(screen.getByText("No account is configured")).toBeTruthy();
+  });
+});
+
+// ---- ADR 492: the controls ------------------------------------------------
+
+const SECRET = "ghp_SECRET_TOKEN_VALUE";
+const posts = (sent: Sent[]) => sent.filter((s) => s.method === "POST");
+const field = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
+
+describe("no controls without a snapshot", () => {
+  it("the ErrorState and the no-snapshot banner draw none", async () => {
+    await page(serve(null, ["no credentials snapshot yet"]));
+    await screen.findByText("no credentials snapshot yet");
+    expect(screen.queryByText("Renew")).toBeNull();
+    expect(screen.queryByText("Sign in again")).toBeNull();
+    cleanup();
+    await page({
+      "/api/credentials": { status: 500, error: "boom" },
+      "/api/accounts": { data: [] },
+    });
+    await screen.findByText("Credential status could not be read");
+    expect(screen.queryByText("Renew")).toBeNull();
+  });
+
+  it("a stale snapshot has them, a malformed row has none", async () => {
+    await page(
+      serve(
+        snapshot({
+          stale: true,
+          deploy_keys: [{ project: 7 }],
+          accounts: [{ account: 7 }],
+        }),
+      ),
+    );
+    await screen.findByText("GitHub token");
+    expect(screen.getByText("Renew")).toBeTruthy();
+    expect(screen.queryByText("Check")).toBeNull();
+    expect(screen.queryByText("Sign in again")).toBeNull();
+  });
+
+  it("a failed /api/actions adds its broken line", async () => {
+    await page(serve(snapshot(), [], { "/api/actions": { status: 500, error: "down" } }));
+    expect(
+      await screen.findByText(
+        "/api/actions did not answer: a sign-in started elsewhere is not shown",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("Renew")).toBeTruthy();
+  });
+});
+
+describe("Renew", () => {
+  const accepted = { bare: record("R1", "git_token_renew"), status: 201 };
+
+  it("posts the token and clears the field; username empty is left out", async () => {
+    const r = await page(
+      serve(snapshot(), [], {
+        "POST /api/credentials/git-token": accepted,
+        "/api/actions/R1": { data: record("R1", "git_token_renew") },
+      }),
+    );
+    await screen.findByText("GitHub token");
+    const renew = screen.getByText("Renew") as HTMLButtonElement;
+    expect(renew.disabled).toBe(true);
+    expect(field("Token").type).toBe("password");
+    expect(field("Token").autocomplete).toBe("off");
+    fireEvent.change(field("Token"), { target: { value: SECRET } });
+    fireEvent.click(renew);
+    expect(await screen.findByText("queued as R1, waiting for the worker")).toBeTruthy();
+    expect(posts(r.sent)).toEqual([
+      { method: "POST", path: "/api/credentials/git-token", body: { token: SECRET } },
+    ]);
+    expect(field("Token").value).toBe("");
+  });
+
+  it("sends the username when one is given, and keeps it", async () => {
+    const r = await page(
+      serve(snapshot(), [], {
+        "POST /api/credentials/git-token": accepted,
+        "/api/actions/R1": { data: record("R1", "git_token_renew") },
+      }),
+    );
+    await screen.findByText("GitHub token");
+    fireEvent.change(field("Token"), { target: { value: SECRET } });
+    fireEvent.change(field("Username"), { target: { value: " bot " } });
+    fireEvent.click(screen.getByText("Renew"));
+    await screen.findByText("queued as R1, waiting for the worker");
+    expect(posts(r.sent)[0]?.body).toEqual({ token: SECRET, username: "bot" });
+    expect(field("Username").value).toBe(" bot ");
+  });
+
+  it("a done renewal reads written, with its clock", async () => {
+    await page(
+      serve(snapshot(), [], {
+        "POST /api/credentials/git-token": accepted,
+        "/api/actions/R1": {
+          data: record("R1", "git_token_renew", { status: "done", finished_at: iso(5) }),
+        },
+      }),
+    );
+    await screen.findByText("GitHub token");
+    fireEvent.change(field("Token"), { target: { value: SECRET } });
+    fireEvent.click(screen.getByText("Renew"));
+    await waitFor(() => expect(text()).toMatch(/written \d{4}-/));
+  });
+
+  it("a failed renewal quotes its error", async () => {
+    await page(
+      serve(snapshot(), [], {
+        "POST /api/credentials/git-token": accepted,
+        "/api/actions/R1": {
+          data: record("R1", "git_token_renew", { status: "failed", error: "token rejected" }),
+        },
+      }),
+    );
+    await screen.findByText("GitHub token");
+    fireEvent.change(field("Token"), { target: { value: SECRET } });
+    fireEvent.click(screen.getByText("Renew"));
+    expect(await screen.findByText("Renewal failed: token rejected")).toBeTruthy();
+  });
+
+  it.each([
+    [400, "token is empty"],
+    [409, "a renewal is already queued"],
+    [503, "actions are not configured"],
+  ])("quotes a %s under the form, clears the field, leaks nothing", async (status, message) => {
+    const spies = (["log", "error", "warn", "info", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => {}),
+    );
+    const href = window.location.href;
+    await page(
+      serve(snapshot(), [], { "POST /api/credentials/git-token": { status, error: message } }),
+    );
+    await screen.findByText("GitHub token");
+    fireEvent.change(field("Token"), { target: { value: SECRET } });
+    fireEvent.click(screen.getByText("Renew"));
+    expect(await screen.findByText(`Refused (${status}): ${message}`)).toBeTruthy();
+    expect(field("Token").value).toBe("");
+    expect(document.body.innerHTML).not.toContain(SECRET);
+    expect(window.location.href).toBe(href);
+    for (const s of spies) expect(JSON.stringify(s.mock.calls)).not.toContain(SECRET);
+  });
+});
+
+describe("Replace key and Check", () => {
+  const keyed = (over: Served = {}) =>
+    serve(snapshot(), [], {
+      "POST /api/projects/alpha/keygen": { bare: record("K1", "keygen"), status: 201 },
+      "POST /api/projects/alpha/check": { bare: record("C1", "check"), status: 201 },
+      ...over,
+    });
+
+  it("asks first; Keep it sends nothing", async () => {
+    const r = await page(keyed());
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Replace key"));
+    expect(text()).toContain(
+      "Replacing alpha's key makes its fetch and push fail until the new public half is added on GitHub as a deploy key.",
+    );
+    fireEvent.click(screen.getByText("Keep it"));
+    expect(screen.queryByText("Replace the key")).toBeNull();
+    expect(posts(r.sent)).toHaveLength(0);
+  });
+
+  it("Replace the key posts replace:true and shows the public half and fingerprint", async () => {
+    const r = await page(
+      keyed({
+        "/api/actions/K1": {
+          data: record("K1", "keygen", {
+            status: "done",
+            result: { public: "ssh-ed25519 AAAAC3 harness", fingerprint: "SHA256:newfp" },
+          }),
+        },
+      }),
+    );
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Replace key"));
+    fireEvent.click(screen.getByText("Replace the key"));
+    const pub = await screen.findByTestId("public-key");
+    expect(pub.textContent).toBe("ssh-ed25519 AAAAC3 harness");
+    expect(text()).toContain("SHA256:newfp");
+    expect(text()).toContain("Add it on GitHub");
+    expect(posts(r.sent)).toEqual([
+      { method: "POST", path: "/api/projects/alpha/keygen", body: { replace: true } },
+    ]);
+  });
+
+  it("a keygen without a public half is a warning", async () => {
+    await page(
+      keyed({
+        "/api/actions/K1": { data: record("K1", "keygen", { status: "done", result: {} }) },
+      }),
+    );
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Replace key"));
+    fireEvent.click(screen.getByText("Replace the key"));
+    expect(await screen.findByText("the finished keygen reported no public key")).toBeTruthy();
+  });
+
+  it("quotes a refused replace under its control", async () => {
+    await page(
+      keyed({ "POST /api/projects/alpha/keygen": { status: 409, error: "a keygen is queued" } }),
+    );
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Replace key"));
+    fireEvent.click(screen.getByText("Replace the key"));
+    expect(await screen.findByText("Refused (409): a keygen is queued")).toBeTruthy();
+  });
+
+  it("Check posts an empty body", async () => {
+    const r = await page(
+      keyed({ "/api/actions/C1": { data: record("C1", "check", { status: "running" }) } }),
+    );
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Check"));
+    expect(await screen.findByText("running")).toBeTruthy();
+    expect(posts(r.sent)).toEqual([
+      { method: "POST", path: "/api/projects/alpha/check", body: {} },
+    ]);
+  });
+
+  it.each([
+    [{ reachable: true, writable: true, detail: "ok" }, "would take a push from it. ok"],
+    [{ reachable: true, writable: false, detail: "ro" }, "refuses a push from it."],
+    [{ reachable: true, writable: null, detail: "" }, "write access was not tested."],
+    [{ reachable: false, detail: "timeout" }, "does not answer this key yet: timeout"],
+  ])("reads the check result %j", async (result, sentence) => {
+    await page(
+      keyed({
+        "/api/actions/C1": { data: record("C1", "check", { status: "done", result }) },
+      }),
+    );
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Check"));
+    await waitFor(() => expect(text()).toContain(sentence));
+  });
+
+  it("a failed check quotes its error and a missing record says so", async () => {
+    await page(
+      keyed({
+        "/api/actions/C1": { data: record("C1", "check", { status: "interrupted", error: null }) },
+      }),
+    );
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Check"));
+    expect(await screen.findByText("Check interrupted: no error was recorded")).toBeTruthy();
+    cleanup();
+    await page(keyed({ "/api/actions/C1": { status: 404, error: "no such action" } }));
+    await screen.findByText("Deploy keys");
+    fireEvent.click(screen.getByText("Check"));
+    expect(await screen.findByText("the queue has no record of C1")).toBeTruthy();
+  });
+});
+
+describe("the login", () => {
+  const URL = "https://claude.ai/oauth/authorize?x=1";
+  const started = (rec: unknown, over: Served = {}) =>
+    serve(snapshot(), [], {
+      "POST /api/accounts/cuenta1/login": { bare: record("L1", "account_login"), status: 201 },
+      "/api/actions/L1": { data: rec },
+      ...over,
+    });
+  const login = (status: string, result: unknown = null, error: string | null = null) =>
+    record("L1", "account_login", { status, result, error, params: { account: "cuenta1" } });
+  async function signIn(served: Served) {
+    const r = await page(served);
+    await screen.findByText("Claude logins");
+    fireEvent.click(screen.getByText("Sign in again"));
+    return r;
+  }
+
+  it("waits for the URL, then links it with a code field", async () => {
+    const r = await signIn(started(login("pending")));
+    expect(await screen.findByText("waiting for the sign-in URL")).toBeTruthy();
+    expect(posts(r.sent)).toEqual([
+      { method: "POST", path: "/api/accounts/cuenta1/login", body: {} },
+    ]);
+    expect((screen.getByText("Sign in again") as HTMLButtonElement).disabled).toBe(true);
+    cleanup();
+    await signIn(started(login("running", { url: URL, awaiting: "code" })));
+    const link = (await screen.findByText(URL)) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe(URL);
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(field("Code").type).toBe("password");
+  });
+
+  it("a URL that is not https is Malformed and no link", async () => {
+    await signIn(started(login("running", { url: "javascript:alert(1)", awaiting: "code" })));
+    expect(await screen.findByText(/url — a string, not an https URL/)).toBeTruthy();
+    expect(document.querySelector("a[href^='javascript']")).toBeNull();
+    expect(screen.queryByLabelText("Code")).toBeNull();
+  });
+
+  it("Send code posts the code and clears the field", async () => {
+    const r = await signIn(
+      started(login("running", { url: URL, awaiting: "code" }), {
+        "POST /api/actions/L1/login-code": { bare: { ok: true }, status: 200 },
+      }),
+    );
+    await screen.findByLabelText("Code");
+    fireEvent.change(field("Code"), { target: { value: "ABC-123" } });
+    fireEvent.click(screen.getByText("Send code"));
+    await waitFor(() => expect(field("Code").value).toBe(""));
+    expect(posts(r.sent).at(-1)).toEqual({
+      method: "POST",
+      path: "/api/actions/L1/login-code",
+      body: { code: "ABC-123" },
+    });
+    expect(document.body.innerHTML).not.toContain("ABC-123");
+  });
+
+  it("a refused code is quoted and the field is cleared anyway", async () => {
+    await signIn(
+      started(login("running", { url: URL, awaiting: "code" }), {
+        "POST /api/actions/L1/login-code": { status: 409, error: "not awaiting a code" },
+      }),
+    );
+    await screen.findByLabelText("Code");
+    fireEvent.change(field("Code"), { target: { value: "ABC-123" } });
+    fireEvent.click(screen.getByText("Send code"));
+    expect(await screen.findByText("Refused (409): not awaiting a code")).toBeTruthy();
+    expect(field("Code").value).toBe("");
+    expect(document.body.innerHTML).not.toContain("ABC-123");
+  });
+
+  it("reads signing in, signed in, released, and failed", async () => {
+    await signIn(started(login("running", { url: URL, awaiting: null, code_at: iso(3) })));
+    expect(await screen.findByText("signing in")).toBeTruthy();
+    cleanup();
+    await signIn(started(login("done", { logged_in_at: iso(2), released: true })));
+    await waitFor(() => expect(text()).toContain("released from AUTH_EXPIRED"));
+    expect(text()).toMatch(/signed in \d{4}-/);
+    cleanup();
+    await signIn(started(login("failed", null, "login timed out")));
+    expect(await screen.findByText("Sign-in failed: login timed out")).toBeTruthy();
+    expect(screen.queryByText("Cancel")).toBeNull();
+  });
+
+  it("quotes a refused sign-in", async () => {
+    await signIn(
+      started(login("pending"), {
+        "POST /api/accounts/cuenta1/login": { status: 409, error: "a login is open" },
+      }),
+    );
+    expect(await screen.findByText("Refused (409): a login is open")).toBeTruthy();
+  });
+
+  it("Cancel is drawn while open, posts, and the record ends cancelled", async () => {
+    const r = await signIn(
+      started(login("pending"), {
+        "POST /api/actions/L1/cancel": { bare: record("X1", "cancel"), status: 201 },
+      }),
+    );
+    fireEvent.click(await screen.findByText("Cancel"));
+    expect(await screen.findByText("cancel queued as X1")).toBeTruthy();
+    expect(posts(r.sent).at(-1)).toEqual({
+      method: "POST",
+      path: "/api/actions/L1/cancel",
+      body: {},
+    });
+    cleanup();
+    await signIn(started(login("cancelled")));
+    expect(await screen.findByText("cancelled")).toBeTruthy();
+    expect(screen.queryByText("Cancel")).toBeNull();
+  });
+
+  it("quotes a refused cancel under Cancel", async () => {
+    await signIn(
+      started(login("running"), {
+        "POST /api/actions/L1/cancel": { status: 409, error: "already final" },
+      }),
+    );
+    fireEvent.click(await screen.findByText("Cancel"));
+    expect(await screen.findByText("Refused (409): already final")).toBeTruthy();
+  });
+
+  it("adopts an open sign-in from the queue with no click", async () => {
+    const open = record("L9", "account_login", {
+      status: "running",
+      params: { account: "cuenta1" },
+      result: { url: URL, awaiting: "code" },
+    });
+    const other = record("L8", "account_login", { params: { account: "ghost" } });
+    const r = await page(
+      serve(snapshot(), [], {
+        "/api/actions": { data: queue({ claimed: [open], pending: [other] }) },
+        "/api/actions/L9": { data: open },
+      }),
+    );
+    expect(await screen.findByText(URL)).toBeTruthy();
+    expect(posts(r.sent)).toHaveLength(0);
+    expect(screen.getByText("Cancel")).toBeTruthy();
   });
 });
