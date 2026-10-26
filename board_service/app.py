@@ -41,6 +41,10 @@ body. The caller's role is the `?role=` query parameter, not a credential
 keeps a confused phase off a tool outside its role; it does not stop someone on
 the network from naming another role, and is not meant to.
 
+Three more behind the bearer queue the GitHub token's `git_token`, an
+`account_login`, and hand a login code to a claimed one; the secret goes to its
+own file and is in no answer (ADR 456, ADR 468).
+
 A person's sign-in, sessions, CSRF check and audit log are `signin.py`'s, installed
 here once (ADR 324).
 """
@@ -1144,6 +1148,47 @@ def create_app(config_path: str) -> Flask:
             return actions.create(
                 state_dir, "cancel", params={"target": action_id}, actor=_person()
             )
+
+        return _action(actions_token, make)
+
+    def _only_fields(body: dict, allowed: tuple[str, ...]) -> None:
+        for name in body:
+            if name not in allowed:
+                raise actions.ActionRefused(400, f"unknown field {name!r}")
+
+    @app.post("/api/credentials/git-token")
+    def http_git_token():
+        # The GitHub token (ADR 456 decision 3, ADR 468): the secret goes to
+        # its own file and is in no answer; the owner only, by signin's hook.
+        def make(body: dict):
+            _only_fields(body, ("token", "username"))
+            username = body.get("username")
+            params = {"username": username} if username is not None else None
+            return actions.create(
+                state_dir, "git_token", params=params, secret=body.get("token"), actor=_person()
+            )
+
+        return _action(actions_token, make)
+
+    @app.post("/api/accounts/<name>/login")
+    def http_account_login(name: str):
+        def make(body: dict):
+            _only_fields(body, ())
+            if name not in {a.name for a in cfg.accounts}:
+                raise actions.ActionRefused(404, f"no account {name!r} in the config")
+            return actions.create(
+                state_dir, "account_login", params={"account": name}, actor=_person()
+            )
+
+        return _action(actions_token, make)
+
+    @app.post("/api/actions/<action_id>/login-code")
+    def http_login_code(action_id: str):
+        def make(body: dict):
+            _only_fields(body, ("code",))
+            actions.put_login_code(state_dir, action_id, body.get("code"))
+            entry = actions.find(state_dir, action_id)
+            return entry.record if entry else {"id": action_id}
 
         return _action(actions_token, make)
 
