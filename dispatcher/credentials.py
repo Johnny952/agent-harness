@@ -1,5 +1,5 @@
 """The credentials snapshot: what the dispatcher's side can tell about the
-secrets without opening one (docs/decisions.md ADR 456 decision 4, ADR 462).
+secrets without opening one (docs/decisions.md ADR 456 decision 4, ADR 462, ADR 480).
 
 A snapshot says, per region, whether a credential is there and when it last
 changed: the git token, each project's deploy key, each account's Claude
@@ -28,6 +28,9 @@ SNAPSHOT = "credentials.json"
 VERSION = 1
 CLAUDE_CREDENTIALS = "/root/.claude-account/.credentials.json"
 STAT_TIMEOUT_SECONDS = 15
+# Files Docker and Podman put at a container's root; a missing git token path
+# is `not_mounted` where one exists, `absent` elsewhere (ADR 480).
+CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
 _STAT_SCRIPT = 'if [ -f "$1" ]; then stat -c \'%s %Y\' "$1"; else echo absent; fi'
 
 _LOCK = threading.Lock()
@@ -41,12 +44,15 @@ def _iso(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds")
 
 
+def _in_container() -> bool:
+    return any(os.path.exists(p) for p in CONTAINER_MARKERS)
+
+
 def git_token_row(path: str) -> dict:
     try:
         st = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
-        parent = os.path.dirname(path) or "."
-        state = "absent" if os.path.isdir(parent) else "not_mounted"
+        state = "not_mounted" if _in_container() else "absent"
         return {"path": path, "state": state, "modified_at": None}
     except OSError:
         return {"path": path, "state": "absent", "modified_at": None}
