@@ -86,6 +86,12 @@
  * `listNotifications` reads `GET /api/notifications`, the api's envelope,
  * hive-wide and without parameters. Read state is not the api's: the console
  * keeps it per browser (`@/lib/notifications`).
+ *
+ * **One read and three writes for the Tokens screen** (ADR 456, ADR 468, ADR 471,
+ * ADR 483): `getCredentials` reads `GET /api/credentials` (the snapshot, or null
+ * with a warning); `renewGitToken`, `startAccountLogin` and `sendLoginCode` are
+ * `POST`s to the board-service. A token or a code is sent once: no message built
+ * here holds one, and nothing here logs or stores either.
  */
 import type {
   AcceptTaskBody,
@@ -101,6 +107,8 @@ import type {
   EpicStartResult,
   EpicStopResult,
   ApiResult,
+  CredentialsSnapshot,
+  LoginCodeResult,
   SendTurnBody,
   CreateThreadBody,
   ChangeProjectBody,
@@ -780,6 +788,53 @@ export function keygenProject(slug: string, replace = false): Promise<ActionReco
  */
 export function checkProject(slug: string): Promise<ActionRecord> {
   return queueSetup(slug, "check");
+}
+
+/**
+ * The credentials snapshot: `GET /api/credentials` (ADR 471). `data` is null with
+ * a warning when the worker has not written it or it is unreadable, which is not
+ * an error.
+ */
+export function getCredentials(): Promise<ApiResult<CredentialsSnapshot | null>> {
+  return readEnvelope<CredentialsSnapshot | null>("/api/credentials");
+}
+
+/**
+ * Queue a git token renewal: `POST /api/credentials/git-token` (ADR 468). The
+ * token is sent once and kept nowhere; a refusal (400, 409, 503) is an
+ * `ApiError` with the service's own message, which echoes no value.
+ */
+export function renewGitToken(
+  token: string,
+  username: string | null = null,
+): Promise<ActionRecord> {
+  return readBare<ActionRecord>("/api/credentials/git-token", {
+    method: "POST",
+    body: username === null ? { token } : { token, username },
+  });
+}
+
+/**
+ * Queue an account's login: `POST /api/accounts/<name>/login` (ADR 468). A refusal
+ * (404 for an unknown account, 409, 503) is an `ApiError`.
+ */
+export function startAccountLogin(account: string): Promise<ActionRecord> {
+  return readBare<ActionRecord>(`/api/accounts/${encodeURIComponent(account)}/login`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+/**
+ * Hand a running login its code: `POST /api/actions/<id>/login-code` (ADR 468
+ * decision 4). The code is sent once and kept nowhere; the answer is the action
+ * or just its id, and a refusal (400, 404, 409, 503) is an `ApiError`.
+ */
+export function sendLoginCode(actionId: string, code: string): Promise<LoginCodeResult> {
+  return readBare<LoginCodeResult>(`/api/actions/${encodeURIComponent(actionId)}/login-code`, {
+    method: "POST",
+    body: { code },
+  });
 }
 
 /** A write to the board-service. The forward sends the body on and nothing else. */

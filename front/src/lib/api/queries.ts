@@ -409,6 +409,16 @@ export const sessionsQuery = queryOptions({
   refetchInterval: POLL_MS * 2,
 });
 
+/**
+ * The credentials snapshot (ADR 483 decision 7): the worker rewrites it after
+ * each credential action ends, which the screen wants within seconds.
+ */
+export const credentialsQuery = queryOptions({
+  queryKey: ["credentials"],
+  queryFn: () => api.getCredentials(),
+  refetchInterval: POLL_MS * 2,
+});
+
 export const tokensQuery = queryOptions({
   queryKey: ["tokens"],
   queryFn: () => api.listTokens(),
