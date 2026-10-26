@@ -293,7 +293,7 @@ export const actionQueueListQuery = queryOptions({
 });
 
 /** The statuses an action does not leave: `dispatcher/actions.py`'s finished ones. */
-const FINISHED = new Set(["done", "failed", "interrupted"]);
+const FINISHED = new Set(["done", "failed", "interrupted", "cancelled"]);
 
 /**
  * One action record by its id (ADR 216), *New project*'s read of each setup
