@@ -17,7 +17,10 @@ an account as a start does (ADR 272). A `resolve_conflict` runs
 `dispatch resolve-conflict` on a `conflict` task under the project's base lock,
 holding an account but no project lock (ADR 285). At start and every
 `CREDENTIALS_SNAPSHOT_SECONDS` a thread writes the credentials snapshot
-(ADR 456, ADR 462).
+(ADR 456, ADR 462). A `git_token` writes the host's token file in place and an
+`account_login` runs `claude auth login` in an account's container, relaying
+its URL and the pasted code (ADR 456, ADR 465); neither writes the secret
+anywhere else.
 Stdlib only.
 """
 
@@ -27,11 +30,14 @@ import fcntl
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +48,7 @@ from dispatcher import (
     notifications, project_keys, projects, state_machine, tasks, threads,
 )
 from dispatcher import dispatcher as core
+from dispatcher import operator as operator_cmd
 from dispatcher import queue as queue_mod
 from dispatcher.config import Config
 from dispatcher.project_lock import ProjectBusy, ProjectLock
@@ -245,6 +252,11 @@ class Worker:
     # ---- one pass -----------------------------------------------------------
 
     def tick(self) -> None:
+        try:
+            for name in actions.sweep_secrets(self.state_dir):
+                logger.debug("worker: swept secret %s", name)
+        except OSError:
+            logger.exception("worker: could not sweep the secrets")
         root = actions.ensure_dirs(self.state_dir)
         entries, warnings = actions._scan(root, (actions.PENDING,))
         for w in warnings:
@@ -586,7 +598,9 @@ def _cancel(worker: Worker, record: dict, _cancelled=None) -> None:
             entry = next(
                 (r for r in worker.running.values() if r.action_id == target), None
             )
-        if tgt.get("kind") in ("start", "turn", "request_changes") and entry is not None:
+        if tgt.get("kind") in (
+            "start", "turn", "request_changes", "account_login",
+        ) and entry is not None:
             entry.cancelled.set()
             if entry.kill is not None:
                 entry.kill()
@@ -900,6 +914,13 @@ def _keygen(worker: Worker, record: dict, _cancelled=None) -> None:
     """The project's deploy key (`project-keygen`'s function) and its record's
     fingerprint. The result holds the public half only: the private half is
     named by the path it is written to and never read here."""
+    try:
+        _make_key(worker, record)
+    finally:
+        _snapshot_after(worker.cfg)
+
+
+def _make_key(worker: Worker, record: dict) -> None:
     cfg, sd = worker.cfg, worker.state_dir
     project = _setup_record(worker, record)
     if project is None:
@@ -1087,11 +1108,311 @@ def _resolve_conflict(worker: Worker, record: dict, _cancelled=None) -> None:
     )
 
 
+# ---- credentials (ADR 456, ADR 465) -----------------------------------------
+
+
+def _snapshot_after(cfg: Config, logins: dict | None = None) -> None:
+    """Refresh the credentials snapshot after an end; a failure only logs."""
+    try:
+        if logins:
+            credentials.write(cfg, logins=logins)
+        else:
+            credentials.write(cfg)
+    except Exception:
+        logger.exception("worker: the credentials snapshot failed")
+
+
+GIT_TOKEN_MISSING = "the token was not found; renew it again"
+GIT_TOKEN_SHAPE = "the token is not a GitHub personal access token"
+_GIT_FILE_ADVICE = "create .data/credentials/git-credentials on the host, then recreate the worker"
+GIT_TOKEN_FILE_ERRORS = {
+    "not_mounted": f"the worker has no token file mounted: {_GIT_FILE_ADVICE}",
+    "absent": f"the token file is missing: {_GIT_FILE_ADVICE}",
+    "directory": (
+        "the token file is a directory: Docker made one for a missing "
+        ".data/credentials/git-credentials; replace it with a file on the host, "
+        "then recreate the worker"
+    ),
+}
+GIT_TOKEN_WRITE_ERROR = "the token file could not be written: "
+
+
+def _write_token_file(path: str, username: str, token: str) -> None:
+    """The credential line, written in place so the file keeps its inode (a
+    bind mount follows the inode, not the name)."""
+    line = f"https://{username}:{token}@github.com\n"
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, line.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+        del line
+
+
+def _git_token(worker: Worker, record: dict, _cancelled=None) -> None:
+    """Write the token of a `git_token` action into the mounted credentials file
+    (ADR 456, 5; ADR 465, 6). The token is read from `secrets/<id>` and lives in
+    one local; every failure is one of the fixed sentences, none of them quotes
+    it, and nothing escapes to `_guarded`, which would write `str(exc)`."""
+    cfg, sd, aid = worker.cfg, worker.state_dir, record["id"]
+    status, error, result = "failed", None, None
+    try:
+        token = actions.take_secret(sd, aid)
+        if token is None:
+            error = GIT_TOKEN_MISSING
+        elif not actions.GIT_TOKEN_RE.fullmatch(token):
+            error = GIT_TOKEN_SHAPE
+        else:
+            row = credentials.git_token_row(cfg.git_credentials_path)
+            if row["state"] in GIT_TOKEN_FILE_ERRORS:
+                error = GIT_TOKEN_FILE_ERRORS[row["state"]]
+            else:
+                try:
+                    _write_token_file(
+                        cfg.git_credentials_path, record["params"]["username"], token)
+                except OSError as exc:
+                    error = GIT_TOKEN_WRITE_ERROR + (exc.strerror or "unknown error")
+                else:
+                    status = "done"
+                    result = {"written_at": _utc_now().isoformat()}
+        token = None
+    except Exception as exc:
+        logger.error("worker: git_token %s raised %s", aid, type(exc).__name__)
+        error = GIT_TOKEN_WRITE_ERROR + type(exc).__name__
+    actions.finish(sd, aid, status, result=result, error=error)
+    logger.info("worker: git_token %s %s", aid, status)
+    _snapshot_after(cfg)
+
+
+LOGIN_COMMAND = [
+    "sh", "-c", 'echo "$$"; exec "$@"', "ia-harness-login",
+    "script", "-qfec", "claude auth login", "/dev/null",
+]
+LOGIN_URL_SECONDS = 60
+LOGIN_CODE_SECONDS = 600
+LOGIN_EXIT_SECONDS = 120
+LOGIN_CODE_POLL_SECONDS = 1.0
+LOGIN_URL_HOSTS = frozenset({"claude.ai", "console.anthropic.com", "platform.claude.com"})
+LOGIN_STOPPED_ERROR = "the worker stopped during the sign-in"
+LOGIN_BUSY_ERROR = "the account is running a phase; sign in again once it is idle"
+LOGIN_NO_URL_ERROR = "the login printed no sign-in URL within 60 seconds"
+LOGIN_NO_CODE_ERROR = "no code arrived within 10 minutes; start the sign-in again"
+LOGIN_SEND_ERROR = "the code could not be sent to the login"
+LOGIN_NO_EXIT_ERROR = "the login did not exit within 120 seconds after the code was sent"
+LOGIN_NOT_REWRITTEN_ERROR = (
+    "the login exited 0 but the account's credentials file was not rewritten"
+)
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_URL_RE = re.compile(r"https://[^\s\"'<>]+")
+
+
+def _login_url(raw: str) -> str | None:
+    """The first sign-in URL in a line of the login's output, else None."""
+    line = _ANSI_RE.sub("", raw).replace("\r", "")
+    for match in _URL_RE.finditer(line):
+        try:
+            host = urllib.parse.urlparse(match.group()).hostname
+        except ValueError:
+            continue
+        if host in LOGIN_URL_HOSTS:
+            return match.group()
+    return None
+
+
+class _LoginEnd(Exception):
+    """How a login ended early; `error` is always one of the fixed sentences."""
+
+    def __init__(self, status: str, error: str | None = None):
+        super().__init__(status)
+        self.status, self.error = status, error
+
+
+def _account_login(worker: Worker, record: dict, cancelled: threading.Event) -> None:
+    """Sign an account in through `claude auth login` (ADR 456, 6; ADR 465).
+
+    The CLI runs under `script` in the account's container. Its URL is shown on
+    the action's result, the code the person pastes is taken from `secrets/<id>`
+    and written once to the login's stdin, and the login's output is read for
+    the URL only and never kept: `script` echoes the code back."""
+    cfg, sd, aid = worker.cfg, worker.state_dir, record["id"]
+    name = record["params"]["account"]
+    status, error, result, logged_in_at = "failed", None, None, None
+    proc = reader = None
+    pid: list[int] = []
+    try:
+        account = next((a for a in cfg.accounts if a.name == name), None)
+        if account is None:
+            raise _LoginEnd("failed", f"account {name} is not configured")
+        if (state_machine.get_holders(sd, name)
+                and state_machine.get_state(sd, name) is not state_machine.AccountState.AUTH_EXPIRED):
+            raise _LoginEnd("failed", LOGIN_BUSY_ERROR)
+        record["started_at"] = _utc_now().isoformat()
+        actions.rewrite(sd, record)
+        with worker._lock:
+            entry = next((r for r in worker.running.values() if r.action_id == aid), None)
+
+        def interrupted() -> None:
+            if cancelled.is_set():
+                raise _LoginEnd("cancelled")
+            if worker.stopping.is_set():
+                raise _LoginEnd("interrupted", LOGIN_STOPPED_ERROR)
+
+        def kill() -> None:
+            if pid:
+                docker_exec.kill_in_container(account.container, pid[0])
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+
+        try:
+            proc = docker_exec.open_docker_exec(
+                account.container, "/", LOGIN_COMMAND, stdin=True)
+        except OSError:
+            raise _LoginEnd(
+                "failed", f"the login could not be started in {account.container}") from None
+        if entry is not None:
+            entry.kill = kill
+        found: list[str] = []
+        woke, ended = threading.Event(), threading.Event()
+
+        def read() -> None:
+            try:
+                first = True
+                for raw in proc.stdout:
+                    if first:
+                        first = False
+                        if raw.strip().isdigit():
+                            pid.append(int(raw.strip()))
+                            if cancelled.is_set() or worker.stopping.is_set():
+                                kill()
+                            continue
+                    if not found:
+                        url = _login_url(raw)
+                        if url:
+                            found.append(url)
+                            woke.set()
+            finally:
+                ended.set()
+                woke.set()
+
+        reader = threading.Thread(target=read, name=f"login-{aid}", daemon=True)
+        reader.start()
+
+        def wait_for(event: threading.Event, seconds: float) -> bool:
+            """True when `event` is set within `seconds`; a cancel or a stop raises."""
+            deadline = time.monotonic() + seconds
+            while True:
+                interrupted()
+                if event.is_set():
+                    return True
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                event.wait(min(0.05, left))
+
+        if not wait_for(woke, LOGIN_URL_SECONDS):
+            raise _LoginEnd("failed", LOGIN_NO_URL_ERROR)
+        if not found:
+            raise _LoginEnd("failed", f"the login exited {_exit_code(proc)} before printing a sign-in URL")
+        record["result"] = {"url": found[0], "awaiting": "code", "url_at": _utc_now().isoformat()}
+        actions.rewrite(sd, record)
+
+        deadline = time.monotonic() + LOGIN_CODE_SECONDS
+        code = None
+        while code is None:
+            interrupted()
+            code = actions.take_secret(sd, aid)
+            if code is not None:
+                break
+            if ended.is_set():
+                raise _LoginEnd(
+                    "failed", f"the login exited {_exit_code(proc)} before the code was sent")
+            if time.monotonic() >= deadline:
+                raise _LoginEnd("failed", LOGIN_NO_CODE_ERROR)
+            cancelled.wait(LOGIN_CODE_POLL_SECONDS)
+        try:
+            proc.stdin.write(code + "\r")
+            proc.stdin.flush()
+        except OSError:
+            raise _LoginEnd("failed", LOGIN_SEND_ERROR) from None
+        finally:
+            code = None
+        record["result"] = {"url": None, "awaiting": None, "code_at": _utc_now().isoformat()}
+        actions.rewrite(sd, record)
+
+        if not wait_for(ended, LOGIN_EXIT_SECONDS):
+            raise _LoginEnd("failed", LOGIN_NO_EXIT_ERROR)
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise _LoginEnd("failed", LOGIN_NO_EXIT_ERROR) from None
+        if rc != 0:
+            raise _LoginEnd("failed", f"the login exited {rc} after the code was sent")
+        if not _credentials_rewritten(account, record):
+            raise _LoginEnd("failed", LOGIN_NOT_REWRITTEN_ERROR)
+        released = False
+        if state_machine.get_state(sd, name) is state_machine.AccountState.AUTH_EXPIRED:
+            released = not operator_cmd.release_account(cfg, name).refused
+        logged_in_at = _utc_now().isoformat(timespec="seconds")
+        status, result = "done", {"logged_in_at": logged_in_at, "released": released}
+    except _LoginEnd as end:
+        status, error = end.status, end.error
+    except Exception as exc:
+        logger.error("worker: account_login %s raised %s", aid, type(exc).__name__)
+        error = f"the login failed unexpectedly ({type(exc).__name__})"
+    finally:
+        _stop_login(proc, pid, name, cfg, reader)
+    actions.finish(sd, aid, status, result=result, error=error)
+    logger.info("worker: account_login %s %s %s", aid, name, status)
+    _snapshot_after(cfg, {name: logged_in_at} if status == "done" else None)
+
+
+def _exit_code(proc) -> int | None:
+    try:
+        return proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return proc.poll()
+
+
+def _credentials_rewritten(account, record: dict) -> bool:
+    """Whether the account's credentials file is present and written since the
+    claim (to the whole second, the file's mtime resolution)."""
+    row = credentials.account_row(account)
+    try:
+        since = datetime.fromisoformat(record["claimed_at"]).replace(microsecond=0)
+        written = datetime.fromisoformat(row["modified_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return row["state"] == "present" and written >= since
+
+
+def _stop_login(proc, pid: list[int], name: str, cfg: Config, reader) -> None:
+    """Every way out of a login ends its exec when it is still running."""
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                if pid:
+                    docker_exec.kill_in_container(
+                        next(a.container for a in cfg.accounts if a.name == name), pid[0])
+                proc.kill()
+                proc.wait()
+        except Exception:
+            logger.error("worker: could not stop the login of %s", name)
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+    if reader is not None:
+        reader.join(5)
+
+
 HANDLERS = {
     "start": _start, "cancel": _cancel, "command_verdict": _command_verdict, "turn": _turn,
     "clone": _clone, "init": _init, "keygen": _keygen, "check": _check,
     "approve": _approve, "request_changes": _request_changes,
     "resolve_conflict": _resolve_conflict,
+    "git_token": _git_token, "account_login": _account_login,
 }
 
 

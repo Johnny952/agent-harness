@@ -18133,3 +18133,191 @@ named fields, where the route reads `accounts[]` from, what
   `accounts[]` is not a key the config writer edits.
 - *404 for a login code to an unknown action:* ADR 456 decision 3 makes every
   case but the shape 409, and `put_login_code` does not tell them apart.
+## ADR 471 — `GET /api/credentials`: the snapshot served whole with `stale` beside it, and what an unreadable `written_at` is
+
+**Status:** accepted (T-184, 2026-10-26). Builds ADR 456 *Consequences*, 5.
+Narrows ADR 456 decision 4's last paragraph where it left the answer's shape
+open; supersedes nothing.
+
+**Context.** ADR 456 decision 4 says the read api serves the snapshot through
+`/state:ro` in the `{data, warnings}` envelope, `stale: true` past 900
+seconds, `data: null` with a fixed warning when there is no file and with its
+reason when the file does not parse. It does not say where `stale` sits, what
+a snapshot whose `written_at` is missing or not a time is, or how much of the
+record the api checks. ADR 462 decision 1 gives `credentials.read(state_dir)`:
+`None` for no file, `SnapshotError` for a file that does not parse or is not
+a JSON object. The envelope has no third key
+(`docs/learnings/a-new-field-on-an-api-row-has-two-questions.md`).
+
+**Decision.**
+
+1. *The route.* `GET /api/credentials` in `observability/api/app.py`
+   `create_app`, behind `requires_auth`, no query parameter (any is ADR 5's
+   400 by `_reject_unknown_parameters(frozenset())`). It reads through
+   `dispatcher.credentials.read(cfg.state_dir)` and nothing else: no second
+   parser, no directory made, no exec.
+2. *A snapshot.* `data` is the file's object as written, every key kept and
+   none checked, plus two keys the api adds: `stale` (bool) and
+   `stale_after_seconds`, the constant `CREDENTIALS_STALE_SECONDS = 3 *
+   worker.CREDENTIALS_SNAPSHOT_SECONDS` (900, ADR 462's three missed passes),
+   as `/api/actions` serves its heartbeat's. `stale` is true when `now -
+   written_at` is above it. `version` and the rows' shapes are served, not
+   checked: a row of the wrong shape is the screen's `Malformed` (ADR 456
+   decision 7).
+3. *An unreadable `written_at`.* Missing, not a string, not ISO 8601, or
+   with no time zone: `data` is still served, `stale: true`, and one warning
+   `"<path>: written_at <repr> is not an ISO time: <reason>"`, as
+   `_worker_heartbeat` treats `beat_at`. A `written_at` in the future is not
+   stale.
+4. *No file.* `data: null`, warnings exactly `["no credentials snapshot: the
+   worker has not written one"]`, 200.
+5. *A bad file.* `SnapshotError` (does not parse, is not an object, or an
+   `OSError` reading it): `data: null`, warnings `["unreadable credentials
+   snapshot: <the error's text>"]`, which already names the path; 200,
+   never 500.
+
+**Consequences.** The console's forward of this route is ADR 456 task 7's,
+with the `FORWARDED` count it moves. A snapshot that grows a field reaches
+the console with no change here. The 900 seconds follow the worker's
+constant at the api's restart.
+
+**Ruled out.**
+- *`data: {snapshot, stale}`:* nests the record the worker wrote one level
+  down for no reader's benefit; the keys the api adds do not collide with
+  the snapshot's.
+- *Validating the rows here:* a second copy of ADR 462's shapes, and one bad
+  row would cost the screen the good ones.
+## ADR 465 — The worker's `git_token` and `account_login` handlers: the login's argv and pid, its three waits, its fixed sentences, and the snapshot after each end
+
+**Status:** accepted (T-182, 2026-10-26). Builds ADR 456 *Consequences*, 3.
+Narrows ADR 456 decisions 5 and 6 where they left the argv, the clock, a
+failure's wording or the release open; supersedes nothing.
+
+**Context.** ADR 456 decision 6 gives the login as `docker exec -i <container>
+script -qfec 'claude auth login' /dev/null` and says a cancel kills the exec,
+but killing the host `docker exec` client does not stop the process inside
+the container (`dispatcher/docker_exec.py` `kill_in_container`), and the
+`turn` handler solves that with a pid line (`TURN_PID_WRAPPER`). The ADR
+names three waits (60 s for the URL, 600 s for the code, 120 s for the exit)
+that a test cannot sit through, two failure sentences of the login's and
+none of the token's, and "releases it as `release-account` does" without
+saying which of that command's guards apply. ADR 459's *Consequences* hands
+the call of `sweep_secrets` from each worker pass to this task. And the
+handler needs the token file's and the login file's state, which ADR 462
+built as private helpers of `dispatcher/credentials.py`.
+
+**Decision.**
+
+1. *`open_docker_exec` gains `stdin: bool = False`.* True puts `-i` after
+   `exec` in the argv and opens the process with `stdin=subprocess.PIPE`;
+   False is today's call, unchanged for the `turn`. `_docker_exec_argv`
+   takes the same flag. No `-t`, ever (ADR 456, ruled out).
+2. *The login's argv* is `LOGIN_COMMAND = ["sh", "-c", 'echo "$$"; exec
+   "$@"', "ia-harness-login", "script", "-qfec", "claude auth login",
+   "/dev/null"]`, run in workdir `/` on the account's container with
+   `stdin=True`. The first line is the pid of `script` (the `sh` `exec`s
+   it), which `kill_in_container` signals; the `turn`'s first-line rule.
+3. *The two credential readers become public* in `dispatcher/credentials.py`:
+   `_git_token` is renamed `git_token_row(path)` and `_account` is renamed
+   `account_row(account, previous_row=None)`, with every caller and test in
+   that module updated. Behaviour unchanged; the worker calls them rather
+   than a private name of another module.
+4. *Waits are module constants of `dispatcher/worker.py`*, read at call time
+   so a test lowers them: `LOGIN_URL_SECONDS = 60`, `LOGIN_CODE_SECONDS =
+   600`, `LOGIN_EXIT_SECONDS = 120`, `LOGIN_CODE_POLL_SECONDS = 1.0`. Each
+   wait also ends at once on the action's `cancelled` event or the worker's
+   `stopping`; the code poll is `cancelled.wait(LOGIN_CODE_POLL_SECONDS)`.
+   The output is read by a reader thread into a list in memory, line by line;
+   the handler waits on an event the reader sets when the URL is taken or the
+   stream ends. The list is cleared and dropped before the handler returns.
+5. *The URL* is the first match of `https://[^\s"'<>]+` in a line with
+   ANSI CSI and OSC sequences and `\r` removed, whose `urllib.parse` host is
+   exactly `claude.ai`, `console.anthropic.com` or `platform.claude.com`.
+6. *`git_token`'s fixed sentences*, each the whole `error`:
+   - no secret file: "the token was not found; renew it again";
+   - shape: "the token is not a GitHub personal access token" (actions'
+     `GIT_TOKEN_RE`, the same words as `create`'s 400);
+   - by `credentials.git_token_row`'s `state`: `not_mounted` "the worker has
+     no token file mounted: create .data/credentials/git-credentials on the
+     host, then recreate the worker"; `absent` "the token file is missing:
+     create .data/credentials/git-credentials on the host, then recreate the
+     worker"; `directory` "the token file is a directory: Docker made one for
+     a missing .data/credentials/git-credentials; replace it with a file on
+     the host, then recreate the worker"; `present` and `empty` are written;
+   - an `OSError` from the write: "the token file could not be written: " and
+     the error's `strerror` only.
+   The write is `os.open(path, O_WRONLY)`, `os.ftruncate(fd, 0)`, one write of
+   the whole line, `os.fsync`, close; the line and the token are local
+   variables of one function, deleted before it returns.
+7. *`account_login`'s fixed sentences*, each the whole `error`:
+   - account not in `cfg.accounts`: "account <name> is not configured";
+   - a holder and not `AUTH_EXPIRED`: ADR 456's "the account is running a
+     phase; sign in again once it is idle";
+   - the exec could not start (`OSError`): "the login could not be started in
+     <container>";
+   - no URL in time: ADR 456's "the login printed no sign-in URL within 60
+     seconds"; the stream ends first: "the login exited <rc> before printing
+     a sign-in URL";
+   - no code in time: ADR 456's "no code arrived within 10 minutes; start the
+     sign-in again"; the exec exits while waiting: "the login exited <rc>
+     before the code was sent";
+   - writing the code fails (`OSError`, a closed pipe): "the code could not be
+     sent to the login";
+   - no exit in time after the code: "the login did not exit within 120
+     seconds after the code was sent";
+   - non-zero exit after the code: "the login exited <rc> after the code was
+     sent";
+   - exit 0 but `credentials.account_row`'s `state` is not `present` or its
+     `modified_at` is earlier than `claimed_at` cut to whole seconds: "the
+     login exited 0 but the account's credentials file was not rewritten".
+   A cancel ends `cancelled` with no error; the worker stopping ends
+   `interrupted`, "the worker stopped during the sign-in". Every way out kills
+   the exec when it is still running: `kill_in_container` with the pid when
+   it was read, then the client's `kill()`.
+8. *The release.* On `done`, when `state_machine.get_state` is
+   `AUTH_EXPIRED`, the handler calls `operator.release_account(cfg, account)`
+   with no `force` and no `clear_rate_limit`: the command's own guards stand.
+   `released` is true when that call was made and was not refused. A refused
+   release still ends `done`: the login was renewed, and the account is
+   released by hand as before. `operator` is imported inside the function if a
+   module-level import cycles.
+9. *Cancel.* `_cancel` adds `account_login` to the kinds whose running
+   action it cancels (sets `cancelled`, calls `kill` when set, ends `done`
+   with `target_status: "running"`). A running `git_token` keeps today's
+   `else` arm: the cancel fails, "is a running git_token; it cannot be
+   cancelled", and the token is written.
+10. *The snapshot.* After `actions.finish` of every `git_token`,
+    `account_login` and `keygen`, whatever the status, the handler calls
+    `credentials.write(cfg)`, or `credentials.write(cfg, logins={account:
+    logged_in_at})` after a login that ended `done`. On the handler's own
+    thread; an exception is logged (`logger.exception`) and changes nothing.
+    A login refused before its exec started writes it too: it is an end.
+11. *The sweep.* `Worker.tick` calls `actions.sweep_secrets(state_dir)` first;
+    an `OSError` is logged and the pass goes on. A swept name is an action id
+    and may be logged at debug.
+12. *Logs.* Each handler logs one info line at its end: kind, action id, the
+    account for a login, and the status; nothing else. No handler writes a
+    comment or a notification. A value of the token, the code or the login's
+    output never reaches `str()` of an exception the handler lets escape to
+    `_guarded`: every call that holds one is inside the handler's own `try`.
+
+**Consequences.**
+- `docs/README.md`'s row for `dispatcher/worker.py` gains the two handlers,
+  and the `dispatcher/credentials.py` row names the two public readers.
+- The login's URL pattern, its prompt and the CLI's exit status under
+  `script` are still unmeasured (ADR 456 *Also*); a miss is an edit to
+  `LOGIN_COMMAND` or the URL rule under a new ADR. A URL the CLI wraps across
+  lines at the pty's width would be taken cut short; nothing here sets the
+  width.
+- `script` echoes the pasted code back into the output. The buffer is never
+  logged or stored, which is why the failure sentences quote no output.
+
+**Ruled out.**
+- *The bare `script` argv of ADR 456 with no pid line:* a cancel or a
+  timeout would kill only the host client and leave the CLI waiting inside
+  the agent.
+- *`release_account(force=True)`:* a live lock or an unexpired refusal is
+  exactly what that command refuses over, and a sign-in does not change
+  either.
+- *Fake clocks for the waits:* the waits are on events and a pipe, so a
+  lowered constant tests them in real time with nothing to drive.

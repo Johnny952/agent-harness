@@ -627,3 +627,17 @@ ADR 456 decision 3's three routes behind `BOARD_ACTIONS_TOKEN` (ADR 468):
 start, and `POST /api/actions/<id>/login-code` writes the code only while the
 claimed login awaits it. A new account needs a board-service restart before
 its login route answers; ADR 468 decides that, so it is not debt.
+**T-184** declared no debt and resolved none. It builds ADR 456
+*Consequences* 5: `GET /api/credentials` in `observability/api/app.py` serves
+the worker's credentials snapshot with `stale` and `stale_after_seconds`, and
+`data: null` with its reason when there is none or it does not parse
+(`docs/decisions.md` ADR 471). The console forward is build task 7, the next
+task and not debt.
+**T-182** declared no debt and resolved none. It builds ADR 456
+*Consequences* 3: the worker's `git_token` and `account_login` handlers of
+ADR 465, which write the token in place, run `claude auth login` under
+`script`, release an `AUTH_EXPIRED` account on success, sweep `secrets/` each
+tick and call the credentials snapshot with `logins`. The login output is
+scanned for the URL and never kept, where ADR 465 4 says a list
+(`docs/implementations/T-182.md`). The CLI's real output under `script` is
+unmeasured; ADR 456 *Consequences* 4, the routes, is the next task, not debt.
