@@ -15,7 +15,9 @@ account and no project lock (ADR 258, ADR 264). A `request_changes` runs the
 task's cycle again from the arquitecto on its branch, holding the project and
 an account as a start does (ADR 272). A `resolve_conflict` runs
 `dispatch resolve-conflict` on a `conflict` task under the project's base lock,
-holding an account but no project lock (ADR 285).
+holding an account but no project lock (ADR 285). At start and every
+`CREDENTIALS_SNAPSHOT_SECONDS` a thread writes the credentials snapshot
+(ADR 456, ADR 462).
 Stdlib only.
 """
 
@@ -36,8 +38,8 @@ from pathlib import Path
 from typing import Callable
 
 from dispatcher import (
-    actions, board_mcp, command_run, context_transfer, docker_exec, epic_runs, notifications,
-    project_keys, projects, state_machine, tasks, threads,
+    actions, board_mcp, command_run, context_transfer, credentials, docker_exec, epic_runs,
+    notifications, project_keys, projects, state_machine, tasks, threads,
 )
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 LOCK = "worker.lock"
 HEARTBEAT = "worker.json"
 POLL_SECONDS = 2.0
+CREDENTIALS_SNAPSHOT_SECONDS = 300
 ACCOUNT_POLL_SECONDS = float(queue_mod.WAIT_POLL_SECONDS)
 STOPPED_ERROR = "the worker stopped; the cycle was held at a phase boundary"
 VERDICT_NOT_CANCELLABLE = (
@@ -143,6 +146,8 @@ class Worker:
         self._closed_until: datetime | None = None
         #: The primary's free share and when it was read (the pool's floor).
         self._pool_read: tuple[datetime, int | None] | None = None
+        self._snapshot_started: datetime | None = None
+        self._snapshot_thread: threading.Thread | None = None
 
     @property
     def state_dir(self) -> str:
@@ -206,6 +211,7 @@ class Worker:
         self.recover()
         while not self.stopping.is_set():
             self.beat()
+            self._maybe_snapshot()
             self.tick()
             self.stopping.wait(interval)
         with self._lock:
@@ -213,6 +219,28 @@ class Worker:
         for kill in kills:  # a turn has no boundary to hold at (ADR 173, 8)
             kill()
         self.join()
+
+    def _maybe_snapshot(self) -> None:
+        """Start the credentials snapshot when it is due and none is running.
+        A thread, because an exec into an agent that does not answer can take
+        seconds and the loop runs a `cancel` at once (ADR 462, 7)."""
+        if self._snapshot_thread is not None and self._snapshot_thread.is_alive():
+            return
+        now = _utc_now()
+        if (self._snapshot_started is not None
+                and now - self._snapshot_started
+                < timedelta(seconds=CREDENTIALS_SNAPSHOT_SECONDS)):
+            return
+        self._snapshot_started = now
+        self._snapshot_thread = threading.Thread(
+            target=self._write_credentials, name="credentials-snapshot", daemon=True)
+        self._snapshot_thread.start()
+
+    def _write_credentials(self) -> None:
+        try:
+            credentials.write(self.cfg)
+        except Exception:
+            logger.exception("worker: the credentials snapshot failed")
 
     # ---- one pass -----------------------------------------------------------
 
