@@ -18063,6 +18063,76 @@ what unlink, and no route creates a secret before task 4. A `put_login_code`
 that lands after the handler took the first code but before it rewrote
 `awaiting` leaves a second file that `finish` or the sweep removes.
 
+## ADR 468 — The board service's three credential routes: bodies, the account check, the login code's answer, and owner only by the sign-in hook
+
+**Status:** accepted (T-183, 2026-10-26). Builds ADR 456 *Consequences*, 4,
+on ADR 459's `dispatcher/actions.py`. Narrows ADR 456 decision 3 where it
+left a body field, the 404's source or the login code's answer open;
+supersedes nothing.
+
+**Context.** ADR 456 decision 3 names the three routes, their patterns and
+their 400s and 409s, and says each answers 201 "with the record". ADR 459
+put every pattern and every 409 in `dispatcher/actions.py` (`create` with
+`secret`, `put_login_code`). Left open: what a body may carry beside the
+named fields, where the route reads `accounts[]` from, what
+`POST /api/actions/<id>/login-code` answers when it creates no record, and how
+"owner only" is enforced when a request carries a session.
+
+**Decision.**
+
+1. *Shape.* All three are `board_service/app.py` `_action` routes: ADR 151's
+   guards (Origin 403, no token 503, bearer 401, query 400, body not an
+   object 400), then a `make(body)` whose `ActionRefused` is answered with
+   its status and reason, and `OSError` 503. Each refuses an unknown body
+   field with 400 `unknown field '<name>'`, naming the field, never a value.
+   Every queued record carries `actor=_person()` (ADR 387).
+2. *`POST /api/credentials/git-token`,* fields `token`, `username`.
+   `actions.create(state_dir, "git_token", params=..., secret=body.get("token"),
+   actor=_person())`; `params` is `{"username": username}` when `username` is
+   present and not null, else `None`, so `_new_record` fills
+   `x-access-token`. The route checks no pattern itself: a missing token is
+   `create`'s 400 "a git_token needs its token", a bad one its "the token is
+   not a GitHub personal access token", a bad username `validate`'s
+   "params.username must be a GitHub login", a second one its 409. 201 with
+   the record, which has no token.
+3. *`POST /api/accounts/<name>/login`,* an empty body (any field is the
+   unknown-field 400). 404 `no account '<name>' in the config` when no
+   `cfg.accounts` entry has that `name`, checked before `create`; `cfg` is
+   the one `create_app` loaded, so an account added to `config.yaml` reaches
+   this route on the service's restart, as ADR 151 5 has for the token. Then
+   `actions.create(state_dir, "account_login", params={"account": name},
+   actor=_person())`; the second sign-in for the account is its 409. 201
+   with the record.
+4. *`POST /api/actions/<id>/login-code`,* field `code`.
+   `actions.put_login_code(state_dir, action_id, body.get("code"))`, whose 400
+   (the shape, never the value) and 409s (not a claimed `account_login`
+   awaiting `"code"`, a malformed or unknown id included; a code already
+   waiting) are answered as they are. Then 201 with the action's record as
+   `actions.find` reads it after the write — the claimed `account_login`,
+   which holds no code, the code being only in `secrets/<id>` — or
+   `{"id": <id>}` when that read finds none (the worker ended it in between);
+   the console follows the outcome on `GET /api/actions/<id>` either way
+   (ADR 456 decision 7).
+5. *Owner only* is `board_service/signin.py`'s `before_request` hook, which
+   already refuses a session write by a non-owner with 403 "this needs the
+   owner's role" unless its endpoint is in `REVIEWER_WRITES`; none of these
+   three is added there. A request with no session is the bearer's, as on
+   every action route. The hook's audit line names method and path only.
+
+**Consequences.**
+- No answer, refusal, log or audit line of these routes holds a token or a
+  code: the routes echo only a field name, an account name or an action id,
+  and the patterns' refusals are ADR 459's fixed sentences. Tests assert the
+  value absent from every answer's body, the record file and `read_all`.
+- The console's forward of the three routes is ADR 456 task 7's.
+
+**Ruled out.**
+- *Re-checking the patterns in the route:* ADR 459, 2 keeps one copy, and
+  `create`/`put_login_code` already refuse with 400.
+- *Reloading the config per request for the 404:* no other route does, and
+  `accounts[]` is not a key the config writer edits.
+- *404 for a login code to an unknown action:* ADR 456 decision 3 makes every
+  case but the shape 409, and `put_login_code` does not tell them apart.
 ## ADR 471 — `GET /api/credentials`: the snapshot served whole with `stale` beside it, and what an unreadable `written_at` is
 
 **Status:** accepted (T-184, 2026-10-26). Builds ADR 456 *Consequences*, 5.
