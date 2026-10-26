@@ -647,6 +647,12 @@ decision 3: `credentials.git_token_row` reads a missing token path as
 otherwise, so the Coolify worker, which mounts `/run/secrets/projects` but no
 token, now reads `not_mounted` (`docs/implementations/T-185-S1.md`). A runtime
 writing neither marker reads `absent`; ADR 480 accepts that, so it is not debt.
+**T-186-S2** declared no debt and resolved none. It builds ADR 456 decision 7's
+reads: `front/src/routes/tokens.tsx` draws `getCredentials` joined with
+`GET /api/accounts` under ADR 489, with no controls, and `ContainerToken`,
+`listTokens`, `reauthContainer` and their fixtures are gone
+(`docs/implementations/T-186-S2.md`). The controls are the next sub-task of
+T-186, not debt.
 **T-185-S2** declared no debt and resolved none. ADR 486 builds ADR 456
 *Consequences* 6 for the plain compose: `worker` mounts
 `.data/credentials/git-credentials` read-write and `dispatcher` does not, the

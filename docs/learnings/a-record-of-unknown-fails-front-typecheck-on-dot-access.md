@@ -4,8 +4,10 @@
 `front/` so you can guard each field at the render (`isRec(v) && v.role`),
 and reach for `Record<string, unknown>`.
 
-**Status:** unconfirmed — reported by T-046's implementador, which hit it
-under `bun run typecheck` and fixed it; the error text was not quoted.
+**Status:** confirmed by T-186-S2, whose implementador hit the same
+`noPropertyAccessFromIndexSignature` rejection on the Tokens screen's row
+guards and took the same fix (`Served` in `front/src/routes/tokens.tsx`) —
+first reported by T-046's implementador; the error text was not quoted.
 
 ## Symptom
 

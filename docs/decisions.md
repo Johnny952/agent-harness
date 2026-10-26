@@ -18462,6 +18462,109 @@ mounted inode at the path.
 - *Keeping the parent rule outside a container:* outside Docker nothing is
   mounted, so `not_mounted` there names a cause that cannot be the one.
 
+## ADR 489 — The Tokens screen's reads: the row set, the join with `/api/accounts`, each state's tone and words, and what a row of the wrong shape is
+
+**Status:** accepted (T-186-S2, 2026-10-26). Builds the reads half of ADR 456
+*Consequences*, 7, on ADR 483's `getCredentials` and `credentialsQuery`.
+Narrows ADR 456 decision 7's *Regions* and *States* where they left the row
+set, the join, the tones, the wording and the malformed test open; supersedes
+nothing. The controls of decision 7 are the epic's next sub-task (7c).
+
+**Context.** ADR 456 decision 7 names three regions, one per credential, and
+five screen states: per-page loading, an `ErrorState` on a failed
+`/api/credentials`, a degraded banner naming the worker on the no-snapshot
+warning, a warning banner with the age on `stale: true`, and `Malformed` for a
+row of the wrong shape. ADR 471 serves the snapshot unvalidated, with
+`data: null` for two causes (no file, a bad file) and possibly a warning beside
+a served snapshot (an unreadable `written_at`). `docs/ui.md` binds the tone of
+a state, *Absent, empty and broken*, the wrong-shape rule, and *Times are
+absolute, ages are relative*. The Claude logins region joins the snapshot's
+`accounts` with `/api/accounts`, the screen's secondary read.
+
+**Decision.**
+
+1. *Reads.* `credentialsQuery` is the screen's own read; `accountsQuery` is
+   secondary. Loading is one line, "Reading credentials…", while either is
+   `isLoading`. `RefreshedAt` takes the credentials read's `dataUpdatedAt`.
+   `listTokens`, `reauthContainer`, `tokensQuery`, `ContainerToken`,
+   `TokenState` and `initialTokens` are deleted, not kept for 7c: 7c queues
+   through ADR 483's three client calls and ADR 212's routes.
+2. *Broken.* A failed `/api/credentials` is the page's `ErrorState`, title
+   "Credential status could not be read", and nothing else is drawn. A failed
+   `/api/accounts` is a `BrokenBanner` line "/api/accounts did not answer: the
+   Claude logins' pool state is not shown" and the pool-state cell of every
+   login row draws nothing (not `Absent`: no answer is not *not recorded*).
+3. *No snapshot.* `data: null`, whatever the warning (ADR 471 decisions 4 and
+   5 both): one `Banner` tone `warning` that quotes every served warning
+   verbatim, one line each, then "The worker writes this snapshot when it
+   starts and every 5 minutes; until it has, there is nothing to show. Check
+   that the worker is running on the Queue screen." No region and no row.
+   Those warnings are in this banner only, not repeated in `WarningBanner`.
+4. *Warnings.* With a snapshot, the credentials read's warnings then the
+   accounts read's, concatenated, in one `WarningBanner`, never truncated.
+5. *Stale.* `stale: true` is a `Banner` tone `warning` above the regions:
+   "The credentials snapshot is <age> old, written <date clock>; the api
+   calls it stale past <stale_after_seconds / 60> minutes, so the worker may
+   not be running." The age is `formatAge(agoSeconds(written_at, now))`,
+   ticking on `useNow`; an unreadable `written_at` reads "of unknown age"
+   (its reason is already in the warnings). The rows are drawn under it.
+6. *Regions,* in this order, each a `panel` with its heading:
+   - **GitHub token**: one row — state pill, `path` in `Mono`, modified
+     (`formatDateClock`, then the age, ticking), the hint for its state, and
+     the scope note: "ADR 36 asks for a fine-grained token with `contents:
+     read`; a project that pushes on approve needs `contents: write` (ADR 78)."
+     Hints: `empty` "the file exists and is empty"; `absent` "no file at this
+     path"; `directory` "Docker made a directory here because the host file
+     `.data/credentials/git-credentials` was missing; create it and recreate
+     the worker"; `not_mounted` "the worker has no such path: this compose
+     mounts no token". `present` has none.
+   - **Deploy keys**: a row per served item, in served order — project, state
+     pill, fingerprint in `Mono` (`Absent` "no fingerprint" when null),
+     modified. An empty list is an `EmptyState` in the region: "No project
+     has a record or a key directory".
+   - **Claude logins**: a row per served item, in served order — account,
+     container, the pool state from the `/api/accounts` row of the same name
+     with `accountStateTone` (`Absent` "state unreadable" for `null`,
+     `Absent` "not in the pool" for no such row), the file's state pill and
+     modified, and "signed in from the console" with `formatDateClock` and
+     age, or `Absent` "never from the console". Pool accounts the snapshot
+     lacks are not drawn: the snapshot is one row per configured account at
+     its `written_at`, and a newer config is what *Stale* reports. An empty
+     list is "No account is configured".
+   A `modified_at` of `null` is `Absent` "never written".
+7. *Tones of a file state.* `present` is `success`; `empty`, `absent`,
+   `directory`, `not_mounted` and `unreachable` are `warning` (a missing
+   credential costs a warning per task, ADR 36's `unavailable`, never a
+   stop); a string outside the region's union renders verbatim, `muted`
+   (`docs/ui.md` *The tone of a state*). The pool state keeps the Pool
+   screen's tones: `stateTone` moves out of `pool.tsx` `AccountCard` to
+   `front/src/lib/format.ts` as `accountStateTone`, and both screens read it.
+8. *Malformed,* per `docs/ui.md` *A value of the wrong shape*: `git_token`
+   not an object, or `deploy_keys` / `accounts` not a list, replaces that
+   region's body with `Malformed` naming the key. A list item that is not an
+   object, or whose `project` / `account` is not a string, is one `Malformed`
+   row in its place; the others render. Inside a good row a `state` that is
+   not a string, a time or fingerprint that is neither a string nor `null`,
+   is `Malformed` in that cell. A time string `Date` cannot parse renders
+   verbatim with no age. The guards sit in the components that render.
+9. *Header.* Title "Tokens"; subtitle "Whether each credential the harness
+   uses exists, from the worker's snapshot. Whether a Claude login still works
+   is its account's pool state." `head` meta reworded to match; no control
+   and no `actionBackendQuery`.
+
+**Consequences.**
+- 7c adds controls into these rows and invalidates `["credentials"]` after
+  each write; nothing here reserves space for them.
+- The console's fixture-backed screens drop to three (approvals, session
+  logs, role models), which `docs/README.md` *Modules* `front/` and
+  `front/README.md` say.
+
+**Ruled out.**
+- *Pool accounts as the row set:* the file's state would be `Absent` for an
+  account the worker never saw, which is the stale banner's news.
+- *The no-snapshot warning in `WarningBanner` too:* the same sentence twice.
+- *Validating the whole snapshot up front:* one bad row would cost the good
+  ones (ADR 471 *Ruled out*).
 ## ADR 486 — The plain compose's `worker` mounts the git token read-write and the `dispatcher` does not; `configure.sh` makes the host file empty and `0600`
 
 **Status:** accepted (T-185-S2, 2026-10-26). Builds ADR 456 *Consequences*,
