@@ -606,3 +606,10 @@ kinds, hands their secret to the worker in a file of its own under the action
 queue, and gives the Tokens screen a credentials snapshot the worker writes
 without opening a secret. Its eight build tasks are listed in that ADR's
 *Consequences*; they are the next tasks, not debt.
+
+**T-181** declared no debt and resolved none. It builds ADR 456
+*Consequences* 2: `dispatcher/credentials.py` writes the credentials snapshot
+from `stat`, listings and one exec per account, opening no secret, and the
+worker writes it at start and every 300 seconds on a thread
+(`docs/decisions.md` ADR 462). Nothing calls it with `logins` yet; that is
+build task 3, the next task and not debt.
