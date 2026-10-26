@@ -619,3 +619,11 @@ of ADR 456 and ADR 459: written `0600` before the record is pending, taken
 once, unlinked by `finish`, `recover` and `sweep_secrets`. Nothing calls
 `sweep_secrets` yet and no route creates a secret; those are ADR 456
 *Consequences* tasks 3 and 4, the next tasks, not debt.
+
+**T-183** declared no debt and resolved none. `board_service/app.py` now has
+ADR 456 decision 3's three routes behind `BOARD_ACTIONS_TOKEN` (ADR 468):
+`POST /api/credentials/git-token` creates the secret file,
+`POST /api/accounts/<name>/login` 404s an account not in the config read at
+start, and `POST /api/actions/<id>/login-code` writes the code only while the
+claimed login awaits it. A new account needs a board-service restart before
+its login route answers; ADR 468 decides that, so it is not debt.
