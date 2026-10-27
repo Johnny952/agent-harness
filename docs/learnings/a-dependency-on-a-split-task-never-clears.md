@@ -28,7 +28,9 @@ sub-task merged or not.
 Re-point the dependent's `depends_on` to the epic's sub-task ids (or change
 the gate in `tasks.unmet_dependencies`) — never wait on the parent's merge.
 The queue does the re-pointing since T-188 (`docs/decisions.md` ADR 495); a
-task outside a queue is still stuck (`docs/debt/T-188-D1.md`).
+task outside a queue was still stuck (`docs/debt/T-188-D1.md`). Since T-190
+the gate itself clears it: a split parent is met once every sub-task merged
+(ADR 504).
 
 ## Evidence
 

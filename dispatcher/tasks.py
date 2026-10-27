@@ -25,7 +25,8 @@ an entry point refuse the whole hive until `dispatch migrate` has been run.
 
 The epic format of `docs/plans/task-split.md` section 2 is written here too:
 `file_split` files a split's sub-tasks and turns their parent into an epic,
-`mark_merged` records a merge on the task and `unmet_dependencies` reads it.
+`mark_merged` records a merge on the task and `unmet_dependencies` reads it
+(and, for a split task, on each sub-task, ADR 504).
 `mark_blocked` records a task that stopped blocked. `close_epic` closes an
 epic once every sub-task is settled, merged or dropped (ADR 134), and
 `epic_problems` checks one written by hand. The dispatcher calls all of
@@ -89,7 +90,7 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import yaml
@@ -706,19 +707,27 @@ def ready_order(tasks: "dict[str, context_transfer.TaskFile]") -> list[str]:
     """The Ready column, in the order work should be taken: ids. Pure; never reads a file.
 
     A task is ready when it is `pending`, not merged, and every task in its
-    `depends_on` is in `tasks` and merged; an epic itself is never ready, its
+    `depends_on` is in `tasks` and merged, or split with every sub-task
+    merged (ADR 504); an epic itself is never ready, its
     tasks are. They are ordered by `effective_buckets`, then their own `rank`,
     then id. `tasks` is every task file read, by id: the buckets need the
     tasks that are not ready too, since they are what lifts the rest.
     """
     buckets = effective_buckets(tasks)
+
+    def in_dict(child_id: object) -> bool:
+        return isinstance(child_id, str) and child_id in tasks and bool(tasks[child_id].merged)
+
     ready = []
     for task_id, task in tasks.items():
         if task.status != ACCEPTED_STATUS or task.merged:
             continue
         deps = task.depends_on
         if not isinstance(deps, list) or not all(
-            isinstance(dep, str) and dep in tasks and tasks[dep].merged for dep in deps
+            isinstance(dep, str)
+            and dep in tasks
+            and (tasks[dep].merged or _split_waits_on(tasks[dep], in_dict) == [])
+            for dep in deps
         ):
             continue
         ready.append(task_id)
@@ -1382,18 +1391,44 @@ def unmet_dependencies(hive_dir: str, task: context_transfer.TaskFile) -> list[s
     """Why this task cannot start yet, one line per dependency. Empty means it can.
 
     A dependency is met once its task file carries a `merged` block; its
-    status does not matter, `done` is not merged. Never writes.
+    status does not matter, `done` is not merged. A split parent never
+    merges, so it is met once every id in its `split_into` is merged
+    (ADR 504); a dropped sub-task holds it. Never writes.
     """
     if not isinstance(task.depends_on, list):
         return [f"depends_on is {task.depends_on!r}, not a list"]
+
+    def merged_file(child_id: object) -> bool:
+        child, _ = _read_for_check(hive_dir, child_id)
+        return child is not None and bool(child.merged)
+
     unmet = []
     for dep in task.depends_on:
         dependency, why = _read_for_check(hive_dir, dep)
         if dependency is None:
             unmet.append(why)
         elif not dependency.merged:
-            unmet.append(f"{dep} is not merged")
+            waits = _split_waits_on(dependency, merged_file)
+            if waits is None:
+                unmet.append(f"{dep} is not merged")
+            elif waits:
+                unmet.append(f"{dep} is split; {', '.join(map(str, waits))} not merged yet")
     return unmet
+
+
+def _split_waits_on(
+    dependency: context_transfer.TaskFile, is_merged: Callable[[object], bool]
+) -> list | None:
+    """The sub-tasks of a split dependency not merged yet (ADR 504).
+
+    None when `dependency` is not a split parent: `split_into` a non-empty
+    list and `epic` unset. Otherwise the ids of `split_into` for which
+    `is_merged` is false, in order; empty means the dependency is met.
+    """
+    children = dependency.split_into
+    if not isinstance(children, list) or not children or dependency.epic:
+        return None
+    return [child_id for child_id in children if not is_merged(child_id)]
 
 
 def epic_problems(hive_dir: str, task: context_transfer.TaskFile) -> list[str]:
