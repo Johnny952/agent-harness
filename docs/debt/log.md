@@ -666,3 +666,8 @@ the queue re-points its dependents' `depends_on` to them, on the board too
 (`docs/implementations/T-188.md`). Outside a queue a dependency on a split
 task still never clears, since `tasks.unmet_dependencies` wants a `merged`
 block no epic parent gets: that is `T-188-D1`.
+**T-187** resolved no earlier row and declared none. ADR 456 *Consequences*
+8: `update_project_before_task` is an editable bool in `CONFIG_KEYS`, its
+reason points at the Tokens screen, and the config writer checks no
+credential before taking it (`docs/implementations/T-187.md`). The class
+counts are 25 editable, 20 read-only, 3 credential.
