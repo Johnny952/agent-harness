@@ -1435,7 +1435,7 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
     if queue.status == queue_mod.Q_LIMIT:
         raise SystemExit(EXIT_LIMIT)
     if queue.status == queue_mod.Q_WAITING or any(
-        e.state in queue_mod.FAILED for e in queue.entries
+        queue_mod.failed(e) for e in queue.entries
     ):
         raise SystemExit(EXIT_BLOCKED)
 

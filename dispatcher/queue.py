@@ -8,9 +8,12 @@ follows `depends_on`:
 
 - a task whose dependency is not merged yet waits, and the queue goes on with
   the next one that does not;
-- a task that fails (blocked, held after it spent, split, interrupted) is not
+- a task that fails (blocked, held after it spent, interrupted) is not
   retried, and every task of the queue that depends on it is skipped with a
   comment;
+- a task the arquitecto splits is replaced, at its place, by its sub-tasks
+  (ADR 495): they run under the same limit and parallelism, and what depended
+  on the split task waits for all of them;
 - the limit is in measured tokens, read from each task's usage log; once the
   total reaches it no new phase or task starts and the queue stops with
   `limit_reached`;
@@ -82,8 +85,9 @@ INTERRUPTED = "interrupted"  # found `running` on resume: never started again
 STOPPED = "limit_reached"  # stopped by the limit before or inside its cycle
 
 #: A task in one of these ended its one cycle without something to build on:
-#: whatever depends on it is skipped.
-FAILED = frozenset({BLOCKED, HELD, SPLIT, SKIPPED, INTERRUPTED})
+#: whatever depends on it is skipped. A split task is not here: its sub-tasks
+#: take its place (ADR 495); `failed` covers a split that left none.
+FAILED = frozenset({BLOCKED, HELD, SKIPPED, INTERRUPTED})
 
 # The states of the queue itself.
 Q_RUNNING = "running"
@@ -116,6 +120,19 @@ class Entry:
     # {"role", "round"} the limit held the cycle at; kept only while the task
     # is `limit_reached` or reopened from it (ADR 357).
     held_at: dict | None = None
+    # The sub-tasks a split task was replaced by, and the split task an
+    # absorbed sub-task came from (ADR 495).
+    split_into: list[str] = dataclasses.field(default_factory=list)
+    epic: str | None = None
+
+
+def failed(entry: Entry) -> bool:
+    """Whether the entry ended its cycle without something to build on.
+
+    A split task counts only when no sub-task took its place (ADR 495): its
+    sub-tasks could not be read, or the queue file predates the ADR.
+    """
+    return entry.state in FAILED or (entry.state == SPLIT and not entry.split_into)
 
 
 @dataclasses.dataclass
@@ -345,7 +362,7 @@ def confirmation(cfg: Config, queue: Queue) -> str:
     for n, e in enumerate(queue.entries, 1):
         after = f"  (after {', '.join(e.depends_on)})" if e.depends_on else ""
         picked = "  [from Ready]" if e.from_ready else ""
-        lines.append(f"  {n}. {e.task_id}  {e.title}{after}{picked}")
+        lines.append(f"  {n}. {e.task_id}  {e.title}{after}{picked}{_split_tag(e)}")
     if queue.passed_over:
         lines += ["", "Passed over from the Ready order:"]
         lines += [f"  {why}" for why in queue.passed_over]
@@ -353,6 +370,8 @@ def confirmation(cfg: Config, queue: Queue) -> str:
         "",
         "Each task runs one cycle: " + ", ".join(roles(cfg)) + ".",
         "A task that fails is not retried; the tasks that depend on it are skipped.",
+        "A task the arquitecto splits is replaced by its sub-tasks, which run in its "
+        "place under this limit; what depends on it waits for all of them.",
         f"Parallelism: {queue.parallel}",
         f"Limit: {queue.limit} measured tokens (input, output and cache, ADR 79)",
         "  It is checked before each phase, so the phase running when it is reached "
@@ -369,6 +388,14 @@ def confirmation(cfg: Config, queue: Queue) -> str:
             ]
             lines.append(f"  {change['at']}: {', '.join(moved)}")
     return "\n".join(lines)
+
+
+def _split_tag(entry: Entry) -> str:
+    if entry.split_into:
+        return f"  [split into {', '.join(entry.split_into)}]"
+    if entry.epic:
+        return f"  [from {entry.epic}'s split]"
+    return ""
 
 
 def _usage_lines(cfg: Config, task_id: str) -> list[dict]:
@@ -417,15 +444,19 @@ def wait_for_account(cfg: Config, sleep: Callable[[float], None] = time.sleep) -
         sleep(WAIT_POLL_SECONDS)
 
 
-def _comment(cfg: Config, task_id: str, body: str) -> None:
-    """A comment on the task that leaves its status as it was."""
+def _comment(
+    cfg: Config, task_id: str, body: str, depends_on: list[str] | None = None,
+) -> None:
+    """A comment on the task that leaves its status as it was.
+
+    `depends_on`, when given, replaces the task's own (ADR 495)."""
     try:
         status = context_transfer.read_task_file(
             context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
         ).status
     except FileNotFoundError:
         status = "pending"
-    tasks.handoff(cfg.hive_tasks_dir, task_id, status, body)
+    tasks.handoff(cfg.hive_tasks_dir, task_id, status, body, depends_on=depends_on)
 
 
 def _is_merged(cfg: Config, task_id: str) -> bool:
@@ -614,6 +645,8 @@ def _run_serial(
         )
         entry.tokens, entry.unmeasured = _spend(cfg, entry)
         _settle(cfg, queue, entry, outcome, limit_hit, held[0] if held else None)
+        if entry.state == SPLIT:
+            _absorb_split(cfg, queue, entry)
         if entry.state == PENDING:
             # Held before any phase spent: the account it was given closed
             # again. Without a pause the account check can pass at once and
@@ -669,6 +702,12 @@ class WriteScheduler:
         """Give `task_id` the next place in the order, if it has none."""
         with self.cond:
             self.order.setdefault(task_id, len(self.order))
+
+    def reorder(self, task_ids: Iterable[str]) -> None:
+        """Replace the order, so entries added to the queue hold their place (ADR 495)."""
+        with self.cond:
+            self.order = {task_id: n for n, task_id in enumerate(task_ids)}
+            self.cond.notify_all()
 
     def _first_in_line(self, task_id: str, entries: frozenset[str]) -> bool:
         mine = self.order.get(task_id, len(self.order))
@@ -793,6 +832,9 @@ def _run_parallel(
                         stopped_by["limit"] or stopped_by["refused"],
                         held[0] if held else None,
                     )
+                    if entry.state == SPLIT:
+                        _absorb_split(cfg, queue, entry)
+                        scheduler.reorder([e.task_id for e in queue.entries])
                     if own_refusal:
                         entry.note = f"merged, but the push of the base was refused: {own_refusal[0]}"
                         logger.error("queue %s stops: %s", queue.queue_id, entry.note)
@@ -862,17 +904,17 @@ def _next(cfg: Config, queue: Queue, busy: frozenset[str] = frozenset()) -> Entr
     for entry in queue.entries:
         if entry.state != PENDING or entry.task_id in busy:
             continue
-        failed = [
+        broken = [
             d for d in entry.depends_on
-            if any(e.task_id == d and e.state in FAILED for e in queue.entries)
+            if any(e.task_id == d and failed(e) for e in queue.entries)
         ]
-        if failed:
+        if broken:
             entry.state = SKIPPED
-            entry.note = f"skipped: {', '.join(failed)} did not finish in this queue"
+            entry.note = f"skipped: {', '.join(broken)} did not finish in this queue"
             _comment(
                 cfg, entry.task_id,
                 f"## queue {queue.queue_id}\n\nNot started: it depends on "
-                f"{', '.join(failed)}, which did not finish in this queue. "
+                f"{', '.join(broken)}, which did not finish in this queue. "
                 "Run it on its own once that is settled.",
             )
             save(cfg, queue)
@@ -923,6 +965,54 @@ def _settle(
     logger.info("queue %s: task %s is %s", queue.queue_id, entry.task_id, entry.state)
 
 
+def _absorb_split(cfg: Config, queue: Queue, entry: Entry) -> list[str]:
+    """Put a split task's sub-tasks in its place in the queue (ADR 495).
+
+    They follow the split entry in the epic's order, and every pending entry
+    that depended on the split task now depends on them, on the board too, so
+    it starts once all of them are merged. A split whose sub-tasks cannot be
+    read changes nothing but the note; `failed` then skips its dependents.
+    Returns the sub-task ids absorbed.
+    """
+    task = _task_file(cfg, entry.task_id)
+    ids = task.split_into if task is not None else None
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        entry.note = "split, but its sub-tasks could not be read"
+        return []
+    ids = list(ids)
+    known = {e.task_id for e in queue.entries}
+    place = queue.entries.index(entry) + 1
+    for task_id in ids:
+        if task_id in known:
+            continue
+        try:
+            sub = _entry(cfg, task_id)
+        except QueueError as exc:
+            sub = Entry(task_id, "", [], state=SKIPPED, note=f"not started: {exc}")
+        sub.epic = entry.task_id
+        queue.entries.insert(place, sub)
+        place += 1
+    entry.split_into = ids
+    for dependent in queue.entries:
+        if dependent.state != PENDING or entry.task_id not in dependent.depends_on:
+            continue
+        replaced: list[str] = []
+        for dep in dependent.depends_on:
+            replaced += [d for d in (ids if dep == entry.task_id else [dep]) if d not in replaced]
+        dependent.depends_on = replaced
+        _comment(
+            cfg, dependent.task_id,
+            f"## queue {queue.queue_id}\n\n{entry.task_id} was split into "
+            f"{', '.join(ids)}; this task now waits for all of them.",
+            depends_on=list(dependent.depends_on),
+        )
+    logger.info(
+        "queue %s: task %s was split; %s take its place",
+        queue.queue_id, entry.task_id, ", ".join(ids),
+    )
+    return ids
+
+
 def _stop_on_limit(cfg: Config, queue: Queue, entry: Entry | None) -> None:
     queue.status = Q_LIMIT
     if entry is not None:
@@ -942,5 +1032,5 @@ def summary(queue: Queue) -> str:
         if e.unmeasured:
             extra += f", {e.unmeasured} unmeasured call(s)"
         note = f"  {e.note}" if e.note else ""
-        lines.append(f"  {e.task_id}: {e.state}{extra}{note}")
+        lines.append(f"  {e.task_id}: {e.state}{extra}{note}{_split_tag(e)}")
     return "\n".join(lines)

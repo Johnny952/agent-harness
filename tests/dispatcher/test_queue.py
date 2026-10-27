@@ -15,6 +15,7 @@ import pytest
 
 from dispatcher import cli as cli_mod
 from dispatcher import context_transfer, docker_exec, tasks
+from dispatcher import handoff as handoff_mod
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
 from dispatcher.config import AccountConfig
@@ -67,6 +68,13 @@ class FakeCycle:
                 return core.CycleOutcome.HELD
             _usage(cfg, task_id, spend)
         outcome = plan.get("outcome", core.CycleOutcome.FINISHED)
+        if plan.get("split") is not None:
+            # `split`: the `after` tuples of the sub-tasks, as file_split gets them.
+            tasks.file_split(cfg.hive_tasks_dir, task_id, [
+                handoff_mod.SubTask(f"Part {n}", "src/", _DESCRIPTION.format(id=f"part {n}"), after)
+                for n, after in enumerate(plan["split"], 1)
+            ])
+            outcome = core.CycleOutcome.SPLIT
         if outcome is core.CycleOutcome.FINISHED and plan.get("merge", True):
             tasks.mark_merged(cfg.hive_tasks_dir, task_id, "main")
             if on_approve is not None:
@@ -879,6 +887,199 @@ def test_a_queue_file_without_changes_loads(tmp_path, accounts, monkeypatch):
     Path(path).write_text(json.dumps(data))
 
     assert queue_mod.load(cfg, queue.queue_id).changes == []
+
+
+# --- A split task's sub-tasks take its place (ADR 495) ---
+
+_SPLIT = core.CycleOutcome.SPLIT
+
+
+def _states(queue):
+    return {e.task_id: e.state for e in queue.entries}
+
+
+def test_a_split_task_is_replaced_by_its_sub_tasks_in_place(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2")
+    fake = _install(monkeypatch, cfg, {
+        "T-1": {"split": [(), (1,)]}, "T-1-S1": {}, "T-1-S2": {}, "T-2": {},
+    })
+
+    queue = queue_mod.plan(cfg, "proj", ["T-1", "T-2"], limit=10_000)
+    queue = queue_mod.run(cfg, queue, sleep=_no_sleep)
+
+    order = ["T-1", "T-1-S1", "T-1-S2", "T-2"]
+    assert fake.started == order
+    assert [e.task_id for e in queue.entries] == order
+    assert queue.status == queue_mod.Q_DONE
+    assert _states(queue) == {
+        "T-1": queue_mod.SPLIT, "T-1-S1": queue_mod.MERGED,
+        "T-1-S2": queue_mod.MERGED, "T-2": queue_mod.MERGED,
+    }
+    assert queue.entry("T-1").split_into == ["T-1-S1", "T-1-S2"]
+    assert queue.entry("T-1-S2").epic == "T-1"
+    assert queue.entry("T-1-S2").depends_on == ["T-1-S1"]
+    assert not any(queue_mod.failed(e) for e in queue.entries)
+
+
+def test_a_sub_task_waits_for_an_earlier_sibling_that_is_not_merged(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    fake = _install(monkeypatch, cfg, {
+        "T-1": {"split": [(), (1,)]}, "T-1-S1": {"merge": False}, "T-1-S2": {},
+    })
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1"], 10_000), sleep=_no_sleep)
+
+    assert fake.started == ["T-1", "T-1-S1"]
+    assert queue.status == queue_mod.Q_WAITING
+    assert _states(queue)["T-1-S2"] == queue_mod.PENDING
+
+
+def test_a_dependent_waits_for_the_whole_epic(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {
+        "T-1": {"split": [(), ()]}, "T-1-S1": {}, "T-1-S2": {}, "T-2": {},
+    })
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000), sleep=_no_sleep)
+
+    assert fake.started == ["T-1", "T-1-S1", "T-1-S2", "T-2"]
+    assert queue.entry("T-2").depends_on == ["T-1-S1", "T-1-S2"]
+    file = context_transfer.read_task_file(
+        context_transfer.task_file_path(cfg.hive_tasks_dir, "T-2")
+    )
+    assert file.depends_on == ["T-1-S1", "T-1-S2"]
+    assert "was split into T-1-S1, T-1-S2" in file.body
+    assert queue.status == queue_mod.Q_DONE
+
+
+def test_a_dependent_waits_while_a_sub_task_is_unmerged(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {
+        "T-1": {"split": [(), ()]}, "T-1-S1": {}, "T-1-S2": {"merge": False}, "T-2": {},
+    })
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000), sleep=_no_sleep)
+
+    assert "T-2" not in fake.started
+    assert queue.status == queue_mod.Q_WAITING
+
+
+def test_a_failed_sub_task_skips_its_sibling_and_the_dependent(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {
+        "T-1": {"split": [(), (1,)]},
+        "T-1-S1": {"outcome": core.CycleOutcome.BLOCKED}, "T-1-S2": {}, "T-2": {},
+    })
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000), sleep=_no_sleep)
+
+    assert fake.started == ["T-1", "T-1-S1"]
+    assert _states(queue) == {
+        "T-1": queue_mod.SPLIT, "T-1-S1": queue_mod.BLOCKED,
+        "T-1-S2": queue_mod.SKIPPED, "T-2": queue_mod.SKIPPED,
+    }
+    assert queue.status == queue_mod.Q_DONE
+
+
+def test_resume_goes_on_with_the_absorbed_sub_tasks(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {
+        "T-1": {"split": [(), (1,)]}, "T-1-S1": {}, "T-1-S2": {}, "T-2": {},
+    })
+    queue = queue_mod.plan(cfg, "proj", ["T-1", "T-2"], limit=150)
+
+    queue = queue_mod.run(cfg, queue, sleep=_no_sleep)
+
+    assert queue.status == queue_mod.Q_LIMIT
+    saved = queue_mod.load(cfg, queue.queue_id)
+    assert saved.entry("T-1").split_into == ["T-1-S1", "T-1-S2"]
+    assert saved.entry("T-1-S1").epic == "T-1"
+    assert fake.started == ["T-1", "T-1-S1"]
+    shown = queue_mod.confirmation(cfg, saved)
+    assert "[split into T-1-S1, T-1-S2]" in shown
+    assert "[from T-1's split]" in shown
+
+    queue = queue_mod.run(
+        cfg, queue_mod.resume(cfg, queue.queue_id, limit=10_000), sleep=_no_sleep,
+    )
+
+    assert fake.started == ["T-1", "T-1-S1", "T-1-S2", "T-2"]
+    assert queue.status == queue_mod.Q_DONE
+
+
+def test_an_old_split_entry_without_sub_tasks_still_skips_its_dependents(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {"T-2": {}})
+    queue = queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000)
+    queue.entry("T-1").state = queue_mod.SPLIT
+    path = queue_mod.save(cfg, queue)
+    data = json.loads(Path(path).read_text())
+    for e in data["entries"]:
+        e.pop("split_into")
+        e.pop("epic")
+    Path(path).write_text(json.dumps(data))
+
+    loaded = queue_mod.load(cfg, queue.queue_id)
+    assert queue_mod.failed(loaded.entry("T-1"))
+    queue = queue_mod.run(cfg, queue_mod.resume(cfg, queue.queue_id), sleep=_no_sleep)
+
+    assert fake.started == []
+    assert _states(queue)["T-2"] == queue_mod.SKIPPED
+
+
+def test_a_sub_task_that_cannot_be_read_is_skipped_with_its_reason(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {"T-1": {"outcome": _SPLIT}, "T-2": {}})
+    parent = context_transfer.task_file_path(cfg.hive_tasks_dir, "T-1")
+    task = context_transfer.read_task_file(parent)
+    task.split_into = ["T-1-S1"]  # no description was ever written for it
+    tasks._write_task_file(parent, task)
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000), sleep=_no_sleep)
+
+    assert fake.started == ["T-1"]
+    assert _states(queue)["T-1-S1"] == queue_mod.SKIPPED
+    assert queue.entry("T-1-S1").note.startswith("not started:")
+    assert _states(queue)["T-2"] == queue_mod.SKIPPED
+
+
+def test_a_split_without_readable_sub_tasks_stays_a_failure(cfg, accounts, monkeypatch):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {"T-1": {"outcome": _SPLIT}, "T-2": {}})
+
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000), sleep=_no_sleep)
+
+    assert fake.started == ["T-1"]
+    assert queue.entry("T-1").note == "split, but its sub-tasks could not be read"
+    assert queue_mod.failed(queue.entry("T-1"))
+    assert _states(queue)["T-2"] == queue_mod.SKIPPED
+
+
+def test_the_confirmation_states_the_split_rule(cfg):
+    _task(cfg, "T-1")
+    queue = queue_mod.plan(cfg, "proj", ["T-1"], 10_000)
+    assert "replaced by its sub-tasks" in queue_mod.confirmation(cfg, queue)
+
+
+def test_cli_exits_zero_when_a_split_task_s_sub_tasks_all_merged(tmp_path, accounts, monkeypatch):
+    cfg = _make_config(tmp_path)
+    _task(cfg, "T-1")
+    _install(monkeypatch, cfg, {"T-1": {"split": [(), ()]}, "T-1-S1": {}, "T-1-S2": {}})
+
+    code = _cli(
+        monkeypatch, tmp_path, "run-queue", "--project", "proj", "--task-id", "T-1",
+        "--limit", "500000", "--yes",
+    )
+
+    assert code == 0
 
 
 def test_cli_missing_limit_names_the_unit(tmp_path, accounts, monkeypatch, capsys):

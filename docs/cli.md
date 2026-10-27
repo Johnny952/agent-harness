@@ -272,6 +272,14 @@ the effective values and a "Changed on resume" list, and records each change
 (old and new value, UTC time) under `changes` in the queue file. A plain
 `--resume` keeps the saved limit and asks nothing.
 
+A task the arquitecto splits into an epic is not a failure of the queue (ADR
+495): its sub-tasks take its place, in the epic's order, and run under the same
+limit and parallelism, each waiting for the earlier sibling it depends on. A
+task that depended on the split task waits for all of them, and is skipped if
+one fails. The confirmation and the final summary tag the split task `[split
+into ...]` and each sub-task `[from T-n's split]`; the queue file records both,
+and `--resume` goes on with the sub-tasks without a new yes.
+
 Queue state is saved in `<state_dir>/queues/<queue_id>.json`, written
 atomically on every change; ids look like `q-20261022T120000Z-ab12`. The
 command prints the id and the path when it saves, and `--resume <queue_id>` goes

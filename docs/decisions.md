@@ -18768,3 +18768,102 @@ its cache after it settles.
   inline confirmation keeps the row's other controls in view.
 - *Checking the URL's host against the worker's list:* ADR 465 decision 5
   keeps that list; the screen only refuses a non-`https:` link.
+
+## ADR 495 — A split task's sub-tasks take its place in the queue
+
+**Status:** accepted (T-188, 2026-10-27). Amends ADR 79 decision 4, "A cycle
+that spent and was then held, blocked or split is recorded as such and not
+retried", for *split* only: held and blocked are unchanged. Rests on
+`docs/charter.md` C-4, *Amended* 2026-10-26 (ruling (A) of T-188's blocked
+arquitecto). Supersedes nothing.
+
+**Context.** Until now `SPLIT` was in `dispatcher/queue.py` `FAILED`: a queued
+task the arquitecto split ended the queue's interest in it, and every task of
+the queue that depended on it was skipped, so the owner relaunched a queue by
+hand for each split (T-185, T-186 on 2026-10-26). C-4 now says the queue's yes
+covers the sub-tasks a listed task is split into, run in its place under the
+same limit and parallelism, with what depended on it waiting for all of them.
+Two facts of the code shape the decision: a cycle returns
+`CycleOutcome.SPLIT` only once `tasks.file_split` has written the sub-tasks
+and the parent's `split_into` (`dispatcher/dispatcher.py` `_file_split`); and
+`tasks.unmet_dependencies`, which `open_cycle` gates on, wants a `merged`
+block that no path writes on an epic parent, so a task left depending on a
+split task can never start (learning
+`docs/learnings/a-dependency-on-a-split-task-never-clears.md`).
+
+**Decision.**
+1. *The file.* `Entry` gains `split_into: list[str]` (default empty; set on
+   the split task) and `epic: str | None` (default None; set on an absorbed
+   sub-task). A queue file written before this ADR loads with the defaults.
+2. *Split is not a failure.* `SPLIT` leaves `FAILED`. A new public
+   `queue.failed(entry) -> bool` is true for a state in `FAILED`, and for
+   `SPLIT` with an empty `split_into` (its sub-tasks could not be read, or
+   the file predates this ADR, which keeps an old file's behaviour). `_next`'s
+   skip and `dispatcher/cli.py` `_run_queue`'s exit 1 test use it, so a queue
+   whose split task's sub-tasks all merged exits 0.
+3. *Absorbing.* Right after `_settle` leaves an entry `SPLIT`, both loops call
+   `_absorb_split(cfg, queue, entry)`, before the save that follows:
+   - it reads the task file's `split_into`; missing, not a list or empty, the
+     entry's note is "split, but its sub-tasks could not be read" and nothing
+     else changes (decision 2 then skips its dependents);
+   - each id not already an entry of the queue becomes one through `_entry`,
+     with `epic` set to the split task, inserted right after the split entry
+     in `split_into` order (a sub-task's `depends_on` names earlier siblings
+     only, so the order stays topological). An id `_entry` refuses becomes an
+     entry `skipped`, title empty, `depends_on` empty, note "not started:
+     <the QueueError>", never started; what depends on it is skipped as for
+     any failed task. `entry.split_into` is set to the whole list read;
+   - every `PENDING` entry whose `depends_on` names the split task has that
+     id replaced, in place, by the sub-task ids; the same replacement is
+     written to its task file's `depends_on` through `_comment`, widened to
+     `_comment(cfg, task_id, body, depends_on=None)` and passing it to
+     `tasks.handoff` (status kept), with the body "## queue <id>\n\n<split
+     task> was split into <ids>; this task now waits for all of them." The
+     board write is what lets `open_cycle` start the dependent once the
+     sub-tasks merge. `tasks.edit_task` is not used: it refuses a task whose
+     file has a handoff body;
+   - one log line at info: "queue <id>: task <T> was split; <ids> take its
+     place".
+   A sub-task is then an ordinary entry: it waits while a sibling is not
+   merged (`_waits`), is skipped when a sibling failed, counts against the
+   same limit and takes a slot of the same parallelism. A sub-task cannot be
+   split again (`tasks.file_split` refuses a task inside an epic), so its
+   proposed split ends it `blocked`, as for any refused split.
+4. *Parallel order.* `WriteScheduler` gains `reorder(task_ids)`, which under
+   its condition replaces `order` with the given order and notifies; the
+   parallel loop calls it with the entries' order after absorbing, so the
+   sub-tasks hold the split task's place for write windows rather than the
+   end that `enlist` would give them.
+5. *What the owner reads.* `confirmation` tags a split entry "  [split into
+   <ids>]" and an absorbed one "  [from <T>'s split]", and its rule line
+   becomes "A task that fails is not retried; the tasks that depend on it are
+   skipped. A task the arquitecto splits is replaced by its sub-tasks, which
+   run in its place under this limit; what depends on it waits for all of
+   them." `summary` adds the same two tags. `--resume` already prints the
+   confirmation, so it names the absorbed sub-tasks before going on; it asks
+   no new yes for them (C-4 covers them).
+6. *Resume.* Nothing new: absorbed entries are `pending` entries of the file.
+   A kill between the cycle's end and the save leaves the split task
+   `running`, which `reopen` records `interrupted` (ADR 79, 5); its sub-tasks
+   are then not absorbed and its dependents are skipped. Re-pointed board
+   `depends_on` written before such a kill stays written, which is correct
+   for the board either way.
+
+**Consequences.**
+- One yes can now run more cycles than the confirmation listed, bounded by
+  the same token limit; the confirmation says so.
+- The queue writes `depends_on` on a dependent's task file, the first board
+  field it changes besides a comment.
+- A board task outside the queue that depends on a split task still waits
+  forever: the gate is `tasks.unmet_dependencies`, not the queue's.
+- A sub-task the owner listed in the same queue is not added twice; it keeps
+  its listed place.
+
+**Ruled out.**
+- *Changing `tasks.unmet_dependencies` to count an epic parent met when every
+  `split_into` id merged:* the right fix for the board at large, but a
+  change to the task module's contract outside this task's surface.
+- *Asking a new yes on `--resume` for absorbed sub-tasks (ruling (B)):* the
+  owner ruled (A).
+- *Appending the sub-tasks at the end of the queue:* the Goal puts them in
+  the split task's place.
