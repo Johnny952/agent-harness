@@ -28,6 +28,7 @@ from dispatcher.config import (
     CONFIG_KEYS,
     DRAFT_ROLE,
     EDITABLE,
+    INTEGRADOR_ROLE,
     PHASE_ROLES,
     REMOVED_BOARD_KEYS,
     Config,
@@ -252,8 +253,10 @@ def create_app(config_path: str, token: str) -> Flask:
             "revision": _sha256(raw),
             "rows": rows,
             "roles": {
-                "role_model": sorted((PHASE_ROLES - {MAPPER_ROLE}) | {DRAFT_ROLE}),
-                "role_effort": sorted(PHASE_ROLES),
+                "role_model": sorted(
+                    (PHASE_ROLES - {MAPPER_ROLE}) | {DRAFT_ROLE, INTEGRADOR_ROLE}
+                ),
+                "role_effort": sorted(PHASE_ROLES | {INTEGRADOR_ROLE}),
                 "fallback_roles": sorted(PHASE_ROLES),
             },
             "recent_changes": recent_changes(warnings),

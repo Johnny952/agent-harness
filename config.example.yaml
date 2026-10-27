@@ -229,7 +229,7 @@ max_revision_rounds: 3
 default_effort: medium
 
 # A level per role over default_effort. Roles: arquitecto, implementador,
-# revisor, auditor, cartografo. An unknown role or level is refused at load.
+# revisor, auditor, cartografo, integrador. An unknown role or level is refused at load.
 # Optional; defaults to none.
 # role_effort:
 #   revisor: high
