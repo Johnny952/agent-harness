@@ -19056,6 +19056,81 @@ something re-points its `depends_on`, which only the queue does (ADR 495, 3).
 - *Keying on `status: epic`:* `close_epic` changes it to `done`, and the
   dependent would then wait forever again.
 
+## ADR 510 — Agent-side settings live in `hooks/install_settings.py`'s merge; a `SubagentStop` cap of 4000 characters and a 120000-token compaction window
+
+**Status:** accepted (T-195, 2026-10-27). Takes up `docs/plans/backlog.md`
+item 2, *Cap what a role returns* (the `SubagentStop` half) and *Compaction
+window*. Supersedes nothing.
+
+**Context.** Neither is set today. The agent image ships no `settings.json`:
+the `claude_shared` volume mounts over `/root/.claude` and shadows anything
+baked in, and every account's config home symlinks the one shared file
+(`docker/agent/entrypoint.sh`). `hooks/install_settings.py` is its only
+writer; it runs at every container start and merges additively — the event
+hook on every event, and `SYNC_SETTINGS` through `merge_defaults` — never
+rewriting a key already there. The hook script it registers is copied alone
+into the image (`docs/learnings/the-hook-is-copied-alone-into-the-agent-image.md`).
+The setup the backlog borrows from held subagent returns to 3–4 KB with a
+block-once hook, found `agent_type` set on about 7% of closes, and simulated
+a 120K window as about 12% cheaper than 150K. A role's subagent prompt is
+written by the role's model, not by the dispatcher; the one text the
+dispatcher writes into every phase session is its prompt's
+`Role: <role>. Task: <id>.` line (`dispatcher/dispatcher.py`, the prompt
+builder).
+
+**Decision.**
+1. *Where.* Agent-side settings are defaults in `hooks/install_settings.py`'s
+   additive merge, nowhere else: no baked `settings.json`, no per-account
+   file. A key the operator already set in the shared file wins, so each
+   default stays overridable by hand, for every account at once.
+2. *The window.* `autoCompactWindow` defaults to `120000`, merged like
+   `SYNC_SETTINGS`.
+3. *The hook.* A new stdlib-only script, `hooks/cap_subagent_return.py`,
+   copied by its own `COPY` line to `/usr/local/lib/ia-harness/` and
+   registered by `install_settings` as a second command on `SubagentStop`,
+   beside the event hook. It measures the subagent's last message in
+   characters (`last_assistant_message` from the hook input, else the last
+   assistant entry of `agent_transcript_path`).
+4. *The role.* Read from a sentinel, never `agent_type`: first an
+   `<!-- ia-harness-role: <name> -->` comment in the subagent's own first
+   prompt, then the dispatcher's `Role: <name>.` line in the parent session's
+   first prompt (`transcript_path`), else `unknown`. The log says which
+   (`role_source`: `subagent`, `session`, `none`). Nothing asks a role to
+   write the first sentinel yet; it is the opt-in for a finer cap.
+5. *The caps.* `DEFAULT_CAP = 4000` characters for every role; a `CAPS` dict
+   keyed by role overrides it and starts empty. Tuning edits that dict.
+6. *Block once.* Over its cap and not yet blocked, the hook prints
+   `{"decision": "block", "reason": …}`, the reason asking for the detail in
+   a file and a summary under the cap naming that file. A subagent counts as
+   already blocked when the input's `stop_hook_active` is true or the log
+   already has a `blocked` line for its `agent_id`; then it is let through,
+   whatever its length, and its retry is logged.
+7. *The log.* One JSON line per blocked return and per retry, appended to
+   `/root/.claude/ia-harness/subagent-returns.jsonl` (the shared volume, so
+   one file for every account): `ts`, `outcome` (`blocked` or `retried`),
+   `role`, `role_source`, `task`, `session_id`, `agent_id`, `agent_type`,
+   `chars`, `cap`. A return under its cap writes nothing.
+   `cap_subagent_return.py --report` prints one line per role from it, to
+   tune the caps.
+8. *Fail open.* Any error in the cap hook — unreadable input, transcript or
+   log — writes one stderr line and exits 0 with no decision: a broken cap
+   must not stop a subagent returning. The event hook keeps failing loudly.
+
+**Consequences.**
+- Both take effect at the next container start, and only where the shared
+  `settings.json` lacks the key; an image rebuild is needed for the hook's
+  `COPY`, which no phase can run.
+- A subagent pays one extra turn when it overruns; the retry's length is in
+  the log, so a cap too tight shows as retries still over it.
+- Compaction between tasks and mid-phase (backlog item 8) are not this ADR.
+
+**Ruled out.**
+- *A `settings.json` baked into the image:* the volume shadows it.
+- *Keying on `agent_type`:* mostly empty, per the backlog's measurement.
+- *Asking every role in its prompt to write the sentinel:* a prompt rule is
+  what the backlog found does not hold, and the dispatcher's own `Role:` line
+  already names the parent role on every phase.
+- *Measuring bytes:* the backlog's own figures are characters.
 ## ADR 507 — The config writer serves the integrador in the `role_model` and `role_effort` role lists, not in `fallback_roles`
 
 **Status:** accepted (T-191, 2026-10-27). Builds ADR 277 *Consequences*'

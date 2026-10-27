@@ -17,12 +17,26 @@ def test_install_registers_hook_on_every_event(tmp_path: Path) -> None:
     assert set(hooks) == expected_events
     for event in expected_events:
         commands = [h["command"] for group in hooks[event] for h in group["hooks"]]
-        assert commands == [install_settings.HOOK_COMMAND]
+        expected = [install_settings.HOOK_COMMAND]
+        if event == "SubagentStop":
+            expected.append(install_settings.RETURN_CAP_COMMAND)
+        assert commands == expected
     # Tool events select by tool name; the rest carry no matcher.
     for event in install_settings.TOOL_EVENTS:
         assert hooks[event][0]["matcher"] == "*"
     for event in install_settings.SESSION_EVENTS:
         assert "matcher" not in hooks[event][0]
+
+
+def test_install_sets_the_compact_window_but_keeps_an_operator_value(tmp_path: Path) -> None:
+    fresh = tmp_path / "fresh.json"
+    install_settings.install(str(fresh))
+    assert json.loads(fresh.read_text())["autoCompactWindow"] == 120000
+
+    own = tmp_path / "own.json"
+    own.write_text(json.dumps({"autoCompactWindow": 50000}))
+    install_settings.install(str(own))
+    assert json.loads(own.read_text())["autoCompactWindow"] == 50000
 
 
 def test_install_is_idempotent(tmp_path: Path) -> None:
