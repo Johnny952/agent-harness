@@ -21,7 +21,7 @@ the compose `dispatcher` service (README, *5. Run a task*).
 | Code | Name | Commands | Meaning |
 |---|---|---|---|
 | `0` | | all | Done. |
-| `1` | `EXIT_BLOCKED` | most | A run that stopped and needs a person: a blocked task, a refused merge, an entry that is not there, a queue that was not confirmed or has a failed task. An uncaught exception is also 1, with a traceback. |
+| `1` | `EXIT_BLOCKED` | most | A run that stopped and needs a person: a blocked task, a refused merge, an entry that is not there, a queue that was not confirmed, has a failed task, or ended `stalled`, `wait_expired` or `cancelled` (ADR 498). An uncaught exception is also 1, with a traceback. |
 | `2` | | all | Usage error from argparse (`--limit` below the floor included). `worker` also exits 2 when another worker holds `worker.lock`. `backup` and `restore` exit 2 on a backup error. |
 | `3` | `EXIT_SPLIT` | `run-task`, `command-verdict`, `command-resume` | The arquitecto split the task and the split was filed (ADR 60). |
 | `4` | `EXIT_NOT_PUSHED` | `merge-task --push`, `run-queue` | Merged, but the push was refused (ADR 78). |
@@ -251,8 +251,9 @@ and takes only `--limit`, `--parallel` and `--yes` (ADR 336).
 | `--ready` | `N` tasks | `0` | Add the first N tasks of the board's Ready order after the listed ones (ADR 132). At least one of `--task-id` and `--ready` is needed. |
 | `--limit` | `TOKENS`, measured tokens, not tasks | none; required unless `--resume` | The ceiling on the queue's spend: input + output + cache creation + cache read, summed from the usage log (ADR 79). At least `100000` (ADR 333); a smaller value is a usage error (exit 2) and nothing is saved or started. |
 | `--parallel` | cycles at a time | `1` for a new queue; the queue's own on `--resume` | At most the sum of `max_concurrent_phases` over the accounts (ADR 252); tasks with overlapping surfaces never write at once (ADR 83). With `--resume` it changes the queue's parallelism (ADR 336). |
+| `--max-wait` | `HOURS` | `72` | How long the queue waits for a person's merge with nothing else to run, per stretch with nothing merged (ADR 498). `0` ends at once; below 0 is a usage error (exit 2). Not with `--resume`: it is the queue's own. |
 | `--yes` | flag | off | Start without asking; the confirmation screen is still printed. |
-| `--resume` | `QUEUE_ID` | none | Go on with a saved queue under its own project and tasks. Only `--limit`, `--parallel` and `--yes` may go with it; `--project`, `--task-id` and `--ready` are a usage error (exit 2) that names them (ADR 336). |
+| `--resume` | `QUEUE_ID` | none | Go on with a saved queue under its own project and tasks. Only `--limit`, `--parallel` and `--yes` may go with it; `--project`, `--task-id`, `--ready` and `--max-wait` are a usage error (exit 2) that names them (ADR 336). |
 
 The limit is checked before each task and before each phase. A phase that has
 started finishes, so a queue can pass its limit by one phase. When the spend has
@@ -279,6 +280,22 @@ task that depended on the split task waits for all of them, and is skipped if
 one fails. The confirmation and the final summary tag the split task `[split
 into ...]` and each sub-task `[from T-n's split]`; the queue file records both,
 and `--resume` goes on with the sub-tasks without a new yes.
+
+With automatic approve off, a finished task waits for the person's merge
+(`merge-task` or the console's approve). When nothing else can run and every
+unmet dependency of the tasks left is a task finished in the queue, the queue
+does not end: its status is `waiting` and the file records
+`waiting = {on, since, until}`. It releases the project lock, starts no phase,
+probes no account and spends nothing; every 60 s
+(`queue.MERGE_POLL_SECONDS`) it re-reads the task files and, once a merge is
+recorded, takes the project again and starts the dependents. A finished task
+found dropped or blocked meanwhile is recorded `dropped` or `blocked` and its
+dependents are skipped as for any failed task. The wait ends the queue as
+`wait_expired` after `--max-wait` hours with nothing changing, or as
+`cancelled` on Ctrl-C (SIGINT; SIGTERM kills and leaves the file `waiting`);
+both exit 1, as does `stalled`, the end when what is left waits on a task
+outside the queue or one not finished in it. `--resume` of a `waiting` queue
+keeps its clock; of a `wait_expired` or `cancelled` one starts a fresh wait.
 
 Queue state is saved in `<state_dir>/queues/<queue_id>.json`, written
 atomically on every change; ids look like `q-20261022T120000Z-ab12`. The

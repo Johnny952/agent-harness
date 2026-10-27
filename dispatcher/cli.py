@@ -849,6 +849,12 @@ def build_parser() -> argparse.ArgumentParser:
         "never write at once (docs/plans/autonomy.md, B-3, ADR 83)",
     )
     queue_parser.add_argument(
+        "--max-wait", type=int, default=None, metavar="HOURS",
+        help="How long the queue waits for a person's merge with nothing else to "
+        f"run, per stretch (default {queue_mod.DEFAULT_MAX_WAIT_HOURS}; 0 ends at "
+        "once); not with --resume, the queue's own (ADR 498)",
+    )
+    queue_parser.add_argument(
         "--yes", action="store_true",
         help="Start without asking; the confirmation screen is still printed",
     )
@@ -1390,11 +1396,13 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
                 f"--parallel: at most {slots}, the pool's phase slots "
                 "(the sum of max_concurrent_phases, ADR 252)"
             )
+    if args.max_wait is not None and args.max_wait < 0:
+        parser.error("--max-wait: at least 0 hours")
     if args.resume:
-        if args.task_ids or args.ready or args.project:
+        if args.task_ids or args.ready or args.project or args.max_wait is not None:
             parser.error(
                 "--resume takes only --limit, --parallel and --yes: "
-                "the project and tasks are the queue's own (ADR 336)"
+                "the project, tasks and maximum wait are the queue's own (ADR 336, ADR 498)"
             )
         if args.limit is not None:
             check_floor()
@@ -1423,6 +1431,8 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
         except queue_mod.QueueError as exc:
             parser.error(str(exc))
         queue.parallel = 1 if args.parallel is None else args.parallel
+        if args.max_wait is not None:
+            queue.max_wait_hours = args.max_wait
         print(queue_mod.confirmation(cfg, queue))
         confirm()
         queue.authorized = True
@@ -1434,9 +1444,9 @@ def _run_queue(args: argparse.Namespace, cfg: Config, parser: argparse.ArgumentP
         raise SystemExit(EXIT_NOT_PUSHED)
     if queue.status == queue_mod.Q_LIMIT:
         raise SystemExit(EXIT_LIMIT)
-    if queue.status == queue_mod.Q_WAITING or any(
-        queue_mod.failed(e) for e in queue.entries
-    ):
+    if queue.status in (
+        queue_mod.Q_STALLED, queue_mod.Q_WAIT_EXPIRED, queue_mod.Q_CANCELLED,
+    ) or any(queue_mod.failed(e) for e in queue.entries):
         raise SystemExit(EXIT_BLOCKED)
 
 
