@@ -1596,8 +1596,9 @@ number and title.
      closed.
    - A salted password digest — **built**: stdlib `hashlib.scrypt` with a
      random salt, `hash_password` in `board_service/signin.py`,
-     `docs/decisions.md` ADR 324. Left: the console's sign-in screen and the
-     first-user command (`docs/plans/server-deployment.md` *How it would be
+     `docs/decisions.md` ADR 324. The first user is made by
+     `python3 -m board_service.first_user` (ADR 519). Left: the console's
+     sign-in screen (`docs/plans/server-deployment.md` *How it would be
      built*, step 2), so the console still signs in with Basic auth and its
      constant-time compare (`observability/auth.py`).
    - The four HTTP services run Flask's development server —
