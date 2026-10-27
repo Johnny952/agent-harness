@@ -159,6 +159,14 @@ from the conversation as well as from the console:
   depend on it. A spec an agent drafted is not a task until the owner has
   approved it, and an agent's draft never puts itself on a queue.
 
+**Amended:** 2026-10-26, in conversation with the main thread, at the user's
+word: a queue's yes also covers the sub-tasks a listed task is split into
+during the run. They run in its place, one cycle each, under the same spending
+limit and parallelism, and what depended on the split task waits for all of
+them. The confirmation says so before the yes. A sub-task that ends blocked,
+red at a gate, past its budget or out of quota is not retried, as for any
+task on the queue (T-188).
+
 ---
 
 ### C-5 — No role pushes
