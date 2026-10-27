@@ -18789,7 +18789,7 @@ and the parent's `split_into` (`dispatcher/dispatcher.py` `_file_split`); and
 `tasks.unmet_dependencies`, which `open_cycle` gates on, wants a `merged`
 block that no path writes on an epic parent, so a task left depending on a
 split task can never start (learning
-`inbox/T-188-a-dependency-on-a-split-task-never-clears.md`).
+`docs/learnings/a-dependency-on-a-split-task-never-clears.md`).
 
 **Decision.**
 1. *The file.* `Entry` gains `split_into: list[str]` (default empty; set on

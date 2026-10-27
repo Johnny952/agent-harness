@@ -660,3 +660,9 @@ Coolify file mounts no token, and `scripts/configure.sh` makes the host file
 empty and `0600` so Docker does not make a directory of it. Its failed-create
 branch has no test, the suite running as root; ADR 486 decision 4 fixes its
 shape, so it is not debt.
+**T-188** resolved no earlier row and declared `T-188-D1`. ADR 495: a queued
+task the arquitecto splits is replaced, at its place, by its sub-tasks, and
+the queue re-points its dependents' `depends_on` to them, on the board too
+(`docs/implementations/T-188.md`). Outside a queue a dependency on a split
+task still never clears, since `tasks.unmet_dependencies` wants a `merged`
+block no epic parent gets: that is `T-188-D1`.
