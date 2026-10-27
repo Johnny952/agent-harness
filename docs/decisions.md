@@ -19131,3 +19131,44 @@ builder).
   what the backlog found does not hold, and the dispatcher's own `Role:` line
   already names the parent role on every phase.
 - *Measuring bytes:* the backlog's own figures are characters.
+## ADR 507 — The config writer serves the integrador in the `role_model` and `role_effort` role lists, not in `fallback_roles`
+
+**Status:** accepted (T-191, 2026-10-27). Builds ADR 277 *Consequences*'
+"Not built yet: the integrador in `config_writer`'s role list". Supersedes
+nothing.
+
+**Context.** `load_config` already accepts `role_model.integrador` and
+`role_effort.integrador` (`dispatcher/config.py` `_load_role_model`,
+`_load_role_effort`), and `resolve_conflict` already starts the integrador
+with `cfg.model_for` / `cfg.effort_for` of it (ADR 277, 4). But the config
+writer's `GET /settings` `roles` block, which the Settings screen at
+`/models` renders one row per entry, is derived from `PHASE_ROLES`, and
+`INTEGRADOR_ROLE` is deliberately not in it (`dispatcher/config.py`
+`INTEGRADOR_ROLE`). So no row exists to set it from the console.
+
+**Decision.**
+1. `config_writer/app.py` serves `roles.role_model` as
+   `(PHASE_ROLES - {MAPPER_ROLE}) | {DRAFT_ROLE, INTEGRADOR_ROLE}` and
+   `roles.role_effort` as `PHASE_ROLES | {INTEGRADOR_ROLE}`, sorted — the same
+   sets `_load_role_model` and `_load_role_effort` accept, so every served row
+   loads.
+2. `roles.fallback_roles` stays `PHASE_ROLES`. Which account the integrador
+   may run on is not this task's question, and `fallback_roles` is not
+   validated against roles at load, so serving it would offer a box nobody
+   has decided the meaning of.
+3. `PHASE_ROLES` is not widened: `run-phase`, the board's actor list and the
+   command-request roles key on it, and the integrador is none of those
+   (ADR 277, 3).
+4. The console needs no change: it renders whatever `roles` lists.
+
+**Consequences.**
+- The Settings screen shows an `integrador` row under `role_model` and
+  `role_effort`. Left at *(default)*, nothing changes: the integrador runs on
+  the implementador's model and on `default_effort`.
+- The screen's hint "(default) … runs on default_model" is wrong for the
+  integrador (it falls back to the implementador's model), as it already was
+  for `arquitecto-draft` (the arquitecto's).
+
+**Ruled out.**
+- *Adding the integrador to `PHASE_ROLES`:* decision 3.
+- *A hard-coded role list in the console:* it would drift from the writer's.

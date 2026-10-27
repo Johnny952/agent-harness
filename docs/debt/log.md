@@ -692,3 +692,9 @@ settings are defaults in `hooks/install_settings.py`'s additive merge;
 once and logs it (`docs/implementations/T-195.md`). Neither is verified
 against the pinned CLI and neither works before an image rebuild; that is an
 operator step, not debt.
+**T-191** resolved no earlier row and declared `T-191-D1`. ADR 507: the config
+writer serves `integrador` in `roles.role_model` and `roles.role_effort`, not
+in `fallback_roles`; the dispatcher already read both keys (ADR 277), so only
+the writer changed (`docs/implementations/T-191.md`). The Settings hint still
+says an unset role runs on `default_model`, wrong for `integrador` and
+`arquitecto-draft`: that is `T-191-D1`.

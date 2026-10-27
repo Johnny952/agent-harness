@@ -11,7 +11,14 @@ import yaml
 
 from config_writer import app as writer
 from config_writer.app import create_app, main
-from dispatcher.config import CONFIG_KEYS, DRAFT_ROLE, PHASE_ROLES, load_config, refresh_primary
+from dispatcher.config import (
+    CONFIG_KEYS,
+    DRAFT_ROLE,
+    INTEGRADOR_ROLE,
+    PHASE_ROLES,
+    load_config,
+    refresh_primary,
+)
 from dispatcher.project_docs import MAPPER_ROLE
 
 TOKEN = "writer-token"
@@ -431,9 +438,25 @@ def test_rows_are_the_key_table_in_order(client) -> None:
 
 def test_roles_are_served_from_the_dispatcher_constants(client) -> None:
     roles = get(client)["roles"]
-    assert roles["role_model"] == sorted((PHASE_ROLES - {MAPPER_ROLE}) | {DRAFT_ROLE})
-    assert roles["role_effort"] == sorted(PHASE_ROLES)
+    assert roles["role_model"] == sorted(
+        (PHASE_ROLES - {MAPPER_ROLE}) | {DRAFT_ROLE, INTEGRADOR_ROLE}
+    )
+    assert roles["role_effort"] == sorted(PHASE_ROLES | {INTEGRADOR_ROLE})
     assert roles["fallback_roles"] == sorted(PHASE_ROLES)
+    assert "integrador" in roles["role_model"]
+    assert "integrador" in roles["role_effort"]
+    assert "integrador" not in roles["fallback_roles"]
+
+
+def test_an_integrador_override_is_what_the_dispatcher_reads(client, cfg: Path) -> None:
+    revision = get(client)["revision"]
+    revision = put(client, "role_model", {"integrador": "some-model"}, revision).get_json()[
+        "data"
+    ]["revision"]
+    assert put(client, "role_effort", {"integrador": "low"}, revision).status_code == 200
+    loaded = load_config(cfg)
+    assert loaded.model_for("integrador") == "some-model"
+    assert loaded.effort_for("integrador") == "low"
 
 
 def test_every_served_role_loads_in_an_override(client, cfg: Path) -> None:
