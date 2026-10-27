@@ -59,7 +59,8 @@
  * checks as the action routes, the body unchanged, and so does
  * `PUT /api/push/settings` (ADR 237, ADR 246), which saves which kinds are
  * pushed and the quiet hours; with the twenty-one above they make twenty-four
- * writes (twenty-seven with the three below). `GET /api/push/key`, the VAPID public key, and
+ * writes (twenty-seven with the three credentials below, twenty-nine with the
+ * session's two). `GET /api/push/key`, the VAPID public key, and
  * `GET /api/push/settings` are reads of the board-service and not of the api:
  * no token, no query parameter, no header of the browser's
  * (`forwardBoardRead`). Every other method on these three paths keeps the
@@ -72,6 +73,14 @@
  * hold a secret, which the console neither parses nor echoes nor logs). The
  * api's one credentials read, `GET /api/credentials` (ADR 471), is an entry of
  * `FORWARDED`. Every other method on these paths keeps the answer it had.
+ *
+ * **Three more go to the board-service for sign-in** (ADR 324, ADR 522):
+ * `POST`, `GET` and `DELETE /api/session`, which open, read and close the
+ * browser's session. They alone carry the browser's `harness_session` cookie,
+ * its `X-CSRF-Token` and an `X-Forwarded-For` (the last hop received, the
+ * client address), and pass the board-service's `Set-Cookie` back. The `POST`
+ * and the `DELETE` carry the CSRF checks of `forwardBoard`; a query string is
+ * a 400. Every other method on the path is the 405.
  */
 import {
   API_BASE_URL,
@@ -338,6 +347,12 @@ const PUSH_SUBSCRIPTIONS = "/api/push/subscriptions";
 const PUSH_SETTINGS = "/api/push/settings";
 
 /**
+ * The browser's session on the board-service (ADR 324, ADR 522): `POST` opens
+ * it, `GET` reads it, `DELETE` closes it. The only route that relays cookies.
+ */
+const SESSION = "/api/session";
+
+/**
  * The credential writes (ADR 468, ADR 483): `POST`s to the board-service with
  * the actions bearer and the body unchanged. The account name and the action id
  * are decoded and re-encoded, not shape-checked: the board service refuses
@@ -421,6 +436,13 @@ export async function forwardApiRequest(request: Request): Promise<Response | nu
   if (request.method === "GET" && url.pathname === PUSH_KEY) return forwardBoardRead(PUSH_KEY);
   if (request.method === "GET" && url.pathname === PUSH_SETTINGS) {
     return forwardBoardRead(PUSH_SETTINGS);
+  }
+
+  if (
+    url.pathname === SESSION &&
+    (request.method === "GET" || request.method === "POST" || request.method === "DELETE")
+  ) {
+    return forwardSession(request, url);
   }
 
   // Also before the read-only check, and only for the twenty-seven exact pairs: a method
@@ -886,24 +908,8 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     return jsonResponse({ error: resolved.error }, resolved.status);
   }
 
-  const mediaType = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-  if (mediaType !== "application/json") {
-    return jsonResponse({ error: `A write to ${BOARD} must be sent as application/json.` }, 415);
-  }
-  const site = request.headers.get("sec-fetch-site");
-  if (site !== null && site !== "same-origin") {
-    return jsonResponse(
-      { error: `A write to ${BOARD} must come from the console's own pages, not ${site}.` },
-      403,
-    );
-  }
-  const origin = request.headers.get("origin");
-  if (origin !== null && origin !== url.origin) {
-    return jsonResponse(
-      { error: `A write to ${BOARD} must come from the console's own origin.` },
-      403,
-    );
-  }
+  const refusal = csrfRefusal(request, url);
+  if (refusal) return refusal;
 
   const action = resolved.action;
   if (action && !BOARD_ACTIONS_TOKEN) {
@@ -1012,6 +1018,126 @@ async function forwardBoard(request: Request, url: URL, resolved: Resolution): P
     status: upstream.status,
     headers: contentType ? { "content-type": contentType } : {},
   });
+}
+
+/**
+ * `forwardBoard`'s CSRF checks, also `forwardSession`'s, in that order: 415 for
+ * a body that is not `application/json`, 403 for a `Sec-Fetch-Site` that is
+ * not `same-origin`, 403 for an `Origin` that is not this request's own.
+ * `null` once the request passes.
+ */
+function csrfRefusal(request: Request, url: URL): Response | null {
+  const mediaType = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    return jsonResponse({ error: `A write to ${BOARD} must be sent as application/json.` }, 415);
+  }
+  const site = request.headers.get("sec-fetch-site");
+  if (site !== null && site !== "same-origin") {
+    return jsonResponse(
+      { error: `A write to ${BOARD} must come from the console's own pages, not ${site}.` },
+      403,
+    );
+  }
+  const origin = request.headers.get("origin");
+  if (origin !== null && origin !== url.origin) {
+    return jsonResponse(
+      { error: `A write to ${BOARD} must come from the console's own origin.` },
+      403,
+    );
+  }
+  return null;
+}
+
+/**
+ * The client's address: the last entry of the incoming `X-Forwarded-For`, which
+ * is the hop the console's own proxy appended (ADR 522, 5). `null` when absent,
+ * empty or not shaped like an address.
+ */
+function clientAddress(request: Request): string | null {
+  const header = request.headers.get("x-forwarded-for");
+  if (header === null) return null;
+  const last = header.split(",").pop()!.trim();
+  return /^[0-9A-Fa-f.:]{1,45}$/.test(last) ? last : null;
+}
+
+/** The value of the browser's `harness_session` cookie, or `null`. Not decoded or checked. */
+function sessionCookie(request: Request): string | null {
+  const header = request.headers.get("cookie");
+  if (header === null) return null;
+  for (const part of header.split(";")) {
+    const piece = part.trim();
+    const eq = piece.indexOf("=");
+    if (eq !== -1 && piece.slice(0, eq) === "harness_session") return piece.slice(eq + 1);
+  }
+  return null;
+}
+
+/**
+ * The board-service's answer to `POST`, `GET` and `DELETE /api/session`
+ * (ADR 324, ADR 522). The only forward that relays the browser's session cookie
+ * upstream and the board-service's `Set-Cookie` back. A query string is a 400;
+ * the writes carry `csrfRefusal`'s checks, and a `POST` its body, bounded.
+ * Nothing but the failure line is logged: never the body, cookie, token or address.
+ */
+async function forwardSession(request: Request, url: URL): Promise<Response> {
+  if (url.search !== "") {
+    return jsonResponse({ error: `${SESSION} takes no query string.` }, 400);
+  }
+  const method = request.method;
+  if (method === "POST" || method === "DELETE") {
+    const refusal = csrfRefusal(request, url);
+    if (refusal) return refusal;
+  }
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const cookie = sessionCookie(request);
+  if (cookie !== null) headers["Cookie"] = `harness_session=${cookie}`;
+  const token = request.headers.get("x-csrf-token");
+  if (token !== null) headers["X-CSRF-Token"] = token;
+  const address = clientAddress(request);
+  if (address !== null) headers["X-Forwarded-For"] = address;
+
+  let body: ArrayBuffer | undefined;
+  if (method === "POST") {
+    headers["Content-Type"] = "application/json";
+    const read = await readBounded(request, MAX_BOARD_BODY_BYTES);
+    if (read === null) {
+      return jsonResponse(
+        { error: `A write to ${BOARD} takes at most ${MAX_BOARD_BODY_BYTES} bytes.` },
+        413,
+      );
+    }
+    body = read;
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${BOARD_SERVICE_URL}${SESSION}`, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body }),
+      signal: AbortSignal.timeout(BOARD_SERVICE_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    const why = describe(cause);
+    console.error(`[forward] ${BOARD_SERVICE_URL} did not answer: ${why}`);
+    if (isTimeout(cause)) {
+      return jsonResponse(
+        { error: `${capitalise(BOARD)} did not answer within ${BOARD_SERVICE_TIMEOUT_MS} ms.` },
+        504,
+      );
+    }
+    return jsonResponse({ error: `${capitalise(BOARD)} could not be reached.` }, 502);
+  }
+
+  const answer = new Headers();
+  const contentType = upstream.headers.get("content-type");
+  if (contentType) answer.set("content-type", contentType);
+  for (const cookieLine of upstream.headers.getSetCookie()) answer.append("set-cookie", cookieLine);
+  // A 204 (the close) cannot carry a body, not even an empty one.
+  const bodyless = upstream.status === 204 || upstream.status === 205 || upstream.status === 304;
+  const content = bodyless ? null : await upstream.arrayBuffer();
+  return new Response(content, { status: upstream.status, headers: answer });
 }
 
 /**
