@@ -715,3 +715,8 @@ sign-ins now has an address to count. Gating the other routes on a session
 stays with the plan's step 2 guard, a later task. The client address
 holding only as far as the proxy in front replaces the header is accepted in
 ADR 522 *Consequences* and recorded as a learning rather than debt.
+**T-193-S1** resolved no earlier row and declared `T-193-S1-D1`. ADR 519:
+`python3 -m board_service.first_user` creates the first owner from the
+server's shell and prints the TOTP secret and otpauth URI once
+(`docs/implementations/T-193-S1.md`). It refuses once any user exists, and no
+command adds a second user such as a reviewer: that is `T-193-S1-D1`.

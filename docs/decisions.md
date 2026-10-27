@@ -19305,3 +19305,57 @@ proxy, the same address for every person.
   body".
 - *Passing the browser's whole `Cookie` header*: the console's other
   cookies are not the board service's business.
+## ADR 519 — The first user is created by `python3 -m board_service.first_user`, which prints the TOTP secret and otpauth URI once, not a setup link
+
+**Status:** accepted (T-193-S1, 2026-10-27). Amends
+`docs/plans/server-deployment.md` *Decisions* 1 ("a command that prints a
+one-time setup link"). Supersedes nothing; ADR 324 stands.
+
+**Context.** ADR 324 built users, passwords and TOTP in
+`board_service/signin.py` and left the first-user command to its step 2.
+The plan wants that command to print a one-time setup link. A link needs a
+route that serves it and a screen that shows the TOTP enrolment, both front
+work that is not built yet; and until it is used, the link is a credential
+on the network. `create_user` refuses a duplicate name but not a second user.
+
+**Decision.**
+1. A module `board_service/first_user.py`, run as `python3 -m
+   board_service.first_user [--name NAME]` from the server's shell. `NAME`
+   defaults to `owner`; `create_user` checks it against `NAME_RE`.
+2. It reads `BOARD_AUTH_DIR`. Unset or empty: one stderr line, exit 2.
+3. If `users.json` there already holds a user: one stderr line, exit 1,
+   before any prompt and with the store untouched.
+4. It reads the password twice with `getpass` (no echo); the two must match,
+   else exit 2. A `ValueError` from `create_user` (name, length): its
+   message on stderr, exit 2.
+5. `signin.create_user` gains a keyword `first: bool = False`. When true it
+   refuses, under the same `_locked` that writes, if `users` is not empty,
+   raising `signin.UserExists` (a `ValueError` subclass); the command maps
+   that to exit 1. So two concurrent runs cannot both create a user.
+6. The role is always `owner`. On success it appends an audit line
+   `user_created` (user, `role="owner"`, no secret), then prints to stdout,
+   once, the base32 TOTP secret and
+   `otpauth://totp/ia-harness:<name>?secret=<S>&issuer=ia-harness&algorithm=SHA1&digits=6&period=30`
+   (label quoted with `urllib.parse.quote`), and exits 0. The password is
+   never printed.
+7. This is the one sanctioned exception to ADR 324 decision 10: the secret
+   goes to the operator's terminal, once, and nowhere else — not to the
+   audit log, not over HTTP.
+
+**Consequences.**
+- No setup link exists. Whoever runs the command must be at the server's
+  shell and enrol the authenticator from its output.
+- A restore of an empty auth directory (plan *Decisions* 7–8) reruns the
+  command; with a user present it refuses, by design.
+- A second user (a reviewer) still has no command; that is later work.
+- `getpass` reads `/dev/tty`; in a container that means `docker compose
+  exec -it`. Wiring `BOARD_AUTH_DIR` into compose is other T-193 work.
+
+**Ruled out.**
+- *A one-time setup link:* needs a route and a screen not yet built, and
+  puts a credential on the network until used.
+- *Password as an argument or env var:* lands in shell history and
+  `/proc/<pid>/environ`.
+- *Checking "no users" only outside the lock:* two runs could both pass it.
+- *A separate `create_first_user` in signin:* duplicates the record-building
+  of `create_user` for one condition.
