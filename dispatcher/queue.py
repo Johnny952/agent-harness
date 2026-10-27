@@ -7,7 +7,10 @@ when it was confirmed and nothing else, run one at a time in an order that
 follows `depends_on`:
 
 - a task whose dependency is not merged yet waits, and the queue goes on with
-  the next one that does not;
+  the next one that does not; when nothing else can run and every such
+  dependency is finished in the queue, the queue itself waits for the person's
+  merges (holding no project lock and spending nothing, up to `max_wait_hours`)
+  and starts the dependent once they are recorded (ADR 498);
 - a task that fails (blocked, held after it spent, interrupted) is not
   retried, and every task of the queue that depends on it is skipped with a
   comment;
@@ -66,6 +69,13 @@ WAIT_POLL_SECONDS = 300
 #: as soon as it is released.
 SURFACE_LOCK_POLL_SECONDS = 5
 
+#: Seconds between two looks at the merge records while the queue waits for
+#: a person's merge (ADR 498).
+MERGE_POLL_SECONDS = 60
+
+#: The default `max_wait_hours`: how long one stretch of waiting for merges lasts.
+DEFAULT_MAX_WAIT_HOURS = 72
+
 #: How much of a task's goal its title shows on the confirmation screen.
 TITLE_WIDTH = 72
 
@@ -83,16 +93,20 @@ SPLIT = "split"
 SKIPPED = "skipped"
 INTERRUPTED = "interrupted"  # found `running` on resume: never started again
 STOPPED = "limit_reached"  # stopped by the limit before or inside its cycle
+DROPPED = "dropped"  # dropped (or its file gone) while the queue waited for its merge
 
 #: A task in one of these ended its one cycle without something to build on:
 #: whatever depends on it is skipped. A split task is not here: its sub-tasks
 #: take its place (ADR 495); `failed` covers a split that left none.
-FAILED = frozenset({BLOCKED, HELD, SKIPPED, INTERRUPTED})
+FAILED = frozenset({BLOCKED, HELD, SKIPPED, INTERRUPTED, DROPPED})
 
 # The states of the queue itself.
 Q_RUNNING = "running"
 Q_DONE = "done"
-Q_WAITING = "waiting"  # what is left waits on a merge outside the queue
+Q_WAITING = "waiting"  # live: waiting for the person's merges (ADR 498)
+Q_STALLED = "stalled"  # what is left waits on a task outside the queue, or one not finished in it
+Q_WAIT_EXPIRED = "wait_expired"  # the wait for merges reached `max_wait_hours`
+Q_CANCELLED = "cancelled"  # the person interrupted the wait
 Q_LIMIT = "limit_reached"
 Q_PUSH_REFUSED = "push_refused"
 
@@ -152,6 +166,11 @@ class Queue:
     passed_over: list[str] = dataclasses.field(default_factory=list)
     # One record per resume that changed the limit or the parallelism (ADR 336).
     changes: list[dict] = dataclasses.field(default_factory=list)
+    # Hours one stretch of waiting for merges lasts (ADR 498), and, while the
+    # queue waits or after a wait ended expired or cancelled, what it waits on:
+    # {"on": [task ids], "since": ISO, "until": ISO}.
+    max_wait_hours: int = DEFAULT_MAX_WAIT_HOURS
+    waiting: dict | None = None
 
     def entry(self, task_id: str) -> Entry:
         return next(e for e in self.entries if e.task_id == task_id)
@@ -352,7 +371,9 @@ def confirmation(cfg: Config, queue: Queue) -> str:
     approve = (
         "on: a task that meets every condition is merged and the base pushed"
         if cfg.auto_approves(queue.project)
-        else "off: finished tasks wait for `merge-task`, and so do their dependents"
+        else "off: finished tasks wait for a person's merge (`merge-task` or the "
+        "console's approve); the queue waits for those merges and then starts "
+        "what depends on them"
     )
     lines = [
         f"Queue {queue.queue_id} for project {queue.project}",
@@ -377,7 +398,11 @@ def confirmation(cfg: Config, queue: Queue) -> str:
         "  It is checked before each phase, so the phase running when it is reached "
         "finishes and the spend can pass it by that one phase.",
         f"Automatic approve: {approve}",
+        f"Merge wait: up to {queue.max_wait_hours} hours with nothing merged, checked "
+        f"every {MERGE_POLL_SECONDS} s, spending nothing; Ctrl-C ends it as cancelled",
     ]
+    if queue.waiting:
+        lines.append(_waiting_line(queue))
     if queue.changes:
         lines += ["", "Changed on resume:"]
         for change in queue.changes:
@@ -388,6 +413,14 @@ def confirmation(cfg: Config, queue: Queue) -> str:
             ]
             lines.append(f"  {change['at']}: {', '.join(moved)}")
     return "\n".join(lines)
+
+
+def _waiting_line(queue: Queue) -> str:
+    w = queue.waiting or {}
+    return (
+        f"Waiting since {w.get('since')} for the merge of "
+        f"{', '.join(w.get('on', []))}, until {w.get('until')}"
+    )
 
 
 def _split_tag(entry: Entry) -> str:
@@ -526,8 +559,10 @@ def reopen(
             if entry.state == STOPPED:
                 entry.state = PENDING
                 entry.note = ""
+    if queue.status in (Q_WAIT_EXPIRED, Q_CANCELLED):
+        queue.waiting = None  # a resume is a fresh wait (ADR 498, 6)
     if queue.status != Q_PUSH_REFUSED:
-        queue.status = Q_RUNNING
+        queue.status = Q_RUNNING  # a saved `waiting` keeps its `waiting` record
     return queue
 
 
@@ -543,28 +578,151 @@ def run(
     queue: Queue,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Queue:
-    """Run the queue until it is done, waits on a merge, hits its limit or a refused push.
+    """Run the queue until it is done, stalled, hits its limit or a refused push.
 
     Saved before every cycle and after it, so the file is never behind by more
     than the one task it says is `running`.
 
-    The project is held for the whole run (ADR 200, 6): the queue waits for it
+    The project is held while cycles run (ADR 200, 6): the queue waits for it
     while another cycle has it, then passes the one lock to every cycle it
     starts, so the cycles of a parallel queue neither exclude each other nor
-    the surface locks that order their writes (ADR 83).
+    the surface locks that order their writes (ADR 83). When nothing can run
+    but the person's merges are awaited, the lock is released for the wait
+    (the merge's backup and a request for changes need it) and taken again
+    when a merge lands (ADR 498, 2); a queue that ends `waiting` never returns.
     """
     if queue.status == Q_PUSH_REFUSED:
         logger.error("queue %s stopped on a refused push; nothing more runs", queue.queue_id)
         return queue
-    lock = _take_project(cfg, queue, sleep)
+    lock: ProjectLock | None = None
     try:
-        queue.status = Q_RUNNING
-        save(cfg, queue)
-        if queue.parallel > 1:
-            return _run_parallel(cfg, queue, sleep, lock)
-        return _run_serial(cfg, queue, sleep, lock)
+        while True:
+            lock = _take_project(cfg, queue, sleep)
+            before = [e.state for e in queue.entries]
+            queue.status = Q_RUNNING
+            save(cfg, queue)
+            if queue.parallel > 1:
+                _run_parallel(cfg, queue, sleep, lock)
+            else:
+                _run_serial(cfg, queue, sleep, lock)
+            lock.release()
+            lock = None
+            if queue.status != Q_WAITING:
+                return queue
+            if [e.state for e in queue.entries] != before:
+                queue.waiting = None  # something ran: a new stretch, a new clock
+            if not _wait_for_merges(cfg, queue, sleep):
+                return queue
     finally:
-        lock.release()
+        if lock is not None:
+            lock.release()
+
+
+def _now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _end_status(cfg: Config, queue: Queue) -> str:
+    """How a loop that can start nothing and has nothing running ends (ADR 498, 1).
+
+    `done` with no pending entry left; `waiting` when a pending entry's unmet
+    dependencies are all entries of this queue finished and awaiting the
+    person's merge; otherwise `stalled`.
+    """
+    pending = [e for e in queue.entries if e.state == PENDING]
+    if not pending:
+        return Q_DONE
+    return Q_WAITING if any(_waitable(cfg, queue, e) for e in pending) else Q_STALLED
+
+
+def _unmerged_finished(cfg: Config, queue: Queue, entry: Entry) -> list[str] | None:
+    """The finished dependencies of the entry awaiting a merge, or None if it
+    also depends on something else unmerged (outside the queue, or not finished)."""
+    unmerged = [d for d in entry.depends_on if not _is_merged(cfg, d)]
+    finished = {e.task_id for e in queue.entries if e.state == FINISHED}
+    if not unmerged or any(d not in finished for d in unmerged):
+        return None
+    return unmerged
+
+
+def _waitable(cfg: Config, queue: Queue, entry: Entry) -> bool:
+    return _unmerged_finished(cfg, queue, entry) is not None
+
+
+def _merges_waited_on(cfg: Config, queue: Queue) -> list[str]:
+    on: list[str] = []
+    for e in queue.entries:
+        if e.state != PENDING:
+            continue
+        for d in _unmerged_finished(cfg, queue, e) or []:
+            if d not in on:
+                on.append(d)
+    return sorted(on, key=lambda d: [x.task_id for x in queue.entries].index(d))
+
+
+def _refresh_finished(cfg: Config, queue: Queue) -> bool:
+    """Re-read the task file of every finished entry; True if any changed (ADR 498, 4)."""
+    changed = False
+    for entry in queue.entries:
+        if entry.state != FINISHED:
+            continue
+        task = _task_file(cfg, entry.task_id)
+        if task is not None and task.merged is not None:
+            entry.state = MERGED
+        elif task is None or task.status == "dropped":
+            entry.state, entry.note = DROPPED, "dropped while the queue waited for its merge"
+        elif task.status == "blocked":
+            entry.state, entry.note = BLOCKED, "blocked while the queue waited for its merge"
+        else:
+            continue
+        changed = True
+        logger.info("queue %s: task %s is %s", queue.queue_id, entry.task_id, entry.state)
+    return changed
+
+
+def _wait_for_merges(
+    cfg: Config, queue: Queue, sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Wait, spending nothing, until a merge record changes; False if the wait ended the queue.
+
+    Starts no phase and probes no account: it reads task files every
+    MERGE_POLL_SECONDS and writes only the queue file (ADR 498, 4). The clock
+    of a resumed wait goes on from its `since`.
+    """
+    since = None
+    if queue.waiting and queue.waiting.get("since"):
+        since = dt.datetime.fromisoformat(queue.waiting["since"])
+    since = since or _now()
+    until = since + dt.timedelta(hours=queue.max_wait_hours)
+    on = _merges_waited_on(cfg, queue)
+    queue.waiting = {
+        "on": on,
+        "since": since.isoformat(timespec="seconds"),
+        "until": until.isoformat(timespec="seconds"),
+    }
+    queue.status = Q_WAITING
+    save(cfg, queue)
+    logger.info(
+        "queue %s: waiting for the merge of %s until %s",
+        queue.queue_id, ", ".join(on), queue.waiting["until"],
+    )
+    try:
+        while True:
+            if _refresh_finished(cfg, queue):
+                queue.waiting = None
+                save(cfg, queue)
+                return True
+            if _now() >= until:
+                queue.status = Q_WAIT_EXPIRED
+                save(cfg, queue)
+                logger.warning("queue %s: no merge by %s; the wait ended", queue.queue_id, until)
+                return False
+            sleep(MERGE_POLL_SECONDS)
+    except KeyboardInterrupt:
+        queue.status = Q_CANCELLED
+        save(cfg, queue)
+        logger.warning("queue %s: the wait was cancelled", queue.queue_id)
+        return False
 
 
 def _take_project(
@@ -604,8 +762,7 @@ def _run_serial(
             return queue
         entry = _next(cfg, queue)
         if entry is None:
-            left = [e for e in queue.entries if e.state in (PENDING, FINISHED)]
-            queue.status = Q_WAITING if any(e.state == PENDING for e in left) else Q_DONE
+            queue.status = _end_status(cfg, queue)
             save(cfg, queue)
             return queue
 
@@ -889,8 +1046,7 @@ def _run_parallel(
         elif stop["limit"] or queue.spent >= queue.limit:
             _stop_on_limit(cfg, queue, None)
         else:
-            left = [e for e in queue.entries if e.state in (PENDING, FINISHED)]
-            queue.status = Q_WAITING if any(e.state == PENDING for e in left) else Q_DONE
+            queue.status = _end_status(cfg, queue)
             save(cfg, queue)
     return queue
 
@@ -1033,4 +1189,6 @@ def summary(queue: Queue) -> str:
             extra += f", {e.unmeasured} unmeasured call(s)"
         note = f"  {e.note}" if e.note else ""
         lines.append(f"  {e.task_id}: {e.state}{extra}{note}{_split_tag(e)}")
+    if queue.waiting:
+        lines.append(_waiting_line(queue))
     return "\n".join(lines)

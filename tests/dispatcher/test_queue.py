@@ -348,12 +348,209 @@ def test_unmerged_dependency_waits_and_the_queue_moves_on(cfg, accounts, monkeyp
     _task(cfg, "T-3")
     fake = _install(monkeypatch, cfg, {"T-1": {"merge": False}, "T-2": {}, "T-3": {}})
 
-    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2", "T-3"], 10_000),
-                          sleep=_no_sleep)
+    planned = queue_mod.plan(cfg, "proj", ["T-1", "T-2", "T-3"], 10_000)
+    planned.max_wait_hours = 0
+    queue = queue_mod.run(cfg, planned, sleep=_no_sleep)
 
     assert fake.started == ["T-1", "T-3"]
-    assert queue.status == queue_mod.Q_WAITING
+    assert queue.status == queue_mod.Q_WAIT_EXPIRED
     assert queue.entry("T-2").state == queue_mod.PENDING
+
+
+# --- Waiting for the person's merge (ADR 498) ---------------------------------
+
+
+class Clock:
+    """A replaceable `queue._now`, moved by the fake sleep."""
+
+    def __init__(self):
+        import datetime as dt
+        self.now = dt.datetime(2026, 10, 27, 12, 0, tzinfo=dt.timezone.utc)
+        self.dt = dt
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += self.dt.timedelta(seconds=seconds)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = Clock()
+    monkeypatch.setattr(queue_mod, "_now", c)
+    return c
+
+
+def _sleeper(clock, cfg, at=None, do=None):
+    """A sleep that advances the clock; on its `at`-th call it runs `do`."""
+    calls = []
+
+    def sleep(seconds):
+        calls.append(seconds)
+        clock.advance(seconds)
+        if at is not None and len(calls) == at:
+            do()
+
+    sleep.calls = calls
+    return sleep
+
+
+def _waiting_queue(cfg, monkeypatch, **script):
+    _task(cfg, "T-1")
+    _task(cfg, "T-2", depends_on=["T-1"])
+    fake = _install(monkeypatch, cfg, {"T-1": {"merge": False}, "T-2": {}, **script})
+    return fake, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000)
+
+
+def _set_status(cfg, task_id, status):
+    path = context_transfer.task_file_path(cfg.hive_tasks_dir, task_id)
+    task = context_transfer.read_task_file(path)
+    task.status = status
+    context_transfer.write_task_file(path, task)
+
+
+def test_the_queue_waits_for_a_merge_then_starts_the_dependent(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    seen = {}
+
+    def merge():
+        seen["file"] = json.loads(Path(queue_mod.queue_path(cfg, planned.queue_id)).read_text())
+        seen["probes"] = accounts["probes"]
+        tasks.mark_merged(cfg.hive_tasks_dir, "T-1", "main")
+
+    sleep = _sleeper(clock, cfg, at=3, do=merge)
+    queue = queue_mod.run(cfg, planned, sleep=sleep)
+
+    assert sleep.calls == [queue_mod.MERGE_POLL_SECONDS] * 3
+    assert fake.started == ["T-1", "T-2"]  # nothing started during the wait
+    assert queue.status == queue_mod.Q_DONE and queue.waiting is None
+    assert seen["file"]["status"] == "waiting"
+    assert seen["file"]["waiting"]["on"] == ["T-1"]
+    assert seen["file"]["max_wait_hours"] == 72
+    assert accounts["probes"] == 0  # no /usage probe at all
+
+
+def test_the_wait_releases_the_project_lock(cfg, accounts, clock, monkeypatch):
+    from dispatcher.project_lock import ProjectBusy, ProjectLock
+
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    probe = {}
+
+    def merge():
+        try:
+            held = ProjectLock.take(cfg.state_dir, "proj", None, "the merge's backup")
+        except ProjectBusy:
+            probe["free"] = False
+        else:
+            probe["free"] = True
+            held.release()
+        tasks.mark_merged(cfg.hive_tasks_dir, "T-1", "main")
+
+    queue_mod.run(cfg, planned, sleep=_sleeper(clock, cfg, at=1, do=merge))
+    assert probe["free"] is True
+
+
+@pytest.mark.parametrize("status,state", [("dropped", queue_mod.DROPPED), ("blocked", queue_mod.BLOCKED)])
+def test_a_dependency_that_ends_badly_while_waiting_skips_its_dependents(
+    cfg, accounts, clock, monkeypatch, status, state
+):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    sleep = _sleeper(clock, cfg, at=1, do=lambda: _set_status(cfg, "T-1", status))
+
+    queue = queue_mod.run(cfg, planned, sleep=sleep)
+
+    assert fake.started == ["T-1"]
+    assert queue.entry("T-1").state == state
+    assert queue.entry("T-2").state == queue_mod.SKIPPED
+    assert queue.status == queue_mod.Q_DONE
+
+
+def test_a_task_file_gone_while_waiting_counts_as_dropped(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    path = context_transfer.task_file_path(cfg.hive_tasks_dir, "T-1")
+    queue = queue_mod.run(cfg, planned, sleep=_sleeper(clock, cfg, at=1, do=lambda: os.unlink(path)))
+    assert queue.entry("T-1").state == queue_mod.DROPPED
+
+
+def test_the_wait_expires_after_the_maximum(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    planned.max_wait_hours = 1
+    sleep = _sleeper(clock, cfg)
+
+    queue = queue_mod.run(cfg, planned, sleep=sleep)
+
+    assert queue.status == queue_mod.Q_WAIT_EXPIRED
+    assert len(sleep.calls) == 60
+    assert queue.waiting["on"] == ["T-1"]
+    saved = queue_mod.load(cfg, queue.queue_id)
+    assert saved.status == queue_mod.Q_WAIT_EXPIRED and saved.waiting == queue.waiting
+    assert fake.started == ["T-1"]
+
+
+def test_ctrl_c_cancels_the_wait(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    queue = queue_mod.run(cfg, planned, sleep=interrupt)
+
+    assert queue.status == queue_mod.Q_CANCELLED
+    assert queue_mod.load(cfg, queue.queue_id).status == queue_mod.Q_CANCELLED
+    assert not any(e.state == queue_mod.RUNNING for e in queue.entries)
+
+
+def test_resume_of_a_waiting_queue_keeps_its_clock_and_waits(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    queue_mod.run(cfg, planned, sleep=_sleeper(clock, cfg, at=2, do=lambda: (_ for _ in ()).throw(KeyboardInterrupt)))
+    # A kill leaves the file `waiting` (SIGTERM): simulate by saving that status.
+    killed = queue_mod.load(cfg, planned.queue_id)
+    killed.status = queue_mod.Q_WAITING
+    queue_mod.save(cfg, killed)
+    since = killed.waiting["since"]
+
+    resumed = queue_mod.reopen(cfg, planned.queue_id)
+    assert resumed.waiting["since"] == since
+    assert "Waiting since" in queue_mod.confirmation(cfg, resumed)
+    assert "Merge wait: up to 72 hours" in queue_mod.confirmation(cfg, resumed)
+
+    sleep = _sleeper(clock, cfg, at=1, do=lambda: tasks.mark_merged(cfg.hive_tasks_dir, "T-1", "main"))
+    queue = queue_mod.run(cfg, resumed, sleep=sleep)
+    assert fake.started == ["T-1", "T-2"] and queue.status == queue_mod.Q_DONE
+
+
+def test_resume_of_an_expired_wait_starts_a_fresh_one(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    planned.max_wait_hours = 0
+    queue_mod.run(cfg, planned, sleep=_no_sleep)
+    assert queue_mod.load(cfg, planned.queue_id).status == queue_mod.Q_WAIT_EXPIRED
+
+    resumed = queue_mod.reopen(cfg, planned.queue_id)
+    assert resumed.waiting is None and resumed.status == queue_mod.Q_RUNNING
+
+
+def test_the_confirmation_says_the_queue_waits_for_merges(cfg, monkeypatch):
+    _task(cfg, "T-1")
+    text = queue_mod.confirmation(cfg, queue_mod.plan(cfg, "proj", ["T-1"], 10_000))
+    assert "the queue waits for those merges" in text
+    assert "Merge wait: up to 72 hours" in text
+
+
+def test_a_dependency_outside_the_queue_stalls_instead_of_waiting(cfg, accounts, clock, monkeypatch):
+    _task(cfg, "T-0")
+    _task(cfg, "T-2", depends_on=["T-0"])
+    _install(monkeypatch, cfg, {"T-2": {}})
+    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-2"], 10_000), sleep=_no_sleep)
+    assert queue.status == queue_mod.Q_STALLED
+
+
+def test_a_parallel_queue_waits_too(cfg, accounts, clock, monkeypatch):
+    fake, planned = _waiting_queue(cfg, monkeypatch)
+    planned.parallel = 2
+    sleep = _sleeper(clock, cfg, at=1, do=lambda: tasks.mark_merged(cfg.hive_tasks_dir, "T-1", "main"))
+    queue = queue_mod.run(cfg, planned, sleep=sleep)
+    assert fake.started == ["T-1", "T-2"] and queue.status == queue_mod.Q_DONE
 
 
 def test_limit_reached_between_tasks(cfg, accounts, monkeypatch):
@@ -928,10 +1125,12 @@ def test_a_sub_task_waits_for_an_earlier_sibling_that_is_not_merged(cfg, account
         "T-1": {"split": [(), (1,)]}, "T-1-S1": {"merge": False}, "T-1-S2": {},
     })
 
-    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1"], 10_000), sleep=_no_sleep)
+    planned = queue_mod.plan(cfg, "proj", ["T-1"], 10_000)
+    planned.max_wait_hours = 0
+    queue = queue_mod.run(cfg, planned, sleep=_no_sleep)
 
     assert fake.started == ["T-1", "T-1-S1"]
-    assert queue.status == queue_mod.Q_WAITING
+    assert queue.status == queue_mod.Q_WAIT_EXPIRED
     assert _states(queue)["T-1-S2"] == queue_mod.PENDING
 
 
@@ -961,10 +1160,12 @@ def test_a_dependent_waits_while_a_sub_task_is_unmerged(cfg, accounts, monkeypat
         "T-1": {"split": [(), ()]}, "T-1-S1": {}, "T-1-S2": {"merge": False}, "T-2": {},
     })
 
-    queue = queue_mod.run(cfg, queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000), sleep=_no_sleep)
+    planned = queue_mod.plan(cfg, "proj", ["T-1", "T-2"], 10_000)
+    planned.max_wait_hours = 0
+    queue = queue_mod.run(cfg, planned, sleep=_no_sleep)
 
     assert "T-2" not in fake.started
-    assert queue.status == queue_mod.Q_WAITING
+    assert queue.status == queue_mod.Q_WAIT_EXPIRED
 
 
 def test_a_failed_sub_task_skips_its_sibling_and_the_dependent(cfg, accounts, monkeypatch):
