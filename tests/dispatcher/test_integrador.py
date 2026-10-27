@@ -245,6 +245,40 @@ def test_the_integrador_runs_on_the_implementadors_model_unless_configured(
     assert calls[0]["model"] == "sonnet-x"
 
 
+def test_the_integrador_reads_its_own_model_and_effort_keys(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(
+        tmp_path, repo["projects"],
+        role_model={"implementador": "sonnet-x", "integrador": "int-m"},
+        role_effort={"integrador": "xhigh"},
+    )
+    _diverge(repo, conflict=True)
+    _in_conflict(cfg)
+    _gate(monkeypatch, [])
+    calls = _phases(monkeypatch, repo, {"integrador": _resolve(), "revisor": _approve})
+
+    _resolve_conflict(cfg)
+
+    assert calls[0]["model"] == "int-m"
+    assert calls[0]["effort"] == "xhigh"
+
+
+def test_an_absent_integrador_key_keeps_the_default_model_and_effort(
+    tmp_path, repo, monkeypatch,
+) -> None:
+    cfg = _config(tmp_path, repo["projects"], default_effort="low")
+    _diverge(repo, conflict=True)
+    _in_conflict(cfg)
+    _gate(monkeypatch, [])
+    calls = _phases(monkeypatch, repo, {"integrador": _resolve(), "revisor": _approve})
+
+    _resolve_conflict(cfg)
+
+    assert calls[0]["model"] == "opus"
+    assert calls[0]["effort"] == "low"
+
+
 def test_a_blocked_integrador_leaves_the_task_in_conflict_and_the_branch_alone(
     tmp_path, repo, monkeypatch,
 ) -> None:
