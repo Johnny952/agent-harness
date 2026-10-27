@@ -19172,3 +19172,40 @@ writer's `GET /settings` `roles` block, which the Settings screen at
 **Ruled out.**
 - *Adding the integrador to `PHASE_ROLES`:* decision 3.
 - *A hard-coded role list in the console:* it would drift from the writer's.
+
+## ADR 513 — The Settings `role_model` hint names each listed fallback role's fallback, from a map the console holds
+
+**Status:** accepted (T-198, 2026-10-27). Closes debt T-191-D1 (ADR 507
+*Consequences*). Supersedes nothing.
+
+**Context.** Under the `role_model` row `front/src/routes/models.tsx` says
+an empty field takes the role out of the map "and it runs on
+default_model". Two roles fall back elsewhere first (`dispatcher/config.py`
+`Config.model_for`): `arquitecto-draft` to the arquitecto's model (ADR 82,
+6) and `integrador` to the implementador's (ADR 277, 4). The writer's
+`GET /settings` serves the role list, not the fallbacks.
+
+**Decision.**
+1. `models.tsx` holds `ROLE_MODEL_FALLBACK`, `{"arquitecto-draft":
+   "arquitecto", integrador: "implementador"}`, the two `role not in
+   self.role_model` branches of `Config.model_for` written out.
+2. The hint keeps its sentence and, for each role of that map the served
+   `roles.role_model` lists, in the list's order, adds that it runs on the
+   named role's model instead. A role the list does not name is not
+   mentioned, so a writer that stops serving one drops it from the hint.
+3. No per-row text and no placeholder change: the input's placeholder stays
+   `(default)`, the word the hint explains.
+4. The `role_effort` hint is unchanged: nothing falls back there but to
+   `default_effort` (ADR 507 *Consequences*).
+
+**Consequences.**
+- A change to `Config.model_for`'s fallbacks has to change
+  `ROLE_MODEL_FALLBACK` too; nothing checks the two against each other.
+- The fallback role's own entry may itself be unset, so "the arquitecto's
+  model" can be `default_model`; the hint names the role, not a model ID.
+
+**Ruled out.**
+- *Serving the fallbacks from the config writer:* a second surface for a
+  two-entry map that changes only with `Config.model_for`.
+- *A placeholder per row naming the fallback:* the hint would then explain
+  a word two rows no longer show.

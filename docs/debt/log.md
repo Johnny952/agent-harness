@@ -698,3 +698,10 @@ in `fallback_roles`; the dispatcher already read both keys (ADR 277), so only
 the writer changed (`docs/implementations/T-191.md`). The Settings hint still
 says an unset role runs on `default_model`, wrong for `integrador` and
 `arquitecto-draft`: that is `T-191-D1`.
+
+**T-198** resolved `T-191-D1` and declared nothing. ADR 513: the Settings
+`role_model` hint names, for `arquitecto-draft` and `integrador` when listed,
+the role whose model each falls back to, from `ROLE_MODEL_FALLBACK` in
+`front/src/routes/models.tsx` (`docs/implementations/T-198.md`). That map is a
+hand copy of `Config.model_for`'s fallbacks, accepted in ADR 513
+*Consequences* and recorded as a learning rather than debt.
