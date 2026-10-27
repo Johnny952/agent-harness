@@ -666,3 +666,9 @@ the queue re-points its dependents' `depends_on` to them, on the board too
 (`docs/implementations/T-188.md`). Outside a queue a dependency on a split
 task still never clears, since `tasks.unmet_dependencies` wants a `merged`
 block no epic parent gets: that is `T-188-D1`.
+**T-189** resolved no earlier row and declared none. ADR 498: a queue with
+nothing runnable whose pending tasks wait only on dependencies finished in it
+releases its project lock and waits, spending nothing, for the person's
+merges, up to `max_wait_hours` per stretch (`docs/implementations/T-189.md`).
+`run-queue --max-wait` parsing and the new exit codes have no CLI-level test;
+the queue-level tests cover each end status, so it was not filed.
