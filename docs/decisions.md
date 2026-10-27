@@ -18999,3 +18999,59 @@ its backup and deadlock a request for changes.
 - *Waiting on a dependency outside the queue:* the Goal names dependencies
   finished in the queue; one outside it may never be worked, and the queue
   says `stalled` instead.
+
+## ADR 504 — A dependency on a split task is met once every sub-task of it merged
+
+**Status:** accepted (T-190, 2026-10-27). Takes up ADR 495 *Ruled out*'s
+first entry and retires its consequence "A board task outside the queue that
+depends on a split task still waits forever". Resolves `docs/debt/T-188-D1.md`.
+Supersedes nothing.
+
+**Context.** `dispatcher/tasks.py` `unmet_dependencies` (the gate of
+`open_cycle`, `run-task`, the worker's start and the queue's `_waits`) and
+`ready_order` (the Ready column, the queue's `ready` and `epic_runs`) count a
+dependency met only when its task file has a `merged` block. No path writes
+one on a split parent: `file_split` makes it `status: epic`, and `close_epic`
+later makes it `done` or `dropped`. A task depending on it never starts unless
+something re-points its `depends_on`, which only the queue does (ADR 495, 3).
+
+**Decision.**
+1. *The rule.* A dependency is met when its file has a `merged` block, or when
+   it is a split parent — `split_into` a non-empty list and `epic` unset — and
+   every id in `split_into` names a task file with a `merged` block. Its status
+   does not matter (`epic`, or `done` once `close_epic` ran), as it never did
+   for a merged dependency.
+2. *Dropped sub-tasks hold it.* A sub-task that is dropped, missing or
+   unreadable counts as not merged, so the dependency stays unmet: the
+   dependent asked for the whole of the parent, and only the owner can say
+   whether what merged of it is enough (by re-pointing `depends_on`). An epic
+   closed `dropped` therefore never clears a dependent either.
+3. *One rule, two readers.* A pure helper in `dispatcher/tasks.py` decides it
+   from a "is this id merged" callable; `unmet_dependencies` passes one that
+   reads the file (`_read_for_check`), `ready_order` one that looks in the dict
+   it was given. Neither starts writing.
+4. *What it says.* While a split parent is unmet, `unmet_dependencies` gives
+   one line for it: `"<dep> is split; <ids> not merged yet"`, the ids those of
+   its `split_into` that are not merged, comma-separated, in `split_into`
+   order. A dependency that is not a split parent keeps `"<dep> is not
+   merged"`.
+
+**Consequences.**
+- A task whose `depends_on` names a split task starts, from `run-task`, the
+  worker, the Ready order or a queue, once every sub-task merged; the owner no
+  longer re-points it by hand.
+- The queue's re-pointing (ADR 495, 3) stays: inside a queue it gives the same
+  answer earlier per sub-task and keeps `_waitable`/`_unmerged_finished`
+  (ADR 498), which read `merged` on the ids named, working.
+- `open_cycle`'s refusal for such a task names the sub-tasks it waits on.
+
+**Ruled out.**
+- *Writing a `merged` block on the parent when it closes:* `merged` records a
+  git merge of that task's branch with a target (`mark_merged`); an epic has
+  no branch, and the `done` it gets also covers a parent with dropped
+  sub-tasks, which decision 2 does not count as met.
+- *Counting dropped sub-tasks as settled, as `close_epic` does:* `is_settled`
+  answers "may the epic close", not "did the dependent get what it waited
+  for"; the debt's Fix names "every id merged".
+- *Keying on `status: epic`:* `close_epic` changes it to `done`, and the
+  dependent would then wait forever again.
