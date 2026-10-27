@@ -96,6 +96,22 @@ type Write = Change & { revision: string | null };
 /** Where the broken-config banner's own refusals are kept, beside the rows' keys. */
 const BANNER = "\u0000banner";
 
+// Roles that fall back to another role's model, not default_model, when unset:
+// `Config.model_for` in dispatcher/config.py, ADR 513. Kept by hand.
+const ROLE_MODEL_FALLBACK: Record<string, string> = {
+  "arquitecto-draft": "arquitecto",
+  integrador: "implementador",
+};
+
+function roleModelHint(roles: string[]): string {
+  const base =
+    "(default) — an empty field — takes the role out of the map, and it runs on default_model";
+  const special = roles.filter((role) => role in ROLE_MODEL_FALLBACK);
+  if (special.length === 0) return `${base}.`;
+  const parts = special.map((role) => `${role} runs on ${ROLE_MODEL_FALLBACK[role]}'s model`);
+  return `${base}; except ${parts.join(", and ")}.`;
+}
+
 function SettingsPage() {
   const settings = useQuery(settingsQuery);
   const data = settings.data?.data;
@@ -468,7 +484,7 @@ function SettingControl({
         ))}
         <p className="text-[10px] text-muted-foreground">
           {key === "role_model"
-            ? "(default) — an empty field — takes the role out of the map, and it runs on default_model."
+            ? roleModelHint(roles)
             : "(default) takes the role out of the map, and it runs on default_effort."}
         </p>
       </div>

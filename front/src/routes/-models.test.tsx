@@ -309,6 +309,25 @@ describe("the controls, by key and kind", () => {
     expect(ids.sort()).toEqual(["opus", "opus-4", "sonnet"]);
   });
 
+  it("names the fallback of arquitecto-draft and integrador in the role_model hint", async () => {
+    const roles = [...ROLES, "arquitecto-draft", "integrador"];
+    await open(
+      settings({ roles: { role_model: roles, role_effort: ROLES, fallback_roles: ROLES } }),
+    );
+    const hint = line("role_model").textContent ?? "";
+    expect(hint).toContain("default_model");
+    expect(hint).toMatch(/arquitecto-draft runs on arquitecto's model/);
+    expect(hint).toMatch(/integrador runs on implementador's model/);
+  });
+
+  it("keeps the plain role_model hint when neither fallback role is listed", async () => {
+    await open(settings());
+    const hint = line("role_model").textContent ?? "";
+    expect(hint).toContain("it runs on default_model.");
+    expect(hint).not.toContain("arquitecto-draft");
+    expect(hint).not.toContain("integrador");
+  });
+
   it("sends a switch and the ticked roles in the writer's order", async () => {
     const { sent } = await openWith(
       { data: settings() },
