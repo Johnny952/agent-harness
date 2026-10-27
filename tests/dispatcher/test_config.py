@@ -1128,6 +1128,29 @@ def test_escalated_model_is_an_editable_nullable_model() -> None:
     assert (spec.key_class, spec.kind) == (EDITABLE, "nullable_model")
 
 
+def test_update_project_before_task_is_an_editable_bool_with_its_reason() -> None:
+    spec = CONFIG_KEYS["update_project_before_task"]
+    assert (spec.key_class, spec.kind) == (EDITABLE, "bool")
+    assert spec.reason == (
+        "Fetches before each task; the Tokens screen shows whether a credential exists."
+    )
+
+
+def test_an_update_project_before_task_override_loads(tmp_path: Path) -> None:
+    path, _ = _write(tmp_path, "update_project_before_task: true\n")
+
+    assert load_config(path).update_project_before_task is True
+
+
+def test_a_non_boolean_update_project_before_task_override_is_refused(tmp_path: Path) -> None:
+    path, overrides_path = _write(tmp_path, "update_project_before_task: 'yes'\n")
+
+    with pytest.raises(ValueError) as err:
+        load_config(path)
+
+    assert str(overrides_path) in str(err.value)
+
+
 def test_a_null_escalated_model_override_turns_it_off_over_config_yaml(tmp_path: Path) -> None:
     base = "escalated_model: claude-opus-5-5\n"
     path, _ = _write(tmp_path, "escalated_model: null\n", base)
@@ -1253,8 +1276,8 @@ def test_config_keys_are_exactly_the_keys_load_config_reads(tmp_path: Path) -> N
     assert set(values) | set(REMOVED_BOARD_KEYS) == set(CONFIG_KEYS)
     classes = [spec.key_class for spec in CONFIG_KEYS.values()]
     assert (classes.count(EDITABLE), classes.count(READ_ONLY), classes.count(CREDENTIAL)) == (
-        24,
-        21,
+        25,
+        20,
         3,
     )
     for spec in CONFIG_KEYS.values():

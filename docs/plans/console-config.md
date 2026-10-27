@@ -307,4 +307,5 @@ console sees each credential through `GET /api/credentials`, a snapshot the
 worker writes from `stat` and public halves alone.
 `update_project_before_task` becomes editable once the Tokens screen is
 merged. The eight build tasks, one surface each and in order, are the ADR's
-*Consequences*. None is built.
+*Consequences*. Task 8 is built by T-187: the row is editable, a bool, and
+the writer checks no credential (25 editable, 20 read-only, 3 credential).
