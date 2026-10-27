@@ -677,3 +677,10 @@ releases its project lock and waits, spending nothing, for the person's
 merges, up to `max_wait_hours` per stretch (`docs/implementations/T-189.md`).
 `run-queue --max-wait` parsing and the new exit codes have no CLI-level test;
 the queue-level tests cover each end status, so it was not filed.
+**T-190** resolved `T-188-D1` and declared none. ADR 504:
+`tasks.unmet_dependencies` and `tasks.ready_order` count a split parent met
+once every id in its `split_into` is merged, through one helper
+`_split_waits_on`; a dropped or missing sub-task holds the dependent by design
+(`docs/implementations/T-190.md`). `dispatcher/queue.py` still reads `merged`
+on named ids only, which stalls a queue dependent never re-pointed to the
+sub-tasks; queues re-point since ADR 495, so it was not filed.

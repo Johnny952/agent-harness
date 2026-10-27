@@ -967,6 +967,53 @@ def test_a_sub_task_waits_for_the_one_it_comes_after_until_that_is_merged(tmp_pa
     assert tasks.unmet_dependencies(hive, second) == []
 
 
+def _split_dependent(hive: str):
+    """A task depending on the split parent `task-1`, whose sub-tasks are S1 and S2."""
+    _legacy(hive, "")
+    tasks.file_split(hive, "task-1", _SPLIT)
+    waiting = read_task_file(task_file_path(hive, "task-1-S2"))
+    waiting.depends_on = ["task-1"]
+    return waiting
+
+
+def test_a_split_parent_is_met_once_every_sub_task_is_merged(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    waiting = _split_dependent(hive)
+    before = _tree(hive)
+
+    assert tasks.unmet_dependencies(hive, waiting) == [
+        "task-1 is split; task-1-S1, task-1-S2 not merged yet"
+    ]
+    assert _tree(hive) == before
+    tasks.mark_merged(hive, "task-1-S1", "main")
+    assert tasks.unmet_dependencies(hive, waiting) == ["task-1 is split; task-1-S2 not merged yet"]
+    tasks.mark_merged(hive, "task-1-S2", "main")
+    assert tasks.unmet_dependencies(hive, waiting) == []
+    tasks.close_epic(hive, "task-1-S2")
+    assert tasks.unmet_dependencies(hive, waiting) == []
+
+
+def test_a_dropped_sub_task_keeps_a_split_parent_unmet(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    waiting = _split_dependent(hive)
+    tasks.mark_merged(hive, "task-1-S1", "main")
+    path = Path(task_file_path(hive, "task-1-S2"))
+    text = path.read_text()
+    status = read_task_file(str(path)).status
+    path.write_text(text.replace(f"status: {status}\n", "status: dropped\n", 1))
+
+    assert tasks.unmet_dependencies(hive, waiting) == ["task-1 is split; task-1-S2 not merged yet"]
+
+
+def test_a_parent_without_sub_tasks_is_just_not_merged(tmp_path: Path) -> None:
+    hive = _hive(tmp_path)
+    _legacy(hive, "")
+    waiting = read_task_file(task_file_path(hive, "task-1"))
+    waiting.depends_on = ["task-1"]
+
+    assert tasks.unmet_dependencies(hive, waiting) == ["task-1 is not merged"]
+
+
 def test_mark_blocked_sets_the_status_and_releases_the_lock_keeping_the_body(
     tmp_path: Path,
 ) -> None:

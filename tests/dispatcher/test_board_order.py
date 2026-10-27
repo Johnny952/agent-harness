@@ -304,6 +304,26 @@ def test_ready_is_pending_with_every_dependency_merged() -> None:
     assert tasks.ready_order(graph) == ["T-2"]
 
 
+def test_a_split_parent_is_met_once_every_sub_task_is_merged() -> None:
+    merged = {"target": "main"}
+
+    def graph(first: dict, second_status: str, second: dict, parent_status: str) -> dict:
+        return _graph(
+            _tf("T-9", status=parent_status, split_into=["T-9-S1", "T-9-S2"]),
+            _tf("T-9-S1", status="done", epic="T-9", **first),
+            _tf("T-9-S2", status=second_status, epic="T-9", **second),
+            _tf("T-5", depends_on=["T-9"]),
+        )
+
+    assert "T-5" not in tasks.ready_order(graph({"merged": merged}, "pending", {}, "epic"))
+    assert "T-5" in tasks.ready_order(
+        graph({"merged": merged}, "done", {"merged": merged}, "done")
+    )
+    assert "T-5" not in tasks.ready_order(
+        graph({"merged": merged}, "dropped", {}, "epic")
+    )
+
+
 def test_ready_is_ordered_by_effective_bucket_then_rank_then_id() -> None:
     graph = _graph(
         _tf("T-1", priority="low", rank=1),
