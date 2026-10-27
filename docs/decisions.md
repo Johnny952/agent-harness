@@ -18867,3 +18867,135 @@ split task can never start (learning
   owner ruled (A).
 - *Appending the sub-tasks at the end of the queue:* the Goal puts them in
   the split task's place.
+
+## ADR 498 — A queue with nothing runnable waits for the person's merges instead of ending
+
+**Status:** accepted (T-189, 2026-10-27). Amends ADR 79 decision 4, "a task
+whose dependency is merely unmerged (auto-approve off, or a person's merge
+pending) makes the queue end `waiting`, and `--resume` takes it up later",
+and decision 7's exit list; the rest of ADR 79 stands. Rests on
+`docs/charter.md` C-4 (*Amended* 2026-10-15): the dependent was listed and
+confirmed, so starting it after the merge is inside the yes the queue already
+has, and the confirmation names the wait before that yes.
+
+**Context.** With automatic approve off, a queued task's cycle ends
+`awaiting_review` and its queue entry `finished`; `_next` passes over its
+dependents (`_waits`, which reads `tasks.unmet_dependencies`), and both loops
+then ended the queue with status `waiting`. The person approved, then had to
+type `run-queue --resume` for the dependents to run: two acts where the Goal
+wants one. Two facts shape the design. A merge is already recorded where the
+queue reads it: `merge-task` and the worker's `approve` both end in
+`tasks.mark_merged` on the task file, which `_waits` reads, so the queue
+needs no hook in either. And the queue holds the project lock (ADR 200) for
+its whole run: `backup.before_merge`, which both merge paths call without
+`shared`, is refused while any project lock is held, and a worker
+`request_changes` on the finished dependency needs that project lock to run
+its cycle; a queue that held it while waiting would cost the person's merge
+its backup and deadlock a request for changes.
+
+**Decision.**
+1. *Which end waits.* When neither loop can start anything and nothing runs,
+   the end is decided by a new `_end_status(cfg, queue)`:
+   - no `pending` entry left: `done`;
+   - some `pending` entry is *waitable*: its unmet dependencies (the ids of
+     its `Entry.depends_on` whose task file has no `merged` block) are not
+     empty and every one of them is an entry of this queue in state
+     `finished`: `waiting`;
+   - otherwise (what is left waits on a task outside the queue, or one not
+     finished in it): `stalled`, a new end status, which is what the old
+     `waiting` end meant. Exit 1, as before.
+   The merges waited on are the union, in queue order, of the `finished`
+   dependencies of every waitable entry.
+2. *Where it waits.* In `run`, not in the loops: `_run_serial` and
+   `_run_parallel` end as today, with `_end_status` in place of their
+   `left` test, and `run` then loops: while the status is `waiting`, it
+   releases the project lock, calls `_wait_for_merges`, and, if that returns
+   true, takes the project again through `_take_project`, sets `running`,
+   saves and runs the loop again. Its `finally` releases the lock only when
+   it holds one. Nothing runs during the wait, so the parallel loop has no
+   cycle holding the lock either.
+3. *The saved state.* `Queue` gains `max_wait_hours: int = 72` and
+   `waiting: dict | None = None`. While waiting the file has status `waiting`
+   and `waiting = {"on": [ids], "since": <UTC ISO>, "until": <UTC ISO>}`,
+   `until` being `since` plus `max_wait_hours`. A file written before this
+   ADR loads with the defaults. `waiting` is set to None when a wait ends with
+   something to run, and kept when it ends `wait_expired` or `cancelled`, so
+   the file says what it waited on.
+4. *The wait.* `_wait_for_merges(cfg, queue, sleep) -> bool` starts no phase,
+   calls neither `wait_for_account` nor `account_open` (no `/usage` probe),
+   and writes nothing but the queue file and the comments below. `since` is
+   kept from `queue.waiting` when present (a resumed wait goes on with its
+   clock), else it is now (`_now()`, a module function the tests replace).
+   Every `MERGE_POLL_SECONDS` (60) it re-reads the task file of each
+   `finished` entry:
+   - `merged` block: the entry becomes `merged`;
+   - status `dropped`, or no task file: the entry becomes `dropped`, a new
+     entry state added to `FAILED`, note "dropped while the queue waited for
+     its merge";
+   - status `blocked` (a requested change whose cycle blocked): the entry
+     becomes `blocked`, note "blocked while the queue waited for its merge";
+   - any other status (`awaiting_review`, `conflict`, `pending` or
+     `in_progress` during a requested change): unchanged.
+   If any entry changed, the wait ends: `waiting` = None, return true, and
+   the loop's `_next` starts the dependents whose merges landed and skips,
+   with its usual comment, those whose dependency is now `dropped` or
+   `blocked`. A loop that again finds nothing to run waits again, with a new
+   `since`: the maximum bounds one stretch with nothing happening, not the
+   queue's life. If nothing changed and now is at or past `until`, the status
+   becomes `wait_expired`, saved, and it returns false. `max_wait_hours` 0
+   therefore ends at once, which is the old behaviour under a clear name.
+5. *Cancel.* A `KeyboardInterrupt` (Ctrl-C, SIGINT) raised while
+   `_wait_for_merges` sleeps sets the status `cancelled`, saves and returns
+   false: no cycle runs then, so nothing is left `running`. A
+   `KeyboardInterrupt` during a cycle is untouched (a kill, ADR 79 decision
+   5). SIGTERM is not caught: it kills the process and leaves the file
+   `waiting`, which a resume goes on with.
+6. *Resume.* `reopen` keeps `waiting` for a queue saved `waiting`, so `run`
+   waits again with the same `since` and `until`; for one saved
+   `wait_expired` or `cancelled` it sets `waiting` = None, so a resume is a
+   fresh wait under the same `max_wait_hours` (that is how the person
+   extends one). Every other rule of `reopen` stands: a resume asks no new
+   yes for this, and `--max-wait` is refused with `--resume` like
+   `--project` (ADR 336: the queue's own).
+7. *The CLI.* `run-queue` gains `--max-wait HOURS` (int, at least 0, default
+   72, stored as `max_wait_hours`; below 0 is a usage error, exit 2).
+   `_run_queue` exits 1 for `stalled`, `wait_expired` and `cancelled`, as it
+   did for `waiting`; `run` never returns `waiting` now. `docs/cli.md`
+   `### run-queue` gets the argument row, a paragraph on the wait and the
+   new end statuses, and the exits line.
+8. *What the owner reads.* `confirmation`'s approve line, off, becomes "off:
+   finished tasks wait for a person's merge (`merge-task` or the console's
+   approve); the queue waits for those merges and then starts what depends
+   on them", and it always adds "Merge wait: up to <N> hours with nothing
+   merged, checked every 60 s, spending nothing; Ctrl-C ends it as
+   cancelled". With `queue.waiting` set (a resumed waiting queue) it adds
+   "Waiting since <since> for the merge of <ids>, until <until>". `summary`
+   adds the same waiting line when `waiting` is set. The wait logs one info
+   line when it starts: "queue <id>: waiting for the merge of <ids> until
+   <until>".
+
+**Consequences.**
+- A queue is no longer sure to end when nothing can run: a process can sit
+  for up to `max_wait_hours` per stretch, holding no lock and spending
+  nothing. Anything reading a queue file (none but the CLI today) must treat
+  `waiting` as live, and `stalled` as the old `waiting` end.
+- While the queue waits, another cycle may take the project; the queue then
+  waits for it in `_take_project` before it starts the dependent.
+- The merge is seen up to `MERGE_POLL_SECONDS` late; no merge path signals
+  the queue.
+- With automatic approve on, the wait happens only when an approve did not
+  merge (a pre-merge check stopped it, `conflict`), and the person's
+  resolution and merge then let the queue go on.
+
+**Ruled out.**
+- *Waking the queue from `merge-task` or the worker's `approve`:* a signal
+  or a file the merge paths write would change two callers for a delay of
+  at most a minute, and a reread of the task files costs nothing.
+- *Holding the project lock while waiting:* it refuses the merge's backup
+  and blocks a *request changes* on the very task the queue waits for.
+- *A `config.yaml` key for the maximum:* a per-queue value shown on the
+  confirmation is part of what the owner says yes to, and a config key is
+  another module's contract.
+- *Waiting on a dependency outside the queue:* the Goal names dependencies
+  finished in the queue; one outside it may never be worked, and the queue
+  says `stalled` instead.
