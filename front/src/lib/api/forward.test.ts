@@ -2249,6 +2249,197 @@ describe("the board-service credential routes (ADR 468, ADR 483)", () => {
   });
 });
 
+describe("the session routes (ADR 522)", () => {
+  const SET_COOKIE = "harness_session=s; Path=/; HttpOnly";
+
+  function stubSession(body: string | null = '{"ok":true}', status = 200) {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(body, {
+          status,
+          headers: [
+            ["content-type", "application/json"],
+            ["set-cookie", SET_COOKIE],
+          ],
+        }),
+    );
+  }
+
+  function session(method: string, headers: Record<string, string> = {}, path = "/api/session") {
+    const same = { "content-type": "application/json", "sec-fetch-site": "same-origin" };
+    return get(path, {
+      method,
+      headers: method === "GET" ? headers : { ...same, ...headers },
+      ...(method === "POST" ? { body: '{"token":"t"}' } : {}),
+    });
+  }
+
+  function sent(fetchMock: ReturnType<typeof stubSession>) {
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    return { url: String(url), init: init as RequestInit };
+  }
+
+  it("forwards a POST with exactly the five headers, body unchanged", async () => {
+    const fetchMock = stubSession();
+    const answer = await forwardApiRequest(
+      session("POST", {
+        origin: "http://console.test",
+        authorization: "Bearer browser",
+        cookie: "other=1; harness_session=abc",
+        "x-csrf-token": "t",
+        "x-forwarded-for": "6.6.6.6, 203.0.113.7",
+      }),
+    );
+    const { url, init } = sent(fetchMock);
+    expect(url).toBe(`${BOARD}/api/session`);
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Cookie: "harness_session=abc",
+      "X-CSRF-Token": "t",
+      "X-Forwarded-For": "203.0.113.7",
+    });
+    expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe('{"token":"t"}');
+    expect(answer!.status).toBe(200);
+    expect(await answer!.json()).toEqual({ ok: true });
+    expect(answer!.headers.getSetCookie()).toEqual([SET_COOKIE]);
+  });
+
+  it("forwards a GET with no CSRF headers and passes Set-Cookie back", async () => {
+    for (const extra of [{}, { "sec-fetch-site": "cross-site" }]) {
+      const fetchMock = stubSession();
+      const answer = await forwardApiRequest(
+        session("GET", { cookie: "harness_session=abc", ...extra }),
+      );
+      const { url, init } = sent(fetchMock);
+      expect(url).toBe(`${BOARD}/api/session`);
+      expect(init.method).toBe("GET");
+      expect(init.body).toBeUndefined();
+      expect(answer!.headers.getSetCookie()).toEqual([SET_COOKIE]);
+      vi.restoreAllMocks();
+    }
+    const denied = stubSession('{"error":"no"}', 401);
+    const answer = await forwardApiRequest(session("GET"));
+    expect(denied).toHaveBeenCalledTimes(1);
+    expect(answer!.status).toBe(401);
+    expect(answer!.headers.getSetCookie()).toEqual([SET_COOKIE]);
+  });
+
+  it("forwards a DELETE and passes a 204 with its clearing Set-Cookie back", async () => {
+    const fetchMock = stubSession(null, 204);
+    const answer = await forwardApiRequest(
+      session("DELETE", { cookie: "harness_session=abc", "x-csrf-token": "t" }),
+    );
+    const { init } = sent(fetchMock);
+    expect(init.method).toBe("DELETE");
+    expect(init.body).toBeUndefined();
+    expect(answer!.status).toBe(204);
+    expect(await answer!.text()).toBe("");
+    expect(answer!.headers.getSetCookie()).toEqual([SET_COOKIE]);
+  });
+
+  it("takes the last X-Forwarded-For hop, and none when it is not an address", async () => {
+    const cases: [string | null, string | undefined][] = [
+      [null, undefined],
+      ["garbage", undefined],
+      ["1.2.3.4, ", undefined],
+      ["::1", "::1"],
+    ];
+    for (const [header, expected] of cases) {
+      const fetchMock = stubSession();
+      await forwardApiRequest(session("GET", header === null ? {} : { "x-forwarded-for": header }));
+      const headers = sent(fetchMock).init.headers as Record<string, string>;
+      expect(headers["X-Forwarded-For"]).toBe(expected);
+      expect("X-Forwarded-For" in headers).toBe(expected !== undefined);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("sends no Cookie without the session cookie and no token without one", async () => {
+    const fetchMock = stubSession();
+    await forwardApiRequest(session("GET", { cookie: "other=1" }));
+    const headers = sent(fetchMock).init.headers as Record<string, string>;
+    expect(Object.keys(headers)).toEqual(["Accept"]);
+  });
+
+  it("refuses a query string on each method", async () => {
+    for (const method of ["GET", "POST", "DELETE"]) {
+      const fetchMock = stubSession();
+      const answer = await forwardApiRequest(session(method, {}, "/api/session?x=1"));
+      expect(answer!.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("holds a POST and a DELETE to the CSRF checks", async () => {
+    for (const method of ["POST", "DELETE"]) {
+      const fetchMock = stubSession();
+      const status = async (headers: Record<string, string>) =>
+        (await forwardApiRequest(session(method, headers)))!.status;
+      expect(await status({ "content-type": "text/plain" })).toBe(415);
+      expect(await status({ "sec-fetch-site": "cross-site" })).toBe(403);
+      expect(await status({ origin: "http://evil.test" })).toBe(403);
+      expect(fetchMock).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("413s a POST over 64 KiB", async () => {
+    const fetchMock = stubSession();
+    const request = get("/api/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "x".repeat(64 * 1024 + 1),
+    });
+    expect((await forwardApiRequest(request))!.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 502 and 504 without naming the board-service address", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connect failed to board.test"));
+    const unreachable = await forwardApiRequest(session("GET"));
+    expect(unreachable!.status).toBe(502);
+    expect(await unreachable!.text()).not.toContain("board.test");
+    vi.restoreAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new DOMException("timed out at board.test", "TimeoutError"),
+    );
+    const slow = await forwardApiRequest(session("GET"));
+    expect(slow!.status).toBe(504);
+    expect(await slow!.text()).not.toContain("board.test");
+  });
+
+  it("leaves other methods and sub-paths where they were", async () => {
+    const fetchMock = stubSession();
+    expect((await forwardApiRequest(session("PUT")))!.status).toBe(405);
+    expect((await forwardApiRequest(session("GET", {}, "/api/session/x")))!.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("lets no other write carry a cookie, a token or an address, or pass Set-Cookie back", async () => {
+    const fetchMock = stubSession();
+    const answer = await forwardApiRequest(
+      get("/api/backlog", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: "harness_session=abc",
+          "x-csrf-token": "t",
+          "x-forwarded-for": "203.0.113.7",
+        },
+        body: "{}",
+      }),
+    );
+    expect(sent(fetchMock).init.headers).toEqual({ "Content-Type": "application/json" });
+    expect(answer!.headers.getSetCookie()).toEqual([]);
+  });
+});
+
 describe("the credential routes without their configuration", () => {
   async function configured(overrides: Record<string, unknown>) {
     vi.resetModules();

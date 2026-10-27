@@ -706,6 +706,15 @@ the role whose model each falls back to, from `ROLE_MODEL_FALLBACK` in
 hand copy of `Config.model_for`'s fallbacks, accepted in ADR 513
 *Consequences* and recorded as a learning rather than debt.
 
+**T-193-S2** declared nothing and resolved nothing. ADR 522: `POST`, `GET`
+and `DELETE /api/session` are forwarded to the board service with the
+`harness_session` cookie, the `X-CSRF-Token` and the last `X-Forwarded-For`
+hop, and pass `Set-Cookie` back (`forwardSession` in
+`front/src/lib/api/forward.ts`), so ADR 381's per-address count of failed
+sign-ins now has an address to count. Gating the other routes on a session
+stays with the plan's step 2 guard, a later task. The client address
+holding only as far as the proxy in front replaces the header is accepted in
+ADR 522 *Consequences* and recorded as a learning rather than debt.
 **T-193-S1** resolved no earlier row and declared `T-193-S1-D1`. ADR 519:
 `python3 -m board_service.first_user` creates the first owner from the
 server's shell and prints the TOTP secret and otpauth URI once
