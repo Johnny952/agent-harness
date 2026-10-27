@@ -705,3 +705,9 @@ the role whose model each falls back to, from `ROLE_MODEL_FALLBACK` in
 `front/src/routes/models.tsx` (`docs/implementations/T-198.md`). That map is a
 hand copy of `Config.model_for`'s fallbacks, accepted in ADR 513
 *Consequences* and recorded as a learning rather than debt.
+
+**T-193-S1** resolved no earlier row and declared `T-193-S1-D1`. ADR 519:
+`python3 -m board_service.first_user` creates the first owner from the
+server's shell and prints the TOTP secret and otpauth URI once
+(`docs/implementations/T-193-S1.md`). It refuses once any user exists, and no
+command adds a second user such as a reviewer: that is `T-193-S1-D1`.
