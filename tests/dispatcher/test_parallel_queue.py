@@ -15,6 +15,7 @@ import types
 import pytest
 
 from dispatcher import cli as cli_mod
+from dispatcher import handoff as handoff_mod
 from dispatcher import tasks
 from dispatcher import dispatcher as core
 from dispatcher import queue as queue_mod
@@ -234,6 +235,40 @@ def test_the_queue_order_decides_a_contested_window(cfg, monkeypatch):
     assert queue.status == queue_mod.Q_DONE
     entered = [t for t, what in fake.scheduler.windows if what == "enter"]
     assert entered == ["T-1", "T-2", "T-3"]
+
+
+class _SplittingCycle(ScheduledCycle):
+    """T-1 is split in two sub-tasks when it runs; every other task runs as scheduled."""
+
+    def __call__(self, cfg, task_id, *args, **kwargs):
+        if task_id != "T-1":
+            return super().__call__(cfg, task_id, *args, **kwargs)
+        self.scheduler = kwargs["scheduler"]
+        _usage(cfg, task_id, 100)
+        tasks.file_split(cfg.hive_tasks_dir, task_id, [
+            handoff_mod.SubTask(
+                f"Part {n}", "src/a", _DESCRIPTION.format(id=f"part {n}", surface="src/a"), after,
+            )
+            for n, after in enumerate([(), (1,)], 1)
+        ])
+        return core.CycleOutcome.SPLIT
+
+
+def test_a_split_task_s_sub_tasks_take_its_place_in_a_parallel_queue(cfg, monkeypatch):
+    _task(cfg, "T-1", "src/a")
+    _task(cfg, "T-2", "src/b", depends_on=["T-1"])
+    fake = _SplittingCycle(cfg)
+
+    queue = _run(cfg, monkeypatch, fake, ["T-1", "T-2"])
+
+    assert queue.status == queue_mod.Q_DONE
+    order = ["T-1", "T-1-S1", "T-1-S2", "T-2"]
+    assert [e.task_id for e in queue.entries] == order
+    assert fake.scheduler.order == {task_id: n for n, task_id in enumerate(order)}
+    assert queue.entry("T-1-S2").state == queue_mod.MERGED
+    assert queue.entry("T-2").state == queue_mod.MERGED
+    entered = [t for t, what in fake.events if what == "enter"]
+    assert entered == ["T-1-S1", "T-1-S2", "T-2"]
 
 
 def test_a_dependency_still_running_holds_its_dependent(cfg, monkeypatch):
