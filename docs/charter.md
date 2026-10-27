@@ -469,3 +469,9 @@ a standing verdict, and narrow:
 
 *Request changes*, *resolve conflict* and every verdict that spends quota are
 never given in advance by this switch.
+
+**Amended:** 2026-10-27, in conversation with the main thread, at the user's
+word: *Start epic*'s verdict also covers the sub-tasks a listed task of the
+epic is split into during the run, under the epic's spending limit, as C-4
+does for a queue (amended 2026-10-26). A task added to the epic any other way
+is still not covered (T-188).
