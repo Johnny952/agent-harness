@@ -196,8 +196,15 @@ def _sessions_path(auth_dir: str) -> str:
     return os.path.join(auth_dir, "sessions.json")
 
 
-def create_user(auth_dir: str, name: str, password: str, role: str) -> str:
-    """Add a user and return the TOTP secret, once. `ValueError` says what is wrong."""
+class UserExists(ValueError):
+    """users.json already holds a user (ADR 519)."""
+
+
+def create_user(auth_dir: str, name: str, password: str, role: str, *, first: bool = False) -> str:
+    """Add a user and return the TOTP secret, once. `ValueError` says what is wrong.
+
+    `first=True` refuses with `UserExists`, under the lock, when any user exists.
+    """
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
         raise ValueError("a name is 1 to 64 characters of a-z, 0-9, _, . and -, not starting with a symbol")
     if role not in ROLES:
@@ -216,6 +223,8 @@ def create_user(auth_dir: str, name: str, password: str, role: str) -> str:
     }
     with _locked(auth_dir):
         users = _read(_users_path(auth_dir))
+        if first and users:
+            raise UserExists("a user already exists")
         if name in users:
             raise ValueError(f"the user {name!r} already exists")
         users[name] = record
