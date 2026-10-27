@@ -164,6 +164,9 @@ ENV DISABLE_AUTOUPDATER=1
 # CLAUDE_CONFIG_DIR by the entrypoint) at container start (see entrypoint.sh).
 COPY hooks/emit_event.py /usr/local/lib/ia-harness/emit_event.py
 COPY hooks/install_settings.py /usr/local/lib/ia-harness/install_settings.py
+# cap_subagent_return.py is the SubagentStop return cap install_settings.py
+# registers beside it (ADR 510).
+COPY hooks/cap_subagent_return.py /usr/local/lib/ia-harness/cap_subagent_return.py
 
 # The vendored role skills (see skills/README.md). Baked into the image, not
 # installed into the shared /root/.claude, so the set a role gets moves only

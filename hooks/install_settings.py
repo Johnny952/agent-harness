@@ -9,10 +9,11 @@ The hook has to be registered when the container starts, not at build time,
 because the volume mount shadows anything baked into the image at
 ``/root/.claude``.
 
-Two things are written: the hook registration itself, and the
+Three things are written: the hook registration itself (with the
+`SubagentStop` return cap, ADR 510), the
 `syncClaudeAiSkills`/`syncClaudeAiPlugins` switches that keep the signed-in
 account's claude.ai skills and plugins out of every role's prompt (see
-SYNC_SETTINGS).
+SYNC_SETTINGS), and `autoCompactWindow` (WINDOW_SETTINGS).
 
 The merge is idempotent and additive: hook groups already present in
 settings.json are preserved, the ia-harness command is only appended to an
@@ -68,6 +69,13 @@ SESSION_EVENTS = (
 #: there hidden.
 SYNC_SETTINGS = {"syncClaudeAiSkills": False, "syncClaudeAiPlugins": False}
 
+#: Bounds what a long phase rereads per turn (ADR 510). Merged like
+#: SYNC_SETTINGS, so a value the operator set wins.
+WINDOW_SETTINGS = {"autoCompactWindow": 120000}
+
+#: Second `SubagentStop` command: blocks an overlong subagent return once.
+RETURN_CAP_COMMAND = "python3 /usr/local/lib/ia-harness/cap_subagent_return.py"
+
 
 def build_hooks(command: str = HOOK_COMMAND) -> dict:
     """Return the `hooks` block registering `command` on every event."""
@@ -77,6 +85,7 @@ def build_hooks(command: str = HOOK_COMMAND) -> dict:
         hooks[event] = [{"matcher": "*", "hooks": [entry]}]
     for event in SESSION_EVENTS:
         hooks[event] = [{"hooks": [entry]}]
+    hooks["SubagentStop"].append({"hooks": [{"type": "command", "command": RETURN_CAP_COMMAND}]})
     return hooks
 
 
@@ -151,7 +160,9 @@ def install(path: str = DEFAULT_SETTINGS_PATH, command: str = HOOK_COMMAND) -> d
     """
     settings_path = Path(os.path.realpath(path))
     settings = load_settings(settings_path)
-    merged = merge_defaults(merge_hooks(settings, build_hooks(command)), SYNC_SETTINGS)
+    merged = merge_defaults(
+        merge_hooks(settings, build_hooks(command)), {**SYNC_SETTINGS, **WINDOW_SETTINGS}
+    )
     if merged == settings:
         return merged
     settings_path.parent.mkdir(parents=True, exist_ok=True)

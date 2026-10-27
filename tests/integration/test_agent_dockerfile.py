@@ -193,6 +193,13 @@ def test_the_agent_image_has_an_ssh_client() -> None:
     assert re.search(r"apt-get install[^\n]*\bopenssh-client\b", joined)
 
 
+def test_the_agent_image_copies_the_return_cap_hook_where_install_settings_points() -> None:
+    from hooks import install_settings
+
+    script = install_settings.RETURN_CAP_COMMAND.split()[-1]
+    assert f"COPY hooks/cap_subagent_return.py {script}\n" in _final_stage(_read())
+
+
 def test_the_agent_image_pins_githubs_host_keys_system_wide() -> None:
     # Pinned, not accepted on first use, which would trust whoever answers
     # first; system-wide, so ssh reads it whatever UserKnownHostsFile says.

@@ -1510,9 +1510,11 @@ number and title.
    - *Cap what a role returns*, the dispatcher's cap on a handoff —
      **built**: `_BUDGET_BYTES` in `dispatcher/handoff.py`.
    - *Cap what a role returns*, a `SubagentStop` hook on a role's own
-     subagents — **open**.
+     subagents — **built**: `hooks/cap_subagent_return.py`, registered by
+     `hooks/install_settings.py`; ADR 510.
    - *Resume or restart* — **open**.
-   - *Compaction window* (`autoCompactWindow`) — **open**.
+   - *Compaction window* (`autoCompactWindow`) — **built**:
+     `WINDOW_SETTINGS` in `hooks/install_settings.py`; ADR 510.
    - *caveman, piece by piece* — **open**. The check its wrap would need is
      D3 in [`docs/ROADMAP.md`](docs/ROADMAP.md) *Deferred gates*.
    - Compaction for a long-lived main thread — **planned**:
