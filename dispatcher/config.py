@@ -209,9 +209,9 @@ CONFIG_KEYS: dict[str, ConfigKey] = {
         "generator can run the project's build (ADR 115). A permission is the "
         "operator's to grant by hand."
     ),
-    "update_project_before_task": _read_only(
-        "Turning it on needs a credential or deploy key on the host that the console "
-        "cannot see. That is the second task's ground."
+    "update_project_before_task": _editable(
+        "bool",
+        "Fetches before each task; the Tokens screen shows whether a credential exists.",
     ),
     "review_conflict_check": _read_only(
         "Turning it on runs the test gate on every task waiting for review after "

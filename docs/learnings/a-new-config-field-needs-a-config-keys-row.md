@@ -11,7 +11,9 @@ again adding the editable `thread_models` (ADR 169): the editable count went
 the read-only `project_parallel` (ADR 306): the counts read 23/21/3 after it.
 T-177-S1 hit it with no new key at all: making `escalated_model` editable
 (ADR 441) moved one key from read-only to editable, 24/21/3 after it, while the
-implementador's first run expected the old 23/22/3.
+implementador's first run expected the old 23/22/3. T-187 moved
+`update_project_before_task` from read-only to editable (ADR 456 decision 8):
+25/20/3 after it.
 
 ## What fails
 
