@@ -684,3 +684,11 @@ once every id in its `split_into` is merged, through one helper
 (`docs/implementations/T-190.md`). `dispatcher/queue.py` still reads `merged`
 on named ids only, which stalls a queue dependent never re-pointed to the
 sub-tasks; queues re-point since ADR 495, so it was not filed.
+
+**T-195** resolved no earlier row and declared none. ADR 510: agent-side
+settings are defaults in `hooks/install_settings.py`'s additive merge;
+`autoCompactWindow` 120000 and a `SubagentStop` hook,
+`hooks/cap_subagent_return.py`, that blocks a return over 4000 characters
+once and logs it (`docs/implementations/T-195.md`). Neither is verified
+against the pinned CLI and neither works before an image rebuild; that is an
+operator step, not debt.
