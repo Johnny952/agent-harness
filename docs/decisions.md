@@ -19209,3 +19209,99 @@ default_model". Two roles fall back elsewhere first (`dispatcher/config.py`
   two-entry map that changes only with `Config.model_for`.
 - *A placeholder per row naming the fallback:* the hint would then explain
   a word two rows no longer show.
+
+## ADR 522 — The console forwards `/api/session` with the session cookie, the CSRF token and the proxy's client address, and only there
+
+**Status:** accepted (T-193-S2, 2026-10-27). The relay half of step 2 of
+`docs/plans/server-deployment.md` *How it would be built*, on ADR 324 and
+ADR 381, whose *Consequences* this carries out. Adds to ADR 136's CSRF
+checks; supersedes nothing.
+
+**Context.** `board_service/signin.py` serves `POST`, `GET` and `DELETE
+/api/session`, and refuses a browser `Origin` (403) and any query string
+(400). The console's forward (`front/src/lib/api/forward.ts`) is its only
+client and copies nothing of the browser's but a write's body, so today no
+request carries the `harness_session` cookie, the `X-CSRF-Token` header or
+an `X-Forwarded-For`
+(`docs/learnings/the-browser-never-reaches-the-board-service.md`). ADR 381
+counts failed sign-ins per the first `X-Forwarded-For` hop, trusted as sent.
+The console is always behind a proxy that ends TLS: Caddy 2.10 in the plain
+compose (ADR 100) or Coolify's. So the console's own socket peer is that
+proxy, the same address for every person.
+
+**Decision.**
+1. **Three pairs, one function.** `POST`, `GET` and `DELETE` on exactly
+   `/api/session` go to `BOARD_SERVICE_URL` + `/api/session` through a new
+   `forwardSession`, dispatched in `forwardApiRequest` after the push reads
+   and before `boardTarget`. Any other method there keeps the answer it had
+   (the 405). `/api/session/<x>` is not these pairs.
+2. **A query string is refused** at the console, 400 `/api/session takes no
+   query string.`, before anything is read or sent, on all three methods.
+   `url.search` empty is the test, so a bare `?` passes.
+3. **CSRF on the two writes.** `POST` and `DELETE` take `forwardBoard`'s
+   three checks in its order and with its words: `Content-Type`
+   `application/json` (415), `Sec-Fetch-Site` same-origin when sent (403),
+   `Origin` equal to the request's origin when sent (403). They are moved
+   into one helper both functions call, so the messages cannot drift. The
+   `GET` takes none: it changes nothing, and a cross-site page cannot read
+   its answer.
+4. **What crosses, and only on these three pairs:**
+   - `Accept: application/json`; on `POST`, `Content-Type:
+     application/json` and the body unchanged, capped at
+     `MAX_BOARD_BODY_BYTES` (413). It is never parsed here, since it holds
+     the password and the code. `GET` and `DELETE` send no body.
+   - `Cookie: harness_session=<value>`, only that cookie, taken from the
+     browser's `Cookie` header, when it is there. Any other cookie the
+     browser holds stays behind.
+   - `X-CSRF-Token`, the browser's value unchanged, when sent.
+   - `X-Forwarded-For` per 5.
+   - No `Authorization`, the browser's or a bearer: the routes take none.
+     No `Origin`, never: the board service refuses one.
+5. **The client address is the last `X-Forwarded-For` hop the console
+   received**, the one its own proxy wrote, trimmed. It is sent as the
+   whole `X-Forwarded-For`, so it is the first hop the board service reads
+   and whatever the browser put in the header is dropped. A last hop that
+   is not 1 to 45 characters of hex digits, `.` and `:` (an IPv4 or IPv6
+   literal) is not sent, nor is one from a request with no header: the
+   board service then counts nothing per address (ADR 381, 1), as today.
+   The socket peer is not used: behind the proxy it is the proxy, which
+   would put every person under one key, the failure ADR 381 rules out.
+6. **The answer** is the board service's status, body and content type, as
+   for every board route, plus each of its `Set-Cookie` headers
+   (`Headers.getSetCookie()`), unchanged. No other route passes a
+   `Set-Cookie` back. A 401 from `GET` or `DELETE` carries the clearing
+   cookie and so clears the browser's.
+7. **Failures** are the board routes': 504 on the timeout, 502 otherwise,
+   naming "the board-service" and never its address, which goes only to
+   `console.error`. The cookie, the token, the body and the address are in
+   no log line.
+8. **Only here.** No other forward sends the cookie, the token or
+   `X-Forwarded-For`; gating the other routes on a session is a later
+   task's (the plan's step 2, its guard).
+
+**Consequences.**
+- The address is as good as the proxy in front. Caddy 2.10 with no
+  `trusted_proxies` and Traefik with no trusted IPs replace an incoming
+  `X-Forwarded-For`, so the last hop is the browser's peer. A proxy told to
+  trust a further hop appends, and the last hop is still the nearest
+  client's. A caller that reaches the console directly (its port is bound
+  to `127.0.0.1` on the host) chooses its own key; it is already on the host.
+- The `harness_session` cookie is `Secure`. Browsers keep one over plain
+  HTTP only on `localhost`, so a plain-HTTP console on any other name
+  cannot hold a session.
+- The forward's prose counts change: the twenty-seven board-service
+  writes become twenty-nine with the session's `POST` and `DELETE`, and
+  `GET /api/session` is a third board read beside the push key and
+  settings. `boardTarget`'s pairs stay twenty-seven.
+
+**Ruled out.**
+- *The socket peer from the runtime* (`srvx`'s `request.ip`, through a
+  second `forwardApiRequest` parameter): the proxy's address for everyone.
+- *The first `X-Forwarded-For` hop*: the browser writes it when no proxy
+  replaces the header.
+- *Folding the routes into `boardTarget` and `forwardBoard`*: their answer
+  passes no `Set-Cookie`, and they send no browser header by design; a
+  third kind of branch there would blur ADR 136's "nothing crosses but the
+  body".
+- *Passing the browser's whole `Cookie` header*: the console's other
+  cookies are not the board service's business.
