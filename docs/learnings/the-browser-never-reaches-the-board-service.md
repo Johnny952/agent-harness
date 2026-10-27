@@ -35,6 +35,11 @@ to relay explicitly; until step 2 of `docs/plans/server-deployment.md` does,
 `request.remote_addr` is the console and no request carries a session
 (`docs/decisions.md` ADR 324; `docs/debt/T-146-D1.md`).
 
+Since T-193-S2 (ADR 522) exactly `POST`, `GET` and `DELETE /api/session`
+relay the `harness_session` cookie, the `X-CSRF-Token` and the client
+address (`forward.ts` `forwardSession`); every other route still relays
+none of them.
+
 ## Evidence
 
 The grep above in T-146's worktree, and ADR 324's routes and *Consequences*.
